@@ -101,13 +101,30 @@ restoration events will ever arrive regardless of how `Central` is configured.
 ### Fallback: reconnecting without restoration
 
 If you'd rather not depend on state restoration — or you're on a platform/configuration where
-it isn't available — you can get most of the same practical benefit by persisting the
-`PeripheralIdentifier`s you care about yourself (e.g. in `UserDefaults` or your own storage) and
-calling `connect(_:)` for each one on your next ordinary launch. CoreBluetooth can still resolve
-a previously-seen peripheral's identifier back to a connectable object without a fresh scan, so
-this works even though it isn't triggered by a background relaunch the way restoration is — it
-simply requires your app to actually be launched (by the user, or some other mechanism) rather
-than iOS launching it for you.
+it isn't available — you can get most of the same practical benefit with
+``Central/knownPeripherals(withIdentifiers:)``: persist the `uuid`s of the peripherals you
+care about yourself (e.g. in `UserDefaults` or your own storage), then on your next ordinary
+launch re-resolve them with `knownPeripherals(withIdentifiers:)` and call
+``Central/connect(_:timeout:reconnect:warningOptions:)`` on each result. CoreBluetooth can
+still resolve a previously-seen peripheral's identifier back to a connectable object without a
+fresh scan, so this works even though it isn't triggered by a background relaunch the way
+restoration is — it simply requires your app to actually be launched (by the user, or some
+other mechanism) rather than iOS launching it for you. This is the deliberate fallback for
+force-quit specifically: as above, restoration never fires there, but the app's ordinary launch
+path still runs, and that's exactly where this call belongs.
+
+If the system might still be holding the link (the peripheral never actually disconnected),
+``Central/systemConnectedPeripherals(withServices:)`` is worth trying first — it only returns
+peripherals the OS is *currently* connected to (by any app), and connecting one of those
+typically completes faster than connecting a merely-known one.
+
+```swift
+let saved = loadSavedPeripheralUUIDs() // your own persistence
+let known = try await central.knownPeripherals(withIdentifiers: saved)
+for identifier in known {
+    _ = try await central.connect(identifier)
+}
+```
 
 ## See Also
 

@@ -72,4 +72,14 @@ public protocol CentralManaging: AnyObject {
     /// Looks up previously-seen peripherals by identifier. Mirrors
     /// `CBCentralManager.retrievePeripherals(withIdentifiers:)`.
     func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote]
+
+    /// Looks up peripherals currently connected to the system (by any app) that expose at
+    /// least one of the given services. Mirrors
+    /// `CBCentralManager.retrieveConnectedPeripherals(withServices:)`.
+    ///
+    /// Takes ``ServiceIdentifier``, not `CBUUID`, for the same reason every other member
+    /// of this protocol speaks BLESwift-owned types only (see the protocol's own doc
+    /// comment) — the `CBUUID` conversion happens at the `CBCentralManager` conformance's
+    /// call site, same as ``scanForPeripherals(withServices:options:)``'s.
+    func retrieveConnectedPeripherals(withServices services: [ServiceIdentifier]) -> [any PeripheralRemote]
 }
