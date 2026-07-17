@@ -4,6 +4,7 @@
 //
 
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 /// Exercises ``ThrowingBroadcaster`` in isolation, mirroring `BroadcasterTests` where

@@ -3,6 +3,7 @@
 //  BLESwiftTests
 //
 
+import BLESwiftCore
 import Dispatch
 @testable import BLESwift
 

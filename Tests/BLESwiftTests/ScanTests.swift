@@ -5,6 +5,7 @@
 
 import Foundation
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 /// Exercises `Central.scan(...)` (Phase 4): discovery/duplicate/loss/throttle event flow,

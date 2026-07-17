@@ -4,6 +4,7 @@
 //
 
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 /// Exercises ``Broadcaster`` in isolation: multicast fan-out, every ``ReplayMode``, and

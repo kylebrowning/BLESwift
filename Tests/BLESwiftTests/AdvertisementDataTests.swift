@@ -6,6 +6,7 @@
 import CoreBluetooth
 import Foundation
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 @Suite("AdvertisementData parsing")

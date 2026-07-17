@@ -3,8 +3,9 @@
 //  BLESwiftTests
 //
 
-import CoreBluetooth
+import BLESwiftCore
 import Dispatch
+import Foundation
 import Synchronization
 @testable import BLESwift
 
@@ -34,8 +35,8 @@ import Synchronization
 /// - **`onQueue(_:)` is the only place `queue.sync` appears in this type**, and is the
 ///   only sanctioned door for off-queue (test) code to configure or inspect state: it
 ///   hops onto `queue`, where every precondition-guarded accessor above is legal to call.
-///   `static var authorization` is the one exception — it is not scoped to any single
-///   fake's queue, so it is backed by a `Mutex` instead (see its doc comment).
+///   `static var bluetoothAuthorization` is the one exception — it is not scoped to any
+///   single fake's queue, so it is backed by a `Mutex` instead (see its doc comment).
 final class FakeCentral: CentralManaging, Sendable {
 
     /// How a scripted call to ``connect(_:options:)`` resolves.
@@ -52,26 +53,28 @@ final class FakeCentral: CentralManaging, Sendable {
     /// The queue every CB-mirroring method and event delivery is confined to.
     let queue: DispatchSerialQueue
 
-    nonisolated(unsafe) private var _state: CBManagerState
+    nonisolated(unsafe) private var _radioState: CentralState
     nonisolated(unsafe) private var _eventSink: ((CentralEvent) -> Void)?
     nonisolated(unsafe) private var _connectBehavior: ConnectBehavior = .succeed
     nonisolated(unsafe) private var _connectCallCount = 0
-    nonisolated(unsafe) private var _lastConnectOptions: [String: Any]?
+    nonisolated(unsafe) private var _lastConnectOptions: WarningOptions?
     nonisolated(unsafe) private var _cancelCallCount = 0
     nonisolated(unsafe) private var _scanCallCount = 0
+    nonisolated(unsafe) private var _lastScanOptions: ScanOptions?
     nonisolated(unsafe) private var _stopScanCallCount = 0
     nonisolated(unsafe) private var _retrievablePeripherals: [UUID: FakePeripheral] = [:]
 
-    /// Backs ``authorization``. Unlike every other stored property here, `authorization`
-    /// is a `static var` mirroring the `CBManager.authorization` *class* property — it
-    /// isn't scoped to one fake instance's queue, so it can't be confined the same way,
-    /// and is protected by a `Mutex` instead (per Phase 0's guidance: `Mutex` is
-    /// unconditionally usable for tiny non-actor state on our deployment floor).
-    private static let authorizationBox = Mutex<CBManagerAuthorization>(.allowedAlways)
+    /// Backs ``bluetoothAuthorization``. Unlike every other stored property here,
+    /// `bluetoothAuthorization` is a `static var` mirroring the `CBManager.authorization`
+    /// *class* property — it isn't scoped to one fake instance's queue, so it can't be
+    /// confined the same way, and is protected by a `Mutex` instead (per Phase 0's
+    /// guidance: `Mutex` is unconditionally usable for tiny non-actor state on our
+    /// deployment floor).
+    private static let authorizationBox = Mutex<BluetoothAuthorization>(.allowedAlways)
 
-    /// The `CBManagerAuthorization` this fake reports. Settable directly — `Mutex`
+    /// The `BluetoothAuthorization` this fake reports. Settable directly — `Mutex`
     /// protects it, so no queue confinement or `onQueue(_:)` hop is needed.
-    static var authorization: CBManagerAuthorization {
+    static var bluetoothAuthorization: BluetoothAuthorization {
         get { authorizationBox.withLock { $0 } }
         set { authorizationBox.withLock { $0 = newValue } }
     }
@@ -81,11 +84,11 @@ final class FakeCentral: CentralManaging, Sendable {
     /// - Parameters:
     ///   - queue: The queue every CB-mirroring method and event delivery is confined to —
     ///     the same queue the eventual `Central` actor's executor is tied to.
-    ///   - state: The initial `CBManagerState`. Defaults to `.unknown`, matching a real
+    ///   - state: The initial ``CentralState``. Defaults to `.unknown`, matching a real
     ///     `CBCentralManager` before its first `centralManagerDidUpdateState(_:)`.
-    init(queue: DispatchSerialQueue, state: CBManagerState = .unknown) {
+    init(queue: DispatchSerialQueue, state: CentralState = .unknown) {
         self.queue = queue
-        self._state = state
+        self._radioState = state
     }
 
     /// Runs `body` synchronously on ``queue`` and returns its result — the only
@@ -102,9 +105,9 @@ final class FakeCentral: CentralManaging, Sendable {
     }
 
     /// The current radio state.
-    var state: CBManagerState {
+    var radioState: CentralState {
         dispatchPrecondition(condition: .onQueue(queue))
-        return _state
+        return _radioState
     }
 
     /// Receives every ``CentralEvent`` this fake delivers, on ``queue``. Configure via
@@ -139,10 +142,10 @@ final class FakeCentral: CentralManaging, Sendable {
         return _connectCallCount
     }
 
-    /// The `options` dictionary passed to the most recent ``connect(_:options:)`` call
-    /// (`nil` before any connect, or when the caller passed `nil`). Lets tests assert
-    /// that `WarningOptions` plumbing reaches CoreBluetooth's connect options.
-    var lastConnectOptions: [String: Any]? {
+    /// The `options` passed to the most recent ``connect(_:options:)`` call (`nil` before
+    /// any connect, or when the caller passed `nil`). Lets tests assert that
+    /// `WarningOptions` plumbing reaches the backend seam.
+    var lastConnectOptions: WarningOptions? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _lastConnectOptions
     }
@@ -157,6 +160,14 @@ final class FakeCentral: CentralManaging, Sendable {
     var scanCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _scanCallCount
+    }
+
+    /// The `options` passed to the most recent ``scanForPeripherals(withServices:options:)``
+    /// call (`nil` before any scan). Lets tests assert `ScanOptions` plumbing without
+    /// dictionary assertions.
+    var lastScanOptions: ScanOptions? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _lastScanOptions
     }
 
     /// The number of times ``stopScan()`` has been called.
@@ -183,10 +194,10 @@ final class FakeCentral: CentralManaging, Sendable {
     /// ``CentralEvent/didUpdateState(_:)`` on ``queue``. Off-queue safe to call directly —
     /// hops onto `queue` itself. Flush with ``onQueue(_:)`` before asserting the event
     /// landed.
-    func simulateStateChange(_ newState: CBManagerState) {
+    func simulateStateChange(_ newState: CentralState) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
-            _state = newState
+            _radioState = newState
             deliver(.didUpdateState(newState))
         }
     }
@@ -228,9 +239,10 @@ final class FakeCentral: CentralManaging, Sendable {
 
     /// Records the call. Does not itself deliver a discovery event — use
     /// ``simulateDiscovery(peripheral:advertisement:rssi:)`` to script sightings.
-    func scanForPeripherals(withServices serviceUUIDs: [CBUUID]?, options: [String: Any]?) {
+    func scanForPeripherals(withServices services: [ServiceIdentifier]?, options: ScanOptions) {
         dispatchPrecondition(condition: .onQueue(queue))
         _scanCallCount += 1
+        _lastScanOptions = options
     }
 
     /// Records the call.
@@ -245,7 +257,7 @@ final class FakeCentral: CentralManaging, Sendable {
     /// resolves the attempt later, on the delegate. A no-op (beyond the call count) if
     /// `peripheral` is not a `FakePeripheral` — mixing shim families is a programmer
     /// error, never a trap (see ``CentralManaging/connect(_:options:)``).
-    func connect(_ peripheral: any PeripheralRemote, options: [String: Any]?) {
+    func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?) {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectCallCount += 1
         _lastConnectOptions = options

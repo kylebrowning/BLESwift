@@ -5,6 +5,7 @@
 
 import Foundation
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 private func assertRoundTrip<T: Transmittable & Receivable & Equatable>(

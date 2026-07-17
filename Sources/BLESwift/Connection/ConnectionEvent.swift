@@ -3,6 +3,8 @@
 //  BLESwift
 //
 
+import BLESwiftCore
+
 /// A connection-lifecycle event, published by ``Central/connectionEvents()``.
 ///
 /// Published as a multicast `AsyncStream` — every subscriber sees every event from the

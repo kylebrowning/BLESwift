@@ -3,7 +3,7 @@
 //  BLESwiftTests
 //
 
-import CoreBluetooth
+import BLESwiftCore
 import Dispatch
 import Foundation
 @testable import BLESwift
@@ -35,7 +35,7 @@ final class FakePeripheral: PeripheralRemote, Sendable {
     /// The queue every CB-mirroring method and event delivery is confined to.
     let queue: DispatchSerialQueue
 
-    nonisolated(unsafe) private var _state: CBPeripheralState
+    nonisolated(unsafe) private var _connectionState: PeripheralConnectionState
     nonisolated(unsafe) private var _canSendWriteWithoutResponse: Bool
     nonisolated(unsafe) private var _eventSink: ((PeripheralEvent) -> Void)?
     nonisolated(unsafe) private var _discoveredServices: Set<ServiceIdentifier> = []
@@ -60,20 +60,20 @@ final class FakePeripheral: PeripheralRemote, Sendable {
     /// - Parameters:
     ///   - identifier: The peripheral's identifier. Defaults to a fresh `UUID`.
     ///   - name: The peripheral's advertised/cached name.
-    ///   - state: The initial `CBPeripheralState`. Defaults to `.disconnected`.
+    ///   - state: The initial ``PeripheralConnectionState``. Defaults to `.disconnected`.
     ///   - canSendWriteWithoutResponse: The initial back-pressure state. Defaults to
     ///     `true` (ready).
     ///   - queue: The queue every CB-mirroring method and event delivery is confined to.
     init(
         identifier: UUID = UUID(),
         name: String? = "Fake Peripheral",
-        state: CBPeripheralState = .disconnected,
+        state: PeripheralConnectionState = .disconnected,
         canSendWriteWithoutResponse: Bool = true,
         queue: DispatchSerialQueue
     ) {
         self.identifier = identifier
         self.name = name
-        self._state = state
+        self._connectionState = state
         self._canSendWriteWithoutResponse = canSendWriteWithoutResponse
         self.queue = queue
     }
@@ -226,10 +226,10 @@ final class FakePeripheral: PeripheralRemote, Sendable {
     /// event — connection events are delivered by `FakeCentral`, which owns the
     /// connect/disconnect flow. Off-queue safe to call directly; flush with
     /// ``onQueue(_:)`` before asserting the new state.
-    func simulateStateChange(_ newState: CBPeripheralState) {
+    func simulateStateChange(_ newState: PeripheralConnectionState) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
-            _state = newState
+            _connectionState = newState
         }
     }
 
@@ -302,9 +302,9 @@ final class FakePeripheral: PeripheralRemote, Sendable {
     // MARK: - PeripheralRemote
 
     /// The peripheral's current connection state.
-    var state: CBPeripheralState {
+    var connectionState: PeripheralConnectionState {
         dispatchPrecondition(condition: .onQueue(queue))
-        return _state
+        return _connectionState
     }
 
     /// Whether this fake is currently able to accept a write-without-response.
@@ -426,7 +426,7 @@ final class FakePeripheral: PeripheralRemote, Sendable {
     /// Records the call, invokes ``onWrite`` (synchronously, so anything it enqueues —
     /// e.g. a scripted response notification — lands ahead of the write's own completion),
     /// and asynchronously delivers `didWriteValue` on ``queue``.
-    func writeValue(_ data: Data, for characteristic: CharacteristicIdentifier, type: CBCharacteristicWriteType) {
+    func writeValue(_ data: Data, for characteristic: CharacteristicIdentifier, type: WriteType) {
         dispatchPrecondition(condition: .onQueue(queue))
         _writeCallCounts[characteristic, default: 0] += 1
         _onWrite?(characteristic, data)
@@ -456,7 +456,7 @@ final class FakePeripheral: PeripheralRemote, Sendable {
     }
 
     /// Returns ``scriptedMaximumWriteValueLength``.
-    func maximumWriteValueLength(for type: CBCharacteristicWriteType) -> Int {
+    func maximumWriteValueLength(for type: WriteType) -> Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _scriptedMaximumWriteValueLength
     }

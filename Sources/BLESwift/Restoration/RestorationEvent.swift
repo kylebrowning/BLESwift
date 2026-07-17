@@ -6,6 +6,7 @@
 // NOTE — dual-access declaration: see the note in `RestorationConfiguration.swift`.
 // Public on iOS, internal mirror elsewhere. **Keep the two in sync.**
 
+import BLESwiftCore
 import Foundation
 
 #if os(iOS)

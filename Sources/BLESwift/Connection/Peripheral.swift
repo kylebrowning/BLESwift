@@ -3,6 +3,8 @@
 //  BLESwift
 //
 
+import BLESwiftCore
+
 /// A handle to a connected peripheral, returned by `Central.connect(_:timeout:reconnect:warningOptions:)`
 /// and carried by ``ConnectionState/connected(_:)``.
 ///

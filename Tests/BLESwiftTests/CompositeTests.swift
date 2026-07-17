@@ -6,6 +6,7 @@
 import Foundation
 import Synchronization
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 /// Exercises Phase 7's composite helpers — `writeAndAwaitNotification`,

@@ -3,10 +3,10 @@
 //  BLESwiftTests
 //
 
-import CoreBluetooth
 import Foundation
 import Synchronization
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 /// Exercises `Central`'s Phase 5 connection lifecycle surface: `connect`, `disconnect`,
@@ -33,7 +33,7 @@ struct ConnectionTests {
         #expect(connected.id == fakePeripheral.peripheralIdentifier)
     }
 
-    @Test("connect()'s warningOptions reach CoreBluetooth as the three CBConnectPeripheralOption notify keys")
+    @Test("connect()'s warningOptions reach the backend seam unchanged")
     func warningOptionsReachConnectOptions() async throws {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         register(fakePeripheral, on: fakeCentral)
@@ -47,9 +47,9 @@ struct ConnectionTests {
         _ = try await central.connect(fakePeripheral.peripheralIdentifier, warningOptions: options)
 
         let recorded = fakeCentral.onQueue { fakeCentral.lastConnectOptions }
-        #expect(recorded?[CBConnectPeripheralOptionNotifyOnConnectionKey] as? Bool == true)
-        #expect(recorded?[CBConnectPeripheralOptionNotifyOnDisconnectionKey] as? Bool == false)
-        #expect(recorded?[CBConnectPeripheralOptionNotifyOnNotificationKey] as? Bool == true)
+        #expect(recorded?.notifyOnConnection == true)
+        #expect(recorded?.notifyOnDisconnection == false)
+        #expect(recorded?.notifyOnNotification == true)
     }
 
     @Test("connect() failure: throws the CoreBluetooth-reported error and returns to .disconnected")

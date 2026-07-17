@@ -3,9 +3,9 @@
 //  BLESwiftTests
 //
 
-import CoreBluetooth
 import Foundation
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 /// Exercises `Peripheral`'s Phase 6 GATT surface: `read`, `write`, `readRSSI`,

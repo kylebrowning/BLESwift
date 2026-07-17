@@ -3,6 +3,7 @@
 //  BLESwiftTests
 //
 
+import BLESwiftCore
 import Synchronization
 @testable import BLESwift
 
