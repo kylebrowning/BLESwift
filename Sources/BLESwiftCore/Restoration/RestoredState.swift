@@ -64,8 +64,9 @@ public struct RestoredScanOptions: Sendable, Hashable {
 public struct RestoredState: Sendable, Hashable {
 
     /// The peripherals CoreBluetooth preserved (`CBCentralManagerRestoredStatePeripheralsKey`).
-    /// In practice at most one (BLESwift enforces single-peripheral connection
-    /// discipline).
+    /// Genuinely plural: BLESwift supports N concurrent peripheral connections, and routes
+    /// every one of them on restoration (see `RestorationEvent` in the `BLESwift` module) —
+    /// none are dropped or treated as extras.
     public let peripherals: [RestoredPeripheral]
 
     /// The services of the scan CoreBluetooth preserved

@@ -367,6 +367,234 @@ struct RestorationTests {
         await waitFor { runner.endCount >= 1 }
         #expect(runner.endCount >= 1)
     }
+
+    // MARK: - Multi-peripheral restoration (Phase 3: every restored peripheral is routed)
+
+    @Test("two restored-connected peripherals are both adopted independently, and GATT works on both")
+    func multipleRestoredConnectedAreBothAdopted() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeRestorationCentral()
+        registerRetrievable(fakePeripheralA, on: fakeCentral)
+        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral, name: "Fake Peripheral B")
+        let scriptedA = Data([0x01])
+        let scriptedB = Data([0x02])
+        fakePeripheralA.onQueue { fakePeripheralA.scriptedReadValues[Self.heartRateMeasurement] = scriptedA }
+        fakePeripheralB.onQueue { fakePeripheralB.scriptedReadValues[Self.heartRateMeasurement] = scriptedB }
+
+        let restored = RestoredState(peripherals: [
+            RestoredPeripheral(identifier: fakePeripheralA.peripheralIdentifier, state: .connected),
+            RestoredPeripheral(identifier: fakePeripheralB.peripheralIdentifier, state: .connected),
+        ])
+        fakeCentral.simulateRestoration(restored)
+        fakeCentral.simulateStateChange(.poweredOn)
+
+        let events = await collectRestorationEvents(central, count: 3)
+        try #require(events.count == 3)
+        guard case .willRestore(let replayedState) = events[0] else {
+            Issue.record("expected .willRestore first, got \(events[0])")
+            return
+        }
+        #expect(replayedState == restored)
+
+        let restoredIdentifiers = Set(events[1...].compactMap { event -> PeripheralIdentifier? in
+            guard case .restoredConnection(let id) = event else { return nil }
+            return id
+        })
+        #expect(restoredIdentifiers == Set([fakePeripheralA.peripheralIdentifier, fakePeripheralB.peripheralIdentifier]))
+
+        let connected = await central.connectedPeripherals
+        #expect(connected.count == 2)
+        #expect(Set(connected.map(\.id)) == Set([fakePeripheralA.peripheralIdentifier, fakePeripheralB.peripheralIdentifier]))
+
+        // Adoption requires no CoreBluetooth connect call for either peripheral.
+        #expect(fakeCentral.onQueue { fakeCentral.connectCallCount } == 0)
+
+        guard case .connected(let peripheralA) = await central.connectionState(of: fakePeripheralA.peripheralIdentifier) else {
+            Issue.record("expected A to be .connected")
+            return
+        }
+        guard case .connected(let peripheralB) = await central.connectionState(of: fakePeripheralB.peripheralIdentifier) else {
+            Issue.record("expected B to be .connected")
+            return
+        }
+        #expect(try await peripheralA.read(from: Self.heartRateMeasurement) == scriptedA)
+        #expect(try await peripheralB.read(from: Self.heartRateMeasurement) == scriptedB)
+    }
+
+    @Test("mixed restoration: connected adopted, connecting reconnected, disconnected failed — the startup window stays open until the connecting one resolves")
+    func mixedRestorationRoutesEachIndependently() async throws {
+        let runner = FakeStartupBackgroundTask()
+        let (central, fakeCentral, connectedFake) = makeRestorationCentral(
+            connectingTimeout: .milliseconds(150),
+            startupBackgroundTask: runner
+        )
+        registerRetrievable(connectedFake, on: fakeCentral)
+        let connectingFake = addFakePeripheral(to: central, fakeCentral: fakeCentral, name: "Connecting")
+        let disconnectedFake = addFakePeripheral(to: central, fakeCentral: fakeCentral, name: "Disconnected")
+        fakeCentral.onQueue { fakeCentral.connectBehaviors[connectingFake.identifier] = .hang }
+
+        let restored = RestoredState(peripherals: [
+            RestoredPeripheral(identifier: connectedFake.peripheralIdentifier, state: .connected),
+            RestoredPeripheral(identifier: connectingFake.peripheralIdentifier, state: .connecting),
+            RestoredPeripheral(identifier: disconnectedFake.peripheralIdentifier, state: .disconnected),
+        ])
+        fakeCentral.simulateRestoration(restored)
+        fakeCentral.simulateStateChange(.poweredOn)
+
+        // The connected peripheral is adopted and the disconnected one fails synchronously
+        // during routing; the connecting one's manual reconnect is still hung — the window
+        // must not close yet even though 2 of the 3 outcomes are already resolved.
+        await waitFor {
+            if case .connected = await central.connectionState(of: connectedFake.peripheralIdentifier) { return true }
+            return false
+        }
+        await waitFor { fakeCentral.onQueue { fakeCentral.connectCallCounts[connectingFake.identifier] } == 1 }
+        #expect(fakeCentral.onQueue { fakeCentral.connectCallCounts[connectingFake.identifier] } == 1)
+        guard case .disconnected = await central.connectionState(of: disconnectedFake.peripheralIdentifier) else {
+            Issue.record("expected the restored-disconnected peripheral to stay .disconnected")
+            return
+        }
+        #expect(runner.endCount == 0)
+
+        // Complete the hung manual connect via the standard timeout two-phase cancel.
+        await waitFor { fakeCentral.onQueue { fakeCentral.cancelCallCounts[connectingFake.identifier] } == 1 }
+        fakeCentral.simulateDisconnect(connectingFake.peripheralIdentifier, error: nil)
+
+        let events = await collectRestorationEvents(central, count: 4)
+        try #require(events.count == 4)
+        var outcomes: [PeripheralIdentifier: RestorationEvent] = [:]
+        for event in events[1...] {
+            switch event {
+            case .restoredConnection(let id): outcomes[id] = event
+            case .failedToRestoreConnection(let id, _): outcomes[id] = event
+            default: Issue.record("unexpected event \(event)")
+            }
+        }
+        guard case .restoredConnection = outcomes[connectedFake.peripheralIdentifier] else {
+            Issue.record("expected the connected peripheral to be restored")
+            return
+        }
+        guard case .failedToRestoreConnection(_, let connectingError) = outcomes[connectingFake.peripheralIdentifier] else {
+            Issue.record("expected the connecting peripheral's manual reconnect to fail")
+            return
+        }
+        #expect(connectingError as? BLESwiftError == .connectionTimedOut)
+        guard case .failedToRestoreConnection(_, let disconnectedError) = outcomes[disconnectedFake.peripheralIdentifier] else {
+            Issue.record("expected the disconnected peripheral to fail restoration")
+            return
+        }
+        #expect(disconnectedError as? BLESwiftError == .notConnected)
+
+        await waitFor { runner.endCount == 1 }
+        #expect(runner.endCount == 1)
+    }
+
+    @Test("two restored-connecting peripherals reconnect independently and concurrently — the startup window closes only after both resolve")
+    func multipleRestoredConnectingReconnectIndependently() async throws {
+        let runner = FakeStartupBackgroundTask()
+        let (central, fakeCentral, succeedFake) = makeRestorationCentral(
+            connectingTimeout: .milliseconds(150),
+            startupBackgroundTask: runner
+        )
+        registerRetrievable(succeedFake, on: fakeCentral)
+        let hangFake = addFakePeripheral(to: central, fakeCentral: fakeCentral, name: "Hang")
+        fakeCentral.onQueue {
+            fakeCentral.connectBehaviors[succeedFake.identifier] = .succeed
+            fakeCentral.connectBehaviors[hangFake.identifier] = .hang
+        }
+
+        let restored = RestoredState(peripherals: [
+            RestoredPeripheral(identifier: succeedFake.peripheralIdentifier, state: .connecting),
+            RestoredPeripheral(identifier: hangFake.peripheralIdentifier, state: .connecting),
+        ])
+        fakeCentral.simulateRestoration(restored)
+        fakeCentral.simulateStateChange(.poweredOn)
+
+        // The succeeding one resolves quickly; the window must not close yet — the other
+        // one's manual reconnect is still hung.
+        await waitFor {
+            if case .connected = await central.connectionState(of: succeedFake.peripheralIdentifier) { return true }
+            return false
+        }
+        #expect(runner.endCount == 0)
+
+        // The hanging one times out via the standard two-phase cancel.
+        await waitFor { fakeCentral.onQueue { fakeCentral.cancelCallCounts[hangFake.identifier] } == 1 }
+        fakeCentral.simulateDisconnect(hangFake.peripheralIdentifier, error: nil)
+
+        let events = await collectRestorationEvents(central, count: 3)
+        try #require(events.count == 3)
+        var outcomes: [PeripheralIdentifier: RestorationEvent] = [:]
+        for event in events[1...] {
+            switch event {
+            case .restoredConnection(let id): outcomes[id] = event
+            case .failedToRestoreConnection(let id, _): outcomes[id] = event
+            default: Issue.record("unexpected event \(event)")
+            }
+        }
+        guard case .restoredConnection = outcomes[succeedFake.peripheralIdentifier] else {
+            Issue.record("expected the succeeding peripheral to be restored")
+            return
+        }
+        guard case .failedToRestoreConnection(_, let error) = outcomes[hangFake.peripheralIdentifier] else {
+            Issue.record("expected the hanging peripheral's manual reconnect to time out")
+            return
+        }
+        #expect(error as? BLESwiftError == .connectionTimedOut)
+
+        // Exactly one manual re-connect was issued per identifier — independent attempts,
+        // not a shared single-slot state.
+        #expect(fakeCentral.onQueue { fakeCentral.connectCallCounts[succeedFake.identifier] } == 1)
+        #expect(fakeCentral.onQueue { fakeCentral.connectCallCounts[hangFake.identifier] } == 1)
+
+        await waitFor { runner.endCount == 1 }
+        #expect(runner.endCount == 1)
+    }
+
+    @Test("expiration during two concurrent restored-connecting manual connects fails both with .startupBackgroundTaskExpired, and the window closes exactly once")
+    func expirationFailsMultipleInFlightManualConnects() async throws {
+        let runner = FakeStartupBackgroundTask()
+        let (central, fakeCentral, fakeA) = makeRestorationCentral(startupBackgroundTask: runner)
+        registerRetrievable(fakeA, on: fakeCentral)
+        let fakeB = addFakePeripheral(to: central, fakeCentral: fakeCentral, name: "B")
+        fakeCentral.onQueue {
+            fakeCentral.connectBehaviors[fakeA.identifier] = .hang
+            fakeCentral.connectBehaviors[fakeB.identifier] = .hang
+        }
+
+        let restored = RestoredState(peripherals: [
+            RestoredPeripheral(identifier: fakeA.peripheralIdentifier, state: .connecting),
+            RestoredPeripheral(identifier: fakeB.peripheralIdentifier, state: .connecting),
+        ])
+        fakeCentral.simulateRestoration(restored)
+        fakeCentral.simulateStateChange(.poweredOn)
+        await waitFor {
+            fakeCentral.onQueue { fakeCentral.connectCallCounts[fakeA.identifier] } == 1
+                && fakeCentral.onQueue { fakeCentral.connectCallCounts[fakeB.identifier] } == 1
+        }
+
+        runner.fireExpiration()
+
+        // Expiration routes both through the standard two-phase cancel.
+        await waitFor {
+            fakeCentral.onQueue { fakeCentral.cancelCallCounts[fakeA.identifier] } == 1
+                && fakeCentral.onQueue { fakeCentral.cancelCallCounts[fakeB.identifier] } == 1
+        }
+        fakeCentral.simulateDisconnect(fakeA.peripheralIdentifier, error: nil)
+        fakeCentral.simulateDisconnect(fakeB.peripheralIdentifier, error: nil)
+
+        let events = await collectRestorationEvents(central, count: 3)
+        try #require(events.count == 3)
+        for event in events[1...] {
+            guard case .failedToRestoreConnection(_, let error) = event else {
+                Issue.record("expected .failedToRestoreConnection, got \(event)")
+                continue
+            }
+            #expect(error as? BLESwiftError == .startupBackgroundTaskExpired)
+        }
+
+        await waitFor { runner.endCount == 1 }
+        #expect(runner.endCount == 1)
+    }
 }
 
 // MARK: - Helpers

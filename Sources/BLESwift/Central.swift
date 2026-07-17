@@ -167,25 +167,16 @@ public actor Central {
     /// between `willRestoreState` and `centralManagerDidUpdateState` delivery.
     private var pendingRestoration: RestoredState?
 
-    /// The in-flight manual re-connect for a restored-*connecting* peripheral —
+    /// One in-flight manual re-connect per restored-*connecting* peripheral —
     /// CoreBluetooth never completes a restored-connecting attempt on its own (ledger). A
     /// ledgered actor-owned `Task { }` site under the corrected policy (like
-    /// ``reconnectLoops``):
-    /// spawned from actor-isolated code, stored here so it is always cancellable
+    /// ``reconnectLoops``): each entry is spawned from actor-isolated code
+    /// (``startRestorationConnect(_:)``), stored here so it is always cancellable
     /// (explicit `disconnect`/`stopAndExtractState()`/`deinit`), never spawned from the
-    /// proxy.
-    ///
-    /// Deliberately kept singular (not yet keyed by identifier) in this phase — restoration
-    /// itself still routes at most one peripheral (a later phase generalizes it to N);
-    /// ``restorationConnectingIdentifier`` names which peripheral this task belongs to, so
-    /// callers that need an identifier for the now-keyed ``failPendingConnect(for:error:)``
-    /// (namely ``handleStartupBackgroundTaskExpiration()``) have one to pass.
-    private var restorationTask: Task<Void, Never>?
-
-    /// The identifier ``restorationTask`` is currently re-connecting, if any. Set alongside
-    /// ``restorationTask`` in ``startRestorationConnect(_:)``, cleared alongside it in
-    /// ``runRestorationConnect(identifier:timeout:)`` and ``stopAndExtractState()``.
-    private var restorationConnectingIdentifier: PeripheralIdentifier?
+    /// proxy. Keyed by the peripheral being re-connected — every restored-connecting
+    /// peripheral gets its own independent, concurrent manual-connect task;
+    /// ``runRestorationConnect(identifier:timeout:)`` removes its own entry on completion.
+    private var restorationTasks: [PeripheralIdentifier: Task<Void, Never>] = [:]
 
     /// The startup background-task seam protecting the restoration window — a real
     /// `UIApplication` background task on iOS with restoration enabled, a no-op otherwise.
@@ -513,7 +504,9 @@ public actor Central {
         for loop in reconnectLoops.values {
             loop.task.cancel()
         }
-        restorationTask?.cancel()
+        for task in restorationTasks.values {
+            task.cancel()
+        }
         startupBackgroundTask.end()
     }
 
@@ -558,9 +551,10 @@ public actor Central {
             reconnectLoops[id]?.task.cancel()
         }
         reconnectLoops.removeAll()
-        restorationTask?.cancel()
-        restorationTask = nil
-        restorationConnectingIdentifier = nil
+        for task in restorationTasks.values {
+            task.cancel()
+        }
+        restorationTasks.removeAll()
         pendingRestoration = nil
         endStartupBackgroundTask()
         failAllSessionsPendingGATTContinuations(error: .stopped)
@@ -3039,8 +3033,8 @@ public actor Central {
             if let pending = pendingRestoration {
                 pendingRestoration = nil
                 routeRestoredPeripherals(pending)
-            } else if restorationTask == nil {
-                endStartupBackgroundTask()
+            } else {
+                closeStartupWindowIfIdle()
             }
         } else {
             if let pending = pendingRestoration {
@@ -3050,56 +3044,49 @@ public actor Central {
                 }
                 log("Restoration failed: Bluetooth unavailable", level: .warning, category: "restore")
             }
-            // An in-flight restored-connecting re-connect (`restorationTask`) is not
-            // touched here: the radio loss fails its `connect` on its own
-            // (`handleBluetoothUnavailable`), and the task's own catch emits the failure
-            // event and closes the window.
-            if restorationTask == nil {
-                endStartupBackgroundTask()
-            }
+            // Any in-flight restored-connecting re-connects (`restorationTasks`) are not
+            // touched here: the radio loss fails each one's `connect` on its own
+            // (`handleBluetoothUnavailable`), and each task's own catch emits the failure
+            // event and removes its own entry — `closeStartupWindowIfIdle()` below closes
+            // the window only once every such entry (and `pendingRestoration`, cleared
+            // above) has resolved.
+            closeStartupWindowIfIdle()
         }
     }
 
-    /// Routes `.poweredOn` restoration: restored-*connected* → adopt as the current
-    /// session; restored-*connecting* → manual re-connect (CoreBluetooth never completes it
-    /// on its own); restored-*disconnecting*/*disconnected* →
+    /// Routes `.poweredOn` restoration: EVERY restored peripheral is routed — restored-
+    /// *connected* → adopted as a live session; restored-*connecting* → its own concurrent
+    /// manual re-connect task; restored-*disconnecting*/*disconnected* →
     /// ``RestorationEvent/failedToRestoreConnection(_:error:)`` with
-    /// ``BLESwiftError/notConnected``.
+    /// ``BLESwiftError/notConnected``. The startup window closes only once every outcome
+    /// here has resolved (``closeStartupWindowIfIdle()``, called once at the end — every
+    /// per-peripheral routing step below is synchronous within this same actor turn, except
+    /// spawning a restoration task, which registers itself in ``restorationTasks`` before
+    /// this function returns).
     ///
     /// - Warning: The `disconnecting`/`disconnected` paths have no known way to recreate or
     ///   test on real hardware; that caveat carries over here as well.
-    ///
-    /// BLESwift never crashes on more than one restored peripheral — the first is routed
-    /// (a later phase generalizes restoration to route every peripheral) and any extras
-    /// fail explicitly with ``BLESwiftError/duplicateConnect(_:)`` (the first has already
-    /// claimed/is claiming the tracked entry for its own identifier by the time extras are
-    /// considered; this is an interim compile-time error-vocabulary fix, not a behavior
-    /// redesign — see Phase 1 notes).
     private func routeRestoredPeripherals(_ restored: RestoredState) {
-        guard let first = restored.peripherals.first else {
+        if restored.peripherals.isEmpty {
             log("No peripherals to restore", level: .info, category: "restore")
-            endStartupBackgroundTask()
-            return
         }
 
-        for extra in restored.peripherals.dropFirst() {
-            restorationBroadcaster.yield(.failedToRestoreConnection(extra.identifier, error: BLESwiftError.duplicateConnect(extra.identifier)))
-            log("Not restoring additional peripheral \(extra.identifier) — single-peripheral discipline", level: .warning, category: "restore")
+        for peripheral in restored.peripherals {
+            switch peripheral.state {
+            case .connected:
+                adoptRestoredConnection(peripheral.identifier)
+            case .connecting:
+                startRestorationConnect(peripheral.identifier)
+            case .disconnecting, .disconnected:
+                log("Restored peripheral \(peripheral.identifier) was \(peripheral.state) — nothing to restore", level: .info, category: "restore")
+                restorationBroadcaster.yield(.failedToRestoreConnection(peripheral.identifier, error: BLESwiftError.notConnected))
+            }
         }
 
-        switch first.state {
-        case .connected:
-            adoptRestoredConnection(first.identifier)
-        case .connecting:
-            startRestorationConnect(first.identifier)
-        case .disconnecting, .disconnected:
-            log("Restored peripheral \(first.identifier) was \(first.state) — nothing to restore", level: .info, category: "restore")
-            restorationBroadcaster.yield(.failedToRestoreConnection(first.identifier, error: BLESwiftError.notConnected))
-            endStartupBackgroundTask()
-        }
+        closeStartupWindowIfIdle()
     }
 
-    /// Adopts a restored-*connected* peripheral as the live session — no CoreBluetooth
+    /// Adopts a restored-*connected* peripheral as a live session — no CoreBluetooth
     /// connection work is needed (it *is* connected); GATT operations work immediately
     /// through the ``connectionState(of:)`` `Peripheral` handle, with a `.connected` event
     /// emitted on ``connectionEvents()``.
@@ -3108,17 +3095,18 @@ public actor Central {
     /// `connect(_:timeout:reconnect:warningOptions:)` call exists to have specified one; a
     /// consumer wanting auto-reconnect can observe the eventual disconnect and reconnect
     /// with its preferred policy.
+    ///
+    /// Does not itself close the startup window — called only from
+    /// ``routeRestoredPeripherals(_:)``, which closes it (if idle) once for the whole batch.
     private func adoptRestoredConnection(_ identifier: PeripheralIdentifier) {
         guard connections[identifier] == nil else {
             restorationBroadcaster.yield(.failedToRestoreConnection(identifier, error: BLESwiftError.duplicateConnect(identifier)))
             log("Cannot adopt restored connection to \(identifier): already has a tracked entry", level: .warning, category: "restore")
-            endStartupBackgroundTask()
             return
         }
         guard let target = manager?.retrievePeripherals(withIdentifiers: [identifier.uuid]).first else {
             restorationBroadcaster.yield(.failedToRestoreConnection(identifier, error: BLESwiftError.unexpectedPeripheral(identifier)))
             log("Cannot adopt restored connection to \(identifier): CoreBluetooth no longer knows it", level: .warning, category: "restore")
-            endStartupBackgroundTask()
             return
         }
 
@@ -3139,27 +3127,27 @@ public actor Central {
         log("Restored connection to \(identifier)", level: .info, category: "restore")
         connectionBroadcaster.yield(.connected(identifier))
         restorationBroadcaster.yield(.restoredConnection(identifier))
-        endStartupBackgroundTask()
     }
 
     /// Issues the manual re-connect for a restored-*connecting* peripheral — CoreBluetooth
     /// restores the attempt's existence but never completes (nor re-issues) it, so BLESwift
     /// must connect explicitly, with a default 15 s timeout configurable via
-    /// ``RestorationConfiguration``. Spawns ``restorationTask`` (ledgered `Task { }`
-    /// site — see that property).
+    /// ``RestorationConfiguration``. Spawns and stores a ``restorationTasks`` entry keyed by
+    /// `identifier` (ledgered `Task { }` site — see that property); multiple restored-
+    /// connecting peripherals each get their own entry and run concurrently.
     private func startRestorationConnect(_ identifier: PeripheralIdentifier) {
         let timeout = configuration.restoration?.connectingTimeout ?? .seconds(15)
         log("Restored peripheral \(identifier) was connecting — issuing manual re-connect (timeout: \(timeout))", level: .info, category: "restore")
-        restorationConnectingIdentifier = identifier
-        restorationTask = Task { [weak self] in
+        restorationTasks[identifier] = Task { [weak self] in
             await self?.runRestorationConnect(identifier: identifier, timeout: timeout)
         }
     }
 
-    /// The body of ``restorationTask``: one manual connect attempt, resolved into a
-    /// ``RestorationEvent/restoredConnection(_:)`` or
-    /// ``RestorationEvent/failedToRestoreConnection(_:error:)``, always followed by
-    /// closing the startup window.
+    /// The body of one ``restorationTasks`` entry: one manual connect attempt for
+    /// `identifier`, resolved into a ``RestorationEvent/restoredConnection(_:)`` or
+    /// ``RestorationEvent/failedToRestoreConnection(_:error:)``, always followed by removing
+    /// its own `restorationTasks` entry and closing the startup window if every outcome has
+    /// now resolved.
     ///
     /// Calls ``establishConnection(identifier:policy:timeout:warningOptions:)`` directly
     /// rather than `connect(...)`: the public method's `pendingRestoration` guard exists
@@ -3173,7 +3161,8 @@ public actor Central {
         // no `connections` entry yet, so `failPendingConnect` was a no-op). Without this
         // guard the manual connect would proceed with its full timeout despite the window
         // being closed. `startRestorationConnect` is the only spawn site, and routing runs
-        // synchronously within the state-change's actor turn, so this is the one gap.
+        // synchronously within the state-change's actor turn, so this is the one gap — it
+        // applies independently to every restored-connecting peripheral.
         guard startupWindowOpen else {
             // Silent when cancelled: `stopAndExtractState()`/`deinit` cancel this task
             // after closing the window — that is teardown, not an expiration to report.
@@ -3181,8 +3170,7 @@ public actor Central {
                 log("Startup window closed before the restoration connect could start — failing restoration for \(identifier)", level: .warning, category: "restore")
                 restorationBroadcaster.yield(.failedToRestoreConnection(identifier, error: BLESwiftError.startupBackgroundTaskExpired))
             }
-            restorationTask = nil
-            restorationConnectingIdentifier = nil
+            restorationTasks.removeValue(forKey: identifier)
             return
         }
 
@@ -3202,17 +3190,16 @@ public actor Central {
             log("Failed to restore connection to \(identifier): \(error)", level: .warning, category: "restore")
             restorationBroadcaster.yield(.failedToRestoreConnection(identifier, error: error))
         }
-        restorationTask = nil
-        restorationConnectingIdentifier = nil
-        endStartupBackgroundTask()
+        restorationTasks.removeValue(forKey: identifier)
+        closeStartupWindowIfIdle()
     }
 
     /// Reacts to iOS expiring the startup background task before restoration finished
     /// (wired in `init` via the `StartupBackgroundTaskRunning` seam): every pending
     /// restoration operation fails with ``BLESwiftError/startupBackgroundTaskExpired`` —
     /// covering BLESwift's two restoration-pending states: a staged-but-unrouted
-    /// ``pendingRestoration``, and an in-flight
-    /// restored-connecting re-connect (failed through the standard two-phase connect
+    /// ``pendingRestoration``, and every in-flight restored-connecting re-connect in
+    /// ``restorationTasks`` (each failed through the standard two-phase connect
     /// cancellation, so its continuation resolves with this error once CoreBluetooth
     /// confirms).
     private func handleStartupBackgroundTaskExpiration() {
@@ -3226,14 +3213,27 @@ public actor Central {
             }
         }
 
-        if restorationTask != nil, let restorationConnectingIdentifier {
-            // The task's own catch emits the failure event and closes the window once the
-            // two-phase cancel resolves; the window is also closed below (idempotent) so
-            // the platform task is released *now*, not when CoreBluetooth gets around to
-            // confirming.
-            failPendingConnect(for: restorationConnectingIdentifier, error: BLESwiftError.startupBackgroundTaskExpired)
+        // Snapshot keys first — `failPendingConnect(for:)` can synchronously mutate
+        // `connections` (and, via `handleTermination`, other actor-owned state), so never
+        // iterate a map while mutating it.
+        for identifier in Array(restorationTasks.keys) {
+            // Each task's own catch emits its failure event and removes its own entry once
+            // its two-phase cancel resolves; the window is also closed unconditionally
+            // below so the platform task is released *now*, not when CoreBluetooth gets
+            // around to confirming every one of them.
+            failPendingConnect(for: identifier, error: BLESwiftError.startupBackgroundTaskExpired)
         }
 
+        endStartupBackgroundTask()
+    }
+
+    /// Closes the startup restoration window (via ``endStartupBackgroundTask()``) once
+    /// every restoration outcome has resolved: no staged-but-unrouted ``pendingRestoration``
+    /// and no in-flight ``restorationTasks`` entries. Safe to call speculatively from every
+    /// restoration exit point — a no-op while anything is still pending, and idempotent
+    /// (via ``endStartupBackgroundTask()``'s own guard) once everything has resolved.
+    private func closeStartupWindowIfIdle() {
+        guard pendingRestoration == nil, restorationTasks.isEmpty else { return }
         endStartupBackgroundTask()
     }
 
