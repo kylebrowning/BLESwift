@@ -22,7 +22,9 @@ private nonisolated(unsafe) var centralManagerProxyKey: UInt8 = 0
 /// `any PeripheralRemote` in the protocol (see ``CentralManaging`` for why) but `CBPeripheral`
 /// in the real `CBCentralManager` API, so downcast to `CBPeripheral`, guard-let-else-return
 /// on a mismatch (never trap — mixing shim families is a programmer error, not a runtime
-/// condition to crash on), and delegate to the real method.
+/// condition to crash on), and delegate to the real method;
+/// `retrieveConnectedPeripherals(withServices:)` builds the `[CBUUID]` array CoreBluetooth
+/// expects from `[ServiceIdentifier]`, same conversion as `scanForPeripherals`'s.
 ///
 /// No `@retroactive` needed: `CentralManaging` (in `BLESwiftCore`) and this conformance
 /// (in `BLESwift`) are different modules but the same SPM *package* — SE-0364's
@@ -120,6 +122,15 @@ extension CBCentralManager: CentralManaging {
     /// `[any PeripheralRemote]`.
     public func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote] {
         let cbPeripherals: [CBPeripheral] = retrievePeripherals(withIdentifiers: identifiers)
+        return cbPeripherals
+    }
+
+    /// Builds the `[CBUUID]` CoreBluetooth's real
+    /// `retrieveConnectedPeripherals(withServices:)` expects, delegates to it (disambiguated
+    /// from this method by its `[CBPeripheral]` return type), and upcasts the result to
+    /// `[any PeripheralRemote]`.
+    public func retrieveConnectedPeripherals(withServices services: [ServiceIdentifier]) -> [any PeripheralRemote] {
+        let cbPeripherals: [CBPeripheral] = retrieveConnectedPeripherals(withServices: services.map(\.cbuuid))
         return cbPeripherals
     }
 }

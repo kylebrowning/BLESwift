@@ -61,6 +61,11 @@ public actor Central {
     /// instance straddling actor isolation).
     private var manager: (any CentralManaging)?
 
+    /// Read-only access to ``manager`` for extensions of `Central` declared in other files
+    /// within this module (e.g. `Central+Retrieval.swift`) — `private` is file-scoped, so
+    /// `manager` itself isn't visible there. Not for use outside `BLESwift`.
+    internal var shim: (any CentralManaging)? { manager }
+
     /// This `Central`'s `CBCentralManagerDelegate`, strongly owned here so it outlives the
     /// gap between its creation and `CBCentralManager(delegate:queue:options:)` (required —
     /// `willRestoreState` can arrive during manager init, before this `Central` can wire

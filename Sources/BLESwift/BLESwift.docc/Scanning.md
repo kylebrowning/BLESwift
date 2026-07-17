@@ -121,7 +121,19 @@ Passing `nil`/empty `services` also logs a warning at scan start regardless of p
 Apple's general guidance against unscoped scanning — prefer always specifying the services
 you're interested in.
 
+### You may not need to scan
+
+If you already know a peripheral's identifier — from a previous session, or because you
+persist it yourself — ``Central/knownPeripherals(withIdentifiers:)`` resolves it without a
+scan at all, synchronously against CoreBluetooth's local cache. And
+``Central/systemConnectedPeripherals(withServices:)`` finds peripherals the *system* is
+already holding a connection to (by any app on the device, not just yours), by service —
+useful when a peripheral never actually disconnected and re-scanning for it would be wasted
+radio time. Both hand back a ``PeripheralIdentifier`` you feed straight to
+``Central/connect(_:timeout:reconnect:warningOptions:)``, the same as a scan result.
+
 ## See Also
 
 - <doc:GettingStarted>
 - <doc:ConnectionsAndReconnection>
+- <doc:BackgroundRestoration>

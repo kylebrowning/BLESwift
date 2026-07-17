@@ -62,6 +62,7 @@ public final class FakeCentral: CentralManaging, Sendable {
     nonisolated(unsafe) private var _lastScanOptions: ScanOptions?
     nonisolated(unsafe) private var _stopScanCallCount = 0
     nonisolated(unsafe) private var _retrievablePeripherals: [UUID: FakePeripheral] = [:]
+    nonisolated(unsafe) private var _systemConnectedPeripherals: [(peripheral: FakePeripheral, services: [ServiceIdentifier])] = []
 
     /// Backs ``bluetoothAuthorization``. Unlike every other stored property here,
     /// `bluetoothAuthorization` is a `static var` mirroring the `CBManager.authorization`
@@ -187,6 +188,25 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
+    /// Peripherals ``retrieveConnectedPeripherals(withServices:)`` filters over, each
+    /// paired with the services it should be treated as containing. Empty (i.e. "nothing
+    /// system-connected") by default. Configure via ``onQueue(_:)``.
+    ///
+    /// Deliberately separate from `FakePeripheral.availableServices` (the discovery-
+    /// scripting seam): `availableServices == nil` there means "permissive
+    /// auto-discovery", which has no sensible meaning as a connected-services filter — the
+    /// two concepts must not be conflated.
+    public var systemConnectedPeripherals: [(peripheral: FakePeripheral, services: [ServiceIdentifier])] {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _systemConnectedPeripherals
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _systemConnectedPeripherals = newValue
+        }
+    }
+
     /// Simulates CoreBluetooth updating the radio state and, asynchronously, delivers
     /// `CentralEvent.didUpdateState(_:)` on ``queue``. Off-queue safe to call directly —
     /// hops onto `queue` itself. Flush with ``onQueue(_:)`` before asserting the event
@@ -296,6 +316,17 @@ public final class FakeCentral: CentralManaging, Sendable {
     public func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote] {
         dispatchPrecondition(condition: .onQueue(queue))
         return identifiers.compactMap { _retrievablePeripherals[$0] }
+    }
+
+    /// Returns the scripted peripherals (``systemConnectedPeripherals``) whose services
+    /// intersect `services` (any-of, mirroring CoreBluetooth). Order follows the scripted
+    /// array.
+    public func retrieveConnectedPeripherals(withServices services: [ServiceIdentifier]) -> [any PeripheralRemote] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let query = Set(services)
+        return _systemConnectedPeripherals
+            .filter { !query.isDisjoint(with: $0.services) }
+            .map(\.peripheral)
     }
 
     private func deliver(_ event: CentralEvent) {

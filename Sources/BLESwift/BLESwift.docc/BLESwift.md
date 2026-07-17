@@ -57,6 +57,8 @@ everything below, so every type on this page is available without a separate imp
 
 - <doc:ConnectionsAndReconnection>
 - ``Peripheral``
+- ``Central/knownPeripherals(withIdentifiers:)``
+- ``Central/systemConnectedPeripherals(withServices:)``
 - ``ConnectionEvent``
 - ``ReconnectPolicy``
 
