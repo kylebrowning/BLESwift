@@ -42,6 +42,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _notifyingCharacteristics: Set<CharacteristicIdentifier> = []
     nonisolated(unsafe) private var _scriptedReadValues: [CharacteristicIdentifier: Data] = [:]
     nonisolated(unsafe) private var _scriptedMaximumWriteValueLength = 20
+    nonisolated(unsafe) private var _scriptedRSSI = -50
     nonisolated(unsafe) private var _readCallCount = 0
     nonisolated(unsafe) private var _writeCallCounts: [CharacteristicIdentifier: Int] = [:]
     nonisolated(unsafe) private var _discoverServicesCallCount = 0
@@ -176,6 +177,23 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         set {
             dispatchPrecondition(condition: .onQueue(queue))
             _scriptedMaximumWriteValueLength = newValue
+        }
+    }
+
+    /// The value ``readRSSI()`` reports back via `didReadRSSI`. Defaults to `-50`
+    /// (this fake's original fixed placeholder value, preserved as the default so every
+    /// pre-existing test that never scripts this keeps observing the same value). Configure
+    /// via ``onQueue(_:)`` — lets a multi-peripheral test give distinct fakes distinct
+    /// scripted RSSI values, so a concurrent `readRSSI()` on each can be asserted as
+    /// resolving with the RIGHT peripheral's own value, not just "some" value.
+    public var scriptedRSSI: Int {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _scriptedRSSI
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _scriptedRSSI = newValue
         }
     }
 
@@ -432,10 +450,11 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Asynchronously delivers `didReadRSSI` on ``queue`` with a fixed placeholder value.
+    /// Asynchronously delivers `didReadRSSI` on ``queue`` with ``scriptedRSSI``.
     public func readRSSI() {
         dispatchPrecondition(condition: .onQueue(queue))
-        queue.async { [self] in deliver(.didReadRSSI(-50, error: nil)) }
+        let rssi = _scriptedRSSI
+        queue.async { [self] in deliver(.didReadRSSI(rssi, error: nil)) }
     }
 
     /// Returns ``scriptedMaximumWriteValueLength``.

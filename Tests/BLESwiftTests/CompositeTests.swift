@@ -191,3 +191,57 @@ struct CompositeTests {
         }
     }
 }
+
+/// Exercises Phase 2's multi-peripheral isolation for the composite helpers: a
+/// `writeAndAwaitNotification` round-trip on one peripheral running concurrently with an
+/// independent notification stream on another must not cross-talk in either direction.
+@Suite("Multi-peripheral composite helper isolation")
+struct MultiPeripheralCompositeTests {
+
+    private static let uartService = ServiceIdentifier(uuid: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+    private static let txCharacteristic = CharacteristicIdentifier(uuid: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E", service: uartService)
+    private static let rxCharacteristic = CharacteristicIdentifier(uuid: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E", service: uartService)
+
+    @Test("writeAndAwaitNotification on A, running concurrently with a plain notification stream on B (identical characteristic UUIDs), has no cross-talk in either direction")
+    func writeAndAwaitNotificationOnOneDoesNotCrossTalkWithAnothersStream() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
+        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+        fakeCentral.simulateStateChange(.poweredOn)
+        fakeCentral.onQueue {
+            fakeCentral.retrievablePeripherals[fakePeripheralA.identifier] = fakePeripheralA
+            fakeCentral.connectBehavior = .succeed
+        }
+        let peripheralA = try await central.connect(fakePeripheralA.peripheralIdentifier)
+        let peripheralB = try await central.connect(fakePeripheralB.peripheralIdentifier)
+
+        fakePeripheralA.onQueue {
+            fakePeripheralA.onWrite = { _, _ in
+                fakePeripheralA.simulateNotification(for: Self.rxCharacteristic, value: Data([0xAB, 0xCD]))
+            }
+        }
+
+        // B's own, independent notification stream on the SAME characteristic UUID as A's
+        // composite round-trip — started before A's write, so it's live throughout.
+        let streamB: AsyncThrowingStream<Data, Error> = peripheralB.notifications(for: Self.rxCharacteristic)
+        let collectorB = Task { try await collectData(streamB, count: 1) }
+        await waitFor { fakePeripheralB.onQueue { fakePeripheralB.notifyingCharacteristics.contains(Self.rxCharacteristic) } }
+
+        let response: Data = try await peripheralA.writeAndAwaitNotification(
+            write: UInt8(0x01),
+            to: Self.txCharacteristic,
+            awaitOn: Self.rxCharacteristic
+        )
+        #expect(response == Data([0xAB, 0xCD]))
+
+        // B must not have observed A's response notification — it never fired on B's fake.
+        fakePeripheralB.simulateNotification(for: Self.rxCharacteristic, value: Data([0x01]))
+        let receivedB = try await collectorB.value
+        #expect(receivedB == [Data([0x01])], "B's stream must see only its own peripheral's notification, not A's")
+
+        // A's one-shot subscription must have released cleanly, independent of B's
+        // still-live one.
+        await waitFor { fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 2 }
+        #expect(fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.last?.enabled } == false)
+        #expect(fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 1)
+    }
+}

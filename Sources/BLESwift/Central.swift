@@ -137,17 +137,21 @@ public actor Central {
     /// purpose instead).
     private let connectionBroadcaster = Broadcaster<ConnectionEvent>(replay: .none)
 
-    /// Multicasts every `didModifyServices` invalidation as `[ServiceIdentifier]`, for
-    /// ``Peripheral/serviceChanges()``. Replay `.none`, matching ``connectionBroadcaster``.
+    /// Per-peripheral `didModifyServices` broadcaster registry, for
+    /// ``Peripheral/serviceChanges()``. Replaces a single, un-keyed `Broadcaster` (every
+    /// peripheral's invalidations funneled into one shared stream — the one place, prior to
+    /// this, where peripheral events did NOT carry identity all the way to the consumer):
+    /// each ``PeripheralIdentifier`` now gets its own broadcaster, so peripheral A's
+    /// invalidations never reach peripheral B's subscribers.
     ///
     /// Declared `nonisolated` (rather than actor-isolated, like ``stateBroadcaster``/
     /// ``connectionBroadcaster`` above) specifically so ``Peripheral/serviceChanges()`` can
-    /// fetch its `AsyncStream` **synchronously**, matching the plan's non-`async`
-    /// `serviceChanges()` signature: `Broadcaster` is itself `Sendable` and internally
+    /// fetch its `AsyncStream` **synchronously**, matching that method's non-`async`
+    /// signature: ``ServiceChangesRegistry`` is itself `Sendable` and internally
     /// `Mutex`-guarded (see its doc comment), so exposing it this way needs no actor hop to
     /// stay sound — the same justification already used for ``state``/``isScanning``
     /// above, just applied to a reference type instead of a `Mutex<T>` box directly.
-    nonisolated let serviceChangesBroadcaster = Broadcaster<[ServiceIdentifier]>(replay: .none)
+    nonisolated let serviceChangesRegistry = ServiceChangesRegistry()
 
     // MARK: - Background restoration state
 
@@ -1479,7 +1483,7 @@ public actor Central {
     ///
     /// Routes GATT completions to their pending continuations (take-then-resume, per
     /// characteristic/service where the event carries one) and `didModifyServices` to
-    /// ``serviceChangesBroadcaster``. A later phase (notifications) extends
+    /// ``serviceChangesRegistry``, keyed by the emitting `peripheral`. A later phase (notifications) extends
     /// ``hasActiveNotificationSubscriber(_:session:)`` and the restoration
     /// "unhandled listen" surface referenced in ``handleDidUpdateValue(characteristic:value:error:from:)``.
     func handle(_ event: PeripheralEvent, from peripheral: PeripheralIdentifier) {
@@ -1506,9 +1510,10 @@ public actor Central {
             // No actor-level discovery cache exists to invalidate: the shim's own
             // `isDiscovered(_:)` — backed by CoreBluetooth's own service graph,
             // which CoreBluetooth itself prunes on `didModifyServices` — already reflects
-            // the invalidation structurally. This is purely the observer fan-out.
+            // the invalidation structurally. This is purely the observer fan-out — routed
+            // to only `peripheral`'s own broadcaster, never any other peripheral's.
             log("Services modified/invalidated: \(invalidatedServices)", level: .info, category: "gatt")
-            serviceChangesBroadcaster.yield(invalidatedServices)
+            serviceChangesRegistry.broadcaster(for: peripheral).yield(invalidatedServices)
 
         case .isReadyToSendWriteWithoutResponse:
             resumeWriteWithoutResponseWaiters(for: peripheral)

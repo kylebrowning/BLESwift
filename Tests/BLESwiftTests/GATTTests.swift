@@ -275,6 +275,39 @@ struct GATTTests {
         #expect(fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 1)
     }
 
+    @Test("serviceChanges() streams survive disconnect and reconnect: a subscriber registered before disconnecting still receives a modification yielded after reconnecting")
+    func serviceChangesStreamSurvivesDisconnectAndReconnect() async throws {
+        let (central, fakeCentral, fakePeripheral, peripheral) = try await connected()
+
+        // Subscribed while still on the FIRST connection.
+        let stream = peripheral.serviceChanges()
+        let collector = Task<[ServiceIdentifier]?, Never> {
+            var iterator = stream.makeAsyncIterator()
+            return await iterator.next()
+        }
+        await Task.yield()
+
+        try await central.disconnect(fakePeripheral.peripheralIdentifier)
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
+            Issue.record("expected .disconnected")
+            return
+        }
+
+        // Reconnect to the SAME identifier — `ServiceChangesRegistry` is keyed by
+        // `PeripheralIdentifier`, not by any particular connection attempt, so the old
+        // subscriber's stream must still be live against the new session.
+        _ = try await central.connect(fakePeripheral.peripheralIdentifier)
+        guard case .connected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
+            Issue.record("expected .connected after reconnect")
+            return
+        }
+        _ = fakeCentral
+
+        fakePeripheral.simulateServiceModification(invalidatedServices: [Self.heartRateService])
+        let invalidated = await collector.value
+        #expect(invalidated?.first == Self.heartRateService, "the stream must survive the disconnect/reconnect cycle — documented behavior")
+    }
+
     // MARK: - Read-while-notifying
 
     @Test("read() on a currently-notifying characteristic throws .readConflictsWithNotification")
