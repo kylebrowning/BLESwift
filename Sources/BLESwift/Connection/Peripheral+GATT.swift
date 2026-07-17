@@ -107,7 +107,9 @@ extension Peripheral {
     }
 
     /// Returns a multicast stream of every `didModifyServices` invalidation — the set of
-    /// services CoreBluetooth just removed (or replaced) on this peripheral.
+    /// services CoreBluetooth just removed (or replaced) on THIS peripheral. Another
+    /// peripheral's invalidations never appear here, even while both are connected through
+    /// the same `Central`.
     ///
     /// CoreBluetooth itself prunes invalidated services from its own service graph as part
     /// of reporting this event, which the CoreBluetooth shim's `isDiscovered(_:)` reflects
@@ -117,14 +119,15 @@ extension Peripheral {
     ///
     /// No replay: a late subscriber only sees invalidations that happen after it starts
     /// consuming. Not actor-isolated to fetch (unlike ``Central/connectionEvents()``): the
-    /// underlying broadcaster is itself `Sendable` and independently thread-safe, so this
+    /// underlying registry is itself `Sendable` and independently thread-safe, so this
     /// can hand back a stream synchronously even if the owning ``Central`` has already been
     /// deallocated (in which case the returned stream finishes immediately, with nothing to
-    /// subscribe to).
+    /// subscribe to). The stream survives this peripheral disconnecting and reconnecting —
+    /// it is keyed by identifier, not by any particular connection attempt.
     public func serviceChanges() -> AsyncStream<[ServiceIdentifier]> {
         guard let central = centralBox.central else {
             return AsyncStream { continuation in continuation.finish() }
         }
-        return central.serviceChangesBroadcaster.stream()
+        return central.serviceChangesRegistry.broadcaster(for: id).stream()
     }
 }
