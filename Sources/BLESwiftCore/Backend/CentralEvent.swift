@@ -5,6 +5,11 @@
 
 import Foundation
 
+/// This is part of BLESwift's backend implementation seam (see ``CentralManaging``).
+/// Conforming your own backend is possible but unsupported: the semantic contract (event
+/// ordering, queue confinement, delivery asynchrony) is documented on ``CentralManaging``
+/// on a best-effort basis and may gain requirements in any release.
+///
 /// A `Sendable` representation of a `CBCentralManagerDelegate` callback, speaking
 /// exclusively in BLESwift-owned (never CoreBluetooth) types.
 ///
@@ -13,9 +18,7 @@ import Foundation
 /// `NSError` is unconditionally `Sendable`, while an `any Error` existential is not
 /// guaranteed to be; CoreBluetooth's delegate errors are bridged with `as NSError?` at the
 /// point they are emitted.
-///
-/// `package`, not `public`, this phase — see ``CentralManaging``.
-package enum CentralEvent: Sendable {
+public enum CentralEvent: Sendable {
 
     /// The Bluetooth radio's state changed. Mirrors
     /// `centralManagerDidUpdateState(_:)`.

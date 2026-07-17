@@ -5,6 +5,12 @@
 
 import Foundation
 
+/// This is BLESwift's backend implementation seam. BLESwift ships two conformances —
+/// CoreBluetooth (the `BLESwift` module) and scriptable fakes (`BLESwiftTestSupport`).
+/// Conforming your own types is possible but unsupported: the semantic contract (event
+/// ordering, queue confinement, delivery asynchrony) is documented here on a best-effort
+/// basis and may gain requirements in any release.
+///
 /// A protocol seam over `CBCentralManager`, mirroring only the API surface BLESwift uses,
 /// speaking exclusively in BLESwift-owned (never CoreBluetooth) types.
 ///
@@ -12,19 +18,24 @@ import Foundation
 /// ``PeripheralRemote`` for the equivalent `CBPeripheral` constraint), so `Central` (in the
 /// `BLESwift` module) is written entirely against this protocol instead of the concrete
 /// CoreBluetooth type. `CBCentralManager` conforms retroactively (`BLESwift`'s
-/// `CBCentralManager+CentralManaging.swift`); a scriptable fake conforms for tests,
-/// standing in for hardware.
+/// `CBCentralManager+CentralManaging.swift`); `BLESwiftTestSupport`'s `FakeCentral` conforms
+/// for tests, standing in for hardware.
 ///
-/// `package`, not `public`, this phase: this is BLESwift's backend implementation seam,
-/// not yet part of the supported public API (publicized in a later phase alongside a real
-/// event route).
+/// - Important: Every ``eventHandler`` delivery must happen **asynchronously**, on the
+///   single serial `DispatchSerialQueue` the owning `Central` was constructed with — never
+///   deliver inline from within a method call on this protocol.
 ///
 /// - Note: ``radioState``/``bluetoothAuthorization`` are named to avoid colliding with
 ///   `CBCentralManager`'s/`CBManager`'s own identically-named `state`/`authorization`
 ///   properties — a same-name, different-type member cannot be added to those types via
 ///   retroactive extension (Swift treats it as an invalid override/redeclaration). This is
 ///   a seam-only rename; `Central`'s own public `state`/`authorization` API is unaffected.
-package protocol CentralManaging: AnyObject {
+public protocol CentralManaging: AnyObject {
+
+    /// Receives every ``CentralEvent`` this backend produces. Set by `Central` at
+    /// creation/adoption time; assigning `nil` detaches event delivery. See the delivery
+    /// contract on the protocol's doc comment.
+    var eventHandler: ((CentralEvent) -> Void)? { get set }
 
     /// The current state of the Bluetooth radio. Mirrors `CBCentralManager.state`.
     var radioState: CentralState { get }

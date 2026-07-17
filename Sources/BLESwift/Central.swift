@@ -61,10 +61,13 @@ public actor Central {
     /// instance straddling actor isolation).
     private var manager: (any CentralManaging)?
 
-    /// This `Central`'s `CBCentralManagerDelegate`/`CBPeripheralDelegate`, strongly owned
-    /// here (it holds only a `weak` back-reference). `nil` for test-backed instances,
-    /// which wire their fakes' event sinks directly to ``handle(_:)``/``handle(_:from:)``
-    /// instead (see ``init(testing:queue:configuration:)``).
+    /// This `Central`'s `CBCentralManagerDelegate`, strongly owned here so it outlives the
+    /// gap between its creation and `CBCentralManager(delegate:queue:options:)` (required —
+    /// `willRestoreState` can arrive during manager init, before this `Central` can wire
+    /// its handler). Non-`nil` only for ``init(configuration:)``, which alone needs this
+    /// construction-order bypass — see the doc comment on `CBCentralManager`'s
+    /// `eventHandler` conformance for why every other init path wires event delivery via
+    /// that computed property instead (and so never needs to store its own proxy here).
     private let proxy: CentralDelegateProxy?
 
     /// The configuration this `Central` was created with.
@@ -211,7 +214,15 @@ public actor Central {
 
         self.manager = CBCentralManager(delegate: proxy, queue: queue, options: options)
 
-        proxy.central = self
+        // `self` is fully initialized (every stored property has a value) by this point,
+        // so it can now be captured — see the doc comment on `proxy` for why this sets
+        // `proxy.handler` directly instead of going through `manager.eventHandler`
+        // (bypassing the associated-object mechanism, which would create a second, wrong
+        // proxy instance disconnected from the one already passed to the manager above).
+        proxy.handler = { [weak self] event in
+            guard let self else { return }
+            self.assumeIsolated { $0.handle(event) }
+        }
 
         // Open the startup background-time window (a no-op runner off-iOS/without
         // restoration). Begun *after* manager creation only because an escaping closure
@@ -249,12 +260,12 @@ public actor Central {
     ///   runtime-verified to succeed (the main queue is always serial).
     ///
     /// - Parameters:
-    ///   - manager: The existing `CBCentralManager` to adopt. `Central` installs itself
-    ///     (via a fresh `CentralDelegateProxy`) as its delegate, replacing whatever
-    ///     delegate it had.
+    ///   - manager: The existing `CBCentralManager` to adopt. `Central` installs its own
+    ///     event delivery (via `manager.eventHandler`, backed by a fresh
+    ///     `CentralDelegateProxy`) as its delegate, replacing whatever delegate it had.
     ///   - connectedPeripheral: An already-connected `CBPeripheral`, if any. It is adopted
-    ///     as the live session: its delegate is re-pointed at this `Central` (so its GATT
-    ///     callbacks route here), ``connectionState`` reports `.connected` with its
+    ///     as the live session: its event delivery is re-pointed at this `Central` (so its
+    ///     GATT callbacks route here), ``connectionState`` reports `.connected` with its
     ///     `Peripheral` handle immediately, GATT operations work through the normal
     ///     machinery, and `.connected` is emitted on ``connectionEvents()`` (note that
     ///     stream has no replay and no subscriber can exist before this initializer
@@ -282,17 +293,12 @@ public actor Central {
         // so no startup restoration window opens.
         self.startupBackgroundTask = NoOpStartupBackgroundTask()
 
-        let proxy = CentralDelegateProxy()
-        self.proxy = proxy
-
-        manager.delegate = proxy
+        // `manager` already exists (unlike `init(configuration:)`, which must create its
+        // manager against a pre-existing proxy) — so event delivery is wired uniformly via
+        // `eventHandler`, letting `CBCentralManager`'s conformance manage its own proxy
+        // creation/retention. No `self.proxy` needed for this path.
+        self.proxy = nil
         self.manager = manager
-
-        // Wire the adopted peripheral's event delivery (its `CBPeripheralDelegate`) to
-        // this Central's proxy, replacing whatever delegate its previous owner had
-        // installed — without this, none of its GATT callbacks would reach BLESwift (Phase 8
-        // BINDING ledger fix; same mechanism as every other session path).
-        connectedPeripheral?.attachEventTarget(proxy)
 
         // Seed the synchronous `state` snapshot (and the `stateEvents()` replay buffer)
         // from the adopted manager's current state rather than leaving it at `.unknown` —
@@ -305,15 +311,17 @@ public actor Central {
 
         // Adopt `connectedPeripheral` as the live session (Session.adopted — the single
         // Session-building shape shared with restoration adoption; policy `.never`, since
-        // no `connect` call existed to specify one). Constructed directly here: a
-        // synchronous actor init may access its own stored properties while `self` has
-        // not yet escaped (SE-0327 flow-sensitive isolation) — `proxy.central = self`
-        // below is the first escape, so no staging is needed. `.connected` is also
-        // yielded on `connectionEvents()`; note that stream has no replay, and no
-        // subscriber can exist before this initializer returns — `connectionState` is the
-        // reliable adoption snapshot (documented on the parameter).
+        // no `connect` call existed to specify one). `.connected` is also yielded on
+        // ``connectionEvents()``; note that stream has no replay, and no subscriber can
+        // exist before this initializer returns — `connectionState` is the reliable
+        // adoption snapshot (documented on the parameter). Every direct stored-property
+        // write (here and above) must precede the `eventHandler` closures below: capturing
+        // `self` — even weakly — counts as `self` escaping (SE-0327), after which direct
+        // property mutation is no longer permitted in this synchronous init.
+        var adoptedIdentifier: PeripheralIdentifier?
         if let connectedPeripheral {
             let identifier = PeripheralIdentifier(uuid: connectedPeripheral.identifier, name: connectedPeripheral.name)
+            adoptedIdentifier = identifier
             phase = .connected(Session.adopted(
                 identifier: identifier,
                 peripheral: connectedPeripheral,
@@ -322,40 +330,80 @@ public actor Central {
             connectionBroadcaster.yield(.connected(identifier))
         }
 
-        proxy.central = self
+        // `self` is fully initialized (every stored property has a value) by this point,
+        // so it can now be captured. Event delivery is wired last — after the session (if
+        // any) already exists — matching every other session-creating path's intent (wire
+        // before the session is *usable* by external callers; nothing external can observe
+        // this `Central` before this initializer returns).
+        manager.eventHandler = { [weak self] event in
+            guard let self else { return }
+            self.assumeIsolated { $0.handle(event) }
+        }
+        if let connectedPeripheral, let identifier = adoptedIdentifier {
+            connectedPeripheral.eventHandler = { [weak self] event in
+                guard let self else { return }
+                self.assumeIsolated { $0.handle(event, from: identifier) }
+            }
+        }
     }
 
-    /// Creates a `Central` for testing, injecting `manager` (a `FakeCentral`) in place of
-    /// a real `CBCentralManager`. Internal — production code always uses
-    /// ``init(configuration:)``.
+    /// Creates a `Central` driving a custom backend — the seam that lets a scriptable
+    /// fake (`BLESwiftTestSupport`'s `FakeCentral`) or any other `CentralManaging`
+    /// conformance stand in for a real `CBCentralManager`. Production apps use
+    /// ``init(configuration:)`` (or ``init(adopting:connectedPeripheral:callbackQueue:configuration:)``
+    /// to adopt an existing manager) instead of this initializer.
     ///
-    /// Unlike the production initializer, this does not create a `CentralDelegateProxy`:
-    /// `manager` is a test double with no real `CBCentralManagerDelegate` to install.
-    /// `makeTestCentral()` (in `Tests/`) instead wires its `FakeCentral`/`FakePeripheral`
-    /// event sinks directly to ``handle(_:)``/``handle(_:from:)`` via `assumeIsolated` —
-    /// sound because the fakes' event delivery is confined to this same `queue`.
+    /// - Important: `queue` **must be the exact `DispatchSerialQueue` instance** `backend`
+    ///   confines its event deliveries to — the same queue-confined contract
+    ///   `CentralManaging`/`PeripheralRemote` document: every event `backend` (and
+    ///   `connectedPeripheral`, if given) produces must arrive asynchronously, on this
+    ///   exact queue. A mismatched queue is not detectable eagerly and surfaces only as an
+    ///   `assumeIsolated` trap the first time an event arrives off-queue (see
+    ///   ``init(adopting:connectedPeripheral:callbackQueue:configuration:)`` for the same
+    ///   invariant on the production adoption path).
+    ///
+    /// This initializer wires `backend.eventHandler` (and `connectedPeripheral?.eventHandler`,
+    /// if adopting) to this `Central`'s internal `handle(_:)`/`handle(_:from:)` methods,
+    /// which stay `internal` — callers never invoke them directly.
+    ///
+    /// - Important: **Retention.** Unlike ``init(configuration:)``/``init(adopting:connectedPeripheral:callbackQueue:configuration:)``,
+    ///   the closures this initializer installs on `backend.eventHandler` (and
+    ///   `connectedPeripheral?.eventHandler`) capture `self` **strongly**, not weakly —
+    ///   `backend` is itself strongly held by this `Central` (`self.manager = backend`), so
+    ///   `Central` → `backend` → closure → `Central` is a deliberate cycle, not an
+    ///   oversight. This means `backend` alone keeps this `Central` alive for as long as
+    ///   `backend` exists, independent of whether anything else still holds a reference to
+    ///   the `Central` instance itself — a consumer that does
+    ///   `_ = Central(backend: fake, queue: queue)` and discards the result still has a
+    ///   live `Central` for as long as `fake` (or whatever holds `fake`) is alive.
+    ///   ``stopAndExtractState()`` does **not** break this cycle for a backend-init
+    ///   `Central`: it only recognizes a real `CBCentralManager`-backed `manager` and
+    ///   throws ``BLESwiftError/stopped`` immediately otherwise, without touching
+    ///   `backend.eventHandler`. To release a `Central` created this way deterministically
+    ///   — rather than letting it (and `backend`) live until `backend` itself is
+    ///   deallocated, or the process exits — clear the cycle explicitly:
+    ///   `backend.eventHandler = nil` (and `connectedPeripheral?.eventHandler = nil`, if
+    ///   adopted). If you never connect and don't need deterministic teardown, this is
+    ///   harmless and expected for the short-lived test rigs this initializer exists for.
     ///
     /// - Parameters:
-    ///   - manager: The `CentralManaging` conformance to drive — typically a `FakeCentral`.
-    ///   - queue: The `DispatchSerialQueue` `manager`'s events are confined to. Must be the
-    ///     same queue instance `manager` was created with.
+    ///   - backend: The `CentralManaging` conformance to drive.
+    ///   - queue: The `DispatchSerialQueue` `backend`'s events are confined to. Must be the
+    ///     same queue instance `backend` was created with — see the invariant above.
     ///   - configuration: Start-time options. Defaults to `Configuration()`.
-    ///   - startupBackgroundTask: A test-injected startup background-task seam (see
+    ///   - startupBackgroundTask: An injected startup background-task seam (see
     ///     `StartupBackgroundTaskRunning`); `nil` (the default) uses a no-op. When
-    ///     `configuration.restoration` is non-`nil`, this init mirrors the production
+    ///     `configuration.restoration` is non-`nil`, this mirrors the production
     ///     restoration window: it begins the (injected or no-op) task with the same
-    ///     expiration wiring, so tests can drive expiration.
-    ///   - connectedPeripheral: A `FakePeripheral` to adopt as the live session, mirroring
-    ///     `init(adopting:connectedPeripheral:...)`'s adoption structure (same
-    ///     `Session.adopted` shape, same `attachEventTarget` + `.connected` emission) —
-    ///     that initializer itself requires real CoreBluetooth objects and is unreachable
-    ///     in SPM tests, so this is how its adoption structure is exercised. The attach is
-    ///     hopped onto `queue` via `queue.sync` (safe: nothing else can be running on the
-    ///     queue during init) because the fake's queue-confinement precondition demands
-    ///     it; the production path attaches a real `CBPeripheral` from the init thread
-    ///     directly.
-    init(
-        testing manager: any CentralManaging,
+    ///     expiration wiring.
+    ///   - connectedPeripheral: A `PeripheralRemote` to adopt as the live session,
+    ///     mirroring ``init(adopting:connectedPeripheral:callbackQueue:configuration:)``'s
+    ///     adoption structure (same `Session.adopted` shape, same eventHandler-before-
+    ///     session-goes-live ordering, same `.connected` emission) — that initializer
+    ///     itself requires real CoreBluetooth objects, so this is how its adoption
+    ///     structure is exercised without hardware.
+    public init(
+        backend: any CentralManaging,
         queue: DispatchSerialQueue,
         configuration: Configuration = Configuration(),
         startupBackgroundTask: (any StartupBackgroundTaskRunning)? = nil,
@@ -363,15 +411,22 @@ public actor Central {
     ) {
         self.queue = queue
         self.configuration = configuration
-        self.manager = manager
+        self.manager = backend
         self.proxy = nil
 
+        let runner = startupBackgroundTask ?? NoOpStartupBackgroundTask()
+        self.startupBackgroundTask = runner
+        self.startupWindowOpen = configuration.restoration != nil
+
+        // Every direct stored-property write (here and above) must precede the
+        // `eventHandler` closures below: capturing `self` — even weakly — counts as
+        // `self` escaping (SE-0327), after which direct property mutation is no longer
+        // permitted in this synchronous init. Mirrors `init(adopting:connectedPeripheral:...)`'s
+        // adoption structure.
+        var adoptedIdentifier: PeripheralIdentifier?
         if let connectedPeripheral {
-            // Mirrors `init(adopting:connectedPeripheral:...)` — see that initializer.
-            // `proxy` is nil for test-backed Centrals, so the attach records a nil target
-            // on the fake (event delivery goes through its `eventSink` regardless).
-            queue.sync { connectedPeripheral.attachEventTarget(nil) }
             let identifier = PeripheralIdentifier(uuid: connectedPeripheral.identifier, name: connectedPeripheral.name)
+            adoptedIdentifier = identifier
             phase = .connected(Session.adopted(
                 identifier: identifier,
                 peripheral: connectedPeripheral,
@@ -380,9 +435,35 @@ public actor Central {
             connectionBroadcaster.yield(.connected(identifier))
         }
 
-        let runner = startupBackgroundTask ?? NoOpStartupBackgroundTask()
-        self.startupBackgroundTask = runner
-        self.startupWindowOpen = configuration.restoration != nil
+        // `self` is fully initialized (every stored property has a value) by this point,
+        // so it can now be captured. Wiring is hopped onto `queue` via `queue.sync` (safe:
+        // nothing else can be running on `queue` during init) because `backend`'s (and, if
+        // adopting, `connectedPeripheral`'s) `eventHandler` setter may be queue-confined,
+        // as `FakeCentral`/`FakePeripheral`'s are — precedented by the old test init's
+        // equivalent off-queue attach.
+        //
+        // Captures `self` strongly (unlike the production paths' `[weak self]`, which
+        // exist to avoid a real `Central` ↔ `CBCentralManager`/`CBPeripheral` retain cycle
+        // in a long-lived app): `self.manager = backend` above already means `Central`
+        // strongly owns `backend`, so a strong capture here forms a `Central` → `backend`
+        // → closure → `Central` cycle deliberately, matching the old internal test init's
+        // behavior exactly (also uncaptured-weak). This is what keeps a `Central` alive in
+        // tests that discard their direct reference (`let (_, fakeCentral, ...) = ...`) —
+        // a real, if incidental, dependency of this package's own test suite. Production
+        // callers own `backend`/`connectedPeripheral` themselves (a real `CBCentralManager`/
+        // `CBPeripheral`), not `Central`, so this initializer is not the production path
+        // that cycle-avoidance protects; those paths use `init(configuration:)`/
+        // `init(adopting:)` instead.
+        queue.sync {
+            backend.eventHandler = { event in
+                self.assumeIsolated { $0.handle(event) }
+            }
+            if let connectedPeripheral, let identifier = adoptedIdentifier {
+                connectedPeripheral.eventHandler = { event in
+                    self.assumeIsolated { $0.handle(event, from: identifier) }
+                }
+            }
+        }
 
         if configuration.restoration != nil {
             runner.begin { [weak self] in
@@ -456,8 +537,8 @@ public actor Central {
         cbManager.delegate = nil
         // Detach the extracted peripheral's event delivery too — its new owner installs
         // its own delegate; leaving ours would route callbacks into a stopped Central.
-        connectedPeripheral?.attachEventTarget(nil)
-        proxy?.central = nil
+        connectedPeripheral?.eventHandler = nil
+        proxy?.handler = nil
 
         return (cbManager, connectedPeripheral)
     }
@@ -754,15 +835,14 @@ public actor Central {
                     return
                 }
 
-                // Wire the peripheral's event delivery (its `CBPeripheralDelegate`, in
-                // production) to the proxy BEFORE initiating the connection, so no GATT
-                // callback can ever be missed — `CBCentralManager.connect` does not do
-                // this implicitly (Phase 8 BINDING ledger fix; the gap was masked by
-                // fakes delivering through `eventSink`s). Also covers every reconnect
-                // attempt and the restoration manual re-connect, which route through
-                // here. `proxy` is `nil` for test-backed Centrals — the fake records the
-                // call and delivers via its sink regardless.
-                target.attachEventTarget(proxy)
+                // Wire the peripheral's event delivery BEFORE initiating the connection,
+                // so no GATT callback can ever be missed — `CBCentralManager.connect` does
+                // not do this implicitly. Also covers every reconnect attempt and the
+                // restoration manual re-connect, which route through here.
+                target.eventHandler = { [weak self] event in
+                    guard let self else { return }
+                    self.assumeIsolated { $0.handle(event, from: id) }
+                }
 
                 phase = .connecting(Connecting(
                     identifier: id,
@@ -903,7 +983,7 @@ public actor Central {
             // Final teardown of this attempt's peripheral reference: detach its event
             // delivery (delegate) — the counterpart of `awaitConnect`'s attach. A
             // follow-up reconnect attempt re-attaches on its own initiation.
-            connecting.peripheral.attachEventTarget(nil)
+            connecting.peripheral.eventHandler = nil
 
             failPendingGATTContinuations(error: .notConnected)
             finishNotificationStreams(error: resolvedError)
@@ -945,7 +1025,7 @@ public actor Central {
 
             // Final teardown of the session's peripheral reference: detach its event
             // delivery (delegate). A reconnect attempt re-attaches on initiation.
-            session.peripheral.attachEventTarget(nil)
+            session.peripheral.eventHandler = nil
 
             let willReconnect = !policy.isNever
             connectionBroadcaster.yield(.disconnected(identifier, error: error, willReconnect: willReconnect))
@@ -967,7 +1047,7 @@ public actor Central {
             // Final teardown of the outgoing peripheral reference: detach its event
             // delivery (delegate) — an explicit disconnect never reconnects, so nothing
             // re-attaches until a future `connect` does.
-            disconnecting.peripheral.attachEventTarget(nil)
+            disconnecting.peripheral.eventHandler = nil
 
             // Already a no-op by this point for the common path: `beginDisconnecting`
             // fails the outgoing session's GATT ops itself, before transitioning here (see
@@ -1207,9 +1287,9 @@ public actor Central {
     // MARK: - Event handling
 
     /// Updates actor state and fans out the corresponding public event(s) for a
-    /// `CentralEvent` — forwarded here by ``CentralDelegateProxy`` for a real
-    /// `CBCentralManager`, or directly by a test's wired `FakeCentral.eventSink` for a
-    /// test-backed `Central`.
+    /// `CentralEvent` — forwarded here through the wired `eventHandler`: by
+    /// ``CentralDelegateProxy`` for a real `CBCentralManager`, or by a test's wired
+    /// `FakeCentral.eventHandler` for a test-backed `Central`.
     func handle(_ event: CentralEvent) {
         switch event {
         case .didUpdateState(let newState):
@@ -1260,6 +1340,30 @@ public actor Central {
             handleTermination(identifier: identifier, error: error)
 
         case .willRestoreState(let restored):
+            // Wire each restored peripheral's event delivery now, *before* `.poweredOn`
+            // routing (`routeRestoredPeripherals(_:)`) actually adopts/reconnects it —
+            // closing (for this path onward) the gap where a notification from a listen
+            // that survived the relaunch would otherwise have nowhere to go. This is the
+            // replacement for the pre-split `CentralDelegateProxy`'s eager
+            // `attachEventTarget(self)` during the raw `willRestoreState` callback: this
+            // handler only runs once `Central` itself is guaranteed wired (see
+            // `CentralDelegateProxy.centralManagerDidUpdateState(_:)`'s buffered-drain
+            // timing), so it cannot cover the narrower window between CoreBluetooth's own
+            // `willRestoreState` delivery and this drain — a disclosed, narrow limitation
+            // of the delegate-proxy split (see that method's doc comment) — but it does
+            // cover the willRestoreState→poweredOn-routing window this fan-out targets,
+            // uniformly for both the real CoreBluetooth path and fakes.
+            for restoredPeripheral in restored.peripherals {
+                let peripheralIdentifier = restoredPeripheral.identifier
+                guard let target = manager?.retrievePeripherals(withIdentifiers: [peripheralIdentifier.uuid]).first else {
+                    continue
+                }
+                target.eventHandler = { [weak self] event in
+                    guard let self else { return }
+                    self.assumeIsolated { $0.handle(event, from: peripheralIdentifier) }
+                }
+            }
+
             // Stage the restored state until the radio's first `.poweredOn` routes it, and
             // emit `.willRestore` immediately (buffered/replayed by `restorationBroadcaster`,
             // so a consumer subscribing later still sees it first).
@@ -1269,9 +1373,9 @@ public actor Central {
         }
     }
 
-    /// Handles a `PeripheralEvent` — forwarded here by ``CentralDelegateProxy`` for a real
-    /// `CBPeripheral`, or directly by a test's wired `FakePeripheral.eventSink` for a
-    /// test-backed `Central`.
+    /// Handles a `PeripheralEvent` — forwarded here through the wired `eventHandler`: by
+    /// ``PeripheralDelegateProxy`` for a real `CBPeripheral`, or by a test's wired
+    /// `FakePeripheral.eventHandler` for a test-backed `Central`.
     ///
     /// Routes GATT completions to their pending continuations (take-then-resume, per
     /// characteristic/service where the event carries one) and `didModifyServices` to
@@ -2911,11 +3015,14 @@ public actor Central {
             return
         }
 
-        // Wire event delivery to the proxy before the session goes live — the one shared
-        // mechanism for every session-creating path (see `awaitConnect`). Idempotent with
-        // the proxy's own early attach during `willRestoreState` (which exists so
-        // notifications arriving before this routing still reach the proxy).
-        target.attachEventTarget(proxy)
+        // Wire event delivery before the session goes live — the one shared mechanism for
+        // every session-creating path (see `awaitConnect`). Idempotent with the early
+        // wiring `handle(_: CentralEvent)`'s `.willRestoreState` case performs (so
+        // notifications arriving before this routing still reach `Central`).
+        target.eventHandler = { [weak self] event in
+            guard let self else { return }
+            self.assumeIsolated { $0.handle(event, from: identifier) }
+        }
 
         phase = .connected(Session.adopted(
             identifier: identifier,

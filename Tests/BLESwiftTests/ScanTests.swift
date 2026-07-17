@@ -6,7 +6,8 @@
 import Foundation
 import Testing
 import BLESwiftCore
-@testable import BLESwift
+import BLESwiftTestSupport
+import BLESwift
 
 /// Exercises `Central.scan(...)` (Phase 4): discovery/duplicate/loss/throttle event flow,
 /// single-scan discipline, and stream-termination-driven cleanup, all via `FakeCentral`.
@@ -23,7 +24,7 @@ struct ScanTests {
         var iterator = stream.makeAsyncIterator()
 
         let peripheral = PeripheralIdentifier(uuid: UUID(), name: "Heart Rate Monitor")
-        let advertisement = AdvertisementData(advertisementData: [:])
+        let advertisement = AdvertisementData()
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -50)
 
         let event = try await iterator.next()
@@ -45,7 +46,7 @@ struct ScanTests {
         var iterator = stream.makeAsyncIterator()
 
         let peripheral = PeripheralIdentifier(uuid: UUID(), name: nil)
-        let advertisement = AdvertisementData(advertisementData: [:])
+        let advertisement = AdvertisementData()
 
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -50)
         guard case .discovered = try await iterator.next() else {
@@ -81,7 +82,7 @@ struct ScanTests {
         var iterator = stream.makeAsyncIterator()
 
         let peripheral = PeripheralIdentifier(uuid: UUID(), name: nil)
-        let advertisement = AdvertisementData(advertisementData: [:])
+        let advertisement = AdvertisementData()
 
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -50)
         guard case .discovered = try await iterator.next() else {
@@ -108,7 +109,7 @@ struct ScanTests {
         var iterator = stream.makeAsyncIterator()
 
         let peripheral = PeripheralIdentifier(uuid: UUID(), name: nil)
-        let advertisement = AdvertisementData(advertisementData: [:])
+        let advertisement = AdvertisementData()
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -50)
 
         guard case .discovered = try await iterator.next() else {
@@ -134,7 +135,7 @@ struct ScanTests {
         var iterator = stream.makeAsyncIterator()
 
         let peripheral = PeripheralIdentifier(uuid: UUID(), name: nil)
-        let advertisement = AdvertisementData(advertisementData: [:])
+        let advertisement = AdvertisementData()
 
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -50)
         guard case .discovered = try await iterator.next() else {
@@ -204,7 +205,7 @@ struct ScanTests {
 
         // The first scan is unaffected — it keeps delivering discoveries.
         let peripheral = PeripheralIdentifier(uuid: UUID(), name: nil)
-        let advertisement = AdvertisementData(advertisementData: [:])
+        let advertisement = AdvertisementData()
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -50)
 
         guard case .discovered = try await firstIterator.next() else {

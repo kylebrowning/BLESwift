@@ -3,15 +3,19 @@
 //  BLESwiftCore
 //
 
-// NOTE — dual-access declarations: see the note in `RestorationConfiguration.swift`
-// (`BLESwift` module). Each type here is declared twice — public on iOS, a `package`
-// mirror elsewhere — so the restoration logic stays compiled (and testable under
-// `swift test` on macOS) without restoration appearing in the non-iOS public API
-// surface. `package`, not `internal`, on non-iOS specifically so `BLESwift`,
-// `BLESwiftTestSupport`, and their tests (separate modules within this package) can
-// still reach these types off-iOS. **Keep the two declarations in sync.**
-
-#if os(iOS)
+// NOTE — unconditionally public (Orchestrator amendment A3.1, plans/03-core-split-and-
+// testsupport.md): these three types were originally dual-declared (public on iOS, a
+// `package` mirror elsewhere) to keep restoration out of the non-iOS public API surface,
+// back when `CentralEvent` itself was `package`. Now that `CentralEvent` is public
+// everywhere (T2) and its `willRestoreState(RestoredState)` case must carry a type at
+// least as accessible as the enum, the dual-access split is no longer viable (a public
+// enum case cannot carry a `package` payload type) — and, per A3.1, no longer desirable
+// either: these are pure value types in a CB-free module, and the public-seam architecture
+// (any `CentralManaging` conformance, including a replay/test backend on any platform, can
+// legitimately construct a `RestoredState`) supersedes the original Phase-8 minimal-surface
+// rationale. The BEHAVIORAL restoration surface — `RestorationConfiguration`,
+// `Configuration.restoration`, `Central.restorationEvents()` (all in the `BLESwift` module)
+// — stays iOS-gated as before; only these inert value types widen.
 
 /// One peripheral CoreBluetooth preserved and handed back during state restoration.
 public struct RestoredPeripheral: Sendable, Hashable {
@@ -84,49 +88,3 @@ public struct RestoredState: Sendable, Hashable {
         self.scanOptions = scanOptions
     }
 }
-
-#else
-
-/// `package` mirror of the iOS-only public `RestoredPeripheral` — see the dual-access
-/// note at the top of this file.
-package struct RestoredPeripheral: Sendable, Hashable {
-    package let identifier: PeripheralIdentifier
-    package let state: PeripheralConnectionState
-
-    package init(identifier: PeripheralIdentifier, state: PeripheralConnectionState) {
-        self.identifier = identifier
-        self.state = state
-    }
-}
-
-/// `package` mirror of the iOS-only public `RestoredScanOptions` — see the dual-access
-/// note at the top of this file.
-package struct RestoredScanOptions: Sendable, Hashable {
-    package let allowDuplicates: Bool
-    package let solicitedServices: [ServiceIdentifier]
-
-    package init(allowDuplicates: Bool, solicitedServices: [ServiceIdentifier] = []) {
-        self.allowDuplicates = allowDuplicates
-        self.solicitedServices = solicitedServices
-    }
-}
-
-/// `package` mirror of the iOS-only public `RestoredState` — see the dual-access note at
-/// the top of this file.
-package struct RestoredState: Sendable, Hashable {
-    package let peripherals: [RestoredPeripheral]
-    package let scanServices: [ServiceIdentifier]
-    package let scanOptions: RestoredScanOptions?
-
-    package init(
-        peripherals: [RestoredPeripheral],
-        scanServices: [ServiceIdentifier] = [],
-        scanOptions: RestoredScanOptions? = nil
-    ) {
-        self.peripherals = peripherals
-        self.scanServices = scanServices
-        self.scanOptions = scanOptions
-    }
-}
-
-#endif

@@ -7,7 +7,8 @@ import Foundation
 import Synchronization
 import Testing
 import BLESwiftCore
-@testable import BLESwift
+import BLESwiftTestSupport
+import BLESwift
 
 /// Exercises Phase 7's composite helpers — `writeAndAwaitNotification`,
 /// `writeAndAssemble`, and `flush(_:quietPeriod:)` — covering listen-before-write ordering,

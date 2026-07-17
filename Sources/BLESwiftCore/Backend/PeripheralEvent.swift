@@ -5,13 +5,16 @@
 
 import Foundation
 
+/// This is part of BLESwift's backend implementation seam (see ``PeripheralRemote``).
+/// Conforming your own backend is possible but unsupported: the semantic contract (event
+/// ordering, queue confinement, delivery asynchrony) is documented on ``PeripheralRemote``
+/// on a best-effort basis and may gain requirements in any release.
+///
 /// A `Sendable` representation of a `CBPeripheralDelegate` callback, speaking exclusively
 /// in BLESwift-owned (never CoreBluetooth) types.
 ///
 /// See ``CentralEvent`` for why errors are typed `NSError?` rather than `any Error`.
-///
-/// `package`, not `public`, this phase — see ``CentralManaging``.
-package enum PeripheralEvent: Sendable {
+public enum PeripheralEvent: Sendable {
 
     /// Service discovery completed (successfully or not). Mirrors
     /// `peripheral(_:didDiscoverServices:)`.
