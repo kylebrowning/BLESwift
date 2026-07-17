@@ -40,7 +40,7 @@ final class CentralDelegateProxy: NSObject, CBCentralManagerDelegate {
     /// observe a torn value.
     ///
     /// Typed `@Sendable` (unlike the `CentralManaging.eventHandler` protocol requirement
-    /// this ultimately backs, which is plain `((CentralEvent) -> Void)?` per its BINDING
+    /// this ultimately backs, which is plain `((CentralEvent) -> Void)?` per its fixed
     /// signature): `Mutex`'s `withLock` requires its `Value` to be safely handed across
     /// isolation domains at the point of storage (a `sending` parameter), which a
     /// non-`@Sendable` closure type cannot satisfy even though the closures `Central`
@@ -63,7 +63,7 @@ final class CentralDelegateProxy: NSObject, CBCentralManagerDelegate {
     ///
     /// Buffered rather than forwarded immediately because `willRestoreState` is the one
     /// delegate callback that can arrive **during `CBCentralManager.init` itself** —
-    /// before `Central` has installed ``handler`` at all (Phase 0 verified constraint:
+    /// before `Central` has installed ``handler`` at all (a verified constraint:
     /// `willRestoreState` precedes `centralManagerDidUpdateState`). A `Mutex` (not
     /// queue-confinement assumptions) guards the buffer precisely because of that unusual
     /// delivery timing; the conversion from the raw `[String: Any]` dictionary to the

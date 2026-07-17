@@ -18,6 +18,19 @@ iOS 18, macOS 15, watchOS 11, tvOS 18, visionOS 2.
 BLESwift is built around Swift's structured concurrency from the ground up — see the articles
 below for the resulting flows.
 
+### Modules
+
+BLESwift ships as three products. `import BLESwift` is all most apps need — it re-exports
+everything below, so every type on this page is available without a separate import:
+
+- **`BLESwiftCore`** — the backend-agnostic types and implementation seam underneath
+  `Central`, with no CoreBluetooth dependency. Most apps never import it directly.
+- **`BLESwift`** (this module) — `Central`, the CoreBluetooth-backed production
+  implementation of the backend seam, and every type re-exported from `BLESwiftCore`.
+- **`BLESwiftTestSupport`** — scriptable `FakeCentral`/`FakePeripheral` fakes for
+  unit-testing your own BLE code without hardware. See <doc:GettingStarted>'s "Testing"
+  section.
+
 ## Topics
 
 ### Essentials

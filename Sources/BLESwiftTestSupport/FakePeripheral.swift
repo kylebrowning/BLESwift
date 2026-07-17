@@ -58,7 +58,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     /// - Parameters:
     ///   - identifier: The peripheral's identifier. Defaults to a fresh `UUID`.
     ///   - name: The peripheral's advertised/cached name.
-    ///   - state: The initial ``PeripheralConnectionState``. Defaults to `.disconnected`.
+    ///   - state: The initial `PeripheralConnectionState`. Defaults to `.disconnected`.
     ///   - canSendWriteWithoutResponse: The initial back-pressure state. Defaults to
     ///     `true` (ready).
     ///   - queue: The queue every CB-mirroring method and event delivery is confined to.
@@ -76,7 +76,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         self.queue = queue
     }
 
-    /// This peripheral's identity as a ``PeripheralIdentifier``. Reads only immutable
+    /// This peripheral's identity as a `PeripheralIdentifier`. Reads only immutable
     /// state, so it needs no queue confinement.
     public var peripheralIdentifier: PeripheralIdentifier {
         PeripheralIdentifier(uuid: identifier, name: name)
@@ -94,7 +94,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         queue.sync(execute: body)
     }
 
-    /// Receives every ``PeripheralEvent`` this fake delivers, on ``queue``. The
+    /// Receives every `PeripheralEvent` this fake delivers, on ``queue``. The
     /// `PeripheralRemote` protocol witness — configure via ``onQueue(_:)``. Every set
     /// (attach *and* `nil` clear) increments ``eventHandlerSetCount``.
     public var eventHandler: ((PeripheralEvent) -> Void)? {
@@ -242,7 +242,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     }
 
     /// Simulates CoreBluetooth signaling renewed write-without-response capacity and,
-    /// asynchronously, delivers ``PeripheralEvent/isReadyToSendWriteWithoutResponse`` on
+    /// asynchronously, delivers `PeripheralEvent.isReadyToSendWriteWithoutResponse` on
     /// ``queue``.
     public func simulateReadyToSendWriteWithoutResponse() {
         queue.async { [self] in
@@ -262,7 +262,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     }
 
     /// Simulates a notification (or an out-of-band read completion) by, asynchronously,
-    /// delivering ``PeripheralEvent/didUpdateValue(characteristic:value:error:)`` on
+    /// delivering `PeripheralEvent.didUpdateValue(characteristic:value:error:)` on
     /// ``queue``.
     public func simulateNotification(for characteristic: CharacteristicIdentifier, value: Data?, error: NSError? = nil) {
         queue.async { [self] in
@@ -292,9 +292,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     /// delivers `didModifyServices` on ``queue``.
     ///
     /// A real `CBPeripheral` removes invalidated services from its own `.services` array as
-    /// part of reporting `didModifyServices`, so ``isDiscovered(_:)`` reflects the
+    /// part of reporting `didModifyServices`, so `isDiscovered(_:)` reflects the
     /// invalidation automatically with no separate BLESwift-side cache to invalidate (see
-    /// ``PeripheralRemote``'s doc comment on the discovery cache). `FakePeripheral`'s
+    /// `PeripheralRemote`'s doc comment on the discovery cache). `FakePeripheral`'s
     /// discovered-sets are its own bookkeeping rather than CoreBluetooth's, so this mirrors
     /// that removal explicitly — proving that a later re-discovery is required after
     /// `didModifyServices` is exactly what this fake's tests exercise.

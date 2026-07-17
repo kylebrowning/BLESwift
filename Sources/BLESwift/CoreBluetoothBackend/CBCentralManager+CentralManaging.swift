@@ -54,7 +54,7 @@ extension CBCentralManager: CentralManaging {
             // it ever passes here captures nothing but `[weak self]` of the `Central`
             // actor itself (unconditionally `Sendable`) plus the event payload (also
             // `Sendable`) — genuinely safe to hand across isolation domains. The compiler
-            // cannot see that through the protocol's necessarily non-`@Sendable` BINDING
+            // cannot see that through the protocol's necessarily non-`@Sendable` fixed
             // signature (`eventHandler`'s type is fixed by `CentralManaging`), so this
             // narrow `nonisolated(unsafe)` capture asserts it explicitly instead of
             // widening the protocol's own closure type.

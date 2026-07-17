@@ -81,7 +81,7 @@ public final class FakeCentral: CentralManaging, Sendable {
     /// - Parameters:
     ///   - queue: The queue every CB-mirroring method and event delivery is confined to —
     ///     the same queue the `Central` actor's executor must be tied to.
-    ///   - state: The initial ``CentralState``. Defaults to `.unknown`, matching a real
+    ///   - state: The initial `CentralState`. Defaults to `.unknown`, matching a real
     ///     `CBCentralManager` before its first `centralManagerDidUpdateState(_:)`.
     public init(queue: DispatchSerialQueue, state: CentralState = .unknown) {
         self.queue = queue
@@ -107,7 +107,7 @@ public final class FakeCentral: CentralManaging, Sendable {
         return _radioState
     }
 
-    /// Receives every ``CentralEvent`` this fake delivers, on ``queue``. The
+    /// Receives every `CentralEvent` this fake delivers, on ``queue``. The
     /// `CentralManaging` protocol witness — configure via ``onQueue(_:)``.
     public var eventHandler: ((CentralEvent) -> Void)? {
         get {
@@ -188,7 +188,7 @@ public final class FakeCentral: CentralManaging, Sendable {
     }
 
     /// Simulates CoreBluetooth updating the radio state and, asynchronously, delivers
-    /// ``CentralEvent/didUpdateState(_:)`` on ``queue``. Off-queue safe to call directly —
+    /// `CentralEvent.didUpdateState(_:)` on ``queue``. Off-queue safe to call directly —
     /// hops onto `queue` itself. Flush with ``onQueue(_:)`` before asserting the event
     /// landed.
     public func simulateStateChange(_ newState: CentralState) {
@@ -200,7 +200,7 @@ public final class FakeCentral: CentralManaging, Sendable {
     }
 
     /// Simulates CoreBluetooth discovering a peripheral during a scan and, asynchronously,
-    /// delivers ``CentralEvent/didDiscover(peripheral:advertisement:rssi:)`` on ``queue``.
+    /// delivers `CentralEvent.didDiscover(peripheral:advertisement:rssi:)` on ``queue``.
     public func simulateDiscovery(peripheral: PeripheralIdentifier, advertisement: AdvertisementData, rssi: Int) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -209,7 +209,7 @@ public final class FakeCentral: CentralManaging, Sendable {
     }
 
     /// Simulates an unexpected disconnect and, asynchronously, delivers
-    /// ``CentralEvent/didDisconnect(_:error:)`` on ``queue``.
+    /// `CentralEvent.didDisconnect(_:error:)` on ``queue``.
     public func simulateDisconnect(_ peripheral: PeripheralIdentifier, error: NSError?) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -219,7 +219,7 @@ public final class FakeCentral: CentralManaging, Sendable {
 
     #if os(iOS)
     /// Simulates CoreBluetooth restoring preserved state after a background relaunch and,
-    /// asynchronously, delivers ``CentralEvent/willRestoreState(_:)`` on ``queue``.
+    /// asynchronously, delivers `CentralEvent.willRestoreState(_:)` on ``queue``.
     ///
     /// Call **before** the `.poweredOn` ``simulateStateChange(_:)`` — CoreBluetooth
     /// guarantees `willRestoreState` precedes `centralManagerDidUpdateState`, and
@@ -263,7 +263,7 @@ public final class FakeCentral: CentralManaging, Sendable {
     /// that a real `connect(_:options:)` call returns immediately while CoreBluetooth
     /// resolves the attempt later, on the delegate. A no-op (beyond the call count) if
     /// `peripheral` is not a `FakePeripheral` — mixing shim families is a programmer
-    /// error, never a trap (see ``CentralManaging/connect(_:options:)``).
+    /// error, never a trap (see `CentralManaging.connect(_:options:)`).
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?) {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectCallCount += 1

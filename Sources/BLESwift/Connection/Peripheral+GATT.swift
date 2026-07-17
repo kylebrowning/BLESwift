@@ -111,9 +111,9 @@ extension Peripheral {
     ///
     /// CoreBluetooth itself prunes invalidated services from its own service graph as part
     /// of reporting this event, which the CoreBluetooth shim's `isDiscovered(_:)` reflects
-    /// automatically — BLESwift keeps no separate discovery cache to invalidate (BINDING
-    /// addendum). A subsequent `read`/`write`/etc. against an invalidated service therefore
-    /// re-discovers it lazily, exactly as if it had never been discovered.
+    /// automatically — BLESwift keeps no separate discovery cache to invalidate. A subsequent
+    /// `read`/`write`/etc. against an invalidated service therefore re-discovers it lazily,
+    /// exactly as if it had never been discovered.
     ///
     /// No replay: a late subscriber only sees invalidations that happen after it starts
     /// consuming. Not actor-isolated to fetch (unlike ``Central/connectionEvents()``): the

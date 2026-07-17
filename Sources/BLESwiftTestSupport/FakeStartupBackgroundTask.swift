@@ -38,6 +38,8 @@ public final class FakeStartupBackgroundTask: StartupBackgroundTaskRunning {
         state.withLock { $0.endCount }
     }
 
+    /// Records the call and captures `onExpiration`, incrementing ``beginCount``. `StartupBackgroundTaskRunning`'s
+    /// protocol witness — fire the captured handler with ``fireExpiration()``.
     public func begin(onExpiration: @escaping @Sendable () -> Void) {
         state.withLock {
             $0.beginCount += 1
@@ -45,6 +47,8 @@ public final class FakeStartupBackgroundTask: StartupBackgroundTaskRunning {
         }
     }
 
+    /// Records the call, incrementing ``endCount``. `StartupBackgroundTaskRunning`'s protocol
+    /// witness.
     public func end() {
         state.withLock { $0.endCount += 1 }
     }

@@ -4,7 +4,7 @@
 //
 
 // `@preconcurrency`: CoreBluetooth's types (`CBCentralManager`, `CBPeripheral`, …) predate
-// Swift's Sendable audit and are not marked `Sendable` (Phase 0 — never mark them
+// Swift's Sendable audit and are not marked `Sendable` (never mark them
 // unchecked-`Sendable`). `stopAndExtractState()` below hands a `CBCentralManager` back to
 // a caller outside this actor's isolation domain — a legitimate one-time ownership
 // transfer (this actor gives up its own reference in the same call) — which only
@@ -27,8 +27,8 @@ import UIKit
 ///
 /// `Central`'s isolation is tied directly to the `DispatchSerialQueue` its underlying
 /// `CBCentralManager` delivers delegate callbacks on (see ``unownedExecutor``) — BLESwift's
-/// core architectural move (Phase 0 survey: no other actor-based CoreBluetooth wrapper
-/// does this). Every `CentralDelegateProxy` callback is therefore already running on
+/// core architectural move (no other actor-based CoreBluetooth wrapper does this
+/// in the survey of prior art this project drew on). Every `CentralDelegateProxy` callback is therefore already running on
 /// `Central`'s own executor, letting it forward into actor-isolated code via
 /// `assumeIsolated` with no thread hop and no risk of the ordering hazards a `Task { }`
 /// hop from a delegate callback would introduce.
@@ -53,8 +53,8 @@ public actor Central {
     ///
     /// `Optional` and `var`, not `let`, specifically so ``stopAndExtractState()`` can
     /// `nil` this out as part of handing its underlying `CBCentralManager` to the caller.
-    /// That's required, not just tidy: `CBCentralManager` is not `Sendable` (Phase 0 —
-    /// never mark it unchecked-`Sendable`), so returning one from this actor-isolated
+    /// That's required, not just tidy: `CBCentralManager` is not `Sendable` (never mark
+    /// it unchecked-`Sendable`), so returning one from this actor-isolated
     /// type across an isolation boundary is only sound if `Central` gives up its own
     /// reference in the same call — otherwise the compiler's region-isolation checker
     /// correctly rejects the aliasing (two live references to one non-Sendable class
@@ -75,7 +75,7 @@ public actor Central {
 
     /// Backs the nonisolated, synchronously-readable ``state`` snapshot. `Mutex` rather
     /// than actor-isolated storage specifically so ``state`` can be read without `await`
-    /// from any isolation domain (Phase 0: `Mutex` is unconditionally usable for tiny
+    /// from any isolation domain (`Mutex` is unconditionally usable for tiny
     /// non-actor state on our deployment floor). The actor-isolated ``handle(_:)`` is the
     /// only writer.
     private let stateBox = Mutex<CentralState>(.unknown)
@@ -107,9 +107,9 @@ public actor Central {
     private var phase: Phase = .idle
 
     /// The active auto-reconnect loop, if any — the **one** sanctioned unstructured `Task`
-    /// site for connection lifecycle in `Sources/` (ledgered; see the Phase 5 plan
-    /// addendum — scanning's loss/timeout timers, above, are Phase 4's separately-ledgered
-    /// site). It is genuinely unstructured background work (a retry loop that outlives any
+    /// site for connection lifecycle in `Sources/` (scanning's loss/timeout timers, above,
+    /// are a separately-tracked unstructured `Task` site of their own). It is genuinely
+    /// unstructured background work (a retry loop that outlives any
     /// single `connect`/`disconnect` call), not a delegate-callback hop. Cancelled on
     /// explicit disconnect, a new `connect`, and `deinit`.
     private var reconnectTask: Task<Void, Never>?
@@ -480,7 +480,7 @@ public actor Central {
     /// Cancels any in-flight auto-reconnect loop and restoration re-connect. Actors
     /// support ordinary (non-`isolated`) `deinit`s that touch their own isolated storage
     /// directly — no concurrent access is possible once deinitialization has started — so
-    /// this needs no `Task` hop and no `isolated deinit` (Phase 0: unstable, forbidden).
+    /// this needs no `Task` hop and no `isolated deinit` (unstable, forbidden).
     deinit {
         reconnectTask?.cancel()
         restorationTask?.cancel()
@@ -622,7 +622,8 @@ public actor Central {
     ///   - timeout: How long to wait before giving up with ``BLESwiftError/connectionTimedOut``.
     ///     Defaults to 15 seconds; `nil` waits indefinitely. On timeout, `Central` cancels
     ///     the pending CoreBluetooth connection attempt and awaits its confirmation before
-    ///     throwing — see the Phase 5 plan's two-phase cancel discussion.
+    ///     throwing — the underlying attempt is genuinely torn down, not just abandoned
+    ///     client-side.
     ///   - reconnect: What to do if this connection is later lost unexpectedly (or this
     ///     very attempt fails, times out, or is cancelled some way other than an explicit
     ///     ``disconnect()``/``cancelAllOperations(error:)`` call). Defaults to ``ReconnectPolicy/never``.
@@ -913,7 +914,7 @@ public actor Central {
 
         // Fail any in-flight GATT operations on the outgoing session's registries *before*
         // `phase` transitions away from `.connected` below — those registries live inside
-        // `Session` (BINDING addendum: GATT state is per-connection, not actor-level), so
+        // `Session` (GATT state is per-connection, not actor-level), so
         // once `phase` becomes `.disconnecting` the old `Session` value (and everything it
         // holds) is gone; failing here first is what keeps their continuations from being
         // silently dropped. A no-op if `phase` isn't currently `.connected` (e.g. this call
@@ -1091,8 +1092,8 @@ public actor Central {
     /// `Task` (plus the RSSI tail) is cancelled. Cleanup step 1 of
     /// ``handleTermination(identifier:error:)`` — called there, by ``beginDisconnecting(identifier:peripheral:disconnectContinuation:connectContinuation:connectFailureReason:)``
     /// (both *before* `phase` stops being `.connected`, since these registries live inside
-    /// `Session` itself — BINDING addendum: GATT state is per-connection, not actor-level),
-    /// and directly by ``cancelAllOperations(error:)`` (which does **not** tear down the
+    /// `Session` itself — GATT state is per-connection, not actor-level), and directly
+    /// by ``cancelAllOperations(error:)`` (which does **not** tear down the
     /// connection itself — only pending GATT operations — so this leaves `phase` at
     /// `.connected`, just with freshly emptied registries).
     ///
@@ -1160,8 +1161,8 @@ public actor Central {
     /// and ``stopAndExtractState()``.
     ///
     /// Must run while `phase` is still `.connected` — the registry lives inside `Session`
-    /// (BINDING addendum: notification state is per-connection, like the GATT registries),
-    /// so once `phase` moves on the subscriptions (and their subscribers' streams) would be
+    /// (notification state is per-connection, like the GATT registries), so once `phase`
+    /// moves on the subscriptions (and their subscribers' streams) would be
     /// silently dropped instead of finished. A no-op otherwise, which also makes the
     /// defensive calls on the `.connecting`/`.disconnecting` cleanup paths (no session ever
     /// existed there, or it was already cleaned) harmless.
@@ -1403,8 +1404,8 @@ public actor Central {
             resumePendingRSSIRead(rssi: rssi, for: peripheral, error: error)
 
         case .didModifyServices(let invalidatedServices):
-            // No actor-level discovery cache exists to invalidate (BINDING addendum): the
-            // shim's own `isDiscovered(_:)` — backed by CoreBluetooth's own service graph,
+            // No actor-level discovery cache exists to invalidate: the shim's own
+            // `isDiscovered(_:)` — backed by CoreBluetooth's own service graph,
             // which CoreBluetooth itself prunes on `didModifyServices` — already reflects
             // the invalidation structurally. This is purely the observer fan-out.
             log("Services modified/invalidated: \(invalidatedServices)", level: .info, category: "gatt")
@@ -1673,7 +1674,7 @@ public actor Central {
     /// `Peripheral.read(from:timeout:)`.
     ///
     /// Wraps the whole discovery-then-read sequence in `timeout` via ``withTimeout(_:throwing:operation:)``
-    /// (error ``BLESwiftError/timedOut``, per the BINDING addendum — distinct from
+    /// (error ``BLESwiftError/timedOut``, distinct from
     /// ``BLESwiftError/connectionTimedOut``, which is `connect`'s own timeout case) and serializes
     /// it against any other pending operation on the same characteristic via
     /// ``runOnFIFO(identifier:characteristic:operation:)``.
@@ -1898,8 +1899,8 @@ public actor Central {
 
     /// Ensures `characteristic` (and its owning service) has been discovered on
     /// `peripheral`, short-circuiting via the shim's own `isDiscovered(_:)` — BLESwift keeps no
-    /// separate discovery cache of its own (BINDING addendum: CoreBluetooth's own
-    /// service/characteristic graph, mirrored by `isDiscovered(_:)`, IS the cache). Discovers
+    /// separate discovery cache of its own (CoreBluetooth's own service/characteristic
+    /// graph, mirrored by `isDiscovered(_:)`, IS the cache). Discovers
     /// the owning service, then the characteristic, before every read/write/listen.
     ///
     /// - Throws: ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)`` if
@@ -1986,8 +1987,8 @@ public actor Central {
 
     /// Registers one `Peripheral.notifications(for:policy:)` subscriber and spawns its
     /// pump task — the bridge between the shared raw-`Data` multicast and that one
-    /// subscriber's typed stream (BINDING addendum: raw-`Data` multicast + per-caller
-    /// decode layers). Called synchronously via `queue.async` + `assumeIsolated` by
+    /// subscriber's typed stream (raw-`Data` multicast + per-caller decode layers).
+    /// Called synchronously via `queue.async` + `assumeIsolated` by
     /// `Peripheral.notifications(for:policy:)`, which enqueues this *before* returning its
     /// stream — so, by serial-queue FIFO ordering, this always runs before the stream's
     /// `onTermination` can enqueue ``handleNotificationStreamTermination(peripheral:characteristic:token:)``.
@@ -2079,8 +2080,7 @@ public actor Central {
     /// Reacts to a `Peripheral.notifications(for:policy:)` subscriber's typed stream
     /// terminating (consumer `break`/task-cancel, decode-failure finish, or any other
     /// finish): cancels and forgets its pump task, then releases its refcount — the
-    /// BINDING addendum's release path (`onTermination` → `queue.async` + `assumeIsolated`
-    /// → here).
+    /// release path (`onTermination` → `queue.async` + `assumeIsolated` → here).
     func handleNotificationStreamTermination(
         peripheral identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -2103,7 +2103,7 @@ public actor Central {
     /// window — then the owning service/characteristic is lazily discovered,
     /// `setNotifyValue(true)` is issued, and its `didUpdateNotificationState` confirmation
     /// awaited (single-slot continuation in `Session.pendingNotifyStateChanges`, reused
-    /// from the Phase 6 registry, cancellable like every GATT continuation). If any of
+    /// from the GATT registry, cancellable like every GATT continuation). If any of
     /// that fails, the whole subscription fails: every current subscriber's stream (and
     /// enablement waiter) finishes with the error — deterministic, and the next subscribe
     /// simply starts a fresh subscription.
@@ -2335,7 +2335,7 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    // MARK: - Composite helpers (Phase 7)
+    // MARK: - Composite helpers
 
     /// Backs `Peripheral.writeAndAwaitNotification(write:to:awaitOn:timeout:)`: subscribes
     /// to `notifyCharacteristic` (raw) FIRST, then writes, then returns the first
@@ -2525,8 +2525,8 @@ public actor Central {
     /// Serializes GATT operations on the same characteristic: awaits `characteristic`'s
     /// previous tail `Task` (if any) before running `operation`, then replaces the tail with
     /// a fresh one representing *this* call, so whatever queues up behind it waits in turn
-    /// — the BINDING addendum's per-characteristic FIFO tail-chain. Different
-    /// characteristics have different keys, so their operations interleave freely instead
+    /// — the per-characteristic FIFO tail-chain. Different characteristics have different
+    /// keys, so their operations interleave freely instead
     /// of blocking on each other.
     ///
     /// `operation` runs **inline**, in this same call's own task — deliberately not inside a
@@ -2607,8 +2607,8 @@ public actor Central {
     ///
     /// Fails the active scan, if any (``failActiveScan(_:)``). Connection-lifecycle and
     /// GATT operations are *not* separately failed here: both live inside `phase`
-    /// (`Connecting`'s continuation, `Session`'s GATT registries — BINDING addendum), and
-    /// `handle(_:)`'s caller already follows this call with
+    /// (`Connecting`'s continuation, `Session`'s GATT registries), and `handle(_:)`'s
+    /// caller already follows this call with
     /// ``handleBluetoothUnavailable()``, which routes through
     /// ``handleTermination(identifier:error:)`` → ``failPendingGATTContinuations(error:)``
     /// for exactly that state. A scan has no such connection-scoped home to route through
@@ -2786,8 +2786,8 @@ public actor Central {
     /// and starts a fresh `lossTimeout`-long one. Only called for `allowDuplicates` scans.
     ///
     /// This (along with the scan-timeout `Task` in ``scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``)
-    /// is Phase 4's sanctioned `Task { }` usage: actor-method-spawned scheduling work, not a
-    /// hop out of a delegate callback. It is stored (`ActiveScan.lossTimers`) so it can
+    /// is one of the package's sanctioned `Task { }` usages: actor-method-spawned scheduling
+    /// work, not a hop out of a delegate callback. It is stored (`ActiveScan.lossTimers`) so it can
     /// always be cancelled, and its closure never touches actor or `ActiveScan` state
     /// synchronously — it only re-enters actor isolation via `await self?.handleLoss(of:)`.
     private func scheduleLossTimer(for peripheral: PeripheralIdentifier, in scan: ActiveScan) {
@@ -3187,9 +3187,9 @@ private struct Connecting {
 
 /// State for an established connection.
 ///
-/// Also holds every piece of GATT (Phase 6) bookkeeping — the BINDING addendum's
-/// explicit design: GATT pending-operation state lives *inside* the connection `Session`,
-/// not at actor level, so disconnect cleanup (``Central/failPendingGATTContinuations(error:)``)
+/// Also holds every piece of GATT bookkeeping — a deliberate design: GATT
+/// pending-operation state lives *inside* the connection `Session`, not at actor level,
+/// so disconnect cleanup (``Central/failPendingGATTContinuations(error:)``)
 /// drops it structurally along with the rest of the connection, and there is exactly one
 /// copy of it, matching single-peripheral connection discipline.
 private struct Session {
@@ -3199,7 +3199,7 @@ private struct Session {
     let timeout: Duration?
     let warningOptions: WarningOptions
 
-    // MARK: - GATT (Phase 6)
+    // MARK: - GATT
 
     /// Per-characteristic FIFO tail-chain: each new read/write on a characteristic awaits
     /// the previous tail `Task` for that characteristic (if any) before running, then
@@ -3258,12 +3258,12 @@ private struct Session {
     /// CoreBluetooth's own API, not per-characteristic.
     var pendingWriteWithoutResponseReady: [UInt64: CheckedContinuation<Void, Error>] = [:]
 
-    // MARK: - Notifications (Phase 7)
+    // MARK: - Notifications
 
     /// The active notification subscription for each characteristic BLESwift is currently
     /// listening to, keyed by characteristic. Lives inside `Session` like every other
-    /// piece of GATT bookkeeping (BINDING addendum), so disconnect cleanup drops it
-    /// structurally — `Central.finishNotificationStreams(error:)` finishes every
+    /// piece of GATT bookkeeping, so disconnect cleanup drops it structurally —
+    /// `Central.finishNotificationStreams(error:)` finishes every
     /// subscription's broadcaster first, while the session still exists.
     var notificationSubscriptions: [CharacteristicIdentifier: NotificationSubscription] = [:]
 
@@ -3318,8 +3318,8 @@ private struct Session {
 /// still connected and powered on).
 private struct NotificationSubscription {
     /// The raw-`Data` multicast: every `didUpdateValue` for this characteristic is
-    /// `yield`ed here (BINDING addendum — decode happens per caller, in each subscriber's
-    /// own decode layer, so one subscriber's decode failure can't affect the others).
+    /// `yield`ed here (decode happens per caller, in each subscriber's own decode layer,
+    /// so one subscriber's decode failure can't affect the others).
     let broadcaster = ThrowingBroadcaster<Data>()
 
     /// One token per live subscriber (typed `notifications(for:policy:)` streams and
