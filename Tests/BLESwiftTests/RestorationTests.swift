@@ -37,7 +37,7 @@ struct RestorationTests {
         // Deliberately let the entire restoration complete BEFORE the first subscriber
         // arrives — the buffered-replay guarantee is the point of this test.
         await waitFor {
-            if case .connected = await central.connectionState { return true }
+            if case .connected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) { return true }
             return false
         }
 
@@ -76,10 +76,10 @@ struct RestorationTests {
         fakeCentral.simulateStateChange(.poweredOn)
 
         await waitFor {
-            if case .connected = await central.connectionState { return true }
+            if case .connected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) { return true }
             return false
         }
-        guard case .connected(let peripheral) = await central.connectionState else {
+        guard case .connected(let peripheral) = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .connected after restored-connected adoption")
             return
         }
@@ -115,7 +115,7 @@ struct RestorationTests {
         // Exactly one manual re-connect was issued against CoreBluetooth.
         #expect(fakeCentral.onQueue { fakeCentral.connectCallCount } == 1)
 
-        guard case .connected = await central.connectionState else {
+        guard case .connected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .connected after the manual re-connect")
             return
         }
@@ -164,7 +164,7 @@ struct RestorationTests {
         #expect(identifier == fakePeripheral.peripheralIdentifier)
         #expect(error as? BLESwiftError == .notConnected)
 
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected — nothing was restored")
             return
         }
@@ -180,7 +180,7 @@ struct RestorationTests {
         fakeCentral.simulateRestoration(restoredState(for: fakePeripheral, state: .connected))
         fakeCentral.simulateStateChange(.poweredOn)
         await waitFor {
-            if case .connected = await central.connectionState { return true }
+            if case .connected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) { return true }
             return false
         }
 
@@ -292,7 +292,7 @@ struct RestorationTests {
         // A later .poweredOn must not adopt anything — the staged restoration is gone.
         fakeCentral.simulateStateChange(.poweredOn)
         fakeCentral.onQueue {}
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected — the expired restoration must not be adopted")
             return
         }

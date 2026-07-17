@@ -7,6 +7,7 @@ import BLESwift
 import BLESwiftCore
 import BLESwiftTestSupport
 import Dispatch
+import Foundation
 
 /// Creates a fresh ``FakeCentral``/``FakePeripheral`` pair sharing one
 /// `DispatchSerialQueue`, ready for a test to script.
@@ -25,7 +26,7 @@ func makeFakeCentral(label: String = "BLESwiftTests.FakeCentral") -> (FakeCentra
 /// Creates a real ``Central`` actor wired to a fresh ``FakeCentral``/``FakePeripheral``
 /// pair, for tests that exercise `Central` itself rather than the fakes directly.
 ///
-/// Uses `Central`'s public `init(backend:queue:configuration:startupBackgroundTask:connectedPeripheral:)`
+/// Uses `Central`'s public `init(backend:queue:configuration:startupBackgroundTask:connectedPeripherals:)`
 /// — no `@testable import` and no direct `handle(_:)`/`handle(_:from:)` wiring needed here;
 /// that initializer does the wiring internally.
 func makeTestCentral(
@@ -39,7 +40,7 @@ func makeTestCentral(
         queue: queue,
         configuration: configuration,
         startupBackgroundTask: startupBackgroundTask,
-        connectedPeripheral: adoptPeripheral ? fakePeripheral : nil
+        connectedPeripherals: adoptPeripheral ? [fakePeripheral] : []
     )
     return (central, fakeCentral, fakePeripheral)
 }
@@ -63,6 +64,35 @@ func makeConnectedTestCentral() async throws -> (Central, FakeCentral, FakePerip
     }
     let peripheral = try await central.connect(fakePeripheral.peripheralIdentifier)
     return (central, fakeCentral, fakePeripheral, peripheral)
+}
+
+/// Creates an additional `FakePeripheral` on the same queue as `fakeCentral` and registers
+/// it as retrievable — the multi-peripheral test workhorse: feed the identifier it reports
+/// to `central.connect(_:)`, which wires the peripheral's `eventHandler` (and so its GATT/
+/// notification event delivery) itself, on initiation, exactly as it does for the primary
+/// fake peripheral `makeTestCentral()` returns — no separate wiring step is needed here.
+///
+/// - Parameters:
+///   - central: The `Central` this peripheral will eventually be connected through. Not
+///     used to wire anything directly (see above); accepted so call sites read as
+///     unambiguously "one more peripheral for this rig", matching `makeTestCentral()`'s own
+///     shape.
+///   - fakeCentral: The fake backing `central`, which the new peripheral is registered
+///     retrievable on.
+///   - identifier: The new peripheral's identifier. Defaults to a fresh `UUID`.
+///   - name: The new peripheral's advertised/cached name.
+/// - Returns: The newly created, already-registered `FakePeripheral`.
+func addFakePeripheral(
+    to central: Central,
+    fakeCentral: FakeCentral,
+    identifier: UUID = UUID(),
+    name: String? = "Fake Peripheral 2"
+) -> FakePeripheral {
+    let peripheral = FakePeripheral(identifier: identifier, name: name, queue: fakeCentral.queue)
+    fakeCentral.onQueue {
+        fakeCentral.retrievablePeripherals[identifier] = peripheral
+    }
+    return peripheral
 }
 
 /// Polls `condition` until it's `true`, or a generous timeout elapses (the surrounding

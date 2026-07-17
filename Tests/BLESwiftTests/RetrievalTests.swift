@@ -125,7 +125,7 @@ struct RetrievalTests {
         let peripheral = try await central.connect(identifier)
 
         #expect(peripheral.id == identifier)
-        let connectionState = await central.connectionState
+        let connectionState = await central.connectionState(of: identifier)
         guard case .connected = connectionState else {
             Issue.record("expected .connected, got \(connectionState)")
             return

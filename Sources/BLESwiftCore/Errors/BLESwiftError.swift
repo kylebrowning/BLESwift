@@ -12,17 +12,21 @@ import Foundation
 /// multiple-listen trap/replace policy, queued disconnection, and the single-scan-specific
 /// error superseded by ``alreadyScanning``) were dropped; new cases were added where
 /// BLESwift's async/await and `AsyncSequence`-based API introduces situations a
-/// callback-based API wouldn't have.
+/// callback-based API wouldn't have. `multipleConnectNotSupported` was replaced by
+/// ``duplicateConnect(_:)`` when `Central` gained multi-peripheral connection support —
+/// connecting to a *different* peripheral no longer conflicts at all; only a second
+/// `connect` to the same already-tracked peripheral does.
 public enum BLESwiftError: Error, Sendable, Equatable {
 
     // MARK: - Core Cases
 
     /// Bluetooth is either turned off or unavailable.
     case bluetoothUnavailable
-    /// BLESwift does not support another connection request if already connected or still
-    /// connecting.
-    case multipleConnectNotSupported
-    /// BLESwift does not support another disconnection request if still disconnecting.
+    /// `connect` targeted a peripheral that already has a tracked entry — connecting,
+    /// connected, or disconnecting.
+    case duplicateConnect(PeripheralIdentifier)
+    /// BLESwift does not support another disconnection request for the same peripheral if
+    /// it is already disconnecting.
     case multipleDisconnectNotSupported
     /// A connection request has timed out.
     case connectionTimedOut
@@ -103,8 +107,8 @@ extension BLESwiftError: LocalizedError {
         switch self {
         case .bluetoothUnavailable:
             return "Bluetooth unavailable"
-        case .multipleConnectNotSupported:
-            return "Multiple connect is not supported"
+        case let .duplicateConnect(peripheral):
+            return "Already connecting, connected, or disconnecting: \(peripheral)"
         case .multipleDisconnectNotSupported:
             return "Multiple disconnect is not supported"
         case .connectionTimedOut:

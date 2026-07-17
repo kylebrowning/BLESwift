@@ -131,13 +131,13 @@ struct CentralTests {
         #expect(manager.state == .unknown)
         #expect(central.state == .unknown)
 
-        let (extractedManager, extractedPeripheral) = try await central.stopAndExtractState()
+        let (extractedManager, extractedPeripherals) = try await central.stopAndExtractState()
 
         // Same instance, not merely an equal one — proves the adopting init actually
         // stored (and stopAndExtractState() handed back) the manager passed in, rather
         // than, say, silently creating a fresh one.
         #expect(extractedManager === manager)
-        #expect(extractedPeripheral == nil)
+        #expect(extractedPeripherals.isEmpty)
 
         // A second call throws — this Central gave up its reference above.
         do {
