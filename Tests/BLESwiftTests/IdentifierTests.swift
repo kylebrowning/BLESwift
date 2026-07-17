@@ -7,7 +7,7 @@ import CoreBluetooth
 import Foundation
 import Testing
 import BLESwiftCore
-@testable import BLESwift
+import BLESwift
 
 @Suite("Identifiers")
 struct IdentifierTests {

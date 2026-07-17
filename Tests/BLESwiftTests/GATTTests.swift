@@ -6,7 +6,8 @@
 import Foundation
 import Testing
 import BLESwiftCore
-@testable import BLESwift
+import BLESwiftTestSupport
+import BLESwift
 
 /// Exercises `Peripheral`'s Phase 6 GATT surface: `read`, `write`, `readRSSI`,
 /// `maximumWriteValueLength`, and `serviceChanges()` — all driven through

@@ -6,7 +6,8 @@
 @preconcurrency import CoreBluetooth
 import Testing
 import BLESwiftCore
-@testable import BLESwift
+import BLESwiftTestSupport
+import BLESwift
 
 /// Exercises the `Central` actor's Phase 3 surface: state snapshot/stream wiring through
 /// `makeTestCentral()`, using a `FakeCentral` in place of a real `CBCentralManager`.
@@ -122,8 +123,13 @@ struct CentralTests {
 
         // The adopting init seeds its synchronous `state` snapshot from the adopted
         // manager's current state at adoption time, rather than leaving it `.unknown`
-        // until a delegate callback that may never re-fire.
-        #expect(central.state == CentralState(manager.state))
+        // until a delegate callback that may never re-fire. A freshly created
+        // `CBCentralManager` always starts in `.unknown` (before its first
+        // `centralManagerDidUpdateState(_:)`) — asserted directly rather than via the
+        // `CentralState(_: CBManagerState)` bridging init, which is `internal` to
+        // `BLESwift` (this file no longer uses `@testable import`).
+        #expect(manager.state == .unknown)
+        #expect(central.state == .unknown)
 
         let (extractedManager, extractedPeripheral) = try await central.stopAndExtractState()
 

@@ -7,7 +7,8 @@ import Dispatch
 import Foundation
 import Testing
 import BLESwiftCore
-@testable import BLESwift
+import BLESwiftTestSupport
+import BLESwift
 
 /// Proves the CoreBluetooth shim's test doubles (`FakeCentral`/`FakePeripheral`) exist,
 /// conform to the shim protocols, and are genuinely queue-confined: every CB-mirroring
@@ -25,7 +26,7 @@ struct FakesSmokeTests {
 
         var observedStates: [CentralState] = []
         central.onQueue {
-            central.eventSink = { event in
+            central.eventHandler = { event in
                 dispatchPrecondition(condition: .onQueue(queue))
                 if case .didUpdateState(let state) = event {
                     observedStates.append(state)
@@ -48,7 +49,7 @@ struct FakesSmokeTests {
 
         var observedStates: [CentralState] = []
         central.onQueue {
-            central.eventSink = { event in
+            central.eventHandler = { event in
                 if case .didUpdateState(let state) = event {
                     observedStates.append(state)
                 }
@@ -87,7 +88,7 @@ struct FakesSmokeTests {
 
         var observedStates: [CentralState] = []
         central.onQueue {
-            central.eventSink = { event in
+            central.eventHandler = { event in
                 if case .didUpdateState(let state) = event {
                     observedStates.append(state)
                 }
@@ -108,7 +109,7 @@ struct FakesSmokeTests {
         central.onQueue { central.connectBehavior = .succeed }
 
         var events: [CentralEvent] = []
-        central.onQueue { central.eventSink = { events.append($0) } }
+        central.onQueue { central.eventHandler = { events.append($0) } }
 
         central.onQueue { central.connect(peripheral, options: nil) }
         central.onQueue {} // flush the async didConnect enqueued by connect(_:options:)
@@ -128,7 +129,7 @@ struct FakesSmokeTests {
         central.onQueue { central.connectBehavior = .fail(expectedError) }
 
         var events: [CentralEvent] = []
-        central.onQueue { central.eventSink = { events.append($0) } }
+        central.onQueue { central.eventHandler = { events.append($0) } }
 
         central.onQueue { central.connect(peripheral, options: nil) }
         central.onQueue {} // flush the async didFailToConnect enqueued by connect(_:options:)
@@ -147,7 +148,7 @@ struct FakesSmokeTests {
         central.onQueue { central.connectBehavior = .hang }
 
         var events: [CentralEvent] = []
-        central.onQueue { central.eventSink = { events.append($0) } }
+        central.onQueue { central.eventHandler = { events.append($0) } }
 
         central.onQueue { central.connect(peripheral, options: nil) }
         central.onQueue {} // nothing was enqueued, so this returns immediately
@@ -163,7 +164,7 @@ struct FakesSmokeTests {
         let value = Data([0x01, 0x02, 0x03])
 
         var events: [PeripheralEvent] = []
-        peripheral.onQueue { peripheral.eventSink = { events.append($0) } }
+        peripheral.onQueue { peripheral.eventHandler = { events.append($0) } }
 
         peripheral.simulateNotification(for: characteristic, value: value)
         peripheral.onQueue {} // flush

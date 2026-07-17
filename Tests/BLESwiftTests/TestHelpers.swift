@@ -1,11 +1,12 @@
 //
-//  TestSupport.swift
+//  TestHelpers.swift
 //  BLESwiftTests
 //
 
+import BLESwift
 import BLESwiftCore
+import BLESwiftTestSupport
 import Dispatch
-@testable import BLESwift
 
 /// Creates a fresh ``FakeCentral``/``FakePeripheral`` pair sharing one
 /// `DispatchSerialQueue`, ready for a test to script.
@@ -24,22 +25,32 @@ func makeFakeCentral(label: String = "BLESwiftTests.FakeCentral") -> (FakeCentra
 /// Creates a real ``Central`` actor wired to a fresh ``FakeCentral``/``FakePeripheral``
 /// pair, for tests that exercise `Central` itself rather than the fakes directly.
 ///
-/// Uses `Central`'s internal `init(testing:queue:configuration:)`, which — unlike the
-/// production `init(configuration:)` — does not create a `CentralDelegateProxy` (there's
-/// no real `CBCentralManagerDelegate` to install on a `FakeCentral`). Instead, this wires
-/// the fakes' `eventSink`s directly to `Central.handle(_:)`/`handle(_:from:)`, via
-/// `assumeIsolated` — sound for the same reason the real proxy's use of `assumeIsolated`
-/// is sound: fake event delivery is confined to `queue`, the exact `DispatchSerialQueue`
-/// backing `Central`'s custom executor, so the sink closures already run on the actor's
-/// own executor by construction.
-///
-/// - Parameter configuration: Passed through to `Central`. Defaults to `Configuration()`.
-/// - Returns: The wired `Central`, and the `FakeCentral`/`FakePeripheral` backing it —
-///   script these to drive `Central`'s behavior.
+/// Uses `Central`'s public `init(backend:queue:configuration:startupBackgroundTask:connectedPeripheral:)`
+/// — no `@testable import` and no direct `handle(_:)`/`handle(_:from:)` wiring needed here;
+/// that initializer does the wiring internally.
+func makeTestCentral(
+    configuration: Configuration = Configuration(),
+    startupBackgroundTask: (any StartupBackgroundTaskRunning)? = nil,
+    adoptPeripheral: Bool = false
+) -> (Central, FakeCentral, FakePeripheral) {
+    let (fakeCentral, fakePeripheral, queue) = makeFakeCentral()
+    let central = Central(
+        backend: fakeCentral,
+        queue: queue,
+        configuration: configuration,
+        startupBackgroundTask: startupBackgroundTask,
+        connectedPeripheral: adoptPeripheral ? fakePeripheral : nil
+    )
+    return (central, fakeCentral, fakePeripheral)
+}
+
 /// ``makeTestCentral()`` plus a completed connection: registers the fake peripheral as
 /// retrievable, scripts a successful connect, and connects — returning the connected
 /// ``Peripheral`` handle alongside the rig. The standard starting point for GATT-level
 /// tests (reads/writes/notifications/composites).
+///
+/// - Returns: The wired `Central`, the `FakeCentral`/`FakePeripheral` backing it, and the
+///   connected `Peripheral` handle.
 func makeConnectedTestCentral() async throws -> (Central, FakeCentral, FakePeripheral, Peripheral) {
     let (central, fakeCentral, fakePeripheral) = makeTestCentral()
     // Power the radio on first: several lifecycle behaviors under test (notably the
@@ -62,33 +73,4 @@ func waitFor(timeout: Duration = .seconds(2), _ condition: () async -> Bool) asy
         if ContinuousClock.now >= deadline { return }
         try? await Task.sleep(for: .milliseconds(5))
     }
-}
-
-func makeTestCentral(
-    configuration: Configuration = Configuration(),
-    startupBackgroundTask: (any StartupBackgroundTaskRunning)? = nil,
-    adoptPeripheral: Bool = false
-) -> (Central, FakeCentral, FakePeripheral) {
-    let (fakeCentral, fakePeripheral, queue) = makeFakeCentral()
-    let central = Central(
-        testing: fakeCentral,
-        queue: queue,
-        configuration: configuration,
-        startupBackgroundTask: startupBackgroundTask,
-        connectedPeripheral: adoptPeripheral ? fakePeripheral : nil
-    )
-
-    fakeCentral.onQueue {
-        fakeCentral.eventSink = { event in
-            central.assumeIsolated { $0.handle(event) }
-        }
-    }
-
-    fakePeripheral.onQueue {
-        fakePeripheral.eventSink = { event in
-            central.assumeIsolated { $0.handle(event, from: fakePeripheral.peripheralIdentifier) }
-        }
-    }
-
-    return (central, fakeCentral, fakePeripheral)
 }

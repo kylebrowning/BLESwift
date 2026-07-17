@@ -14,6 +14,7 @@ let package = Package(
     products: [
         .library(name: "BLESwift", targets: ["BLESwift"]),
         .library(name: "BLESwiftCore", targets: ["BLESwiftCore"]),
+        .library(name: "BLESwiftTestSupport", targets: ["BLESwiftTestSupport"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.5.0"),
@@ -30,6 +31,14 @@ let package = Package(
             resources: [.copy("BLESwift.docc")],
             swiftSettings: sharedSwiftSettings
         ),
-        .testTarget(name: "BLESwiftTests", dependencies: ["BLESwift", "BLESwiftCore"])
+        .target(
+            name: "BLESwiftTestSupport",
+            dependencies: ["BLESwiftCore"],
+            swiftSettings: sharedSwiftSettings
+        ),
+        .testTarget(
+            name: "BLESwiftTests",
+            dependencies: ["BLESwift", "BLESwiftCore", "BLESwiftTestSupport"]
+        )
     ]
 )

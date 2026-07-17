@@ -6,7 +6,7 @@
 import Foundation
 import Testing
 import BLESwiftCore
-@testable import BLESwift
+import BLESwift
 
 @Suite("Data.extract")
 struct DataExtractionTests {

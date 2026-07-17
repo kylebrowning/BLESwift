@@ -6,13 +6,56 @@
 import BLESwiftCore
 import CoreBluetooth
 import Foundation
+import ObjectiveC
+
+/// The stable identity token for the associated `PeripheralDelegateProxy` retained by
+/// `CBPeripheral.eventHandler` below. Its address, not its value, is what matters to
+/// `objc_(get|set)AssociatedObject` — the value is never read or written.
+private nonisolated(unsafe) var peripheralProxyKey: UInt8 = 0
 
 extension CBPeripheral {
-    /// Assigns `target` as this peripheral's `CBPeripheralDelegate` — the wiring that
-    /// routes all of its GATT callbacks (to `CentralDelegateProxy`, in production). A
-    /// `nil` (or non-`CBPeripheralDelegate`) target clears the delegate.
-    package func attachEventTarget(_ target: AnyObject?) {
-        delegate = target as? CBPeripheralDelegate
+    /// Implements `eventHandler` with an associated-object-retained `PeripheralDelegateProxy`
+    /// assigned to `.delegate` (which is `weak` — the association is what keeps the proxy
+    /// alive). Setting a non-`nil` handler creates the proxy on first use and reuses it on
+    /// subsequent sets (updating its `handler`); setting `nil` clears both the proxy's
+    /// handler and `.delegate`, and drops the association. `Central` sets this uniformly
+    /// on every session-creating path (see `PeripheralRemote`'s doc comment) — unlike
+    /// `CentralManaging`'s `eventHandler`, there is no construction-order asymmetry here:
+    /// every `CBPeripheral` this property is set on already exists (handed back by
+    /// CoreBluetooth), so this is always the sole wiring mechanism.
+    public var eventHandler: ((PeripheralEvent) -> Void)? {
+        get {
+            (objc_getAssociatedObject(self, &peripheralProxyKey) as? PeripheralDelegateProxy)?.handler
+        }
+        set {
+            // Bridges the protocol's plain (non-`@Sendable`) closure type into
+            // `PeripheralDelegateProxy.handler`'s `@Sendable` storage — see
+            // `CBCentralManager.eventHandler`'s setter for the full justification of this
+            // `nonisolated(unsafe)` capture (identical reasoning: `Central` is the only
+            // caller, and every closure it passes here only captures `[weak self]` of the
+            // `Central` actor plus a captured `PeripheralIdentifier` value, both
+            // genuinely `Sendable`).
+            let sendableValue: (@Sendable (PeripheralEvent) -> Void)?
+            if let newValue {
+                nonisolated(unsafe) let captured = newValue
+                sendableValue = { captured($0) }
+            } else {
+                sendableValue = nil
+            }
+
+            if let existing = objc_getAssociatedObject(self, &peripheralProxyKey) as? PeripheralDelegateProxy {
+                existing.handler = sendableValue
+                if newValue == nil {
+                    delegate = nil
+                    objc_setAssociatedObject(self, &peripheralProxyKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                }
+            } else if let sendableValue {
+                let proxy = PeripheralDelegateProxy()
+                proxy.handler = sendableValue
+                objc_setAssociatedObject(self, &peripheralProxyKey, proxy, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                delegate = proxy
+            }
+        }
     }
 }
 
@@ -53,60 +96,60 @@ extension CBPeripheral {
 extension CBPeripheral: PeripheralRemote {
 
     /// Maps the native `state` (`CBPeripheralState`) to ``PeripheralConnectionState``.
-    package var connectionState: PeripheralConnectionState {
+    public var connectionState: PeripheralConnectionState {
         PeripheralConnectionState(state)
     }
 
     /// Discovers the given services (or all services, if `nil`).
-    package func discoverServices(_ services: [ServiceIdentifier]?) {
+    public func discoverServices(_ services: [ServiceIdentifier]?) {
         discoverServices(services?.map(\.cbuuid))
     }
 
     /// Discovers the given characteristics (or all characteristics, if `nil`) of
     /// `service`. A no-op if `service` has not yet been discovered.
-    package func discoverCharacteristics(_ characteristics: [CharacteristicIdentifier]?, for service: ServiceIdentifier) {
+    public func discoverCharacteristics(_ characteristics: [CharacteristicIdentifier]?, for service: ServiceIdentifier) {
         guard let cbService = bleSwiftService(service) else { return }
         discoverCharacteristics(characteristics?.map(\.cbuuid), for: cbService)
     }
 
     /// Requests the current value of `characteristic`. A no-op if it has not yet been
     /// discovered.
-    package func readValue(for characteristic: CharacteristicIdentifier) {
+    public func readValue(for characteristic: CharacteristicIdentifier) {
         guard let cbCharacteristic = bleSwiftCharacteristic(characteristic) else { return }
         readValue(for: cbCharacteristic)
     }
 
     /// Writes `data` to `characteristic`. A no-op if it has not yet been discovered.
-    package func writeValue(_ data: Data, for characteristic: CharacteristicIdentifier, type: WriteType) {
+    public func writeValue(_ data: Data, for characteristic: CharacteristicIdentifier, type: WriteType) {
         guard let cbCharacteristic = bleSwiftCharacteristic(characteristic) else { return }
         writeValue(data, for: cbCharacteristic, type: type.cbWriteType)
     }
 
     /// Enables or disables notifications for `characteristic`. A no-op if it has not yet
     /// been discovered.
-    package func setNotifyValue(_ enabled: Bool, for characteristic: CharacteristicIdentifier) {
+    public func setNotifyValue(_ enabled: Bool, for characteristic: CharacteristicIdentifier) {
         guard let cbCharacteristic = bleSwiftCharacteristic(characteristic) else { return }
         setNotifyValue(enabled, for: cbCharacteristic)
     }
 
     /// The maximum payload length in bytes for a single write of `type`.
-    package func maximumWriteValueLength(for type: WriteType) -> Int {
+    public func maximumWriteValueLength(for type: WriteType) -> Int {
         maximumWriteValueLength(for: type.cbWriteType)
     }
 
     /// Whether `service` has already been discovered on this peripheral.
-    package func isDiscovered(_ service: ServiceIdentifier) -> Bool {
+    public func isDiscovered(_ service: ServiceIdentifier) -> Bool {
         bleSwiftService(service) != nil
     }
 
     /// Whether `characteristic` has already been discovered on this peripheral.
-    package func isDiscovered(_ characteristic: CharacteristicIdentifier) -> Bool {
+    public func isDiscovered(_ characteristic: CharacteristicIdentifier) -> Bool {
         bleSwiftCharacteristic(characteristic) != nil
     }
 
     /// Whether `characteristic` currently has notifications enabled. `false` if it has not
     /// yet been discovered.
-    package func isNotifying(_ characteristic: CharacteristicIdentifier) -> Bool {
+    public func isNotifying(_ characteristic: CharacteristicIdentifier) -> Bool {
         bleSwiftCharacteristic(characteristic)?.isNotifying ?? false
     }
 }

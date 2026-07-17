@@ -4,6 +4,7 @@
 //
 
 import BLESwiftCore
+import BLESwiftTestSupport
 import Foundation
 import Synchronization
 import Testing

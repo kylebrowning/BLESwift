@@ -15,10 +15,15 @@
 ///   actor; the UIKit conformance (`BLESwift`'s `UIKitStartupBackgroundTask`) contains the
 ///   documented main-queue hop so `Central` itself never touches MainActor state.
 ///
-/// `package`, not `public`, this phase — see ``CentralManaging``. `UIKitStartupBackgroundTask`
-/// (the real, UIKit-backed conformance) stays in the `BLESwift` module, since it imports
-/// `UIKit`; only the CB-free seam and the no-op conformance live here.
-package protocol StartupBackgroundTaskRunning: Sendable {
+/// This is BLESwift's startup-background-task implementation seam. BLESwift ships two
+/// real conformances — `UIKitStartupBackgroundTask` (the `BLESwift` module, UIKit-backed)
+/// and a scriptable fake (`BLESwiftTestSupport`), plus the no-op conformance below.
+/// Conforming your own types is possible but unsupported: the semantic contract is
+/// documented here on a best-effort basis and may gain requirements in any release.
+///
+/// `UIKitStartupBackgroundTask` stays in the `BLESwift` module, since it imports `UIKit`;
+/// only the CB-free seam and the no-op conformance live here.
+public protocol StartupBackgroundTaskRunning: Sendable {
 
     /// Begins the platform background task. `onExpiration` fires (on an arbitrary
     /// thread/actor) if the system's background time runs out before ``end()`` — the

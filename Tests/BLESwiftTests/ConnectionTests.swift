@@ -7,7 +7,8 @@ import Foundation
 import Synchronization
 import Testing
 import BLESwiftCore
-@testable import BLESwift
+import BLESwiftTestSupport
+import BLESwift
 
 /// Exercises `Central`'s Phase 5 connection lifecycle surface: `connect`, `disconnect`,
 /// `cancelAllOperations`, `connectionEvents()`/`connectionState`, and auto-reconnect — all
@@ -558,20 +559,22 @@ struct ConnectionTests {
 
     // MARK: - Peripheral event-target (delegate) wiring
 
-    @Test("connect() attaches the peripheral's event target before initiating the connection (Phase 8 BINDING ledger fix)")
+    @Test("connect() wires the peripheral's eventHandler before initiating the connection")
     func connectAttachesEventTarget() async throws {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         register(fakePeripheral, on: fakeCentral)
         fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
 
-        #expect(fakePeripheral.onQueue { fakePeripheral.attachEventTargetCallCount } == 0)
+        #expect(fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount } == 0)
 
         _ = try await central.connect(fakePeripheral.peripheralIdentifier)
 
         // In production this is the `CBPeripheral.delegate = proxy` assignment real
-        // CoreBluetooth requires for any GATT callback to arrive; the fake records the
-        // call (its own delivery still goes through `eventSink`).
-        #expect(fakePeripheral.onQueue { fakePeripheral.attachEventTargetCallCount } >= 1)
+        // CoreBluetooth requires for any GATT callback to arrive; the fake's `eventHandler`
+        // is now both the protocol witness and the actual delivery path (replacing the old
+        // decoupled `eventSink` + `attachEventTarget` call-counter split), so this also
+        // proves events are actually delivered, not just that a wiring call happened.
+        #expect(fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount } >= 1)
     }
 
     @Test("a reconnect attempt re-attaches the peripheral's event target (cleared at teardown, re-wired on initiation)")
@@ -590,7 +593,7 @@ struct ConnectionTests {
             fakePeripheral.peripheralIdentifier,
             reconnect: .always(maxAttempts: 3, backoff: .milliseconds(10))
         )
-        let callsAfterFirstConnect = fakePeripheral.onQueue { fakePeripheral.attachEventTargetCallCount }
+        let callsAfterFirstConnect = fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount }
         #expect(callsAfterFirstConnect >= 1)
 
         // Unexpected disconnect → teardown clears the target (attach(nil)), then the
@@ -601,7 +604,7 @@ struct ConnectionTests {
 
         // At least two more calls since the first connect: the teardown clear and the
         // reconnect attempt's re-attach.
-        let callsAfterReconnect = fakePeripheral.onQueue { fakePeripheral.attachEventTargetCallCount }
+        let callsAfterReconnect = fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount }
         #expect(callsAfterReconnect >= callsAfterFirstConnect + 2)
     }
 
@@ -615,17 +618,17 @@ struct ConnectionTests {
         fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
 
         _ = try await central.connect(fakePeripheral.peripheralIdentifier)
-        let callsAfterConnect = fakePeripheral.onQueue { fakePeripheral.attachEventTargetCallCount }
+        let callsAfterConnect = fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount }
 
         let disconnectTask = Task { try await central.disconnect() }
         await waitUntil { fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
         try await disconnectTask.value
 
-        let callsAfterDisconnect = fakePeripheral.onQueue { fakePeripheral.attachEventTargetCallCount }
+        let callsAfterDisconnect = fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount }
         #expect(callsAfterDisconnect >= callsAfterConnect + 1)
         // The final call is the teardown's clear.
-        #expect(fakePeripheral.onQueue { fakePeripheral.lastAttachedEventTarget } == nil)
+        #expect(fakePeripheral.onQueue { fakePeripheral.eventHandler } == nil)
     }
 
     // MARK: - Adopting-init session adoption
@@ -641,7 +644,7 @@ struct ConnectionTests {
         let (central, _, fakePeripheral) = makeTestCentral(adoptPeripheral: true)
 
         // The adoption attached the peripheral's event target during init.
-        #expect(fakePeripheral.onQueue { fakePeripheral.attachEventTargetCallCount } >= 1)
+        #expect(fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount } >= 1)
 
         // The session is live immediately — no connect() call was ever made.
         guard case .connected(let peripheral) = await central.connectionState else {

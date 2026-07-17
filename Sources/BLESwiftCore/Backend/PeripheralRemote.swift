@@ -5,14 +5,20 @@
 
 import Foundation
 
+/// This is BLESwift's backend implementation seam. BLESwift ships two conformances —
+/// CoreBluetooth (the `BLESwift` module) and scriptable fakes (`BLESwiftTestSupport`).
+/// Conforming your own types is possible but unsupported: the semantic contract (event
+/// ordering, queue confinement, delivery asynchrony) is documented here on a best-effort
+/// basis and may gain requirements in any release.
+///
 /// A protocol seam over `CBPeripheral`, mirroring only the API surface BLESwift uses,
 /// speaking exclusively in BLESwift-owned (never CoreBluetooth) types.
 ///
 /// `CBPeripheral` has no accessible public initializer and cannot be instantiated in
 /// tests, so `Central` (in the `BLESwift` module) is written entirely against this
 /// protocol instead of the concrete CoreBluetooth type. `CBPeripheral` conforms
-/// retroactively (`BLESwift`'s `CBPeripheral+PeripheralRemote.swift`); a scriptable fake
-/// conforms for tests, standing in for hardware.
+/// retroactively (`BLESwift`'s `CBPeripheral+PeripheralRemote.swift`); `BLESwiftTestSupport`'s
+/// `FakePeripheral` conforms for tests, standing in for hardware.
 ///
 /// **Identifier-based, not object-graph-based.** Real `CBPeripheral` GATT operations
 /// take `CBService`/`CBCharacteristic` object references, which only exist once
@@ -23,12 +29,14 @@ import Foundation
 /// been discovered. This keeps the fake peripheral trivial (no `CBService`/`CBCharacteristic`
 /// stand-ins needed) and avoids a nested existential hierarchy.
 ///
-/// `package`, not `public`, this phase — see ``CentralManaging``.
+/// - Important: Every ``eventHandler`` delivery must happen **asynchronously**, on the
+///   single serial `DispatchSerialQueue` the owning `Central` was constructed with — never
+///   deliver inline from within a method call on this protocol.
 ///
 /// - Note: ``connectionState`` is named to avoid colliding with `CBPeripheral`'s own
 ///   identically-named `state` property — see ``CentralManaging``'s note on
 ///   ``CentralManaging/radioState``/``CentralManaging/bluetoothAuthorization`` for why.
-package protocol PeripheralRemote: AnyObject {
+public protocol PeripheralRemote: AnyObject {
 
     /// The identifier CoreBluetooth uses for this peripheral. Mirrors
     /// `CBPeripheral.identifier`.
@@ -46,18 +54,13 @@ package protocol PeripheralRemote: AnyObject {
     /// ``PeripheralEvent/isReadyToSendWriteWithoutResponse`` before writing when `false`.
     var canSendWriteWithoutResponse: Bool { get }
 
-    /// Attaches (or, with `nil`, detaches) the object this peripheral's events should be
-    /// delivered to. Mirrors assigning `CBPeripheral.delegate` — the one CoreBluetooth
-    /// wiring step a `connect(_:options:)` call does **not** perform implicitly; without
-    /// it, none of this peripheral's GATT callbacks would ever arrive.
-    ///
-    /// Typed `AnyObject?` rather than `CBPeripheralDelegate?` so the shim stays free of
-    /// CoreBluetooth delegate types in requirements: the `CBPeripheral` conformance
-    /// downcasts internally (a non-delegate target simply clears the delegate — mixing
-    /// shim families is a programmer error, never a trap, per ``CentralManaging``'s
-    /// conventions); a fake peripheral records the call and ignores the target (fakes
-    /// deliver via their own event sink, not a delegate).
-    func attachEventTarget(_ target: AnyObject?)
+    /// Receives every ``PeripheralEvent`` this peripheral produces. Mirrors assigning
+    /// `CBPeripheral.delegate` — the one CoreBluetooth wiring step a `connect(_:options:)`
+    /// call does **not** perform implicitly; without setting this, none of this
+    /// peripheral's GATT callbacks would ever arrive. `Central` sets this on every path
+    /// that creates a session for this peripheral, and clears it (`nil`) on teardown. See
+    /// the delivery contract on the protocol's doc comment.
+    var eventHandler: ((PeripheralEvent) -> Void)? { get set }
 
     /// Discovers the given services (or all services, if `nil`). Mirrors
     /// `CBPeripheral.discoverServices(_:)`.
