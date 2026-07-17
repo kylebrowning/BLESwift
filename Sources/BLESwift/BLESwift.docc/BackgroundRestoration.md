@@ -26,6 +26,13 @@ as a single buffered stream of `RestorationEvent`s, rather than a pair of delega
   one. CoreBluetooth can deliver `willRestoreState` synchronously during `CBCentralManager`
   initialization, potentially before your code has had a chance to start consuming anything, so
   nothing is lost to that race.
+- Restoration is genuinely plural: `RestoredState.peripherals` carries every peripheral
+  CoreBluetooth preserved, and `Central` routes **all of them**, not just one. Each
+  already-*connected* peripheral is adopted as a live session; each restored-*connecting*
+  peripheral gets its own manual re-connect attempt; each produces its own
+  `.restoredConnection`/`.failedToRestoreConnection` event, carrying that peripheral's
+  `PeripheralIdentifier`. A consumer that expects more than one restored peripheral must loop
+  over these events rather than handling only the first.
 
 ### Launch-time discipline
 

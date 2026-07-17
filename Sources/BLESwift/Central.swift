@@ -747,10 +747,13 @@ public actor Central {
     /// is always treated as an intentional, expected termination. Other peripherals'
     /// connections and reconnect loops are entirely unaffected.
     ///
-    /// - Parameter immediate: If `true`, fails pending operations with
-    ///   ``BLESwiftError/explicitDisconnect`` rather than waiting for them to finish. With no
-    ///   in-flight GATT operations to wait for yet (added in a later phase), `immediate`
-    ///   currently has no observable effect — both values behave the same.
+    /// - Parameters:
+    ///   - id: The peripheral to disconnect. Every other peripheral's connection and reconnect
+    ///     loop is entirely unaffected.
+    ///   - immediate: If `true`, fails pending operations with
+    ///     ``BLESwiftError/explicitDisconnect`` rather than waiting for them to finish. With no
+    ///     in-flight GATT operations to wait for yet (added in a later phase), `immediate`
+    ///     currently has no observable effect — both values behave the same.
     /// - Throws: ``BLESwiftError/notConnected`` if `id` has no connection, connection attempt,
     ///   or in-flight auto-reconnect loop; ``BLESwiftError/multipleDisconnectNotSupported`` if
     ///   `id` is already disconnecting.
@@ -808,7 +811,8 @@ public actor Central {
     /// Best-effort teardown of every tracked peripheral: cancels every in-flight
     /// auto-reconnect loop, then disconnects every tracked entry — a connecting attempt is
     /// two-phase-cancelled with ``BLESwiftError/explicitDisconnect``; a connected session
-    /// gets the full 5-step cleanup (see ``handleTermination(identifier:error:)``).
+    /// gets the same full internal cleanup ordering every other disconnect path uses (fail
+    /// pending GATT ops, finish notification streams, yield `.disconnected`).
     ///
     /// Never throws: individual outcomes are observable on ``connectionEvents()``.
     /// Idempotent, and a no-op with nothing tracked.

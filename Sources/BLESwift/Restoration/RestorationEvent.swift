@@ -26,9 +26,10 @@ public enum RestorationEvent: Sendable {
     case willRestore(RestoredState)
 
     /// A restored connection is live again: either the peripheral was restored already
-    /// connected (adopted directly as the current session — its `Peripheral` handle is
-    /// available via ``Central/connectionState``), or a restored-*connecting* peripheral's
-    /// manual re-connect succeeded.
+    /// connected (adopted directly as a live session — its `Peripheral` handle is available
+    /// via ``Central/connectionState(of:)``), or a restored-*connecting* peripheral's manual
+    /// re-connect succeeded. Every restored peripheral is routed and produces its own event —
+    /// none are dropped or treated as extras.
     case restoredConnection(PeripheralIdentifier)
 
     /// Restoring a connection failed.

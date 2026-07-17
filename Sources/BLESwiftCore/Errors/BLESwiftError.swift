@@ -9,13 +9,13 @@ import Foundation
 ///
 /// `BLESwiftError`'s cases cover connection, GATT, and scanning failures. Cases whose
 /// subsystem was deleted in BLESwift's redesign (background-task mode, indefinite flush,
-/// multiple-listen trap/replace policy, queued disconnection, and the single-scan-specific
-/// error superseded by ``alreadyScanning``) were dropped; new cases were added where
-/// BLESwift's async/await and `AsyncSequence`-based API introduces situations a
-/// callback-based API wouldn't have. `multipleConnectNotSupported` was replaced by
-/// ``duplicateConnect(_:)`` when `Central` gained multi-peripheral connection support —
-/// connecting to a *different* peripheral no longer conflicts at all; only a second
-/// `connect` to the same already-tracked peripheral does.
+/// multiple-listen trap/replace policy, queued disconnection, the single-scan-specific
+/// error superseded by ``alreadyScanning``, and the single-connection-specific error
+/// superseded by ``duplicateConnect(_:)`` once `Central` gained multi-peripheral connection
+/// support) were dropped; new cases were added where BLESwift's async/await and
+/// `AsyncSequence`-based API introduces situations a callback-based API wouldn't have.
+/// ``duplicateConnect(_:)`` only fires for a second `connect` to the same already-tracked
+/// peripheral — connecting to a *different* peripheral never conflicts.
 public enum BLESwiftError: Error, Sendable, Equatable {
 
     // MARK: - Core Cases

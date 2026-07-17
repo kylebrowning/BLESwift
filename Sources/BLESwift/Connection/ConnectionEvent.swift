@@ -20,7 +20,8 @@ public enum ConnectionEvent: Sendable {
 
     /// `PeripheralIdentifier` disconnected — whether because a connection attempt failed,
     /// timed out, was cancelled, or an established connection was lost (expectedly, via
-    /// ``Central/disconnect()``/``Central/disconnect(immediate:)``, or unexpectedly).
+    /// ``Central/disconnect(_:)``/``Central/disconnect(_:immediate:)``/
+    /// ``Central/disconnectAll()``, or unexpectedly).
     ///
     /// - Parameters:
     ///   - error: The reason for the disconnect, if any. `nil` for a clean, expected
@@ -28,8 +29,8 @@ public enum ConnectionEvent: Sendable {
     ///   - willReconnect: Whether ``Central`` will attempt to reconnect per the
     ///     ``ReconnectPolicy`` given to the `connect` call that established (or was
     ///     attempting to establish) this connection. Always `false` for a disconnect
-    ///     triggered by an explicit ``Central/disconnect()``/``Central/disconnect(immediate:)``/
-    ///     ``Central/cancelAllOperations(error:)`` call.
+    ///     triggered by an explicit ``Central/disconnect(_:)``/``Central/disconnect(_:immediate:)``/
+    ///     ``Central/disconnectAll()``/``Central/cancelAllOperations(error:)`` call.
     case disconnected(PeripheralIdentifier, error: Error?, willReconnect: Bool)
 
     /// ``Central`` is attempting reconnect attempt number `attempt` (1-indexed) to

@@ -55,8 +55,12 @@ everything below, so every type on this page is available without a separate imp
 
 ### Connecting
 
+BLESwift supports any number of concurrent peripheral connections — see
+<doc:ConnectionsAndReconnection> for the full multi-peripheral model.
+
 - <doc:ConnectionsAndReconnection>
 - ``Peripheral``
+- ``Central/connectedPeripherals``
 - ``Central/knownPeripherals(withIdentifiers:)``
 - ``Central/systemConnectedPeripherals(withServices:)``
 - ``ConnectionEvent``

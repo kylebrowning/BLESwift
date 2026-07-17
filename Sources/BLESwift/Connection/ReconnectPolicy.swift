@@ -5,11 +5,13 @@
 
 /// Declares whether, and how, ``Central`` should automatically retry connecting to a
 /// peripheral after an unexpected disconnect (or a connection attempt that failed, timed
-/// out, or was cancelled some way other than an explicit ``Central/disconnect()``/
+/// out, or was cancelled some way other than an explicit ``Central/disconnect(_:)``/
+/// ``Central/disconnect(_:immediate:)``/``Central/disconnectAll()``/
 /// ``Central/cancelAllOperations(error:)`` call).
 ///
 /// Set per `connect(_:timeout:reconnect:warningOptions:)` call as a single declarative
-/// value. Observe retry progress via ``Central/connectionEvents()``'s
+/// value, independently for each peripheral — each `connect` call's policy governs only that
+/// peripheral's own reconnect loop. Observe retry progress via ``Central/connectionEvents()``'s
 /// ``ConnectionEvent/reconnecting(_:attempt:)`` case.
 ///
 /// - Note: Reconnection never re-arms any previously-active notification streams — those

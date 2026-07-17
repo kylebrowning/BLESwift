@@ -19,10 +19,10 @@ import Synchronization
 /// Entries are created on demand (``broadcaster(for:)`` is get-or-create) and never
 /// removed — bounded by the number of distinct peripherals this `Central` ever touches,
 /// not by how many are currently connected. Streams deliberately survive disconnect,
-/// matching the single-peripheral predecessor's behavior (that broadcaster never finished
-/// on disconnect either): a subscriber that started listening before a disconnect keeps
-/// receiving invalidations after that same peripheral reconnects, because reconnecting
-/// reuses the same `PeripheralIdentifier` and so the same broadcaster instance.
+/// matching the un-keyed predecessor broadcaster's behavior (it never finished on disconnect
+/// either): a subscriber that started listening before a disconnect keeps receiving
+/// invalidations after that same peripheral reconnects, because reconnecting reuses the same
+/// `PeripheralIdentifier` and so the same broadcaster instance.
 final class ServiceChangesRegistry: Sendable {
 
     private let broadcasters = Mutex<[PeripheralIdentifier: Broadcaster<[ServiceIdentifier]>]>([:])
