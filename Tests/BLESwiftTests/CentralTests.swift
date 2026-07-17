@@ -5,6 +5,7 @@
 
 @preconcurrency import CoreBluetooth
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 /// Exercises the `Central` actor's Phase 3 surface: state snapshot/stream wiring through
@@ -83,14 +84,14 @@ struct CentralTests {
 
     @Test("Central.authorization reflects the shim's static authorization")
     func authorizationReflectsShim() async {
-        let original = FakeCentral.authorization
-        defer { FakeCentral.authorization = original }
+        let original = FakeCentral.bluetoothAuthorization
+        defer { FakeCentral.bluetoothAuthorization = original }
 
-        FakeCentral.authorization = .allowedAlways
+        FakeCentral.bluetoothAuthorization = .allowedAlways
         let (central, _, _) = makeTestCentral()
         #expect(await central.authorization == .allowedAlways)
 
-        FakeCentral.authorization = .denied
+        FakeCentral.bluetoothAuthorization = .denied
         #expect(await central.authorization == .denied)
     }
 

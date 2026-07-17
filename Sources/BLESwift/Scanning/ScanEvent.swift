@@ -3,6 +3,8 @@
 //  BLESwift
 //
 
+import BLESwiftCore
+
 /// An event produced by an in-progress
 /// ``Central/scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``.
 ///

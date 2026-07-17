@@ -3,7 +3,7 @@
 //  BLESwift
 //
 
-import CoreBluetooth
+import BLESwiftCore
 import Foundation
 
 /// GATT operations — read, write, RSSI, and service-change notifications — all routed
@@ -66,7 +66,7 @@ extension Peripheral {
     public func write<Value: Transmittable>(
         _ value: Value,
         to characteristic: CharacteristicIdentifier,
-        type: CBCharacteristicWriteType = .withResponse,
+        type: WriteType = .withResponse,
         timeout: Duration? = nil
     ) async throws {
         let central = try resolveCentral()
@@ -99,7 +99,7 @@ extension Peripheral {
     ///
     /// - Parameter type: Which write type to report the maximum payload length for.
     /// - Returns: The maximum payload length, in bytes.
-    public func maximumWriteValueLength(for type: CBCharacteristicWriteType) async -> Int {
+    public func maximumWriteValueLength(for type: WriteType) async -> Int {
         guard let central = centralBox.central else {
             return Central.defaultMaximumWriteValueLength
         }

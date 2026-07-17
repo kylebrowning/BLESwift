@@ -3,6 +3,7 @@
 //  BLESwift
 //
 
+import BLESwiftCore
 import Logging
 
 /// Configures a ``Central`` at creation time.

@@ -5,6 +5,7 @@
 
 import Foundation
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 /// Exercises `Peripheral.notifications(for:policy:)` — Phase 7's multicast notification

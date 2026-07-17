@@ -3,6 +3,7 @@
 //  BLESwift
 //
 
+import BLESwiftCore
 import Foundation
 
 /// Composite async helpers — `writeAndAwaitNotification`, `writeAndAssemble`, and `flush`

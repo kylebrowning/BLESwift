@@ -13,6 +13,7 @@
 // is rejected outright, with no `sending`-based escape hatch available for a type that
 // originated in the actor's own isolated storage (verified: `sending` alone still fails
 // with "'self'-isolated uses may race with caller uses" here).
+import BLESwiftCore
 @preconcurrency import CoreBluetooth
 import Dispatch
 import Foundation
@@ -477,7 +478,7 @@ public actor Central {
     ///   this `Central` no longer owns a manager to ask at that point.
     public var authorization: BluetoothAuthorization {
         guard let manager else { return .notDetermined }
-        return BluetoothAuthorization(type(of: manager).authorization)
+        return type(of: manager).bluetoothAuthorization
     }
 
     /// Whether a scan is currently active.
@@ -774,7 +775,7 @@ public actor Central {
                 ))
                 connectionBroadcaster.yield(.connecting(id))
                 log("Connecting to \(id)", level: .info, category: "connection")
-                manager?.connect(target, options: warningOptions.cbConnectOptions)
+                manager?.connect(target, options: warningOptions)
             }
         } onCancel: {
             self.queue.async {
@@ -1211,9 +1212,8 @@ public actor Central {
     /// test-backed `Central`.
     func handle(_ event: CentralEvent) {
         switch event {
-        case .didUpdateState(let cbState):
+        case .didUpdateState(let newState):
             let previousState = stateBox.withLock { $0 }
-            let newState = CentralState(cbState)
             stateBox.withLock { $0 = newState }
             stateBroadcaster.yield(newState)
 
@@ -1625,7 +1625,7 @@ public actor Central {
         peripheral identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
         data: Data,
-        type: CBCharacteristicWriteType,
+        type: WriteType,
         timeout: Duration?
     ) async throws {
         try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
@@ -1648,7 +1648,7 @@ public actor Central {
         identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
         data: Data,
-        type: CBCharacteristicWriteType
+        type: WriteType
     ) async throws {
         guard case .connected(let session) = phase, session.identifier == identifier else {
             throw BLESwiftError.notConnected
@@ -1777,7 +1777,7 @@ public actor Central {
     /// the currently connected peripheral, returns ``Central/defaultMaximumWriteValueLength``
     /// rather than failing — this is a best-effort sizing hint, not an operation with a
     /// meaningful failure mode.
-    func maximumWriteValueLength(peripheral identifier: PeripheralIdentifier, for type: CBCharacteristicWriteType) -> Int {
+    func maximumWriteValueLength(peripheral identifier: PeripheralIdentifier, for type: WriteType) -> Int {
         guard case .connected(let session) = phase, session.identifier == identifier else {
             return Central.defaultMaximumWriteValueLength
         }
@@ -2613,10 +2613,7 @@ public actor Central {
         activeScan = scan
         isScanningBox.withLock { $0 = true }
 
-        let options: [String: Any] = [
-            CBCentralManagerScanOptionAllowDuplicatesKey: allowDuplicates
-        ]
-        manager?.scanForPeripherals(withServices: services?.map(\.cbuuid), options: options)
+        manager?.scanForPeripherals(withServices: services, options: ScanOptions(allowDuplicates: allowDuplicates))
 
         #if os(iOS)
         installBackgroundGuardIfNeeded(scan: scan, allowDuplicates: allowDuplicates, missingServices: missingServices)
@@ -2757,7 +2754,7 @@ public actor Central {
         }
         #endif
 
-        if manager?.state == .poweredOn {
+        if manager?.radioState == .poweredOn {
             manager?.stopScan()
         }
 

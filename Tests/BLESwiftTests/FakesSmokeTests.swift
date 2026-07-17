@@ -3,10 +3,10 @@
 //  BLESwiftTests
 //
 
-import CoreBluetooth
 import Dispatch
 import Foundation
 import Testing
+import BLESwiftCore
 @testable import BLESwift
 
 /// Proves the CoreBluetooth shim's test doubles (`FakeCentral`/`FakePeripheral`) exist,
@@ -23,7 +23,7 @@ struct FakesSmokeTests {
     func stateFlipObservedOnQueue() {
         let (central, _, queue) = makeFakeCentral()
 
-        var observedStates: [CBManagerState] = []
+        var observedStates: [CentralState] = []
         central.onQueue {
             central.eventSink = { event in
                 dispatchPrecondition(condition: .onQueue(queue))
@@ -33,20 +33,20 @@ struct FakesSmokeTests {
             }
         }
 
-        #expect(central.onQueue { central.state } == .unknown)
+        #expect(central.onQueue { central.radioState } == .unknown)
 
         central.simulateStateChange(.poweredOn)
         central.onQueue {} // flush the async didUpdateState delivery
 
         #expect(observedStates == [.poweredOn])
-        #expect(central.onQueue { central.state } == .poweredOn)
+        #expect(central.onQueue { central.radioState } == .poweredOn)
     }
 
     @Test("Event delivery is asynchronous: the event is not observed before a flush")
     func eventDeliveryIsAsynchronous() {
         let (central, _, _) = makeFakeCentral()
 
-        var observedStates: [CBManagerState] = []
+        var observedStates: [CentralState] = []
         central.onQueue {
             central.eventSink = { event in
                 if case .didUpdateState(let state) = event {
@@ -70,9 +70,9 @@ struct FakesSmokeTests {
 
         // Every one of these would trap via dispatchPrecondition if called directly from
         // this (off-queue) test body; routed through onQueue, they succeed.
-        let state = central.onQueue { central.state }
+        let state = central.onQueue { central.radioState }
         let connectCount = central.onQueue { central.connectCallCount }
-        let peripheralState = peripheral.onQueue { peripheral.state }
+        let peripheralState = peripheral.onQueue { peripheral.connectionState }
         let discovered = peripheral.onQueue { peripheral.isDiscovered(ServiceIdentifier(uuid: "180D")) }
 
         #expect(state == .unknown)
@@ -85,7 +85,7 @@ struct FakesSmokeTests {
     func multipleStateTransitionsObservedInOrder() {
         let (central, _, _) = makeFakeCentral()
 
-        var observedStates: [CBManagerState] = []
+        var observedStates: [CentralState] = []
         central.onQueue {
             central.eventSink = { event in
                 if case .didUpdateState(let state) = event {
@@ -192,12 +192,12 @@ struct FakesSmokeTests {
         #expect(peripheral.onQueue { peripheral.isDiscovered(characteristic) })
     }
 
-    @Test("FakeCentral.authorization is Mutex-backed and readable/writable off-queue, without onQueue")
+    @Test("FakeCentral.bluetoothAuthorization is Mutex-backed and readable/writable off-queue, without onQueue")
     func authorizationIsNotQueueConfined() {
-        let original = FakeCentral.authorization
-        defer { FakeCentral.authorization = original }
+        let original = FakeCentral.bluetoothAuthorization
+        defer { FakeCentral.bluetoothAuthorization = original }
 
-        FakeCentral.authorization = .allowedAlways
-        #expect(FakeCentral.authorization == .allowedAlways)
+        FakeCentral.bluetoothAuthorization = .allowedAlways
+        #expect(FakeCentral.bluetoothAuthorization == .allowedAlways)
     }
 }

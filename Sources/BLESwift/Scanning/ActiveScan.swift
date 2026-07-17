@@ -3,6 +3,7 @@
 //  BLESwift
 //
 
+import BLESwiftCore
 import Foundation
 
 /// The state of a single in-progress `Central.scan(...)` call.

@@ -3,6 +3,7 @@
 //  BLESwift
 //
 
+import BLESwiftCore
 import Foundation
 
 /// Notification (listen) streams, implemented as multicast `AsyncThrowingStream`s with a

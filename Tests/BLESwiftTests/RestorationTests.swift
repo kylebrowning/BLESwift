@@ -3,6 +3,7 @@
 //  BLESwiftTests
 //
 
+import BLESwiftCore
 import Foundation
 import Synchronization
 import Testing
@@ -385,7 +386,7 @@ private func makeRestorationCentral(
 }
 
 /// A single-peripheral `RestoredState`, as CoreBluetooth would hand back for `peripheral`.
-private func restoredState(for peripheral: FakePeripheral, state: RestoredPeripheralState) -> RestoredState {
+private func restoredState(for peripheral: FakePeripheral, state: PeripheralConnectionState) -> RestoredState {
     RestoredState(
         peripherals: [RestoredPeripheral(identifier: peripheral.peripheralIdentifier, state: state)]
     )
