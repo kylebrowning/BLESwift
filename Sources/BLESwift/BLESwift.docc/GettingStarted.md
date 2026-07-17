@@ -66,10 +66,11 @@ let peripheral = try await central.connect(identifier, timeout: .seconds(10))
 ```
 
 This throws ``BLESwiftError/connectionTimedOut`` if `timeout` elapses,
-``BLESwiftError/multipleConnectNotSupported`` if a connection or connection attempt is already in
-progress (BLESwift is single-peripheral), or whatever error CoreBluetooth reports for
-the attempt. See <doc:ConnectionsAndReconnection> for reconnect policies and connection-lifecycle
-events.
+``BLESwiftError/duplicateConnect(_:)`` if `identifier` itself already has a connection or
+connection attempt in progress, or whatever error CoreBluetooth reports for the attempt.
+`Central` supports any number of concurrent peripheral connections — connecting to a
+*different* peripheral never conflicts with this one. See <doc:ConnectionsAndReconnection> for
+reconnect policies, multi-peripheral connections, and connection-lifecycle events.
 
 ### Reading a characteristic
 
@@ -95,7 +96,7 @@ notification streams.
 You don't need real hardware to unit-test code built on `Central`. The **BLESwiftTestSupport**
 module ships `FakeCentral`/`FakePeripheral` — scriptable stand-ins for
 `CBCentralManager`/`CBPeripheral` — plus `Central`'s public
-`init(backend:queue:configuration:startupBackgroundTask:connectedPeripheral:)`, which wires a
+`init(backend:queue:configuration:startupBackgroundTask:connectedPeripherals:)`, which wires a
 real `Central` to them instead of CoreBluetooth:
 
 ```swift

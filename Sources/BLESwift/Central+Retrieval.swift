@@ -48,10 +48,12 @@ extension Central {
     /// Peripherals currently connected to this *device* (by any app, not just this one)
     /// that contain at least one of the given services.
     ///
-    /// ``connectionState`` tracks *this library's single session*; system-connected means
-    /// the OS holds a BLE link to the peripheral opened by **any app on this device**
-    /// (including another app entirely). The two can disagree — a peripheral can be
-    /// system-connected while BLESwift is ``ConnectionState/disconnected`` from it.
+    /// ``Central/connectionState(of:)``/``Central/connectedPeripherals`` track *this
+    /// library's own sessions*; system-connected means the OS holds a BLE link to the
+    /// peripheral opened by **any app on this device** (including another app entirely,
+    /// or a peripheral BLESwift itself has no tracked entry for at all). The two can
+    /// disagree — a peripheral can be system-connected while BLESwift is
+    /// ``ConnectionState/disconnected`` from it.
     ///
     /// The service filter is **any-of** (a peripheral matches if it exposes at least one
     /// listed service), mirroring `CBCentralManager.retrieveConnectedPeripherals(withServices:)`.

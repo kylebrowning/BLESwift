@@ -11,6 +11,8 @@ notifications) is a real multicast stream that every subscriber observes indepen
 
 - **Pure async/await API.** `actor Central`, `async throws` connect/read/write, and
   `AsyncSequence` for scanning and notifications — nothing to bridge from a callback yourself.
+- **Multi-peripheral connections.** Connect to any number of peripherals at once, each with its
+  own independent connection lifecycle, `ReconnectPolicy`, and GATT/notification state.
 - **Actor-isolated core.** `Central`'s isolation is tied directly to the `DispatchSerialQueue`
   its `CBCentralManager` delivers delegate callbacks on, so every CoreBluetooth event is handled
   on the actor's own executor with no thread hop and no ordering hazards.
@@ -73,7 +75,7 @@ Connections & Reconnection, Reading/Writing & Notifications, and Background Rest
 You don't need real hardware to unit-test code built on `Central`. The `BLESwiftTestSupport`
 product ships `FakeCentral`/`FakePeripheral` — scriptable stand-ins for
 `CBCentralManager`/`CBPeripheral` — plus `Central`'s public
-`init(backend:queue:configuration:startupBackgroundTask:connectedPeripheral:)`, which wires a
+`init(backend:queue:configuration:startupBackgroundTask:connectedPeripherals:)`, which wires a
 real `Central` to them instead of CoreBluetooth:
 
 ```swift

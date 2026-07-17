@@ -3,8 +3,9 @@
 //  BLESwiftCore
 //
 
-/// The connection state of a single peripheral, as reported by the backend seam and by
-/// state restoration.
+/// One peripheral's connection state, as reported by the backend seam and by state
+/// restoration. `Central` tracks this independently per peripheral — see
+/// `Central.connectionState(of:)` in the `BLESwift` module.
 ///
 /// BLESwift-owned; the backend's native connection-state mapping (`init(_:)`) lives in the
 /// `BLESwift` module — this type never exposes a CoreBluetooth type in its own public API.
