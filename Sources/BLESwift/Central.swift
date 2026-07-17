@@ -685,7 +685,7 @@ public actor Central {
         reconnect: ReconnectPolicy = .never,
         warningOptions: WarningOptions? = nil
     ) async throws -> Peripheral {
-        guard let manager else { throw BLESwiftError.stopped }
+        guard manager != nil else { throw BLESwiftError.stopped }
 
         // Restoration owns the connection slot until its routing has run — BLESwift rejects
         // the racing call up front instead of cancelling it after the fact.
@@ -693,20 +693,30 @@ public actor Central {
             throw BLESwiftError.backgroundRestorationInProgress
         }
 
-        guard connections[id] == nil else {
-            throw BLESwiftError.duplicateConnect(id)
-        }
+        let resolvedWarningOptions = warningOptions ?? configuration.warningOptions
 
-        guard manager.retrievePeripherals(withIdentifiers: [id.uuid]).first != nil else {
-            throw BLESwiftError.unexpectedPeripheral(id)
-        }
+        // Claim the connection slot SYNCHRONOUSLY, before any suspension point — this is
+        // what closes the concurrent-connect TOCTOU deadlock: a second racing `connect(id)`
+        // now sees the reservation and throws `.duplicateConnect` instead of passing its
+        // guard during this call's suspension and overwriting the pending continuation (see
+        // `reserveConnectingSlot` and `awaitConnect`). Throws `.duplicateConnect(id)` if `id`
+        // is already tracked — including by an in-flight reconnect/restoration attempt that
+        // has already reserved its own slot — or `.unexpectedPeripheral(id)` if CoreBluetooth
+        // no longer knows `id`.
+        try reserveConnectingSlot(
+            identifier: id,
+            policy: reconnect,
+            timeout: timeout,
+            warningOptions: resolvedWarningOptions
+        )
 
         // Cancel an in-flight reconnect loop for THIS peripheral only — every other
-        // peripheral's independent reconnect loop is untouched.
+        // peripheral's independent reconnect loop is untouched. Safe to do after reserving:
+        // had a reconnect *attempt* been mid-flight it would already own the slot, so the
+        // reservation above would have thrown `.duplicateConnect` before reaching here; any
+        // loop still present is therefore in its backoff sleep, holding no slot.
         reconnectLoops[id]?.task.cancel()
         reconnectLoops.removeValue(forKey: id)
-
-        let resolvedWarningOptions = warningOptions ?? configuration.warningOptions
 
         return try await establishConnection(
             identifier: id,
@@ -765,6 +775,18 @@ public actor Central {
         case .disconnecting:
             throw BLESwiftError.multipleDisconnectNotSupported
         case .connecting(let connecting):
+            // Reserved-but-unattached slot (see `reserveConnectingSlot`): no CoreBluetooth
+            // attempt has been issued yet, so there is nothing to cancel and no disconnect
+            // callback would ever arrive to complete a `.disconnecting` transition (which
+            // would hang this `disconnect` call). Instead record `.explicitDisconnect` so
+            // `awaitConnect`'s attach fails the pending connect with it, and return — the
+            // caller's intent (don't connect to `id`) is satisfied, with nothing to await.
+            if connecting.continuation == nil {
+                var reserved = connecting
+                reserved.stopping = BLESwiftError.explicitDisconnect
+                connections[id] = .connecting(reserved)
+                return
+            }
             try await beginDisconnecting(
                 identifier: id,
                 peripheral: connecting.peripheral,
@@ -840,6 +862,17 @@ public actor Central {
         for identifier in Array(connections.keys) {
             switch connections[identifier] {
             case .connecting(let connecting):
+                // Reserved-but-unattached slot (see `reserveConnectingSlot`): no
+                // CoreBluetooth attempt has been issued yet, so it can't be two-phase
+                // cancelled (no callback would ever arrive to complete a `.disconnecting`
+                // transition). Record the error so `awaitConnect`'s attach fails the pending
+                // connect with it — the same handling as `failPendingConnect`'s reserved slot.
+                if connecting.continuation == nil {
+                    var reserved = connecting
+                    reserved.stopping = resolvedError
+                    connections[identifier] = .connecting(reserved)
+                    continue
+                }
                 connections[identifier] = .disconnecting(Disconnecting(
                     identifier: identifier,
                     peripheral: connecting.peripheral,
@@ -870,9 +903,16 @@ public actor Central {
     ///
     /// Takes only `identifier`, not the resolved `any PeripheralRemote` — that existential
     /// is not `Sendable` (`PeripheralRemote` conformances like `CBPeripheral` aren't), so it
-    /// cannot be captured into `withTimeout`'s `@Sendable` closure; ``awaitConnect(id:policy:timeout:warningOptions:)``
-    /// re-resolves it via `retrievePeripherals(withIdentifiers:)` once actually running,
-    /// already back on the actor.
+    /// cannot be captured into `withTimeout`'s `@Sendable` closure. The peripheral was
+    /// already resolved and stored in the reserved ``connections`` entry by
+    /// ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:)`` (which every
+    /// caller of this method invokes first, synchronously); ``awaitConnect(id:policy:timeout:warningOptions:)``
+    /// reads it back from that entry once actually running, already back on the actor.
+    ///
+    /// - Important: The caller MUST have reserved `identifier`'s slot via
+    ///   ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:)`` in the same
+    ///   actor turn, before reaching this suspension — that reservation is what makes the
+    ///   whole flow race-free (see that method).
     private func establishConnection(
         identifier: PeripheralIdentifier,
         policy: ReconnectPolicy,
@@ -884,10 +924,79 @@ public actor Central {
         }
     }
 
-    /// Re-resolves `id` to a `PeripheralRemote`, registers a pending connect continuation,
+    /// Synchronously claims `identifier`'s ``connections`` slot for a brand-new connection
+    /// attempt, *before* any suspension point — the fix for the concurrent-connect TOCTOU
+    /// deadlock. Resolves the target peripheral, wires its event delivery, and writes a
+    /// **continuation-less** `.connecting` reservation. From the moment this returns,
+    /// `connections[identifier]` is occupied, so any racing initiator's
+    /// `connections[identifier] == nil` guard fails and it throws `.duplicateConnect` rather
+    /// than overwriting a live attempt (and orphaning its continuation).
+    ///
+    /// Every path that starts a connection through
+    /// ``establishConnection(identifier:policy:timeout:warningOptions:)`` — user
+    /// ``connect(_:timeout:reconnect:warningOptions:)``, the auto-reconnect loop
+    /// (``runReconnectLoop(identifier:policy:timeout:warningOptions:generation:)``), and the
+    /// restoration manual re-connect (``runRestorationConnect(identifier:timeout:)``) — MUST
+    /// call this first, synchronously within the same actor turn as its own
+    /// `connections[identifier] == nil` decision, so none of them can race another into the
+    /// same slot. (The adoption paths — ``adoptRestoredConnection(_:)`` and `init(adopting:…)`
+    /// — do not go through here: they write a `.connected` entry directly and synchronously,
+    /// with no suspension between their occupied-slot guard and that write, so they are
+    /// already atomic and need no separate reservation.)
+    ///
+    /// The paired ``awaitConnect(id:policy:timeout:warningOptions:)`` later *attaches* its
+    /// continuation to this reservation and only then issues the CoreBluetooth `connect` — so
+    /// no CoreBluetooth callback can arrive for `identifier` while the slot is still
+    /// reserved-but-unattached (`continuation == nil`). That invariant is what lets the
+    /// cancel paths (``failPendingConnect(for:error:)``, ``cancelAllOperations(error:)``,
+    /// ``disconnect(_:immediate:)``) treat a reserved slot specially: there is no in-flight
+    /// CoreBluetooth attempt to two-phase-cancel, so they record the failure into `stopping`
+    /// and `awaitConnect`'s attach resolves it directly.
+    ///
+    /// - Throws: ``BLESwiftError/duplicateConnect(_:)`` if the slot is already occupied;
+    ///   ``BLESwiftError/unexpectedPeripheral(_:)`` if CoreBluetooth no longer knows
+    ///   `identifier`.
+    private func reserveConnectingSlot(
+        identifier: PeripheralIdentifier,
+        policy: ReconnectPolicy,
+        timeout: Duration?,
+        warningOptions: WarningOptions
+    ) throws {
+        guard connections[identifier] == nil else {
+            throw BLESwiftError.duplicateConnect(identifier)
+        }
+        guard let target = manager?.retrievePeripherals(withIdentifiers: [identifier.uuid]).first else {
+            throw BLESwiftError.unexpectedPeripheral(identifier)
+        }
+
+        // Wire the peripheral's event delivery BEFORE the attempt goes live — the one shared
+        // mechanism for every session-creating path (see `awaitConnect`/`adoptRestoredConnection`).
+        // `awaitConnect` issues the actual `manager.connect` only once it has attached its
+        // continuation, so nothing can be delivered here before that.
+        target.eventHandler = { [weak self] event in
+            guard let self else { return }
+            self.assumeIsolated { $0.handle(event, from: identifier) }
+        }
+
+        connections[identifier] = .connecting(Connecting(
+            identifier: identifier,
+            peripheral: target,
+            policy: policy,
+            timeout: timeout,
+            warningOptions: warningOptions,
+            continuation: nil,
+            stopping: nil
+        ))
+    }
+
+    /// Attaches a pending connect continuation to the slot ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:)``
+    /// already reserved for `id` (reading back the peripheral that reservation resolved),
     /// starts the CoreBluetooth connection attempt, and suspends until ``handle(_:)``
     /// resolves it from the `didConnect`/`didFailToConnect`/`didDisconnect` path — never
-    /// directly from here.
+    /// directly from here. Does **not** create the ``connections`` entry itself; the
+    /// reservation did, synchronously, before this suspension (that is what closes the
+    /// concurrent-connect TOCTOU window). If a cancel/timeout raced in during the reservation
+    /// window it is resolved here directly, since no CoreBluetooth attempt was issued yet.
     ///
     /// Wrapped in `withTaskCancellationHandler` so that cancelling the surrounding `Task`
     /// (whether genuine caller cancellation, or ``establishConnection(identifier:policy:timeout:warningOptions:)``'s
@@ -905,32 +1014,41 @@ public actor Central {
     ) async throws -> Peripheral {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Peripheral, Error>) in
-                guard let target = manager?.retrievePeripherals(withIdentifiers: [id.uuid]).first else {
-                    continuation.resume(throwing: BLESwiftError.unexpectedPeripheral(id))
+                // Attach to the slot the caller reserved synchronously via
+                // `reserveConnectingSlot` — do NOT create it here. A reserved slot is
+                // `.connecting` with a `nil` continuation (and no CoreBluetooth attempt
+                // issued yet).
+                guard case .connecting(var connecting) = connections[id], connecting.continuation == nil else {
+                    // The expected reservation is gone or already attached. Under the
+                    // reserve-then-attach discipline only this method ever attaches to or
+                    // clears a reserved entry, and the reservation is written synchronously
+                    // just before this suspension, so this is unreachable in practice —
+                    // resolve defensively rather than orphan the continuation.
+                    continuation.resume(throwing: BLESwiftError.operationCancelled)
                     return
                 }
 
-                // Wire the peripheral's event delivery BEFORE initiating the connection,
-                // so no GATT callback can ever be missed — `CBCentralManager.connect` does
-                // not do this implicitly. Also covers every reconnect attempt and the
-                // restoration manual re-connect, which route through here.
-                target.eventHandler = { [weak self] event in
-                    guard let self else { return }
-                    self.assumeIsolated { $0.handle(event, from: id) }
+                // A cancel/timeout/disconnect that raced in during the reservation window —
+                // before any CoreBluetooth `connect` was issued — recorded its error in
+                // `stopping`. There is no in-flight CoreBluetooth attempt to tear down, so
+                // resolve here directly (the same immediate-resolution rationale as
+                // `failPendingConnect`'s no-radio branch, NOT a two-phase deferral).
+                if let stopping = connecting.stopping {
+                    connections.removeValue(forKey: id)
+                    connecting.peripheral.eventHandler = nil
+                    continuation.resume(throwing: stopping)
+                    return
                 }
 
-                connections[id] = .connecting(Connecting(
-                    identifier: id,
-                    peripheral: target,
-                    policy: policy,
-                    timeout: timeout,
-                    warningOptions: warningOptions,
-                    continuation: continuation,
-                    stopping: nil
-                ))
+                // Normal attach: wire the continuation into the reserved slot, THEN issue the
+                // CoreBluetooth connect — never before, so no `didConnect`/`didFailToConnect`
+                // can land while the slot is still reserved-but-unattached. The peripheral was
+                // resolved and its event delivery wired at reservation time.
+                connecting.continuation = continuation
+                connections[id] = .connecting(connecting)
                 connectionBroadcaster.yield(.connecting(id))
                 log("Connecting to \(id)", level: .info, category: "connection")
-                manager?.connect(target, options: warningOptions)
+                manager?.connect(connecting.peripheral, options: warningOptions)
             }
         } onCancel: {
             self.queue.async {
@@ -958,6 +1076,17 @@ public actor Central {
     private func failPendingConnect(for id: PeripheralIdentifier, error: Error) {
         guard case .connecting(var connecting) = connections[id] else { return }
         guard connecting.stopping == nil else { return }
+
+        // Reserved-but-unattached slot (see `reserveConnectingSlot`): no CoreBluetooth
+        // attempt has been issued yet, so there is nothing to cancel and no
+        // `didFailToConnect`/`didDisconnect` will ever arrive. Just record the error;
+        // `awaitConnect`'s attach resolves the pending continuation with it. Uniform across
+        // radio states — there is genuinely nothing to tear down either way.
+        if connecting.continuation == nil {
+            connecting.stopping = error
+            connections[id] = .connecting(connecting)
+            return
+        }
 
         if state == .poweredOn {
             connecting.stopping = error
@@ -1365,6 +1494,18 @@ public actor Central {
             log("Reconnect attempt \(attempt) for \(identifier)", level: .info, category: "connection")
 
             do {
+                // Reserve the slot synchronously (same discipline as user `connect(_:)`) so a
+                // user `connect(id)` racing this reconnect attempt resolves cleanly: whichever
+                // reserves first wins, and the other throws/observes `.duplicateConnect`
+                // instead of overwriting a live attempt. The `connections[identifier] == nil`
+                // guard above and this reservation run in the same actor turn (nothing
+                // suspends between them), so the reservation cannot spuriously fail.
+                try reserveConnectingSlot(
+                    identifier: identifier,
+                    policy: policy,
+                    timeout: timeout,
+                    warningOptions: warningOptions
+                )
                 _ = try await establishConnection(
                     identifier: identifier,
                     policy: policy,
@@ -3175,9 +3316,16 @@ public actor Central {
         }
 
         do {
-            guard connections[identifier] == nil else {
-                throw BLESwiftError.duplicateConnect(identifier)
-            }
+            // Reserve the slot synchronously (same discipline as user `connect(_:)`) — throws
+            // `.duplicateConnect(identifier)` if the slot is already occupied (e.g. a user
+            // `connect(id)` for this same restored id landed first, once routing had consumed
+            // `pendingRestoration`), so the two never overwrite each other's attempt.
+            try reserveConnectingSlot(
+                identifier: identifier,
+                policy: .never,
+                timeout: timeout,
+                warningOptions: configuration.warningOptions
+            )
             _ = try await establishConnection(
                 identifier: identifier,
                 policy: .never,
@@ -3296,10 +3444,21 @@ private struct Connecting {
     let policy: ReconnectPolicy
     let timeout: Duration?
     let warningOptions: WarningOptions
-    /// Resumed exactly once, by `Central.handleTermination(identifier:error:)` (success or
-    /// failure) — never resumed directly by whatever *requests* cancellation
-    /// (`Central.failPendingConnect(for:error:)`), matching the two-phase-cancel ground
-    /// truth.
+    /// The pending connect continuation. `nil` in two distinct situations:
+    /// 1. **Reserved-but-unattached** — between `Central.reserveConnectingSlot(...)` writing
+    ///    this entry synchronously and `Central.awaitConnect(...)` attaching its continuation
+    ///    (and only then issuing the CoreBluetooth `connect`). While `nil` here, no
+    ///    CoreBluetooth attempt has been issued, so the cancel paths treat the slot specially
+    ///    (record into `stopping`, resolved by `awaitConnect`'s attach) rather than
+    ///    two-phase-cancelling a nonexistent attempt. This is the slot-reservation that
+    ///    closes the concurrent-connect TOCTOU deadlock.
+    /// 2. **Taken** — once resumed, `Central` sets it back to `nil` before/while transitioning
+    ///    the entry away from `.connecting`.
+    ///
+    /// When non-`nil` and a CoreBluetooth attempt is in flight, it is resumed exactly once,
+    /// by `Central.handleTermination(identifier:error:)` (success or failure) — never resumed
+    /// directly by whatever *requests* cancellation (`Central.failPendingConnect(for:error:)`),
+    /// matching the two-phase-cancel ground truth.
     var continuation: CheckedContinuation<Peripheral, Error>?
     /// Non-`nil` once cancellation (task cancellation, timeout, `cancelAllOperations`) has
     /// been requested for this attempt — the error `continuation` will eventually resume
