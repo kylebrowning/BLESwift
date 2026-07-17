@@ -27,7 +27,7 @@ struct ConnectionTests {
         let peripheral = try await central.connect(fakePeripheral.peripheralIdentifier)
         #expect(peripheral.id == fakePeripheral.peripheralIdentifier)
 
-        guard case .connected(let connected) = await central.connectionState else {
+        guard case .connected(let connected) = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .connected")
             return
         }
@@ -69,7 +69,7 @@ struct ConnectionTests {
             #expect(nsError.code == 42)
         }
 
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected after a failed connect")
             return
         }
@@ -90,7 +90,7 @@ struct ConnectionTests {
         }
     }
 
-    @Test("connect() while already connecting throws .multipleConnectNotSupported")
+    @Test("connect() while already connecting throws .duplicateConnect(id)")
     func doubleConnectRejected() async throws {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         register(fakePeripheral, on: fakeCentral)
@@ -104,9 +104,9 @@ struct ConnectionTests {
 
         do {
             _ = try await central.connect(fakePeripheral.peripheralIdentifier)
-            Issue.record("expected .multipleConnectNotSupported")
+            Issue.record("expected .duplicateConnect(fakePeripheral.peripheralIdentifier)")
         } catch let error as BLESwiftError {
-            #expect(error == .multipleConnectNotSupported)
+            #expect(error == .duplicateConnect(fakePeripheral.peripheralIdentifier))
         } catch {
             Issue.record("expected a BLESwiftError, got \(error)")
         }
@@ -117,7 +117,7 @@ struct ConnectionTests {
         _ = await firstAttempt.value
     }
 
-    @Test("connect() while connected throws .multipleConnectNotSupported")
+    @Test("connect() while connected throws .duplicateConnect(id)")
     func connectWhileConnectedRejected() async throws {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         register(fakePeripheral, on: fakeCentral)
@@ -126,9 +126,9 @@ struct ConnectionTests {
 
         do {
             _ = try await central.connect(fakePeripheral.peripheralIdentifier)
-            Issue.record("expected .multipleConnectNotSupported")
+            Issue.record("expected .duplicateConnect(fakePeripheral.peripheralIdentifier)")
         } catch let error as BLESwiftError {
-            #expect(error == .multipleConnectNotSupported)
+            #expect(error == .duplicateConnect(fakePeripheral.peripheralIdentifier))
         } catch {
             Issue.record("expected a BLESwiftError, got \(error)")
         }
@@ -208,9 +208,9 @@ struct ConnectionTests {
         fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
         _ = try await central.connect(fakePeripheral.peripheralIdentifier)
 
-        try await central.disconnect()
+        try await central.disconnect(fakePeripheral.peripheralIdentifier)
 
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected after disconnect()")
             return
         }
@@ -218,10 +218,10 @@ struct ConnectionTests {
 
     @Test("disconnect() with nothing connected throws .notConnected")
     func disconnectWithoutConnectionThrows() async throws {
-        let (central, _, _) = makeTestCentral()
+        let (central, _, fakePeripheral) = makeTestCentral()
 
         do {
-            try await central.disconnect()
+            try await central.disconnect(fakePeripheral.peripheralIdentifier)
             Issue.record("expected .notConnected")
         } catch let error as BLESwiftError {
             #expect(error == .notConnected)
@@ -245,12 +245,12 @@ struct ConnectionTests {
         fakeCentral.onQueue {}
 
         let firstDisconnect = Task {
-            try await central.disconnect()
+            try await central.disconnect(fakePeripheral.peripheralIdentifier)
         }
-        await waitUntil { await central.connectionState.isDisconnecting }
+        await waitUntil { await central.connectionState(of: fakePeripheral.peripheralIdentifier).isDisconnecting }
 
         do {
-            try await central.disconnect()
+            try await central.disconnect(fakePeripheral.peripheralIdentifier)
             Issue.record("expected .multipleDisconnectNotSupported")
         } catch let error as BLESwiftError {
             #expect(error == .multipleDisconnectNotSupported)
@@ -290,7 +290,7 @@ struct ConnectionTests {
             Issue.record("expected a BLESwiftError, got \(error)")
         }
 
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected")
             return
         }
@@ -311,7 +311,7 @@ struct ConnectionTests {
         await Task.yield()
 
         _ = try await central.connect(fakePeripheral.peripheralIdentifier)
-        try await central.disconnect()
+        try await central.disconnect(fakePeripheral.peripheralIdentifier)
 
         let collected = await collector.value
         #expect(collected.count == 3)
@@ -365,7 +365,7 @@ struct ConnectionTests {
             Issue.record("expected .connected at index 5, got \(collected[5])")
         }
 
-        guard case .connected = await central.connectionState else {
+        guard case .connected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected connectionState == .connected after a successful reconnect")
             return
         }
@@ -381,12 +381,12 @@ struct ConnectionTests {
             fakePeripheral.peripheralIdentifier,
             reconnect: .always(maxAttempts: 3, backoff: .milliseconds(10))
         )
-        try await central.disconnect()
+        try await central.disconnect(fakePeripheral.peripheralIdentifier)
 
         // Give any (incorrect) reconnect loop a chance to fire.
         try await Task.sleep(for: .milliseconds(100))
 
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected with no reconnect attempted")
             return
         }
@@ -457,7 +457,7 @@ struct ConnectionTests {
         // Give the (exhausted) loop a moment to fully wind down, then confirm no third
         // .reconnecting ever arrives.
         try await Task.sleep(for: .milliseconds(80))
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected after reconnect attempts are exhausted")
             return
         }
@@ -485,12 +485,12 @@ struct ConnectionTests {
         // than throw `.notConnected` — regression test for the "zombie reconnect loop"
         // defect (an explicit disconnect during backoff previously left the loop running,
         // producing a second connect attempt and a surprise reconnection afterward).
-        try await central.disconnect()
+        try await central.disconnect(fakePeripheral.peripheralIdentifier)
 
         // Wait past the original backoff window to prove no reconnect attempt ever fires.
         try await Task.sleep(for: .milliseconds(450))
 
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected — no reconnect should have completed after disconnect() cancelled the backoff")
             return
         }
@@ -519,7 +519,7 @@ struct ConnectionTests {
 
         try await Task.sleep(for: .milliseconds(450))
 
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected — no reconnect should have completed after cancelAllOperations() cancelled the backoff")
             return
         }
@@ -620,7 +620,7 @@ struct ConnectionTests {
         _ = try await central.connect(fakePeripheral.peripheralIdentifier)
         let callsAfterConnect = fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount }
 
-        let disconnectTask = Task { try await central.disconnect() }
+        let disconnectTask = Task { try await central.disconnect(fakePeripheral.peripheralIdentifier) }
         await waitUntil { fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
         try await disconnectTask.value
@@ -647,7 +647,7 @@ struct ConnectionTests {
         #expect(fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount } >= 1)
 
         // The session is live immediately — no connect() call was ever made.
-        guard case .connected(let peripheral) = await central.connectionState else {
+        guard case .connected(let peripheral) = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .connected immediately after an adopting init")
             return
         }
@@ -658,6 +658,374 @@ struct ConnectionTests {
         fakePeripheral.onQueue { fakePeripheral.scriptedReadValues[characteristic] = scripted }
         let value: Data = try await peripheral.read(from: characteristic)
         #expect(value == scripted)
+    }
+}
+
+/// Exercises Phase 1's multi-peripheral connection support: N independent
+/// connect/disconnect/reconnect/cancel lifecycles tracked simultaneously, keyed by
+/// `PeripheralIdentifier` — the `connections`/`reconnectLoops` dictionaries replacing the
+/// old single `Phase`/`reconnectTask`. Driven through `makeTestCentral()`'s primary fake
+/// peripheral plus `addFakePeripheral(to:fakeCentral:)` for every additional one.
+@Suite("Multi-peripheral connection lifecycle")
+struct MultiPeripheralConnectionTests {
+
+    private static let heartRateService = ServiceIdentifier(uuid: "180D")
+    private static let heartRateMeasurement = CharacteristicIdentifier(uuid: "2A37", service: heartRateService)
+
+    @Test("Two peripherals connect concurrently: both connectionState(of:) report .connected; connectedPeripherals has both, sorted")
+    func twoConcurrentConnections() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
+        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+        register(fakePeripheralA, on: fakeCentral)
+        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+
+        async let connectA = central.connect(fakePeripheralA.peripheralIdentifier)
+        async let connectB = central.connect(fakePeripheralB.peripheralIdentifier)
+        let (resolvedA, resolvedB) = try await (connectA, connectB)
+
+        #expect(resolvedA.id == fakePeripheralA.peripheralIdentifier)
+        #expect(resolvedB.id == fakePeripheralB.peripheralIdentifier)
+
+        guard case .connected = await central.connectionState(of: fakePeripheralA.peripheralIdentifier) else {
+            Issue.record("expected A .connected")
+            return
+        }
+        guard case .connected = await central.connectionState(of: fakePeripheralB.peripheralIdentifier) else {
+            Issue.record("expected B .connected")
+            return
+        }
+
+        let connected = await central.connectedPeripherals
+        let expectedIDs = [fakePeripheralA.peripheralIdentifier, fakePeripheralB.peripheralIdentifier]
+            .sorted { $0.uuid.uuidString < $1.uuid.uuidString }
+        #expect(connected.map(\.id) == expectedIDs)
+    }
+
+    @Test("connect() to B while connected to A succeeds; connect() to A again throws .duplicateConnect(A)")
+    func connectToSecondPeripheralWhileFirstConnected() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
+        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+        register(fakePeripheralA, on: fakeCentral)
+        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+
+        _ = try await central.connect(fakePeripheralA.peripheralIdentifier)
+        let peripheralB = try await central.connect(fakePeripheralB.peripheralIdentifier)
+        #expect(peripheralB.id == fakePeripheralB.peripheralIdentifier)
+
+        do {
+            _ = try await central.connect(fakePeripheralA.peripheralIdentifier)
+            Issue.record("expected .duplicateConnect(A)")
+        } catch let error as BLESwiftError {
+            #expect(error == .duplicateConnect(fakePeripheralA.peripheralIdentifier))
+        } catch {
+            Issue.record("expected a BLESwiftError, got \(error)")
+        }
+    }
+
+    @Test("Disconnecting A leaves B's session fully intact: B's pending GATT op survives A's disconnect")
+    func disconnectingOnePeripheralLeavesAnotherIntact() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
+        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+        register(fakePeripheralA, on: fakeCentral)
+        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+
+        _ = try await central.connect(fakePeripheralA.peripheralIdentifier)
+        let peripheralB = try await central.connect(fakePeripheralB.peripheralIdentifier)
+
+        fakePeripheralB.onQueue {
+            fakePeripheralB.holdReadCompletions = true
+            fakePeripheralB.scriptedReadValues[Self.heartRateMeasurement] = Data([0x42])
+        }
+
+        let readTask = Task<UInt8, Error> {
+            try await peripheralB.read(from: Self.heartRateMeasurement)
+        }
+        await waitUntil { fakePeripheralB.onQueue { fakePeripheralB.readCallCount } == 1 }
+
+        try await central.disconnect(fakePeripheralA.peripheralIdentifier)
+
+        guard case .disconnected = await central.connectionState(of: fakePeripheralA.peripheralIdentifier) else {
+            Issue.record("expected A .disconnected")
+            return
+        }
+        guard case .connected = await central.connectionState(of: fakePeripheralB.peripheralIdentifier) else {
+            Issue.record("expected B still .connected")
+            return
+        }
+
+        fakePeripheralB.simulateNextHeldReadCompletion()
+        let value = try await readTask.value
+        #expect(value == 0x42)
+    }
+
+    @Test("An unexpected disconnect of A tears down only A: .disconnected(A) observed on connectionEvents() while B stays .connected")
+    func unexpectedDisconnectOfOneTearsDownOnlyThatOne() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
+        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+        register(fakePeripheralA, on: fakeCentral)
+        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+
+        _ = try await central.connect(fakePeripheralA.peripheralIdentifier)
+        _ = try await central.connect(fakePeripheralB.peripheralIdentifier)
+
+        let stream = await central.connectionEvents()
+        let collector = Task { () -> ConnectionEvent? in
+            var iterator = stream.makeAsyncIterator()
+            return await iterator.next()
+        }
+        await Task.yield()
+
+        fakeCentral.simulateDisconnect(fakePeripheralA.peripheralIdentifier, error: nil)
+
+        guard let event = await collector.value, case .disconnected(let identifier, _, _) = event else {
+            Issue.record("expected .disconnected")
+            return
+        }
+        #expect(identifier == fakePeripheralA.peripheralIdentifier)
+
+        guard case .disconnected = await central.connectionState(of: fakePeripheralA.peripheralIdentifier) else {
+            Issue.record("expected A .disconnected")
+            return
+        }
+        guard case .connected = await central.connectionState(of: fakePeripheralB.peripheralIdentifier) else {
+            Issue.record("expected B still .connected")
+            return
+        }
+    }
+
+    @Test("Independent reconnect loops: A (.always) reconnects on unexpected disconnect, B (.never) does not; disconnect(A) mid-backoff cancels only A's loop")
+    func independentReconnectLoops() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
+        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+        register(fakePeripheralA, on: fakeCentral)
+        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+
+        _ = try await central.connect(
+            fakePeripheralA.peripheralIdentifier,
+            reconnect: .always(maxAttempts: nil, backoff: .milliseconds(300))
+        )
+        _ = try await central.connect(fakePeripheralB.peripheralIdentifier, reconnect: .never)
+
+        let stream = await central.connectionEvents()
+        let collector = Task { () -> [ConnectionEvent] in
+            var collected: [ConnectionEvent] = []
+            var iterator = stream.makeAsyncIterator()
+            for _ in 0..<2 {
+                guard let event = await iterator.next() else { break }
+                collected.append(event)
+            }
+            return collected
+        }
+        await Task.yield()
+
+        // Unexpected disconnect of BOTH.
+        fakeCentral.simulateDisconnect(fakePeripheralA.peripheralIdentifier, error: nil)
+        fakeCentral.simulateDisconnect(fakePeripheralB.peripheralIdentifier, error: nil)
+
+        let collected = await collector.value
+        #expect(collected.count == 2)
+        for event in collected {
+            guard case .disconnected(let identifier, _, let willReconnect) = event else {
+                Issue.record("expected .disconnected, got \(event)")
+                continue
+            }
+            if identifier == fakePeripheralA.peripheralIdentifier {
+                #expect(willReconnect)
+            } else if identifier == fakePeripheralB.peripheralIdentifier {
+                #expect(!willReconnect)
+            }
+        }
+
+        // B never reconnects — give any (incorrect) attempt a chance to fire.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(fakeCentral.onQueue { fakeCentral.connectCallCounts[fakePeripheralB.identifier] } == 1)
+
+        // A's reconnect loop is mid-backoff (300ms); cancel it via disconnect(A).
+        try await central.disconnect(fakePeripheralA.peripheralIdentifier)
+
+        try await Task.sleep(for: .milliseconds(450))
+
+        guard case .disconnected = await central.connectionState(of: fakePeripheralA.peripheralIdentifier) else {
+            Issue.record("expected A .disconnected — no reconnect should have completed after disconnect() cancelled the backoff")
+            return
+        }
+        #expect(fakeCentral.onQueue { fakeCentral.connectCallCounts[fakePeripheralA.identifier] } == 1)
+    }
+
+    @Test("disconnectAll() with one connecting (hung) and one connected: both end; the connecting attempt throws .explicitDisconnect; no reconnects")
+    func disconnectAllEndsEveryTrackedPeripheral() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
+        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+        register(fakePeripheralA, on: fakeCentral)
+        fakeCentral.simulateStateChange(.poweredOn)
+        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+
+        _ = try await central.connect(
+            fakePeripheralA.peripheralIdentifier,
+            reconnect: .always(maxAttempts: 3, backoff: .milliseconds(10))
+        )
+
+        fakeCentral.onQueue { fakeCentral.connectBehaviors[fakePeripheralB.identifier] = .hang }
+        let connectBTask = Task {
+            try await central.connect(fakePeripheralB.peripheralIdentifier, timeout: nil)
+        }
+        await waitUntil { fakeCentral.onQueue { fakeCentral.connectCallCounts[fakePeripheralB.identifier] } == 1 }
+
+        // `disconnectAll()` processes every tracked peripheral sequentially in an
+        // unspecified (dictionary) order, fully awaiting each one's own CoreBluetooth
+        // `cancelPeripheralConnection` confirmation before moving to the next (both A,
+        // connected, and B, connecting, need one — the radio is powered on). Confirming
+        // both concurrently, independently of which is processed first, avoids assuming an
+        // order this test must not depend on.
+        let disconnectAllTask = Task { await central.disconnectAll() }
+
+        let confirmA = Task {
+            await waitUntil { fakeCentral.onQueue { fakeCentral.cancelCallCounts[fakePeripheralA.identifier] } == 1 }
+            fakeCentral.simulateDisconnect(fakePeripheralA.peripheralIdentifier, error: nil)
+        }
+        let confirmB = Task {
+            await waitUntil { fakeCentral.onQueue { fakeCentral.cancelCallCounts[fakePeripheralB.identifier] } == 1 }
+            // The still-connecting B attempt is two-phase-cancelled: confirming its cancel
+            // resolves it throwing .explicitDisconnect.
+            fakeCentral.simulateDisconnect(fakePeripheralB.peripheralIdentifier, error: nil)
+        }
+        _ = await (confirmA.value, confirmB.value)
+        await disconnectAllTask.value
+
+        let resultB = await connectBTask.result
+        switch resultB {
+        case .success:
+            Issue.record("expected connect(B) to throw .explicitDisconnect")
+        case .failure(let error as BLESwiftError):
+            #expect(error == .explicitDisconnect)
+        case .failure(let error):
+            Issue.record("expected a BLESwiftError, got \(error)")
+        }
+
+        guard case .disconnected = await central.connectionState(of: fakePeripheralA.peripheralIdentifier) else {
+            Issue.record("expected A .disconnected")
+            return
+        }
+        guard case .disconnected = await central.connectionState(of: fakePeripheralB.peripheralIdentifier) else {
+            Issue.record("expected B .disconnected")
+            return
+        }
+
+        // No reconnect for A despite its .always policy — disconnectAll() is explicit
+        // disconnection of every tracked peripheral, which never reconnects.
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(fakeCentral.onQueue { fakeCentral.connectCallCounts[fakePeripheralA.identifier] } == 1)
+    }
+
+    @Test("cancelAllOperations() with two connected sessions fails pending GATT ops on both; both stay connected")
+    func cancelAllOperationsFailsGATTOpsOnBothConnectedPeripherals() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
+        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+        register(fakePeripheralA, on: fakeCentral)
+        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+
+        let peripheralA = try await central.connect(fakePeripheralA.peripheralIdentifier)
+        let peripheralB = try await central.connect(fakePeripheralB.peripheralIdentifier)
+
+        fakePeripheralA.onQueue { fakePeripheralA.holdReadCompletions = true }
+        fakePeripheralB.onQueue { fakePeripheralB.holdReadCompletions = true }
+
+        let readTaskA = Task<UInt8, Error> { try await peripheralA.read(from: Self.heartRateMeasurement) }
+        let readTaskB = Task<UInt8, Error> { try await peripheralB.read(from: Self.heartRateMeasurement) }
+        await waitUntil { fakePeripheralA.onQueue { fakePeripheralA.readCallCount } == 1 }
+        await waitUntil { fakePeripheralB.onQueue { fakePeripheralB.readCallCount } == 1 }
+
+        await central.cancelAllOperations()
+
+        for result in [await readTaskA.result, await readTaskB.result] {
+            switch result {
+            case .success:
+                Issue.record("expected the read to fail")
+            case .failure(let error as BLESwiftError):
+                #expect(error == .cancelled)
+            case .failure(let error):
+                Issue.record("expected a BLESwiftError, got \(error)")
+            }
+        }
+
+        guard case .connected = await central.connectionState(of: fakePeripheralA.peripheralIdentifier) else {
+            Issue.record("expected A still .connected")
+            return
+        }
+        guard case .connected = await central.connectionState(of: fakePeripheralB.peripheralIdentifier) else {
+            Issue.record("expected B still .connected")
+            return
+        }
+    }
+
+    // MARK: - Adversarial probes
+
+    @Test("connect(A) racing an in-flight disconnect(A) throws .duplicateConnect(A) while disconnecting, then succeeds after termination completes")
+    func connectRacingInFlightDisconnectThrowsDuplicateThenSucceeds() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
+        register(fakePeripheralA, on: fakeCentral)
+        fakeCentral.simulateStateChange(.poweredOn)
+        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+
+        _ = try await central.connect(fakePeripheralA.peripheralIdentifier)
+
+        let disconnectTask = Task { try await central.disconnect(fakePeripheralA.peripheralIdentifier) }
+        await waitUntil { fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
+
+        do {
+            _ = try await central.connect(fakePeripheralA.peripheralIdentifier)
+            Issue.record("expected .duplicateConnect while disconnecting")
+        } catch let error as BLESwiftError {
+            #expect(error == .duplicateConnect(fakePeripheralA.peripheralIdentifier))
+        } catch {
+            Issue.record("expected a BLESwiftError, got \(error)")
+        }
+
+        fakeCentral.simulateDisconnect(fakePeripheralA.peripheralIdentifier, error: nil)
+        try await disconnectTask.value
+
+        // The identifier is free again once the disconnect has fully resolved.
+        let reconnected = try await central.connect(fakePeripheralA.peripheralIdentifier)
+        #expect(reconnected.id == fakePeripheralA.peripheralIdentifier)
+    }
+
+    @Test("Power-off with A connected and B connecting fails both with .bluetoothUnavailable; the connections map is empty afterward")
+    func powerOffFailsEveryTrackedPeripheral() async throws {
+        let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
+        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+        register(fakePeripheralA, on: fakeCentral)
+        fakeCentral.simulateStateChange(.poweredOn)
+        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+
+        _ = try await central.connect(fakePeripheralA.peripheralIdentifier)
+
+        fakeCentral.onQueue { fakeCentral.connectBehaviors[fakePeripheralB.identifier] = .hang }
+        let connectBTask = Task {
+            try await central.connect(fakePeripheralB.peripheralIdentifier, timeout: nil)
+        }
+        await waitUntil { fakeCentral.onQueue { fakeCentral.connectCallCounts[fakePeripheralB.identifier] } == 1 }
+
+        fakeCentral.simulateStateChange(.poweredOff)
+
+        let resultB = await connectBTask.result
+        switch resultB {
+        case .success:
+            Issue.record("expected connect(B) to throw .bluetoothUnavailable")
+        case .failure(let error as BLESwiftError):
+            #expect(error == .bluetoothUnavailable)
+        case .failure(let error):
+            Issue.record("expected a BLESwiftError, got \(error)")
+        }
+
+        guard case .disconnected = await central.connectionState(of: fakePeripheralA.peripheralIdentifier) else {
+            Issue.record("expected A .disconnected")
+            return
+        }
+        guard case .disconnected = await central.connectionState(of: fakePeripheralB.peripheralIdentifier) else {
+            Issue.record("expected B .disconnected")
+            return
+        }
+        #expect(await central.connectedPeripherals.isEmpty)
     }
 }
 

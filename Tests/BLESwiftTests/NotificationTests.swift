@@ -35,7 +35,7 @@ struct NotificationTests {
 
         // Both subscribers registered (registration is asynchronous) and notify enabled,
         // before emitting anything both are expected to observe.
-        await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement) == 2 }
+        await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheral.peripheralIdentifier) == 2 }
         await waitFor { fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
 
         fakePeripheral.simulateNotification(for: Self.heartRateMeasurement, value: Data([1]))
@@ -67,7 +67,7 @@ struct NotificationTests {
 
         // Second subscriber fully registered (registration is asynchronous): still no
         // further setNotifyValue call.
-        await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement) == 2 }
+        await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheral.peripheralIdentifier) == 2 }
         fakePeripheral.simulateNotification(for: Self.heartRateMeasurement, value: Data([1]))
         fakePeripheral.onQueue {} // flush the delivery
         #expect(fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 1)
@@ -75,7 +75,7 @@ struct NotificationTests {
         // First subscriber cancels: still no disable — a subscriber remains.
         taskA.cancel()
         _ = try? await taskA.value
-        await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement) == 1 }
+        await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheral.peripheralIdentifier) == 1 }
         #expect(fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 1)
 
         // Last subscriber cancels: exactly one disable.
@@ -106,7 +106,7 @@ struct NotificationTests {
         let dataTask = Task { try await collectData(dataStream, count: 2) }
 
         // Both subscribers registered (registration is asynchronous) before emitting.
-        await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement) == 2 }
+        await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheral.peripheralIdentifier) == 2 }
         await waitFor { fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
 
         // 0xFF is not valid standalone UTF-8: fails the String subscriber's decode layer,
@@ -149,7 +149,7 @@ struct NotificationTests {
         let error = await task.value
         #expect(error as? BLESwiftError == .unexpectedDisconnect)
 
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected")
             return
         }

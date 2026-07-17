@@ -44,6 +44,19 @@ public struct Peripheral: Sendable {
         }
         return central
     }
+
+    /// Disconnects this peripheral — the ergonomic call-site for
+    /// `Central.disconnect(_:immediate:)`.
+    ///
+    /// - Parameter immediate: If `true`, fails pending operations with
+    ///   ``BLESwiftError/explicitDisconnect`` rather than waiting for them to finish.
+    ///   Defaults to `false`.
+    /// - Throws: ``BLESwiftError/notConnected`` if the owning `Central` has already been
+    ///   deallocated, or as documented on `Central.disconnect(_:immediate:)`.
+    public func disconnect(immediate: Bool = false) async throws {
+        let central = try resolveCentral()
+        try await central.disconnect(id, immediate: immediate)
+    }
 }
 
 /// Holds a `weak` reference to a ``Central``, letting ``Peripheral`` refer to the actor that

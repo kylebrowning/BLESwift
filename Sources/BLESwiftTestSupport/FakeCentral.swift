@@ -55,9 +55,12 @@ public final class FakeCentral: CentralManaging, Sendable {
     nonisolated(unsafe) private var _radioState: CentralState
     nonisolated(unsafe) private var _eventHandler: ((CentralEvent) -> Void)?
     nonisolated(unsafe) private var _connectBehavior: ConnectBehavior = .succeed
+    nonisolated(unsafe) private var _connectBehaviors: [UUID: ConnectBehavior] = [:]
     nonisolated(unsafe) private var _connectCallCount = 0
+    nonisolated(unsafe) private var _connectCallCounts: [UUID: Int] = [:]
     nonisolated(unsafe) private var _lastConnectOptions: WarningOptions?
     nonisolated(unsafe) private var _cancelCallCount = 0
+    nonisolated(unsafe) private var _cancelCallCounts: [UUID: Int] = [:]
     nonisolated(unsafe) private var _scanCallCount = 0
     nonisolated(unsafe) private var _lastScanOptions: ScanOptions?
     nonisolated(unsafe) private var _stopScanCallCount = 0
@@ -121,8 +124,9 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Determines how the next call(s) to ``connect(_:options:)`` resolve. Defaults to
-    /// `.succeed`. Configure via ``onQueue(_:)``.
+    /// Determines how the next call(s) to ``connect(_:options:)`` resolve, for a peripheral
+    /// with no entry in ``connectBehaviors``. Defaults to `.succeed`. Configure via
+    /// ``onQueue(_:)``.
     public var connectBehavior: ConnectBehavior {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -134,10 +138,35 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// The number of times ``connect(_:options:)`` has been called.
+    /// Per-peripheral overrides of ``connectBehavior``, keyed by identifier — lets a
+    /// multi-peripheral test script independent outcomes for `connect(_:options:)` calls
+    /// against different fakes (e.g. one `.succeed`, one `.hang`). A peripheral with no
+    /// entry here falls back to ``connectBehavior``. Empty by default. Configure via
+    /// ``onQueue(_:)``.
+    public var connectBehaviors: [UUID: ConnectBehavior] {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _connectBehaviors
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _connectBehaviors = newValue
+        }
+    }
+
+    /// The number of times ``connect(_:options:)`` has been called, across every
+    /// peripheral.
     public var connectCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _connectCallCount
+    }
+
+    /// The number of times ``connect(_:options:)`` has been called, keyed by the target
+    /// peripheral's identifier — lets a multi-peripheral test assert connection attempts
+    /// per peripheral independently. Missing keys mean zero calls for that identifier.
+    public var connectCallCounts: [UUID: Int] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _connectCallCounts
     }
 
     /// The `options` passed to the most recent ``connect(_:options:)`` call (`nil` before
@@ -148,10 +177,18 @@ public final class FakeCentral: CentralManaging, Sendable {
         return _lastConnectOptions
     }
 
-    /// The number of times ``cancelPeripheralConnection(_:)`` has been called.
+    /// The number of times ``cancelPeripheralConnection(_:)`` has been called, across every
+    /// peripheral.
     public var cancelCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _cancelCallCount
+    }
+
+    /// The number of times ``cancelPeripheralConnection(_:)`` has been called, keyed by the
+    /// target peripheral's identifier. Missing keys mean zero calls for that identifier.
+    public var cancelCallCounts: [UUID: Int] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _cancelCallCounts
     }
 
     /// The number of times ``scanForPeripherals(withServices:options:)`` has been called.
@@ -278,7 +315,8 @@ public final class FakeCentral: CentralManaging, Sendable {
         _stopScanCallCount += 1
     }
 
-    /// Records the call and, per ``connectBehavior``, asynchronously delivers
+    /// Records the call and, per ``connectBehaviors`` (falling back to ``connectBehavior``
+    /// if `peripheral`'s identifier has no entry there), asynchronously delivers
     /// `.didConnect`, `.didFailToConnect`, or nothing (`.hang`) on ``queue`` — mirroring
     /// that a real `connect(_:options:)` call returns immediately while CoreBluetooth
     /// resolves the attempt later, on the delegate. A no-op (beyond the call count) if
@@ -291,8 +329,9 @@ public final class FakeCentral: CentralManaging, Sendable {
 
         guard let fakePeripheral = peripheral as? FakePeripheral else { return }
 
-        let behavior = _connectBehavior
         let identifier = fakePeripheral.peripheralIdentifier
+        _connectCallCounts[identifier.uuid, default: 0] += 1
+        let behavior = _connectBehaviors[identifier.uuid] ?? _connectBehavior
 
         switch behavior {
         case .succeed:
@@ -304,11 +343,14 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Records the call. A no-op beyond the call count if `peripheral` is not a
-    /// `FakePeripheral`.
+    /// Records the call, including a per-peripheral count in ``cancelCallCounts`` (a no-op
+    /// beyond the total ``cancelCallCount`` if `peripheral` is not a `FakePeripheral`).
     public func cancelPeripheralConnection(_ peripheral: any PeripheralRemote) {
         dispatchPrecondition(condition: .onQueue(queue))
         _cancelCallCount += 1
+        if let fakePeripheral = peripheral as? FakePeripheral {
+            _cancelCallCounts[fakePeripheral.identifier, default: 0] += 1
+        }
     }
 
     /// Returns the scripted peripherals from ``retrievablePeripherals`` matching

@@ -101,34 +101,40 @@ public actor Central {
     /// from any isolation domain. The scan-handling methods below are the only writers.
     private let isScanningBox = Mutex<Bool>(false)
 
-    /// This `Central`'s single-connection state machine. `private` — connection lifecycle
-    /// is entirely internal bookkeeping; callers only ever see it through
-    /// ``connectionState``, ``connectionEvents()``, and the `Peripheral` handles `connect`
-    /// hands back.
+    /// This `Central`'s per-peripheral connection state machine, keyed by
+    /// ``PeripheralIdentifier``. `private` — connection lifecycle is entirely internal
+    /// bookkeeping; callers only ever see it through ``connectionState(of:)``,
+    /// ``connectedPeripherals``, ``connectionEvents()``, and the `Peripheral` handles
+    /// `connect` hands back.
     ///
-    /// Single-`Phase`, not a dictionary keyed by peripheral: BLESwift enforces single-peripheral
-    /// connection discipline, so there is never more than one pending
-    /// connect attempt or established session to track.
-    private var phase: Phase = .idle
+    /// Absence of an entry for a given identifier IS that peripheral's idle state — there
+    /// is no `.idle` case in ``PeripheralPhase``. An entry exists for exactly as long as
+    /// that peripheral is connecting, connected, or disconnecting.
+    private var connections: [PeripheralIdentifier: PeripheralPhase] = [:]
 
-    /// The active auto-reconnect loop, if any — the **one** sanctioned unstructured `Task`
-    /// site for connection lifecycle in `Sources/` (scanning's loss/timeout timers, above,
-    /// are a separately-tracked unstructured `Task` site of their own). It is genuinely
-    /// unstructured background work (a retry loop that outlives any
-    /// single `connect`/`disconnect` call), not a delegate-callback hop. Cancelled on
-    /// explicit disconnect, a new `connect`, and `deinit`.
-    private var reconnectTask: Task<Void, Never>?
+    /// One independent auto-reconnect loop per peripheral, running while that peripheral
+    /// has no ``connections`` entry (mid-backoff) — the **one** sanctioned unstructured
+    /// `Task` site for connection lifecycle in `Sources/` (scanning's loss/timeout timers,
+    /// above, are a separately-tracked unstructured `Task` site of their own). Genuinely
+    /// unstructured background work (a retry loop that outlives any single
+    /// `connect`/`disconnect(_:)` call), not a delegate-callback hop. Each loop is
+    /// cancelled by that peripheral's own explicit disconnect, a new `connect` to it,
+    /// `cancelAllOperations(error:)`/`disconnectAll()`, and `deinit`.
+    private var reconnectLoops: [PeripheralIdentifier: ReconnectLoop] = [:]
 
-    /// Incremented every time ``scheduleReconnect(identifier:policy:timeout:warningOptions:)``
-    /// starts a new ``reconnectTask``. Lets a loop's own cleanup
-    /// (``clearReconnectTaskIfCurrent(_:)``) tell whether it's still the *current*
-    /// `reconnectTask` before clearing it — see that method's doc comment.
+    /// A global, actor-wide monotonic generation allocator — incremented every time
+    /// ``scheduleReconnect(identifier:policy:timeout:warningOptions:)`` starts a new loop,
+    /// for any peripheral. Each ``ReconnectLoop`` stores the generation it was spawned
+    /// with; ``clearReconnectLoopIfCurrent(id:generation:)`` compares against
+    /// `reconnectLoops[id]?.generation` before clearing that peripheral's entry — see that
+    /// method's doc comment.
     private var reconnectGeneration: UInt64 = 0
 
     /// Multicasts every ``ConnectionEvent`` to every ``connectionEvents()`` subscriber.
     /// Replay `.none`: a late subscriber only sees events from the point it subscribes —
     /// unlike ``stateBroadcaster``, there is no single "current value" snapshot that makes
-    /// sense to replay (``connectionState`` serves that purpose instead).
+    /// sense to replay (``connectionState(of:)``/``connectedPeripherals`` serve that
+    /// purpose instead).
     private let connectionBroadcaster = Broadcaster<ConnectionEvent>(replay: .none)
 
     /// Multicasts every `didModifyServices` invalidation as `[ServiceIdentifier]`, for
@@ -160,11 +166,22 @@ public actor Central {
     /// The in-flight manual re-connect for a restored-*connecting* peripheral —
     /// CoreBluetooth never completes a restored-connecting attempt on its own (ledger). A
     /// ledgered actor-owned `Task { }` site under the corrected policy (like
-    /// ``reconnectTask``):
+    /// ``reconnectLoops``):
     /// spawned from actor-isolated code, stored here so it is always cancellable
     /// (explicit `disconnect`/`stopAndExtractState()`/`deinit`), never spawned from the
     /// proxy.
+    ///
+    /// Deliberately kept singular (not yet keyed by identifier) in this phase — restoration
+    /// itself still routes at most one peripheral (a later phase generalizes it to N);
+    /// ``restorationConnectingIdentifier`` names which peripheral this task belongs to, so
+    /// callers that need an identifier for the now-keyed ``failPendingConnect(for:error:)``
+    /// (namely ``handleStartupBackgroundTaskExpiration()``) have one to pass.
     private var restorationTask: Task<Void, Never>?
+
+    /// The identifier ``restorationTask`` is currently re-connecting, if any. Set alongside
+    /// ``restorationTask`` in ``startRestorationConnect(_:)``, cleared alongside it in
+    /// ``runRestorationConnect(identifier:timeout:)`` and ``stopAndExtractState()``.
+    private var restorationConnectingIdentifier: PeripheralIdentifier?
 
     /// The startup background-task seam protecting the restoration window — a real
     /// `UIApplication` background task on iOS with restoration enabled, a no-op otherwise.
@@ -268,16 +285,17 @@ public actor Central {
     ///   - manager: The existing `CBCentralManager` to adopt. `Central` installs its own
     ///     event delivery (via `manager.eventHandler`, backed by a fresh
     ///     `CentralDelegateProxy`) as its delegate, replacing whatever delegate it had.
-    ///   - connectedPeripheral: An already-connected `CBPeripheral`, if any. It is adopted
-    ///     as the live session: its event delivery is re-pointed at this `Central` (so its
-    ///     GATT callbacks route here), ``connectionState`` reports `.connected` with its
-    ///     `Peripheral` handle immediately, GATT operations work through the normal
-    ///     machinery, and `.connected` is emitted on ``connectionEvents()`` (note that
-    ///     stream has no replay and no subscriber can exist before this initializer
-    ///     returns — use ``connectionState`` for the adoption snapshot). The adopted
-    ///     session's ``ReconnectPolicy`` is ``ReconnectPolicy/never`` — no `connect` call
-    ///     existed to specify one; observe the eventual disconnect and reconnect with your
-    ///     preferred policy if desired.
+    ///   - connectedPeripherals: Every already-connected `CBPeripheral`, if any. Each is
+    ///     adopted as a live session: its event delivery is re-pointed at this `Central`
+    ///     (so its GATT callbacks route here), ``connectionState(of:)`` reports
+    ///     `.connected` with its `Peripheral` handle immediately, GATT operations work
+    ///     through the normal machinery, and `.connected` is emitted on
+    ///     ``connectionEvents()`` per peripheral (note that stream has no replay and no
+    ///     subscriber can exist before this initializer returns — use
+    ///     ``connectionState(of:)``/``connectedPeripherals`` for the adoption snapshot).
+    ///     Every adopted session's ``ReconnectPolicy`` is ``ReconnectPolicy/never`` — no
+    ///     `connect` call existed to specify one; observe the eventual disconnect and
+    ///     reconnect with your preferred policy if desired. Defaults to `[]`.
     ///   - callbackQueue: The exact `DispatchSerialQueue` `manager` delivers delegate
     ///     callbacks on. Required, with no default — see the invariant above.
     ///   - configuration: Start-time options. Note that `showPowerAlert` has no effect
@@ -285,7 +303,7 @@ public actor Central {
     ///     cannot be applied retroactively. Defaults to `Configuration()`.
     public init(
         adopting manager: CBCentralManager,
-        connectedPeripheral: CBPeripheral? = nil,
+        connectedPeripherals: [CBPeripheral] = [],
         callbackQueue: DispatchSerialQueue,
         configuration: Configuration = Configuration()
     ) {
@@ -314,20 +332,21 @@ public actor Central {
         stateBox.withLock { $0 = adoptedState }
         stateBroadcaster.yield(adoptedState)
 
-        // Adopt `connectedPeripheral` as the live session (Session.adopted — the single
-        // Session-building shape shared with restoration adoption; policy `.never`, since
-        // no `connect` call existed to specify one). `.connected` is also yielded on
-        // ``connectionEvents()``; note that stream has no replay, and no subscriber can
-        // exist before this initializer returns — `connectionState` is the reliable
-        // adoption snapshot (documented on the parameter). Every direct stored-property
-        // write (here and above) must precede the `eventHandler` closures below: capturing
-        // `self` — even weakly — counts as `self` escaping (SE-0327), after which direct
-        // property mutation is no longer permitted in this synchronous init.
-        var adoptedIdentifier: PeripheralIdentifier?
-        if let connectedPeripheral {
+        // Adopt every `connectedPeripherals` entry as a live session (Session.adopted — the
+        // single Session-building shape shared with restoration adoption; policy `.never`,
+        // since no `connect` call existed to specify one). `.connected` is also yielded on
+        // ``connectionEvents()`` per peripheral; note that stream has no replay, and no
+        // subscriber can exist before this initializer returns — `connectionState(of:)`/
+        // `connectedPeripherals` are the reliable adoption snapshot (documented on the
+        // parameter). Every direct stored-property write (here and above) must precede the
+        // `eventHandler` closures below: capturing `self` — even weakly — counts as `self`
+        // escaping (SE-0327), after which direct property mutation is no longer permitted
+        // in this synchronous init.
+        var adopted: [(identifier: PeripheralIdentifier, peripheral: CBPeripheral)] = []
+        for connectedPeripheral in connectedPeripherals {
             let identifier = PeripheralIdentifier(uuid: connectedPeripheral.identifier, name: connectedPeripheral.name)
-            adoptedIdentifier = identifier
-            phase = .connected(Session.adopted(
+            adopted.append((identifier, connectedPeripheral))
+            connections[identifier] = .connected(Session.adopted(
                 identifier: identifier,
                 peripheral: connectedPeripheral,
                 warningOptions: configuration.warningOptions
@@ -336,7 +355,7 @@ public actor Central {
         }
 
         // `self` is fully initialized (every stored property has a value) by this point,
-        // so it can now be captured. Event delivery is wired last — after the session (if
+        // so it can now be captured. Event delivery is wired last — after every session (if
         // any) already exists — matching every other session-creating path's intent (wire
         // before the session is *usable* by external callers; nothing external can observe
         // this `Central` before this initializer returns).
@@ -344,7 +363,7 @@ public actor Central {
             guard let self else { return }
             self.assumeIsolated { $0.handle(event) }
         }
-        if let connectedPeripheral, let identifier = adoptedIdentifier {
+        for (identifier, connectedPeripheral) in adopted {
             connectedPeripheral.eventHandler = { [weak self] event in
                 guard let self else { return }
                 self.assumeIsolated { $0.handle(event, from: identifier) }
@@ -355,25 +374,25 @@ public actor Central {
     /// Creates a `Central` driving a custom backend — the seam that lets a scriptable
     /// fake (`BLESwiftTestSupport`'s `FakeCentral`) or any other `CentralManaging`
     /// conformance stand in for a real `CBCentralManager`. Production apps use
-    /// ``init(configuration:)`` (or ``init(adopting:connectedPeripheral:callbackQueue:configuration:)``
+    /// ``init(configuration:)`` (or ``init(adopting:connectedPeripherals:callbackQueue:configuration:)``
     /// to adopt an existing manager) instead of this initializer.
     ///
     /// - Important: `queue` **must be the exact `DispatchSerialQueue` instance** `backend`
     ///   confines its event deliveries to — the same queue-confined contract
-    ///   `CentralManaging`/`PeripheralRemote` document: every event `backend` (and
-    ///   `connectedPeripheral`, if given) produces must arrive asynchronously, on this
-    ///   exact queue. A mismatched queue is not detectable eagerly and surfaces only as an
-    ///   `assumeIsolated` trap the first time an event arrives off-queue (see
-    ///   ``init(adopting:connectedPeripheral:callbackQueue:configuration:)`` for the same
+    ///   `CentralManaging`/`PeripheralRemote` document: every event `backend` (and every
+    ///   `connectedPeripherals` entry, if given) produces must arrive asynchronously, on
+    ///   this exact queue. A mismatched queue is not detectable eagerly and surfaces only
+    ///   as an `assumeIsolated` trap the first time an event arrives off-queue (see
+    ///   ``init(adopting:connectedPeripherals:callbackQueue:configuration:)`` for the same
     ///   invariant on the production adoption path).
     ///
-    /// This initializer wires `backend.eventHandler` (and `connectedPeripheral?.eventHandler`,
-    /// if adopting) to this `Central`'s internal `handle(_:)`/`handle(_:from:)` methods,
-    /// which stay `internal` — callers never invoke them directly.
+    /// This initializer wires `backend.eventHandler` (and each adopted peripheral's
+    /// `eventHandler`) to this `Central`'s internal `handle(_:)`/`handle(_:from:)`
+    /// methods, which stay `internal` — callers never invoke them directly.
     ///
-    /// - Important: **Retention.** Unlike ``init(configuration:)``/``init(adopting:connectedPeripheral:callbackQueue:configuration:)``,
-    ///   the closures this initializer installs on `backend.eventHandler` (and
-    ///   `connectedPeripheral?.eventHandler`) capture `self` **strongly**, not weakly —
+    /// - Important: **Retention.** Unlike ``init(configuration:)``/``init(adopting:connectedPeripherals:callbackQueue:configuration:)``,
+    ///   the closures this initializer installs on `backend.eventHandler` (and each
+    ///   adopted peripheral's `eventHandler`) capture `self` **strongly**, not weakly —
     ///   `backend` is itself strongly held by this `Central` (`self.manager = backend`), so
     ///   `Central` → `backend` → closure → `Central` is a deliberate cycle, not an
     ///   oversight. This means `backend` alone keeps this `Central` alive for as long as
@@ -387,8 +406,8 @@ public actor Central {
     ///   `backend.eventHandler`. To release a `Central` created this way deterministically
     ///   — rather than letting it (and `backend`) live until `backend` itself is
     ///   deallocated, or the process exits — clear the cycle explicitly:
-    ///   `backend.eventHandler = nil` (and `connectedPeripheral?.eventHandler = nil`, if
-    ///   adopted). If you never connect and don't need deterministic teardown, this is
+    ///   `backend.eventHandler = nil` (and each adopted peripheral's `eventHandler = nil`,
+    ///   if any were adopted). If you never connect and don't need deterministic teardown, this is
     ///   harmless and expected for the short-lived test rigs this initializer exists for.
     ///
     /// - Parameters:
@@ -401,18 +420,18 @@ public actor Central {
     ///     `configuration.restoration` is non-`nil`, this mirrors the production
     ///     restoration window: it begins the (injected or no-op) task with the same
     ///     expiration wiring.
-    ///   - connectedPeripheral: A `PeripheralRemote` to adopt as the live session,
-    ///     mirroring ``init(adopting:connectedPeripheral:callbackQueue:configuration:)``'s
-    ///     adoption structure (same `Session.adopted` shape, same eventHandler-before-
-    ///     session-goes-live ordering, same `.connected` emission) — that initializer
-    ///     itself requires real CoreBluetooth objects, so this is how its adoption
-    ///     structure is exercised without hardware.
+    ///   - connectedPeripherals: `PeripheralRemote`s to adopt as live sessions, mirroring
+    ///     ``init(adopting:connectedPeripherals:callbackQueue:configuration:)``'s adoption
+    ///     structure (same `Session.adopted` shape, same eventHandler-before-
+    ///     session-goes-live ordering, same `.connected` emission per peripheral) — that
+    ///     initializer itself requires real CoreBluetooth objects, so this is how its
+    ///     adoption structure is exercised without hardware. Defaults to `[]`.
     public init(
         backend: any CentralManaging,
         queue: DispatchSerialQueue,
         configuration: Configuration = Configuration(),
         startupBackgroundTask: (any StartupBackgroundTaskRunning)? = nil,
-        connectedPeripheral: (any PeripheralRemote)? = nil
+        connectedPeripherals: [any PeripheralRemote] = []
     ) {
         self.queue = queue
         self.configuration = configuration
@@ -426,13 +445,13 @@ public actor Central {
         // Every direct stored-property write (here and above) must precede the
         // `eventHandler` closures below: capturing `self` — even weakly — counts as
         // `self` escaping (SE-0327), after which direct property mutation is no longer
-        // permitted in this synchronous init. Mirrors `init(adopting:connectedPeripheral:...)`'s
+        // permitted in this synchronous init. Mirrors `init(adopting:connectedPeripherals:...)`'s
         // adoption structure.
-        var adoptedIdentifier: PeripheralIdentifier?
-        if let connectedPeripheral {
+        var adopted: [(identifier: PeripheralIdentifier, peripheral: any PeripheralRemote)] = []
+        for connectedPeripheral in connectedPeripherals {
             let identifier = PeripheralIdentifier(uuid: connectedPeripheral.identifier, name: connectedPeripheral.name)
-            adoptedIdentifier = identifier
-            phase = .connected(Session.adopted(
+            adopted.append((identifier, connectedPeripheral))
+            connections[identifier] = .connected(Session.adopted(
                 identifier: identifier,
                 peripheral: connectedPeripheral,
                 warningOptions: configuration.warningOptions
@@ -443,9 +462,9 @@ public actor Central {
         // `self` is fully initialized (every stored property has a value) by this point,
         // so it can now be captured. Wiring is hopped onto `queue` via `queue.sync` (safe:
         // nothing else can be running on `queue` during init) because `backend`'s (and, if
-        // adopting, `connectedPeripheral`'s) `eventHandler` setter may be queue-confined,
-        // as `FakeCentral`/`FakePeripheral`'s are — precedented by the old test init's
-        // equivalent off-queue attach.
+        // adopting, each connected peripheral's) `eventHandler` setter may be
+        // queue-confined, as `FakeCentral`/`FakePeripheral`'s are — precedented by the old
+        // test init's equivalent off-queue attach.
         //
         // Captures `self` strongly (unlike the production paths' `[weak self]`, which
         // exist to avoid a real `Central` ↔ `CBCentralManager`/`CBPeripheral` retain cycle
@@ -455,15 +474,15 @@ public actor Central {
         // behavior exactly (also uncaptured-weak). This is what keeps a `Central` alive in
         // tests that discard their direct reference (`let (_, fakeCentral, ...) = ...`) —
         // a real, if incidental, dependency of this package's own test suite. Production
-        // callers own `backend`/`connectedPeripheral` themselves (a real `CBCentralManager`/
-        // `CBPeripheral`), not `Central`, so this initializer is not the production path
+        // callers own `backend`/`connectedPeripherals` themselves (a real `CBCentralManager`/
+        // `CBPeripheral`s), not `Central`, so this initializer is not the production path
         // that cycle-avoidance protects; those paths use `init(configuration:)`/
         // `init(adopting:)` instead.
         queue.sync {
             backend.eventHandler = { event in
                 self.assumeIsolated { $0.handle(event) }
             }
-            if let connectedPeripheral, let identifier = adoptedIdentifier {
+            for (identifier, connectedPeripheral) in adopted {
                 connectedPeripheral.eventHandler = { event in
                     self.assumeIsolated { $0.handle(event, from: identifier) }
                 }
@@ -487,7 +506,9 @@ public actor Central {
     /// directly — no concurrent access is possible once deinitialization has started — so
     /// this needs no `Task` hop and no `isolated deinit` (unstable, forbidden).
     deinit {
-        reconnectTask?.cancel()
+        for loop in reconnectLoops.values {
+            loop.task.cancel()
+        }
         restorationTask?.cancel()
         startupBackgroundTask.end()
     }
@@ -500,15 +521,15 @@ public actor Central {
     /// connecting) that crash the caller on failure, BLESwift never crashes: both become
     /// thrown ``BLESwiftError/stopped`` cases below.
     ///
-    /// - Returns: The underlying `CBCentralManager`, and, if this `Central` was connected
-    ///   to a real `CBPeripheral` at the time, that peripheral.
+    /// - Returns: The underlying `CBCentralManager`, and every `CBPeripheral` this `Central`
+    ///   was connected to at the time, sorted by identifier for determinism.
     /// - Throws: ``BLESwiftError/stopped`` if this `Central` has already been stopped, was not
     ///   created against a real `CBCentralManager` (only reachable via the internal
-    ///   test-only initializer — never through the public API), or a connection attempt is
-    ///   currently in progress (extracting mid-attempt would strand its pending continuation
-    ///   forever, since detaching the delegate means no further CoreBluetooth callback will
-    ///   ever resolve it).
-    public func stopAndExtractState() throws -> (manager: CBCentralManager, peripheral: CBPeripheral?) {
+    ///   test-only initializer — never through the public API), or ANY tracked peripheral
+    ///   currently has a connection attempt or disconnect in progress (extracting mid-attempt
+    ///   would strand its pending continuation forever, since detaching the delegate means no
+    ///   further CoreBluetooth callback will ever resolve it).
+    public func stopAndExtractState() throws -> (manager: CBCentralManager, peripherals: [CBPeripheral]) {
         guard let currentManager = manager else {
             throw BLESwiftError.stopped
         }
@@ -516,36 +537,44 @@ public actor Central {
             throw BLESwiftError.stopped
         }
 
-        let connectedPeripheral: CBPeripheral?
-        switch phase {
-        case .idle:
-            connectedPeripheral = nil
-        case .connected(let session):
-            connectedPeripheral = session.peripheral as? CBPeripheral
-        case .connecting, .disconnecting:
+        // Any entry that isn't `.connected` (i.e. `.connecting` or `.disconnecting`, for
+        // ANY peripheral) blocks extraction entirely — see the throws documentation above.
+        guard !connections.values.contains(where: { if case .connected = $0 { return false }; return true }) else {
             throw BLESwiftError.stopped
         }
 
-        reconnectTask?.cancel()
-        reconnectTask = nil
+        let connectedPeripherals: [(identifier: PeripheralIdentifier, peripheral: CBPeripheral)] = connections
+            .compactMap { identifier, phase in
+                guard case .connected(let session) = phase, let cbPeripheral = session.peripheral as? CBPeripheral else { return nil }
+                return (identifier, cbPeripheral)
+            }
+            .sorted { $0.identifier.uuid.uuidString < $1.identifier.uuid.uuidString }
+
+        for id in Array(reconnectLoops.keys) {
+            reconnectLoops[id]?.task.cancel()
+        }
+        reconnectLoops.removeAll()
         restorationTask?.cancel()
         restorationTask = nil
+        restorationConnectingIdentifier = nil
         pendingRestoration = nil
         endStartupBackgroundTask()
-        failPendingGATTContinuations(error: .stopped)
-        finishNotificationStreams(error: BLESwiftError.stopped)
-        phase = .idle
+        failAllSessionsPendingGATTContinuations(error: .stopped)
+        finishAllSessionsNotificationStreams(error: BLESwiftError.stopped)
+        connections.removeAll()
 
         // Give up this actor's own reference before returning `cbManager` — see the
         // ``manager`` property's doc comment for why that's required, not just tidy.
         manager = nil
         cbManager.delegate = nil
-        // Detach the extracted peripheral's event delivery too — its new owner installs
+        // Detach every extracted peripheral's event delivery too — its new owner installs
         // its own delegate; leaving ours would route callbacks into a stopped Central.
-        connectedPeripheral?.eventHandler = nil
+        for (_, peripheral) in connectedPeripherals {
+            peripheral.eventHandler = nil
+        }
         proxy?.handler = nil
 
-        return (cbManager, connectedPeripheral)
+        return (cbManager, connectedPeripherals.map(\.peripheral))
     }
 
     // MARK: - Public surface
@@ -587,11 +616,11 @@ public actor Central {
 
     // MARK: - Connection lifecycle
 
-    /// A synchronous-to-read (but actor-isolated) snapshot of this `Central`'s connection
-    /// lifecycle. See ``ConnectionState``.
-    public var connectionState: ConnectionState {
-        switch phase {
-        case .idle:
+    /// A synchronous-to-read (but actor-isolated) snapshot of `id`'s connection lifecycle.
+    /// `.disconnected` when `id` has no tracked entry. See ``ConnectionState``.
+    public func connectionState(of id: PeripheralIdentifier) -> ConnectionState {
+        switch connections[id] {
+        case .none:
             return .disconnected
         case .connecting:
             return .connecting
@@ -602,24 +631,34 @@ public actor Central {
         }
     }
 
-    /// Returns a multicast stream of every ``ConnectionEvent``. See ``ConnectionEvent`` for
-    /// the full event vocabulary and replay semantics (none — a late subscriber only sees
-    /// events from the point it subscribes; use ``connectionState`` for the current
-    /// snapshot).
+    /// A snapshot of every currently-connected peripheral's handle, sorted by
+    /// `id.uuid.uuidString` for determinism.
+    public var connectedPeripherals: [Peripheral] {
+        connections.compactMap { identifier, phase -> Peripheral? in
+            guard case .connected = phase else { return nil }
+            return Peripheral(id: identifier, central: self)
+        }.sorted { $0.id.uuid.uuidString < $1.id.uuid.uuidString }
+    }
+
+    /// Returns a multicast stream of every ``ConnectionEvent``, across every peripheral.
+    /// See ``ConnectionEvent`` for the full event vocabulary and replay semantics (none — a
+    /// late subscriber only sees events from the point it subscribes; use
+    /// ``connectionState(of:)``/``connectedPeripherals`` for the current snapshot).
     public func connectionEvents() -> AsyncStream<ConnectionEvent> {
         connectionBroadcaster.stream()
     }
 
     /// Connects to a known peripheral.
     ///
-    /// Fails immediately with ``BLESwiftError/multipleConnectNotSupported`` if a connection
-    /// attempt is already in progress, a connection is already established, or a
-    /// disconnect is currently in progress — BLESwift enforces single-peripheral connection
-    /// discipline.
+    /// BLESwift supports N concurrent peripheral connections: connecting to a peripheral
+    /// other than `id` while `id` connects (or while anything else is connected) never
+    /// conflicts. Fails immediately with ``BLESwiftError/duplicateConnect(_:)`` only if `id`
+    /// itself already has a tracked entry — connecting, connected, or disconnecting.
     ///
-    /// A new `connect` call cancels any in-flight auto-reconnect loop from a previous
-    /// `connect`, and resets the ``ReconnectPolicy`` in effect to whatever `reconnect`
-    /// specifies here.
+    /// A new `connect` call to `id` cancels any in-flight auto-reconnect loop for `id` from
+    /// a previous `connect`, and resets the ``ReconnectPolicy`` in effect for `id` to
+    /// whatever `reconnect` specifies here — every peripheral's reconnect loop, and the
+    /// policy governing it, is independent of every other peripheral's.
     ///
     /// - Parameters:
     ///   - id: The peripheral to connect to — typically obtained from a prior scan, or a
@@ -631,12 +670,13 @@ public actor Central {
     ///     client-side.
     ///   - reconnect: What to do if this connection is later lost unexpectedly (or this
     ///     very attempt fails, times out, or is cancelled some way other than an explicit
-    ///     ``disconnect()``/``cancelAllOperations(error:)`` call). Defaults to ``ReconnectPolicy/never``.
+    ///     ``disconnect(_:)``/``disconnect(_:immediate:)``/``cancelAllOperations(error:)``
+    ///     call). Defaults to ``ReconnectPolicy/never``.
     ///   - warningOptions: Per-connection override for whether iOS shows system alerts on
     ///     suspended-app connection events. Defaults to ``Configuration``'s
     ///     `warningOptions`.
     /// - Returns: A ``Peripheral`` handle once connected.
-    /// - Throws: ``BLESwiftError/multipleConnectNotSupported``,
+    /// - Throws: ``BLESwiftError/duplicateConnect(_:)``,
     ///   ``BLESwiftError/unexpectedPeripheral(_:)`` if `id` is not known to CoreBluetooth,
     ///   ``BLESwiftError/connectionTimedOut``, ``BLESwiftError/operationCancelled`` if the calling
     ///   `Task` is cancelled, or whatever error CoreBluetooth reports for the failed
@@ -655,19 +695,18 @@ public actor Central {
             throw BLESwiftError.backgroundRestorationInProgress
         }
 
-        switch phase {
-        case .connecting, .connected, .disconnecting:
-            throw BLESwiftError.multipleConnectNotSupported
-        case .idle:
-            break
+        guard connections[id] == nil else {
+            throw BLESwiftError.duplicateConnect(id)
         }
 
         guard manager.retrievePeripherals(withIdentifiers: [id.uuid]).first != nil else {
             throw BLESwiftError.unexpectedPeripheral(id)
         }
 
-        reconnectTask?.cancel()
-        reconnectTask = nil
+        // Cancel an in-flight reconnect loop for THIS peripheral only — every other
+        // peripheral's independent reconnect loop is untouched.
+        reconnectLoops[id]?.task.cancel()
+        reconnectLoops.removeValue(forKey: id)
 
         let resolvedWarningOptions = warningOptions ?? configuration.warningOptions
 
@@ -679,46 +718,49 @@ public actor Central {
         )
     }
 
-    /// Gracefully disconnects: equivalent to `disconnect(immediate: false)`.
+    /// Gracefully disconnects `id`: equivalent to `disconnect(id, immediate: false)`.
     ///
     /// With no in-flight GATT operations to wait for yet (added in a later phase), this
-    /// currently behaves identically to `disconnect(immediate: true)` — the distinction
+    /// currently behaves identically to `disconnect(id, immediate: true)` — the distinction
     /// will matter once GATT operations exist to drain first.
     ///
-    /// - Throws: ``BLESwiftError/notConnected`` if there is no connection or connection
-    ///   attempt in progress; ``BLESwiftError/multipleDisconnectNotSupported`` if a disconnect
-    ///   is already in progress.
-    public func disconnect() async throws {
-        try await disconnect(immediate: false)
+    /// - Throws: ``BLESwiftError/notConnected`` if `id` has no connection or connection
+    ///   attempt in progress; ``BLESwiftError/multipleDisconnectNotSupported`` if `id` is
+    ///   already disconnecting.
+    public func disconnect(_ id: PeripheralIdentifier) async throws {
+        try await disconnect(id, immediate: false)
     }
 
-    /// Disconnects a connected peripheral, or cancels a connection attempt in progress.
+    /// Disconnects a connected peripheral, or cancels a connection attempt in progress, for
+    /// `id`.
     ///
-    /// Never triggers a ``ReconnectPolicy`` retry, regardless of the policy the connection
-    /// (or connection attempt) was established with — an explicit `disconnect` is always
-    /// treated as an intentional, expected termination.
+    /// Never triggers a ``ReconnectPolicy`` retry for `id`, regardless of the policy the
+    /// connection (or connection attempt) was established with — an explicit `disconnect`
+    /// is always treated as an intentional, expected termination. Other peripherals'
+    /// connections and reconnect loops are entirely unaffected.
     ///
     /// - Parameter immediate: If `true`, fails pending operations with
     ///   ``BLESwiftError/explicitDisconnect`` rather than waiting for them to finish. With no
     ///   in-flight GATT operations to wait for yet (added in a later phase), `immediate`
     ///   currently has no observable effect — both values behave the same.
-    /// - Throws: ``BLESwiftError/notConnected`` if there is no connection, connection attempt,
-    ///   or in-flight auto-reconnect loop; ``BLESwiftError/multipleDisconnectNotSupported`` if a
-    ///   disconnect is already in progress.
-    public func disconnect(immediate: Bool) async throws {
-        switch phase {
-        case .idle:
-            // `phase == .idle` doesn't necessarily mean there's nothing to stop: an
-            // auto-reconnect loop (`reconnectTask`) runs entirely between connections —
-            // during its `Task.sleep` backoff, `phase` is `.idle` — so a `disconnect()`
-            // arriving mid-backoff must still be honored as the "stop trying to reconnect"
-            // verb, not rejected with `.notConnected`. This does not throw: unlike every
-            // other case here, the caller's intent (stop reconnecting) is fully satisfied.
-            if reconnectTask != nil {
-                reconnectTask?.cancel()
-                reconnectTask = nil
+    /// - Throws: ``BLESwiftError/notConnected`` if `id` has no connection, connection attempt,
+    ///   or in-flight auto-reconnect loop; ``BLESwiftError/multipleDisconnectNotSupported`` if
+    ///   `id` is already disconnecting.
+    public func disconnect(_ id: PeripheralIdentifier, immediate: Bool) async throws {
+        switch connections[id] {
+        case .none:
+            // No tracked entry for `id` doesn't necessarily mean there's nothing to stop:
+            // an auto-reconnect loop for `id` runs entirely between connections — during
+            // its `Task.sleep` backoff, `id` has no `connections` entry — so a
+            // `disconnect(id)` arriving mid-backoff must still be honored as the "stop
+            // trying to reconnect" verb, not rejected with `.notConnected`. This does not
+            // throw: unlike every other case here, the caller's intent (stop reconnecting
+            // to `id`) is fully satisfied.
+            if reconnectLoops[id] != nil {
+                reconnectLoops[id]?.task.cancel()
+                reconnectLoops.removeValue(forKey: id)
                 reconnectGeneration += 1
-                log("disconnect() cancelled an in-flight auto-reconnect loop", level: .info, category: "connection")
+                log("disconnect(\(id)) cancelled an in-flight auto-reconnect loop", level: .info, category: "connection")
                 return
             }
             throw BLESwiftError.notConnected
@@ -726,7 +768,7 @@ public actor Central {
             throw BLESwiftError.multipleDisconnectNotSupported
         case .connecting(let connecting):
             try await beginDisconnecting(
-                identifier: connecting.identifier,
+                identifier: id,
                 peripheral: connecting.peripheral,
                 disconnectContinuation: nil,
                 connectContinuation: connecting.continuation,
@@ -734,7 +776,7 @@ public actor Central {
             )
         case .connected(let session):
             try await beginDisconnecting(
-                identifier: session.identifier,
+                identifier: id,
                 peripheral: session.peripheral,
                 disconnectContinuation: nil,
                 connectContinuation: nil,
@@ -743,51 +785,80 @@ public actor Central {
         }
     }
 
-    /// Cancels whatever connection attempt is currently in progress, without disconnecting
-    /// an already-established connection — the connection "stays connected". This and
-    /// ``disconnect()``/``disconnect(immediate:)`` are deliberately two separate,
-    /// clearly-named methods rather than a single method parameterized by whether to
-    /// disconnect.
+    /// Best-effort teardown of every tracked peripheral: cancels every in-flight
+    /// auto-reconnect loop, then disconnects every tracked entry — a connecting attempt is
+    /// two-phase-cancelled with ``BLESwiftError/explicitDisconnect``; a connected session
+    /// gets the full 5-step cleanup (see ``handleTermination(identifier:error:)``).
     ///
-    /// A no-op if there is no connection attempt in progress and nothing else pending.
+    /// Never throws: individual outcomes are observable on ``connectionEvents()``.
+    /// Idempotent, and a no-op with nothing tracked.
+    public func disconnectAll() async {
+        for id in Array(reconnectLoops.keys) {
+            reconnectLoops[id]?.task.cancel()
+        }
+        if !reconnectLoops.isEmpty {
+            reconnectLoops.removeAll()
+            reconnectGeneration += 1
+            log("disconnectAll() cancelled every in-flight auto-reconnect loop", level: .info, category: "connection")
+        }
+
+        for id in Array(connections.keys) {
+            try? await disconnect(id, immediate: true)
+        }
+    }
+
+    /// Cancels whatever connection attempt is currently in progress for every tracked
+    /// peripheral, without disconnecting any already-established connection — every
+    /// connection "stays connected". This and ``disconnect(_:)``/``disconnect(_:immediate:)``/
+    /// ``disconnectAll()`` are deliberately separate, clearly-named methods rather than one
+    /// method parameterized by whether to disconnect.
+    ///
+    /// A global operation across every peripheral (not per-peripheral — task cancellation
+    /// already covers per-operation cancel). A no-op if nothing is tracked and no reconnect
+    /// loop is in flight.
     ///
     /// Like an explicit `disconnect`, cancelling a pending connection attempt this way
-    /// never triggers a ``ReconnectPolicy`` retry.
+    /// never triggers a ``ReconnectPolicy`` retry. Does not touch an active scan.
     ///
     /// - Parameter error: The error pending operations fail with. Defaults to
     ///   ``BLESwiftError/cancelled``.
     public func cancelAllOperations(error: Error? = nil) {
         let resolvedError = error ?? BLESwiftError.cancelled
 
-        switch phase {
-        case .idle, .disconnecting:
-            // See the matching comment in `disconnect(immediate:)`: `phase == .idle` while
-            // an auto-reconnect loop's `Task.sleep` backoff is in progress is exactly the
-            // case this must also cancel — `cancelAllOperations` is documented to cancel a
-            // pending connection attempt, and a reconnect-in-waiting is one.
-            if reconnectTask != nil {
-                reconnectTask?.cancel()
-                reconnectTask = nil
-                reconnectGeneration += 1
-                log("cancelAllOperations() cancelled an in-flight auto-reconnect loop", level: .info, category: "connection")
+        // Cancel every in-flight auto-reconnect loop across every peripheral — a
+        // reconnect-in-waiting is a pending connection attempt too, and
+        // `cancelAllOperations` is documented to cancel those. Bumping the shared
+        // generation counter stops a belated loop iteration from clearing a newer loop's
+        // entry — see ``clearReconnectLoopIfCurrent(id:generation:)``.
+        if !reconnectLoops.isEmpty {
+            for id in Array(reconnectLoops.keys) {
+                reconnectLoops[id]?.task.cancel()
             }
-        case .connecting(let connecting):
-            reconnectTask?.cancel()
-            reconnectTask = nil
-            phase = .disconnecting(Disconnecting(
-                identifier: connecting.identifier,
-                peripheral: connecting.peripheral,
-                continuation: nil,
-                connectContinuation: connecting.continuation,
-                connectFailureReason: resolvedError
-            ))
-            if state == .poweredOn {
-                manager?.cancelPeripheralConnection(connecting.peripheral)
-            } else {
-                handleTermination(identifier: connecting.identifier, error: nil)
+            reconnectLoops.removeAll()
+            reconnectGeneration += 1
+            log("cancelAllOperations() cancelled every in-flight auto-reconnect loop", level: .info, category: "connection")
+        }
+
+        for identifier in Array(connections.keys) {
+            switch connections[identifier] {
+            case .connecting(let connecting):
+                connections[identifier] = .disconnecting(Disconnecting(
+                    identifier: identifier,
+                    peripheral: connecting.peripheral,
+                    continuation: nil,
+                    connectContinuation: connecting.continuation,
+                    connectFailureReason: resolvedError
+                ))
+                if state == .poweredOn {
+                    manager?.cancelPeripheralConnection(connecting.peripheral)
+                } else {
+                    handleTermination(identifier: identifier, error: nil)
+                }
+            case .connected:
+                failPendingGATTContinuations(for: identifier, error: .cancelled)
+            case .disconnecting, .none:
+                break
             }
-        case .connected:
-            failPendingGATTContinuations(error: .cancelled)
         }
     }
 
@@ -823,11 +894,11 @@ public actor Central {
     /// Wrapped in `withTaskCancellationHandler` so that cancelling the surrounding `Task`
     /// (whether genuine caller cancellation, or ``establishConnection(identifier:policy:timeout:warningOptions:)``'s
     /// timeout race cancelling the loser) triggers the same two-phase-cancel dance a real
-    /// cancellation would — see ``failPendingConnect(error:)``. The cancellation handler
+    /// cancellation would — see ``failPendingConnect(for:error:)``. The cancellation handler
     /// itself is **not** actor-isolated (cancellation can be delivered from any thread), so
     /// it hops onto ``queue`` and uses `assumeIsolated` — the same sanctioned pattern
     /// `CentralDelegateProxy` uses, and *not* a `Task {}` spawn (grep-forbidden outside the
-    /// ledgered `Task` sites — see ``reconnectTask``/``ActiveScan``).
+    /// ledgered `Task` sites — see ``reconnectLoops``/``ActiveScan``).
     private func awaitConnect(
         id: PeripheralIdentifier,
         policy: ReconnectPolicy,
@@ -850,7 +921,7 @@ public actor Central {
                     self.assumeIsolated { $0.handle(event, from: id) }
                 }
 
-                phase = .connecting(Connecting(
+                connections[id] = .connecting(Connecting(
                     identifier: id,
                     peripheral: target,
                     policy: policy,
@@ -866,15 +937,15 @@ public actor Central {
         } onCancel: {
             self.queue.async {
                 self.assumeIsolated { central in
-                    central.failPendingConnect(error: BLESwiftError.operationCancelled)
+                    central.failPendingConnect(for: id, error: BLESwiftError.operationCancelled)
                 }
             }
         }
     }
 
-    /// Two-phase-cancels (or immediately fails) whatever connect attempt is pending: if the
-    /// radio is powered on, marks the pending attempt as `stopping` and asks CoreBluetooth to
-    /// cancel it, deferring resolution of its continuation to the
+    /// Two-phase-cancels (or immediately fails) whatever connect attempt is pending for
+    /// `id`: if the radio is powered on, marks the pending attempt as `stopping` and asks
+    /// CoreBluetooth to cancel it, deferring resolution of its continuation to the
     /// `didFailToConnect`/`didDisconnect` path (``handleTermination(identifier:error:)``)
     /// so callback ordering matches CoreBluetooth's own event delivery; otherwise (no radio
     /// to cancel against) there is nothing to wait for, so resolution happens here,
@@ -884,29 +955,31 @@ public actor Central {
     /// asked first (e.g. a timeout that fires moments before an unrelated task
     /// cancellation) wins and its error is what the caller ultimately sees.
     ///
-    /// A no-op if there is no pending connect attempt at all (`phase` is not `.connecting`).
-    private func failPendingConnect(error: Error) {
-        guard case .connecting(var connecting) = phase else { return }
+    /// A no-op if there is no pending connect attempt for `id` at all (`connections[id]` is
+    /// not `.connecting`).
+    private func failPendingConnect(for id: PeripheralIdentifier, error: Error) {
+        guard case .connecting(var connecting) = connections[id] else { return }
         guard connecting.stopping == nil else { return }
 
         if state == .poweredOn {
             connecting.stopping = error
-            phase = .connecting(connecting)
+            connections[id] = .connecting(connecting)
             manager?.cancelPeripheralConnection(connecting.peripheral)
         } else {
-            handleTermination(identifier: connecting.identifier, error: error)
+            handleTermination(identifier: id, error: error)
         }
     }
 
     // MARK: - Disconnect internals
 
-    /// Transitions to `.disconnecting` and either asks CoreBluetooth to cancel the
-    /// connection (awaiting its confirmation via ``handleTermination(identifier:error:)``),
+    /// Transitions `identifier` to `.disconnecting` and either asks CoreBluetooth to cancel
+    /// the connection (awaiting its confirmation via ``handleTermination(identifier:error:)``),
     /// or — if the radio isn't powered on, so no such confirmation will ever arrive —
     /// resolves the cleanup synchronously instead.
     ///
-    /// Always cancels any in-flight auto-reconnect loop first: an explicit disconnect is
-    /// never followed by a reconnect attempt.
+    /// Always cancels `identifier`'s in-flight auto-reconnect loop first, if any: an
+    /// explicit disconnect of a peripheral is never followed by a reconnect attempt to it.
+    /// Every other peripheral's connection/reconnect loop is untouched.
     private func beginDisconnecting(
         identifier: PeripheralIdentifier,
         peripheral: any PeripheralRemote,
@@ -914,28 +987,28 @@ public actor Central {
         connectContinuation: CheckedContinuation<Peripheral, Error>?,
         connectFailureReason: Error
     ) async throws {
-        reconnectTask?.cancel()
-        reconnectTask = nil
+        reconnectLoops[identifier]?.task.cancel()
+        reconnectLoops.removeValue(forKey: identifier)
 
         // Fail any in-flight GATT operations on the outgoing session's registries *before*
-        // `phase` transitions away from `.connected` below — those registries live inside
-        // `Session` (GATT state is per-connection, not actor-level), so
-        // once `phase` becomes `.disconnecting` the old `Session` value (and everything it
-        // holds) is gone; failing here first is what keeps their continuations from being
-        // silently dropped. A no-op if `phase` isn't currently `.connected` (e.g. this call
-        // came from cancelling a `.connecting` attempt, which never has a `Session`/GATT
-        // state to begin with).
-        failPendingGATTContinuations(error: .explicitDisconnect)
+        // `connections[identifier]` transitions away from `.connected` below — those
+        // registries live inside `Session` (GATT state is per-connection, not actor-level),
+        // so once the entry becomes `.disconnecting` the old `Session` value (and
+        // everything it holds) is gone; failing here first is what keeps their
+        // continuations from being silently dropped. A no-op if `identifier` isn't
+        // currently `.connected` (e.g. this call came from cancelling a `.connecting`
+        // attempt, which never has a `Session`/GATT state to begin with).
+        failPendingGATTContinuations(for: identifier, error: .explicitDisconnect)
 
         // Same reasoning for notification streams (cleanup step 2): their registry also
         // lives inside `Session`, and `Disconnecting` (below) carries no `Session` — finish
-        // them now, while `phase` is still `.connected`, or their subscribers' streams
+        // them now, while the entry is still `.connected`, or their subscribers' streams
         // would silently hang instead of ending with `.explicitDisconnect`. The later
         // `handleTermination` `.disconnecting`-branch call is then a defensive no-op.
-        finishNotificationStreams(error: BLESwiftError.explicitDisconnect)
+        finishNotificationStreams(for: identifier, error: BLESwiftError.explicitDisconnect)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            phase = .disconnecting(Disconnecting(
+            connections[identifier] = .disconnecting(Disconnecting(
                 identifier: identifier,
                 peripheral: peripheral,
                 continuation: continuation,
@@ -954,45 +1027,43 @@ public actor Central {
     // MARK: - Shared connection cleanup
 
     /// The single cleanup path for every way a tracked connection (or connection attempt)
-    /// ends — a real `didFailToConnect`/`didDisconnect` CoreBluetooth callback
-    /// (``handle(_:)`` routes both here, funneling `didFailToConnect` into the same
+    /// for `identifier` ends — a real `didFailToConnect`/`didDisconnect` CoreBluetooth
+    /// callback (``handle(_:)`` routes both here, funneling `didFailToConnect` into the same
     /// disconnect handling), or a synchronous resolution when there's no radio to wait on
-    /// (``failPendingConnect(error:)``/``beginDisconnecting(identifier:peripheral:disconnectContinuation:connectContinuation:connectFailureReason:)``'s
+    /// (``failPendingConnect(for:error:)``/``beginDisconnecting(identifier:peripheral:disconnectContinuation:connectContinuation:connectFailureReason:)``'s
     /// not-powered-on branches).
     ///
     /// The cleanup ordering: (1) fail in-flight GATT continuations, (2) finish notification
     /// streams, (3) yield `.disconnected` on ``connectionEvents()``, (4) resume the
-    /// disconnect/connect continuation(s), (5) start a reconnect task if the
-    /// ``ReconnectPolicy`` in effect says so.
+    /// disconnect/connect continuation(s), (5) start a reconnect loop for `identifier` if
+    /// the ``ReconnectPolicy`` in effect for it says so. Removes `identifier`'s
+    /// ``connections`` entry once cleanup completes — no map lookup can ever cross into a
+    /// *different* peripheral's entry, so unlike the old single-`Phase` design there is no
+    /// "wrong identifier currently tracked" case to guard against.
     ///
-    /// A no-op if `identifier` doesn't match whatever `phase` is currently tracking (stale
-    /// or unexpected event — logged, not treated as an error).
+    /// A no-op (beyond a debug log) if `identifier` has no ``connections`` entry at all
+    /// (stale or unexpected event).
     private func handleTermination(identifier: PeripheralIdentifier, error: Error?) {
-        switch phase {
-        case .idle:
+        switch connections[identifier] {
+        case .none:
             log("Ignoring a disconnect/fail event for untracked peripheral \(identifier)", level: .debug, category: "connection")
 
         case .connecting(var connecting):
-            guard connecting.identifier == identifier else {
-                log("Ignoring a disconnect/fail event for \(identifier) while connecting to \(connecting.identifier)", level: .warning, category: "connection")
-                return
-            }
-
             let resolvedError = connecting.stopping ?? error ?? BLESwiftError.unexpectedDisconnect
             let policy = connecting.policy
             let timeout = connecting.timeout
             let warningOptions = connecting.warningOptions
             let continuation = connecting.continuation
             connecting.continuation = nil
-            phase = .idle
+            connections.removeValue(forKey: identifier)
 
             // Final teardown of this attempt's peripheral reference: detach its event
             // delivery (delegate) — the counterpart of `awaitConnect`'s attach. A
             // follow-up reconnect attempt re-attaches on its own initiation.
             connecting.peripheral.eventHandler = nil
 
-            failPendingGATTContinuations(error: .notConnected)
-            finishNotificationStreams(error: resolvedError)
+            failPendingGATTContinuations(for: identifier, error: .notConnected)
+            finishNotificationStreams(for: identifier, error: resolvedError)
 
             let willReconnect = !policy.isNever
             connectionBroadcaster.yield(.disconnected(identifier, error: resolvedError, willReconnect: willReconnect))
@@ -1000,34 +1071,30 @@ public actor Central {
             continuation?.resume(throwing: resolvedError)
 
             // If this failed attempt was itself one iteration of an *already-running*
-            // reconnect loop (`reconnectTask` still non-`nil` — that very loop is what's
-            // currently suspended awaiting this `establishConnection` call), don't spawn a
-            // second, concurrent loop: the running loop's own `catch` block will continue
-            // retrying on its own. Only a fresh top-level `connect()` failure (no reconnect
-            // loop active yet) starts one here.
-            if willReconnect, reconnectTask == nil {
+            // reconnect loop for `identifier` (`reconnectLoops[identifier]` still non-`nil`
+            // — that very loop is what's currently suspended awaiting this
+            // `establishConnection` call), don't spawn a second, concurrent loop for the
+            // same peripheral: the running loop's own `catch` block will continue retrying
+            // on its own. Only a fresh top-level `connect()` failure (no reconnect loop
+            // active for `identifier` yet) starts one here.
+            if willReconnect, reconnectLoops[identifier] == nil {
                 scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions)
             }
 
         case .connected(let session):
-            guard session.identifier == identifier else {
-                log("Ignoring a disconnect/fail event for \(identifier) while connected to \(session.identifier)", level: .warning, category: "connection")
-                return
-            }
-
             let policy = session.policy
             let timeout = session.timeout
             let warningOptions = session.warningOptions
 
-            // Fail pending GATT ops and finish notification streams *before* dropping
-            // `phase`'s `.connected` session below — see the matching comment in
+            // Fail pending GATT ops and finish notification streams *before* removing
+            // `identifier`'s `.connected` entry below — see the matching comment in
             // `beginDisconnecting`: their registries live inside `Session` itself, so once
-            // `phase` becomes `.idle` there is no session left to read them from. The
-            // ordering between the two is cleanup steps (1) then (2).
+            // the entry is gone there is no session left to read them from. The ordering
+            // between the two is cleanup steps (1) then (2).
             let resolvedError = error ?? BLESwiftError.unexpectedDisconnect
-            failPendingGATTContinuations(error: .unexpectedDisconnect)
-            finishNotificationStreams(error: resolvedError)
-            phase = .idle
+            failPendingGATTContinuations(for: identifier, error: .unexpectedDisconnect)
+            finishNotificationStreams(for: identifier, error: resolvedError)
+            connections.removeValue(forKey: identifier)
 
             // Final teardown of the session's peripheral reference: detach its event
             // delivery (delegate). A reconnect attempt re-attaches on initiation.
@@ -1037,32 +1104,27 @@ public actor Central {
             connectionBroadcaster.yield(.disconnected(identifier, error: error, willReconnect: willReconnect))
 
             // See the matching comment in the `.connecting` branch above: don't spawn a
-            // second reconnect loop on top of one that's already running.
-            if willReconnect, reconnectTask == nil {
+            // second reconnect loop for `identifier` on top of one that's already running.
+            if willReconnect, reconnectLoops[identifier] == nil {
                 scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions)
             }
 
         case .disconnecting(var disconnecting):
-            guard disconnecting.identifier == identifier else {
-                log("Ignoring a disconnect/fail event for \(identifier) while disconnecting from \(disconnecting.identifier)", level: .warning, category: "connection")
-                return
-            }
-
-            phase = .idle
+            connections.removeValue(forKey: identifier)
 
             // Final teardown of the outgoing peripheral reference: detach its event
             // delivery (delegate) — an explicit disconnect never reconnects, so nothing
-            // re-attaches until a future `connect` does.
+            // re-attaches until a future `connect` to `identifier` does.
             disconnecting.peripheral.eventHandler = nil
 
             // Already a no-op by this point for the common path: `beginDisconnecting`
             // fails the outgoing session's GATT ops itself, before transitioning here (see
-            // its doc comment) — `phase` is `.disconnecting` now, not `.connected`, so
-            // there's no session left for this call to find. Kept as a defensive no-op for
-            // the `cancelAllOperations()`-cancels-a-pending-connect path, which never had a
-            // `Session`/GATT state to begin with.
-            failPendingGATTContinuations(error: .explicitDisconnect)
-            finishNotificationStreams(error: BLESwiftError.explicitDisconnect)
+            // its doc comment) — `identifier`'s entry is `.disconnecting` now, not
+            // `.connected`, so there's no session left for this call to find. Kept as a
+            // defensive no-op for the `cancelAllOperations()`-cancels-a-pending-connect
+            // path, which never had a `Session`/GATT state to begin with.
+            failPendingGATTContinuations(for: identifier, error: .explicitDisconnect)
+            finishNotificationStreams(for: identifier, error: BLESwiftError.explicitDisconnect)
 
             connectionBroadcaster.yield(.disconnected(identifier, error: error, willReconnect: false))
 
@@ -1076,44 +1138,50 @@ public actor Central {
         }
     }
 
-    /// Fails whatever pending connect attempt or established connection this `Central` is
-    /// tracking with ``BLESwiftError/bluetoothUnavailable`` proactively whenever the radio
-    /// leaves `.poweredOn`, rather than waiting on a CoreBluetooth disconnect callback that
-    /// may not reliably arrive once the radio itself is unavailable.
+    /// Fails every pending connect attempt or established connection this `Central` is
+    /// tracking, across every peripheral, with ``BLESwiftError/bluetoothUnavailable``
+    /// proactively whenever the radio leaves `.poweredOn`, rather than waiting on a
+    /// CoreBluetooth disconnect callback that may not reliably arrive once the radio itself
+    /// is unavailable. Reconnect loops are deliberately NOT cancelled here (parity with
+    /// today, generalized per peripheral): their attempts fail on their own and the policy
+    /// in effect decides whether to keep retrying.
     private func handleBluetoothUnavailable() {
-        switch phase {
-        case .idle, .disconnecting:
-            break
-        case .connecting:
-            failPendingConnect(error: BLESwiftError.bluetoothUnavailable)
-        case .connected(let session):
-            handleTermination(identifier: session.identifier, error: BLESwiftError.bluetoothUnavailable)
+        for identifier in Array(connections.keys) {
+            switch connections[identifier] {
+            case .connecting:
+                failPendingConnect(for: identifier, error: BLESwiftError.bluetoothUnavailable)
+            case .connected:
+                handleTermination(identifier: identifier, error: BLESwiftError.bluetoothUnavailable)
+            case .disconnecting, .none:
+                break
+            }
         }
     }
 
-    /// Fails every in-flight GATT operation tracked by the current connected session (if
+    /// Fails every in-flight GATT operation tracked by `identifier`'s connected session (if
     /// any) with `error`: every pending read/write/RSSI-read/discovery/notify-state-change
     /// continuation is resumed throwing `error`, and every per-characteristic FIFO tail
     /// `Task` (plus the RSSI tail) is cancelled. Cleanup step 1 of
     /// ``handleTermination(identifier:error:)`` — called there, by ``beginDisconnecting(identifier:peripheral:disconnectContinuation:connectContinuation:connectFailureReason:)``
-    /// (both *before* `phase` stops being `.connected`, since these registries live inside
-    /// `Session` itself — GATT state is per-connection, not actor-level), and directly
-    /// by ``cancelAllOperations(error:)`` (which does **not** tear down the
-    /// connection itself — only pending GATT operations — so this leaves `phase` at
-    /// `.connected`, just with freshly emptied registries).
+    /// (both *before* the entry stops being `.connected`, since these registries live
+    /// inside `Session` itself — GATT state is per-connection, not actor-level), and
+    /// directly by ``cancelAllOperations(error:)`` (which does **not** tear down the
+    /// connection itself — only pending GATT operations — so this leaves `identifier`'s
+    /// entry `.connected`, just with freshly emptied registries).
     ///
     /// Distinct from ``failAllPendingOperations(error:)``, which only concerns the active
     /// *scan* and must not be triggered by connection cleanup — a disconnect has no bearing
-    /// on an unrelated, independently-running scan.
+    /// on an unrelated, independently-running scan, and one peripheral's GATT cleanup has
+    /// no bearing on any other peripheral's.
     ///
-    /// A no-op if `phase` is not currently `.connected` (nothing to fail).
-    func failPendingGATTContinuations(error: BLESwiftError) {
-        guard case .connected(var session) = phase else {
-            log("No connected session — nothing to fail", level: .debug, category: "gatt")
+    /// A no-op if `identifier`'s entry is not currently `.connected` (nothing to fail).
+    func failPendingGATTContinuations(for identifier: PeripheralIdentifier, error: BLESwiftError) {
+        guard case .connected(var session) = connections[identifier] else {
+            log("No connected session for \(identifier) — nothing to fail", level: .debug, category: "gatt")
             return
         }
 
-        log("Failing all pending GATT operations: \(error)", level: .warning, category: "gatt")
+        log("Failing all pending GATT operations for \(identifier): \(error)", level: .warning, category: "gatt")
 
         for task in session.fifoTails.values {
             task.cancel()
@@ -1157,18 +1225,28 @@ public actor Central {
         }
         session.pendingWriteWithoutResponseReady.removeAll()
 
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
     }
 
-    /// Finishes every active notification stream with `error` and clears the registry —
-    /// cleanup step 2 of ``handleTermination(identifier:error:)``, also invoked by
-    /// ``beginDisconnecting(identifier:peripheral:disconnectContinuation:connectContinuation:connectFailureReason:)``
-    /// and ``stopAndExtractState()``.
+    /// Calls ``failPendingGATTContinuations(for:error:)`` for every currently-connected
+    /// peripheral (a snapshot of ``connections``' keys, never iterated live — see the
+    /// anti-pattern guard on mutating ``connections`` while iterating it). Used by
+    /// ``stopAndExtractState()`` and ``cancelAllOperations(error:)`` — both need every
+    /// connected session's pending GATT operations failed, not just one peripheral's.
+    func failAllSessionsPendingGATTContinuations(error: BLESwiftError) {
+        for identifier in Array(connections.keys) {
+            failPendingGATTContinuations(for: identifier, error: error)
+        }
+    }
+
+    /// Finishes every active notification stream on `identifier`'s session with `error` and
+    /// clears its registry — cleanup step 2 of ``handleTermination(identifier:error:)``,
+    /// also invoked by ``beginDisconnecting(identifier:peripheral:disconnectContinuation:connectContinuation:connectFailureReason:)``.
     ///
-    /// Must run while `phase` is still `.connected` — the registry lives inside `Session`
-    /// (notification state is per-connection, like the GATT registries), so once `phase`
-    /// moves on the subscriptions (and their subscribers' streams) would be
-    /// silently dropped instead of finished. A no-op otherwise, which also makes the
+    /// Must run while `identifier`'s entry is still `.connected` — the registry lives
+    /// inside `Session` (notification state is per-connection, like the GATT registries),
+    /// so once the entry moves on the subscriptions (and their subscribers' streams) would
+    /// be silently dropped instead of finished. A no-op otherwise, which also makes the
     /// defensive calls on the `.connecting`/`.disconnecting` cleanup paths (no session ever
     /// existed there, or it was already cleaned) harmless.
     ///
@@ -1176,19 +1254,19 @@ public actor Central {
     /// each pump ends on its own when its raw stream finishes below, and forwards `error`
     /// to its subscriber's typed stream — cancelling it instead would race that delivery
     /// and could end the typed stream cleanly, hiding the disconnect error.
-    func finishNotificationStreams(error: Error) {
-        guard case .connected(var session) = phase else {
-            log("No connected session — no notification streams to finish", level: .debug, category: "gatt")
+    func finishNotificationStreams(for identifier: PeripheralIdentifier, error: Error) {
+        guard case .connected(var session) = connections[identifier] else {
+            log("No connected session for \(identifier) — no notification streams to finish", level: .debug, category: "gatt")
             return
         }
         guard !session.notificationSubscriptions.isEmpty else { return }
 
-        log("Finishing \(session.notificationSubscriptions.count) notification stream(s): \(error)", level: .debug, category: "gatt")
+        log("Finishing \(session.notificationSubscriptions.count) notification stream(s) for \(identifier): \(error)", level: .debug, category: "gatt")
 
         let subscriptions = session.notificationSubscriptions
         session.notificationSubscriptions.removeAll()
         session.notificationPumps.removeAll()
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
 
         for subscription in subscriptions.values {
             for waiter in subscription.enableWaiters.values {
@@ -1198,17 +1276,30 @@ public actor Central {
         }
     }
 
+    /// Calls ``finishNotificationStreams(for:error:)`` for every currently-connected
+    /// peripheral (a key snapshot, same anti-pattern guard as
+    /// ``failAllSessionsPendingGATTContinuations(error:)``). Used by
+    /// ``stopAndExtractState()``.
+    func finishAllSessionsNotificationStreams(error: Error) {
+        for identifier in Array(connections.keys) {
+            finishNotificationStreams(for: identifier, error: error)
+        }
+    }
+
     // MARK: - Auto-reconnect
 
     /// Starts (or restarts) the auto-reconnect loop for `identifier`, per `policy`. See
-    /// ``reconnectTask``.
+    /// ``reconnectLoops``.
     ///
-    /// Tags the spawned task with the current ``reconnectGeneration`` (incremented here)
-    /// so ``runReconnectLoop(identifier:policy:timeout:warningOptions:generation:)`` can
-    /// safely clear ``reconnectTask`` on exit only if it's still *this* generation's task —
-    /// otherwise a superseded loop's belated cleanup (it was cancelled, but hasn't actually
-    /// finished running yet — cancellation is cooperative) could race with, and incorrectly
-    /// clear, a newer loop's `reconnectTask` that's already been assigned.
+    /// Tags the spawned task with the current ``reconnectGeneration`` (incremented here,
+    /// shared across every peripheral) so
+    /// ``runReconnectLoop(identifier:policy:timeout:warningOptions:generation:)`` can safely
+    /// clear `identifier`'s ``reconnectLoops`` entry on exit only if it's still *this*
+    /// generation's loop — otherwise a superseded loop's belated cleanup (it was cancelled,
+    /// but hasn't actually finished running yet — cancellation is cooperative) could race
+    /// with, and incorrectly clear, a newer loop already scheduled for `identifier` (e.g.
+    /// `disconnect(identifier)` cancelling this loop followed by an immediate, successful
+    /// `connect(identifier)` that starts a fresh one of its own).
     private func scheduleReconnect(
         identifier: PeripheralIdentifier,
         policy: ReconnectPolicy,
@@ -1217,25 +1308,28 @@ public actor Central {
     ) {
         reconnectGeneration += 1
         let generation = reconnectGeneration
-        reconnectTask = Task { [weak self] in
+        let task = Task<Void, Never> { [weak self] in
             await self?.runReconnectLoop(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, generation: generation)
         }
+        reconnectLoops[identifier] = ReconnectLoop(task: task, generation: generation)
     }
 
-    /// Clears ``reconnectTask`` only if `generation` still matches ``reconnectGeneration``
-    /// — see ``scheduleReconnect(identifier:policy:timeout:warningOptions:)`` for why this
-    /// guard is needed instead of an unconditional `reconnectTask = nil`.
-    private func clearReconnectTaskIfCurrent(_ generation: UInt64) {
-        if generation == reconnectGeneration {
-            reconnectTask = nil
+    /// Removes `identifier`'s ``reconnectLoops`` entry only if `generation` still matches
+    /// its stored generation — see
+    /// ``scheduleReconnect(identifier:policy:timeout:warningOptions:)`` for why this guard
+    /// is needed instead of an unconditional `reconnectLoops.removeValue(forKey: identifier)`.
+    private func clearReconnectLoopIfCurrent(id identifier: PeripheralIdentifier, generation: UInt64) {
+        if reconnectLoops[identifier]?.generation == generation {
+            reconnectLoops.removeValue(forKey: identifier)
         }
     }
 
     /// Repeatedly attempts to reconnect to `identifier` per `policy`, emitting
     /// ``ConnectionEvent/reconnecting(_:attempt:)`` before each attempt, until either an
     /// attempt succeeds, `policy` says to stop (``ReconnectPolicy/nextDelay(attempt:error:)``
-    /// returns `nil`), or this task is cancelled (explicit disconnect, `cancelAllOperations`,
-    /// a new `connect`, or `deinit` — see ``reconnectTask``).
+    /// returns `nil`), or this task is cancelled (an explicit disconnect of `identifier`, a
+    /// new `connect` to it, `cancelAllOperations`/`disconnectAll()`, or `deinit` — see
+    /// ``reconnectLoops``). Independent of every other peripheral's reconnect loop.
     ///
     /// `establishConnection(identifier:policy:timeout:warningOptions:)` (via
     /// `awaitConnect(id:policy:timeout:warningOptions:)`) re-resolves the target peripheral
@@ -1253,19 +1347,19 @@ public actor Central {
 
         while !Task.isCancelled {
             guard let delay = await policy.nextDelay(attempt: attempt, error: lastError) else {
-                clearReconnectTaskIfCurrent(generation)
+                clearReconnectLoopIfCurrent(id: identifier, generation: generation)
                 return
             }
 
             do {
                 try await Task.sleep(for: delay)
             } catch {
-                clearReconnectTaskIfCurrent(generation)
+                clearReconnectLoopIfCurrent(id: identifier, generation: generation)
                 return
             }
 
-            guard !Task.isCancelled, case .idle = phase else {
-                clearReconnectTaskIfCurrent(generation)
+            guard !Task.isCancelled, connections[identifier] == nil else {
+                clearReconnectLoopIfCurrent(id: identifier, generation: generation)
                 return
             }
 
@@ -1279,7 +1373,7 @@ public actor Central {
                     timeout: timeout,
                     warningOptions: warningOptions
                 )
-                clearReconnectTaskIfCurrent(generation)
+                clearReconnectLoopIfCurrent(id: identifier, generation: generation)
                 return
             } catch {
                 lastError = error
@@ -1287,7 +1381,7 @@ public actor Central {
             }
         }
 
-        clearReconnectTaskIfCurrent(generation)
+        clearReconnectLoopIfCurrent(id: identifier, generation: generation)
     }
 
     // MARK: - Event handling
@@ -1316,7 +1410,7 @@ public actor Central {
             handleDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: rssi)
 
         case .didConnect(let identifier):
-            guard case .connecting(var connecting) = phase, connecting.identifier == identifier else {
+            guard case .connecting(var connecting) = connections[identifier] else {
                 log("Ignoring didConnect for untracked peripheral \(identifier)", level: .warning, category: "connection")
                 return
             }
@@ -1332,7 +1426,7 @@ public actor Central {
             let warningOptions = connecting.warningOptions
             let target = connecting.peripheral
 
-            phase = .connected(Session(identifier: identifier, peripheral: target, policy: policy, timeout: timeout, warningOptions: warningOptions))
+            connections[identifier] = .connected(Session(identifier: identifier, peripheral: target, policy: policy, timeout: timeout, warningOptions: warningOptions))
 
             log("Connected to \(identifier)", level: .info, category: "connection")
             connectionBroadcaster.yield(.connected(identifier))
@@ -1434,13 +1528,13 @@ public actor Central {
     /// `discoverServices(_:)` call for a still-undiscovered service — a single-slot
     /// continuation would silently drop one of them.
     private func resumeDiscoverServicesWaiters(for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
-        guard case .connected(var session) = phase, session.identifier == peripheralIdentifier else {
+        guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didDiscoverServices for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
             return
         }
         let waiters = session.pendingDiscoverServices
         session.pendingDiscoverServices.removeAll()
-        phase = .connected(session)
+        connections[peripheralIdentifier] = .connected(session)
         for waiter in waiters.values {
             if let error {
                 waiter.resume(throwing: error)
@@ -1455,9 +1549,9 @@ public actor Central {
     /// `withTimeout` timeout), rather than a real `didDiscoverServices` completion. Removing
     /// only this one token leaves any other concurrently pending waiter untouched.
     private func cancelDiscoverServicesWaiter(identifier: PeripheralIdentifier, token: UInt64) {
-        guard case .connected(var session) = phase, session.identifier == identifier else { return }
+        guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingDiscoverServices.removeValue(forKey: token) else { return }
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
@@ -1467,12 +1561,12 @@ public actor Central {
     /// still resumed as a group per key, for the same cross-characteristic-concurrency
     /// reason.
     private func resumeDiscoverCharacteristicsWaiters(service: ServiceIdentifier, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
-        guard case .connected(var session) = phase, session.identifier == peripheralIdentifier else {
+        guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didDiscoverCharacteristics for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
             return
         }
         let waiters = session.pendingDiscoverCharacteristics.removeValue(forKey: service) ?? [:]
-        phase = .connected(session)
+        connections[peripheralIdentifier] = .connected(session)
         for waiter in waiters.values {
             if let error {
                 waiter.resume(throwing: error)
@@ -1485,19 +1579,19 @@ public actor Central {
     /// Take-then-resumes a single characteristic-discovery waiter by service + token — see
     /// ``cancelDiscoverServicesWaiter(identifier:token:)``.
     private func cancelDiscoverCharacteristicsWaiter(identifier: PeripheralIdentifier, service: ServiceIdentifier, token: UInt64) {
-        guard case .connected(var session) = phase, session.identifier == identifier else { return }
+        guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingDiscoverCharacteristics[service]?.removeValue(forKey: token) else { return }
         if session.pendingDiscoverCharacteristics[service]?.isEmpty == true {
             session.pendingDiscoverCharacteristics.removeValue(forKey: service)
         }
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
     /// Take-then-resumes the single pending write continuation for `characteristic`, if
     /// any (single-slot, guaranteed by the per-characteristic FIFO).
     private func resumePendingWrite(characteristic: CharacteristicIdentifier, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
-        guard case .connected(var session) = phase, session.identifier == peripheralIdentifier else {
+        guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didWriteValue for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
             return
         }
@@ -1505,7 +1599,7 @@ public actor Central {
             log("Ignoring didWriteValue for \(characteristic) with no pending write", level: .debug, category: "gatt")
             return
         }
-        phase = .connected(session)
+        connections[peripheralIdentifier] = .connected(session)
         if let error {
             continuation.resume(throwing: error)
         } else {
@@ -1517,9 +1611,9 @@ public actor Central {
     /// still pending — the reaction to cancellation (task cancellation or a `withTimeout`
     /// timeout) rather than a real `didWriteValue` completion.
     private func cancelPendingWrite(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) {
-        guard case .connected(var session) = phase, session.identifier == identifier else { return }
+        guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingWrites.removeValue(forKey: characteristic) else { return }
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
@@ -1528,15 +1622,15 @@ public actor Central {
     /// `setNotifyValue(_:for:)` — this routing already exists so that phase only needs to
     /// populate the registry.
     private func resumePendingNotifyStateChange(characteristic: CharacteristicIdentifier, isNotifying: Bool, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
-        guard case .connected(var session) = phase, session.identifier == peripheralIdentifier else {
+        guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didUpdateNotificationState for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
             return
         }
         guard let continuation = session.pendingNotifyStateChanges.removeValue(forKey: characteristic) else {
-            phase = .connected(session)
+            connections[peripheralIdentifier] = .connected(session)
             return
         }
-        phase = .connected(session)
+        connections[peripheralIdentifier] = .connected(session)
         if let error {
             continuation.resume(throwing: error)
         } else {
@@ -1547,7 +1641,7 @@ public actor Central {
     /// Take-then-resumes the single pending RSSI-read continuation, if any (single-slot,
     /// guaranteed by ``runRSSISerialized(identifier:operation:)``'s own tail-chain).
     private func resumePendingRSSIRead(rssi: Int, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
-        guard case .connected(var session) = phase, session.identifier == peripheralIdentifier else {
+        guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didReadRSSI for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
             return
         }
@@ -1556,7 +1650,7 @@ public actor Central {
             return
         }
         session.pendingRSSIRead = nil
-        phase = .connected(session)
+        connections[peripheralIdentifier] = .connected(session)
         if let error {
             continuation.resume(throwing: error)
         } else {
@@ -1567,10 +1661,10 @@ public actor Central {
     /// Take-then-resumes the single pending RSSI-read continuation, if still pending — see
     /// ``cancelPendingWrite(identifier:characteristic:)``.
     private func cancelPendingRSSIRead(identifier: PeripheralIdentifier) {
-        guard case .connected(var session) = phase, session.identifier == identifier else { return }
+        guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingRSSIRead else { return }
         session.pendingRSSIRead = nil
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
@@ -1579,13 +1673,13 @@ public actor Central {
     /// `canSendWriteWithoutResponse`/`peripheralIsReady(toSendWriteWithoutResponse:)` are
     /// peripheral-wide in CoreBluetooth's own API, not per-characteristic.
     private func resumeWriteWithoutResponseWaiters(for peripheralIdentifier: PeripheralIdentifier) {
-        guard case .connected(var session) = phase, session.identifier == peripheralIdentifier else {
+        guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring isReadyToSendWriteWithoutResponse for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
             return
         }
         let waiters = session.pendingWriteWithoutResponseReady
         session.pendingWriteWithoutResponseReady.removeAll()
-        phase = .connected(session)
+        connections[peripheralIdentifier] = .connected(session)
         for waiter in waiters.values {
             waiter.resume(returning: ())
         }
@@ -1594,9 +1688,9 @@ public actor Central {
     /// Take-then-resumes a single write-without-response-readiness waiter by token — see
     /// ``cancelDiscoverServicesWaiter(identifier:token:)``.
     private func cancelWriteWithoutResponseWaiter(identifier: PeripheralIdentifier, token: UInt64) {
-        guard case .connected(var session) = phase, session.identifier == identifier else { return }
+        guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingWriteWithoutResponseReady.removeValue(forKey: token) else { return }
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
@@ -1614,7 +1708,7 @@ public actor Central {
     /// throwing it) — streams always finish with the error, per the redesign map's
     /// deliberate-drop note.
     private func handleDidUpdateValue(characteristic: CharacteristicIdentifier, value: Data?, error: NSError?, from peripheralIdentifier: PeripheralIdentifier) {
-        guard case .connected(var session) = phase, session.identifier == peripheralIdentifier else {
+        guard case .connected(var session) = connections[peripheralIdentifier] else {
             // willRestoreState→poweredOn window (verifier finding): a restored-but-not-
             // yet-routed peripheral can already be notifying (its delegate is attached by
             // the proxy during willRestoreState precisely so these arrive). Dropping the
@@ -1631,7 +1725,7 @@ public actor Central {
         }
 
         if let subscription = session.notificationSubscriptions[characteristic] {
-            phase = .connected(session)
+            connections[peripheralIdentifier] = .connected(session)
             if let error {
                 failNotificationSubscription(identifier: peripheralIdentifier, characteristic: characteristic, error: error)
             } else {
@@ -1642,7 +1736,7 @@ public actor Central {
         }
 
         if let continuation = session.pendingReads.removeValue(forKey: characteristic) {
-            phase = .connected(session)
+            connections[peripheralIdentifier] = .connected(session)
             if let error {
                 continuation.resume(throwing: error)
             } else {
@@ -1651,7 +1745,7 @@ public actor Central {
             return
         }
 
-        phase = .connected(session)
+        connections[peripheralIdentifier] = .connected(session)
         if configuration.restoration != nil {
             // The restoration "unhandled listen" surface: only meaningful with restoration
             // enabled, where a restored peripheral can still be notifying from a
@@ -1667,9 +1761,9 @@ public actor Central {
     /// still pending — the reaction to cancellation (task cancellation or a `withTimeout`
     /// timeout) rather than a real `didUpdateValue` completion.
     private func cancelPendingRead(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) {
-        guard case .connected(var session) = phase, session.identifier == identifier else { return }
+        guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingReads.removeValue(forKey: characteristic) else { return }
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
@@ -1694,7 +1788,7 @@ public actor Central {
     /// The actual discovery-then-read sequence for ``performRead(peripheral:characteristic:timeout:)``,
     /// run inside `characteristic`'s FIFO chain.
     private func performReadNow(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) async throws -> Data {
-        guard case .connected(let session) = phase, session.identifier == identifier else {
+        guard case .connected(let session) = connections[identifier] else {
             throw BLESwiftError.notConnected
         }
         let peripheral = session.peripheral
@@ -1710,12 +1804,12 @@ public actor Central {
 
         return try await withCancellableGATTContinuation(
             register: { continuation in
-                guard case .connected(var session) = phase, session.identifier == identifier else {
+                guard case .connected(var session) = connections[identifier] else {
                     continuation.resume(throwing: BLESwiftError.notConnected)
                     return
                 }
                 session.pendingReads[characteristic] = continuation
-                phase = .connected(session)
+                connections[identifier] = .connected(session)
                 peripheral.readValue(for: characteristic)
             },
             onCancelled: {
@@ -1760,7 +1854,7 @@ public actor Central {
         data: Data,
         type: WriteType
     ) async throws {
-        guard case .connected(let session) = phase, session.identifier == identifier else {
+        guard case .connected(let session) = connections[identifier] else {
             throw BLESwiftError.notConnected
         }
         let peripheral = session.peripheral
@@ -1775,12 +1869,12 @@ public actor Central {
 
         try await withCancellableGATTContinuation(
             register: { (continuation: CheckedContinuation<Void, Error>) in
-                guard case .connected(var session) = phase, session.identifier == identifier else {
+                guard case .connected(var session) = connections[identifier] else {
                     continuation.resume(throwing: BLESwiftError.notConnected)
                     return
                 }
                 session.pendingWrites[characteristic] = continuation
-                phase = .connected(session)
+                connections[identifier] = .connected(session)
                 peripheral.writeValue(data, for: characteristic, type: .withResponse)
             },
             onCancelled: {
@@ -1814,14 +1908,14 @@ public actor Central {
         let assignedToken = Mutex<UInt64?>(nil)
         try await withCancellableGATTContinuation(
             register: { (continuation: CheckedContinuation<Void, Error>) in
-                guard case .connected(var session) = phase, session.identifier == identifier else {
+                guard case .connected(var session) = connections[identifier] else {
                     continuation.resume(throwing: BLESwiftError.notConnected)
                     return
                 }
                 let token = session.nextGATTWaiterToken()
                 assignedToken.withLock { $0 = token }
                 session.pendingWriteWithoutResponseReady[token] = continuation
-                phase = .connected(session)
+                connections[identifier] = .connected(session)
             },
             onCancelled: {
                 // `assignedToken` is always set by the time this can fire: `register`
@@ -1855,19 +1949,19 @@ public actor Central {
     /// The actual RSSI-read for ``performReadRSSI(peripheral:timeout:)``, run inside the
     /// RSSI tail chain.
     private func performReadRSSINow(identifier: PeripheralIdentifier) async throws -> Int {
-        guard case .connected(let session) = phase, session.identifier == identifier else {
+        guard case .connected(let session) = connections[identifier] else {
             throw BLESwiftError.notConnected
         }
         let peripheral = session.peripheral
 
         return try await withCancellableGATTContinuation(
             register: { continuation in
-                guard case .connected(var session) = phase, session.identifier == identifier else {
+                guard case .connected(var session) = connections[identifier] else {
                     continuation.resume(throwing: BLESwiftError.notConnected)
                     return
                 }
                 session.pendingRSSIRead = continuation
-                phase = .connected(session)
+                connections[identifier] = .connected(session)
                 peripheral.readRSSI()
             },
             onCancelled: {
@@ -1888,7 +1982,7 @@ public actor Central {
     /// rather than failing — this is a best-effort sizing hint, not an operation with a
     /// meaningful failure mode.
     func maximumWriteValueLength(peripheral identifier: PeripheralIdentifier, for type: WriteType) -> Int {
-        guard case .connected(let session) = phase, session.identifier == identifier else {
+        guard case .connected(let session) = connections[identifier] else {
             return Central.defaultMaximumWriteValueLength
         }
         return session.peripheral.maximumWriteValueLength(for: type)
@@ -1927,14 +2021,14 @@ public actor Central {
         let assignedToken = Mutex<UInt64?>(nil)
         try await withCancellableGATTContinuation(
             register: { (continuation: CheckedContinuation<Void, Error>) in
-                guard case .connected(var session) = phase, session.identifier == identifier else {
+                guard case .connected(var session) = connections[identifier] else {
                     continuation.resume(throwing: BLESwiftError.notConnected)
                     return
                 }
                 let token = session.nextGATTWaiterToken()
                 assignedToken.withLock { $0 = token }
                 session.pendingDiscoverServices[token] = continuation
-                phase = .connected(session)
+                connections[identifier] = .connected(session)
                 peripheral.discoverServices([service])
             },
             onCancelled: {
@@ -1963,14 +2057,14 @@ public actor Central {
         let assignedToken = Mutex<UInt64?>(nil)
         try await withCancellableGATTContinuation(
             register: { (continuation: CheckedContinuation<Void, Error>) in
-                guard case .connected(var session) = phase, session.identifier == identifier else {
+                guard case .connected(var session) = connections[identifier] else {
                     continuation.resume(throwing: BLESwiftError.notConnected)
                     return
                 }
                 let token = session.nextGATTWaiterToken()
                 assignedToken.withLock { $0 = token }
                 session.pendingDiscoverCharacteristics[characteristic.service, default: [:]][token] = continuation
-                phase = .connected(session)
+                connections[identifier] = .connected(session)
                 peripheral.discoverCharacteristics([characteristic], for: characteristic.service)
             },
             onCancelled: {
@@ -2020,7 +2114,7 @@ public actor Central {
         deliver: @escaping @Sendable (Data) -> Error?,
         finish: @escaping @Sendable (Error?) -> Void
     ) {
-        guard case .connected(var session) = phase, session.identifier == identifier else {
+        guard case .connected(var session) = connections[identifier] else {
             finish(BLESwiftError.notConnected)
             return
         }
@@ -2039,7 +2133,7 @@ public actor Central {
             )
         }
         session.notificationPumps[token] = pump
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
     }
 
     /// The body of one subscriber's pump task (see
@@ -2091,9 +2185,9 @@ public actor Central {
         characteristic: CharacteristicIdentifier,
         token: UUID
     ) {
-        if case .connected(var session) = phase, session.identifier == identifier,
+        if case .connected(var session) = connections[identifier],
            let pump = session.notificationPumps.removeValue(forKey: token) {
-            phase = .connected(session)
+            connections[identifier] = .connected(session)
             pump.cancel()
         }
         releaseNotificationSubscriber(peripheral: identifier, characteristic: characteristic, token: token)
@@ -2128,7 +2222,7 @@ public actor Central {
         characteristic: CharacteristicIdentifier,
         token: UUID
     ) async throws -> AsyncThrowingStream<Data, Error> {
-        guard case .connected(var session) = phase, session.identifier == identifier else {
+        guard case .connected(var session) = connections[identifier] else {
             throw BLESwiftError.notConnected
         }
 
@@ -2137,7 +2231,7 @@ public actor Central {
             let broadcaster = existing.broadcaster
             let confirmed = existing.enableConfirmed
             session.notificationSubscriptions[characteristic] = existing
-            phase = .connected(session)
+            connections[identifier] = .connected(session)
             let stream = broadcaster.stream()
             if !confirmed {
                 try await awaitNotificationEnablement(identifier: identifier, characteristic: characteristic, token: token)
@@ -2151,7 +2245,7 @@ public actor Central {
         let broadcaster = subscription.broadcaster
         let peripheral = session.peripheral
         session.notificationSubscriptions[characteristic] = subscription
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
         let stream = broadcaster.stream()
 
         log("Enabling notifications on \(characteristic)", level: .debug, category: "gatt")
@@ -2164,12 +2258,12 @@ public actor Central {
             // a fresh enable whose own confirmation is still in flight.
             _ = try await withCancellableGATTContinuation(
                 register: { (continuation: CheckedContinuation<Bool, Error>) in
-                    guard case .connected(var session) = phase, session.identifier == identifier else {
+                    guard case .connected(var session) = connections[identifier] else {
                         continuation.resume(throwing: BLESwiftError.notConnected)
                         return
                     }
                     session.pendingNotifyStateChanges[characteristic] = continuation
-                    phase = .connected(session)
+                    connections[identifier] = .connected(session)
                     peripheral.setNotifyValue(true, for: characteristic)
                 },
                 onCancelled: {
@@ -2203,7 +2297,7 @@ public actor Central {
         do {
             try await withCancellableGATTContinuation(
                 register: { (continuation: CheckedContinuation<Void, Error>) in
-                    guard case .connected(var session) = phase, session.identifier == identifier,
+                    guard case .connected(var session) = connections[identifier],
                           var subscription = session.notificationSubscriptions[characteristic] else {
                         continuation.resume(throwing: BLESwiftError.notConnected)
                         return
@@ -2214,7 +2308,7 @@ public actor Central {
                     }
                     subscription.enableWaiters[token] = continuation
                     session.notificationSubscriptions[characteristic] = subscription
-                    phase = .connected(session)
+                    connections[identifier] = .connected(session)
                 },
                 onCancelled: {
                     self.queue.async {
@@ -2233,13 +2327,13 @@ public actor Central {
     /// Marks `characteristic`'s subscription enable-confirmed and take-then-resumes every
     /// enablement waiter.
     private func confirmNotificationEnablement(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) {
-        guard case .connected(var session) = phase, session.identifier == identifier,
+        guard case .connected(var session) = connections[identifier],
               var subscription = session.notificationSubscriptions[characteristic] else { return }
         subscription.enableConfirmed = true
         let waiters = subscription.enableWaiters
         subscription.enableWaiters = [:]
         session.notificationSubscriptions[characteristic] = subscription
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
 
         log("Notifications enabled on \(characteristic)", level: .debug, category: "gatt")
 
@@ -2257,9 +2351,9 @@ public actor Central {
     /// confirmed; on the value-error path the characteristic's own delivery is already
     /// failing.
     private func failNotificationSubscription(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, error: Error) {
-        guard case .connected(var session) = phase, session.identifier == identifier else { return }
+        guard case .connected(var session) = connections[identifier] else { return }
         guard let subscription = session.notificationSubscriptions.removeValue(forKey: characteristic) else { return }
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
 
         log("Notification subscription on \(characteristic) failed: \(error)", level: .warning, category: "gatt")
 
@@ -2280,7 +2374,7 @@ public actor Central {
     /// confirmation is deliberately not awaited — there is no subscriber left to report a
     /// failure to.
     func releaseNotificationSubscriber(peripheral identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, token: UUID) {
-        guard case .connected(var session) = phase, session.identifier == identifier else { return }
+        guard case .connected(var session) = connections[identifier] else { return }
         guard var subscription = session.notificationSubscriptions[characteristic] else { return }
         guard subscription.subscriberTokens.remove(token) != nil else { return }
 
@@ -2290,7 +2384,7 @@ public actor Central {
 
         if subscription.subscriberTokens.isEmpty {
             session.notificationSubscriptions.removeValue(forKey: characteristic)
-            phase = .connected(session)
+            connections[identifier] = .connected(session)
             waiter?.resume(throwing: BLESwiftError.operationCancelled)
             subscription.broadcaster.finish()
 
@@ -2301,19 +2395,19 @@ public actor Central {
             }
         } else {
             session.notificationSubscriptions[characteristic] = subscription
-            phase = .connected(session)
+            connections[identifier] = .connected(session)
             waiter?.resume(throwing: BLESwiftError.operationCancelled)
         }
     }
 
     /// The number of live subscriber tokens on `characteristic`'s notification
-    /// subscription — `0` if there is none (or no connected session). A test-visibility
-    /// hook (`@testable`): subscriber registration is asynchronous by design (enqueued
-    /// behind `Peripheral.notifications(for:policy:)` returning its stream), so
-    /// multi-subscriber tests await this count before emitting values that every
-    /// subscriber is expected to observe. Not part of the public API.
-    func notificationSubscriberCount(for characteristic: CharacteristicIdentifier) -> Int {
-        guard case .connected(let session) = phase else { return 0 }
+    /// subscription for peripheral `id` — `0` if there is none (or `id` has no connected
+    /// session). A test-visibility hook (`@testable`): subscriber registration is
+    /// asynchronous by design (enqueued behind `Peripheral.notifications(for:policy:)`
+    /// returning its stream), so multi-subscriber tests await this count before emitting
+    /// values that every subscriber is expected to observe. Not part of the public API.
+    func notificationSubscriberCount(for characteristic: CharacteristicIdentifier, on id: PeripheralIdentifier) -> Int {
+        guard case .connected(let session) = connections[id] else { return 0 }
         return session.notificationSubscriptions[characteristic]?.subscriberTokens.count ?? 0
     }
 
@@ -2322,9 +2416,9 @@ public actor Central {
     /// cancellation or a `withTimeout` timeout) rather than a real
     /// `didUpdateNotificationState` completion. See ``cancelPendingRead(identifier:characteristic:)``.
     private func cancelPendingNotifyStateChange(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) {
-        guard case .connected(var session) = phase, session.identifier == identifier else { return }
+        guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingNotifyStateChanges.removeValue(forKey: characteristic) else { return }
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
@@ -2332,11 +2426,11 @@ public actor Central {
     /// counterpart to ``confirmNotificationEnablement(identifier:characteristic:)``,
     /// removing only this waiter and leaving the subscription (and its siblings) intact.
     private func cancelNotificationEnablementWaiter(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, token: UUID) {
-        guard case .connected(var session) = phase, session.identifier == identifier else { return }
+        guard case .connected(var session) = connections[identifier] else { return }
         guard var subscription = session.notificationSubscriptions[characteristic],
               let continuation = subscription.enableWaiters.removeValue(forKey: token) else { return }
         session.notificationSubscriptions[characteristic] = subscription
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
@@ -2552,7 +2646,7 @@ public actor Central {
         characteristic: CharacteristicIdentifier,
         operation: () async throws -> T
     ) async throws -> T {
-        guard case .connected(var session) = phase, session.identifier == identifier else {
+        guard case .connected(var session) = connections[identifier] else {
             throw BLESwiftError.notConnected
         }
 
@@ -2562,13 +2656,13 @@ public actor Central {
             for await _ in doneStream {}
         }
         session.fifoTails[characteristic] = myTail
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
 
         defer { doneContinuation.finish() }
 
         await previousTail?.value
 
-        guard case .connected(let currentSession) = phase, currentSession.identifier == identifier else {
+        guard case .connected = connections[identifier] else {
             throw BLESwiftError.notConnected
         }
 
@@ -2584,7 +2678,7 @@ public actor Central {
         identifier: PeripheralIdentifier,
         operation: () async throws -> T
     ) async throws -> T {
-        guard case .connected(var session) = phase, session.identifier == identifier else {
+        guard case .connected(var session) = connections[identifier] else {
             throw BLESwiftError.notConnected
         }
 
@@ -2594,13 +2688,13 @@ public actor Central {
             for await _ in doneStream {}
         }
         session.rssiTail = myTail
-        phase = .connected(session)
+        connections[identifier] = .connected(session)
 
         defer { doneContinuation.finish() }
 
         await previousTail?.value
 
-        guard case .connected(let currentSession) = phase, currentSession.identifier == identifier else {
+        guard case .connected = connections[identifier] else {
             throw BLESwiftError.notConnected
         }
 
@@ -2971,8 +3065,11 @@ public actor Central {
     ///   test on real hardware; that caveat carries over here as well.
     ///
     /// BLESwift never crashes on more than one restored peripheral — the first is routed
-    /// (single-peripheral connection discipline) and any extras fail explicitly with
-    /// ``BLESwiftError/multipleConnectNotSupported``.
+    /// (a later phase generalizes restoration to route every peripheral) and any extras
+    /// fail explicitly with ``BLESwiftError/duplicateConnect(_:)`` (the first has already
+    /// claimed/is claiming the tracked entry for its own identifier by the time extras are
+    /// considered; this is an interim compile-time error-vocabulary fix, not a behavior
+    /// redesign — see Phase 1 notes).
     private func routeRestoredPeripherals(_ restored: RestoredState) {
         guard let first = restored.peripherals.first else {
             log("No peripherals to restore", level: .info, category: "restore")
@@ -2981,7 +3078,7 @@ public actor Central {
         }
 
         for extra in restored.peripherals.dropFirst() {
-            restorationBroadcaster.yield(.failedToRestoreConnection(extra.identifier, error: BLESwiftError.multipleConnectNotSupported))
+            restorationBroadcaster.yield(.failedToRestoreConnection(extra.identifier, error: BLESwiftError.duplicateConnect(extra.identifier)))
             log("Not restoring additional peripheral \(extra.identifier) — single-peripheral discipline", level: .warning, category: "restore")
         }
 
@@ -2999,7 +3096,7 @@ public actor Central {
 
     /// Adopts a restored-*connected* peripheral as the live session — no CoreBluetooth
     /// connection work is needed (it *is* connected); GATT operations work immediately
-    /// through the ``connectionState`` `Peripheral` handle, with a `.connected` event
+    /// through the ``connectionState(of:)`` `Peripheral` handle, with a `.connected` event
     /// emitted on ``connectionEvents()``.
     ///
     /// The adopted session's ``ReconnectPolicy`` is ``ReconnectPolicy/never`` — no
@@ -3007,9 +3104,9 @@ public actor Central {
     /// consumer wanting auto-reconnect can observe the eventual disconnect and reconnect
     /// with its preferred policy.
     private func adoptRestoredConnection(_ identifier: PeripheralIdentifier) {
-        guard case .idle = phase else {
-            restorationBroadcaster.yield(.failedToRestoreConnection(identifier, error: BLESwiftError.multipleConnectNotSupported))
-            log("Cannot adopt restored connection to \(identifier): connection state is not idle", level: .warning, category: "restore")
+        guard connections[identifier] == nil else {
+            restorationBroadcaster.yield(.failedToRestoreConnection(identifier, error: BLESwiftError.duplicateConnect(identifier)))
+            log("Cannot adopt restored connection to \(identifier): already has a tracked entry", level: .warning, category: "restore")
             endStartupBackgroundTask()
             return
         }
@@ -3029,7 +3126,7 @@ public actor Central {
             self.assumeIsolated { $0.handle(event, from: identifier) }
         }
 
-        phase = .connected(Session.adopted(
+        connections[identifier] = .connected(Session.adopted(
             identifier: identifier,
             peripheral: target,
             warningOptions: configuration.warningOptions
@@ -3048,6 +3145,7 @@ public actor Central {
     private func startRestorationConnect(_ identifier: PeripheralIdentifier) {
         let timeout = configuration.restoration?.connectingTimeout ?? .seconds(15)
         log("Restored peripheral \(identifier) was connecting — issuing manual re-connect (timeout: \(timeout))", level: .info, category: "restore")
+        restorationConnectingIdentifier = identifier
         restorationTask = Task { [weak self] in
             await self?.runRestorationConnect(identifier: identifier, timeout: timeout)
         }
@@ -3066,10 +3164,10 @@ public actor Central {
         // Expiration-vs-routing race guard (verifier finding): `.poweredOn` routing spawns
         // this task, but the task body runs a hop later — if the startup background task
         // expired in that gap, `handleStartupBackgroundTaskExpiration` found nothing to
-        // fail (`pendingRestoration` was already consumed by routing, and `phase` wasn't
-        // `.connecting` yet, so `failPendingConnect` was a no-op). Without this guard the
-        // manual connect would proceed with its full timeout despite the window being
-        // closed. `startRestorationConnect` is the only spawn site, and routing runs
+        // fail (`pendingRestoration` was already consumed by routing, and `identifier` had
+        // no `connections` entry yet, so `failPendingConnect` was a no-op). Without this
+        // guard the manual connect would proceed with its full timeout despite the window
+        // being closed. `startRestorationConnect` is the only spawn site, and routing runs
         // synchronously within the state-change's actor turn, so this is the one gap.
         guard startupWindowOpen else {
             // Silent when cancelled: `stopAndExtractState()`/`deinit` cancel this task
@@ -3079,12 +3177,13 @@ public actor Central {
                 restorationBroadcaster.yield(.failedToRestoreConnection(identifier, error: BLESwiftError.startupBackgroundTaskExpired))
             }
             restorationTask = nil
+            restorationConnectingIdentifier = nil
             return
         }
 
         do {
-            guard case .idle = phase else {
-                throw BLESwiftError.multipleConnectNotSupported
+            guard connections[identifier] == nil else {
+                throw BLESwiftError.duplicateConnect(identifier)
             }
             _ = try await establishConnection(
                 identifier: identifier,
@@ -3099,6 +3198,7 @@ public actor Central {
             restorationBroadcaster.yield(.failedToRestoreConnection(identifier, error: error))
         }
         restorationTask = nil
+        restorationConnectingIdentifier = nil
         endStartupBackgroundTask()
     }
 
@@ -3121,12 +3221,12 @@ public actor Central {
             }
         }
 
-        if restorationTask != nil {
+        if restorationTask != nil, let restorationConnectingIdentifier {
             // The task's own catch emits the failure event and closes the window once the
             // two-phase cancel resolves; the window is also closed below (idempotent) so
             // the platform task is released *now*, not when CoreBluetooth gets around to
             // confirming.
-            failPendingConnect(error: BLESwiftError.startupBackgroundTaskExpired)
+            failPendingConnect(for: restorationConnectingIdentifier, error: BLESwiftError.startupBackgroundTaskExpired)
         }
 
         endStartupBackgroundTask()
@@ -3155,25 +3255,36 @@ public actor Central {
 
 // MARK: - Connection state machine
 
-/// `Central`'s internal single-connection state machine. Declared file-private (not nested
-/// in `Central`) purely for the associated structs' own visibility; nothing outside this
-/// file inspects `Phase` directly — ``Central/connectionState`` projects it into the public
-/// ``ConnectionState``.
-private enum Phase {
-    /// Not connected, no connection attempt in progress.
-    case idle
+/// `Central`'s internal per-peripheral connection state machine. Declared file-private (not
+/// nested in `Central`) purely for the associated structs' own visibility; nothing outside
+/// this file inspects `PeripheralPhase` directly — ``Central/connectionState(of:)``
+/// projects it into the public ``ConnectionState``.
+///
+/// Identical cases to the pre-multi-peripheral single `Phase` type, minus `.idle` —
+/// absence of an entry from ``Central/connections`` IS that peripheral's idle state;
+/// `Central` never stores a `.idle` case.
+private enum PeripheralPhase {
     /// A connection attempt is in progress.
     case connecting(Connecting)
     /// Connected.
     case connected(Session)
-    /// Disconnecting — either an explicit `disconnect` is in flight, or
-    /// `cancelAllOperations` cancelled a pending connection attempt.
+    /// Disconnecting — either an explicit `disconnect(_:)`/`disconnect(_:immediate:)` is in
+    /// flight, or `cancelAllOperations` cancelled a pending connection attempt.
     case disconnecting(Disconnecting)
 }
 
+/// One independent auto-reconnect loop, tracked per peripheral in
+/// ``Central/reconnectLoops``. Pairs the loop's `Task` with the generation it was spawned
+/// with — see ``Central/clearReconnectLoopIfCurrent(id:generation:)``.
+private struct ReconnectLoop {
+    var task: Task<Void, Never>
+    var generation: UInt64
+}
+
 /// State for a connection attempt in progress. Holds the single pending connect
-/// continuation (BLESwift is single-peripheral, so this is one optional value, not a
-/// dictionary-keyed registry) and the two-phase cancel's `stopping` flag.
+/// continuation for this one peripheral (each peripheral gets its own `Connecting` value
+/// inside ``Central/connections``, so this remains one optional value, not a registry) and
+/// the two-phase cancel's `stopping` flag.
 private struct Connecting {
     let identifier: PeripheralIdentifier
     let peripheral: any PeripheralRemote
@@ -3182,7 +3293,8 @@ private struct Connecting {
     let warningOptions: WarningOptions
     /// Resumed exactly once, by `Central.handleTermination(identifier:error:)` (success or
     /// failure) — never resumed directly by whatever *requests* cancellation
-    /// (`Central.failPendingConnect(error:)`), matching the two-phase-cancel ground truth.
+    /// (`Central.failPendingConnect(for:error:)`), matching the two-phase-cancel ground
+    /// truth.
     var continuation: CheckedContinuation<Peripheral, Error>?
     /// Non-`nil` once cancellation (task cancellation, timeout, `cancelAllOperations`) has
     /// been requested for this attempt — the error `continuation` will eventually resume
@@ -3190,13 +3302,14 @@ private struct Connecting {
     var stopping: Error?
 }
 
-/// State for an established connection.
+/// State for one established connection.
 ///
 /// Also holds every piece of GATT bookkeeping — a deliberate design: GATT
 /// pending-operation state lives *inside* the connection `Session`, not at actor level,
-/// so disconnect cleanup (``Central/failPendingGATTContinuations(error:)``)
-/// drops it structurally along with the rest of the connection, and there is exactly one
-/// copy of it, matching single-peripheral connection discipline.
+/// so disconnect cleanup (``Central/failPendingGATTContinuations(for:error:)``)
+/// drops it structurally along with the rest of that connection, and multi-peripheral
+/// isolation falls out for free: each ``Central/connections`` entry owns its own `Session`
+/// (and so its own registries), and teardown of one entry can never touch another's.
 private struct Session {
     let identifier: PeripheralIdentifier
     let peripheral: any PeripheralRemote

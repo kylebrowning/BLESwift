@@ -322,7 +322,7 @@ struct GATTTests {
             Issue.record("expected a BLESwiftError, got \(error)")
         }
 
-        guard case .disconnected = await central.connectionState else {
+        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected")
             return
         }
