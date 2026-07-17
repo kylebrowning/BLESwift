@@ -68,6 +68,34 @@ worked example (including the `HeartRateMeasurement` decoding), and the
 [DocC catalog](Sources/BLESwift/BLESwift.docc/BLESwift.md) for a full walkthrough: Getting Started, Scanning,
 Connections & Reconnection, Reading/Writing & Notifications, and Background Restoration.
 
+## Testing
+
+You don't need real hardware to unit-test code built on `Central`. The `BLESwiftTestSupport`
+product ships `FakeCentral`/`FakePeripheral` — scriptable stand-ins for
+`CBCentralManager`/`CBPeripheral` — plus `Central`'s public
+`init(backend:queue:configuration:startupBackgroundTask:connectedPeripheral:)`, which wires a
+real `Central` to them instead of CoreBluetooth:
+
+```swift
+import BLESwift
+import BLESwiftCore
+import BLESwiftTestSupport
+import Dispatch
+
+let queue = DispatchSerialQueue(label: "MyAppTests.rig")
+let fakeCentral = FakeCentral(queue: queue)
+let central = Central(backend: fakeCentral, queue: queue)
+
+fakeCentral.simulateStateChange(.poweredOn)
+// ... script connects, reads, writes, and notifications against `fakeCentral`/a `FakePeripheral`
+```
+
+See the `BLESwiftTestSupport` module's "Testing Your BLE Code" DocC article for the full rig
+pattern and scripting reference, and
+[`Examples/ConsumerTests`](Examples/ConsumerTests/Tests/ConsumerTests/ConsumerTests.swift) for
+a complete, standalone package exercising this exact pattern from outside BLESwift itself (no
+`@testable import`).
+
 ## Platform support
 
 | Platform  | Minimum version |

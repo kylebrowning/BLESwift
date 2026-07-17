@@ -50,7 +50,8 @@ public struct Peripheral: Sendable {
 /// created it without retaining it.
 ///
 /// `central` is declared `nonisolated(unsafe)` rather than requiring `@unchecked Sendable`
-/// on this whole type (forbidden — see Phase 2/10's grep guards): it is written exactly
+/// on this whole type (`@unchecked Sendable` is forbidden throughout this package): it is
+/// written exactly
 /// once, at initialization, and never reassigned afterward by this type's own code — the
 /// only further "mutation" is Swift's weak-reference runtime zeroing `central` out when the
 /// referenced `Central` deallocates, which the language guarantees is safe to observe

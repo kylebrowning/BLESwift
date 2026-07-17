@@ -9,7 +9,7 @@ import Synchronization
 /// ``yield(_:)``ed `Element` to every currently subscribed `AsyncThrowingStream`, and can
 /// ``finish(throwing:)`` every subscriber with an error.
 ///
-/// Exists because notification streams (Phase 7) MUST be able to finish with
+/// Exists because notification streams MUST be able to finish with
 /// ``BLESwiftError/unexpectedDisconnect``/decode errors, while ``Broadcaster`` is
 /// `AsyncStream`-based and structurally cannot carry a terminal error. Modeled directly on
 /// `Broadcaster`: the same `Mutex`-guarded state (rather than actor confinement, so

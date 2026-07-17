@@ -4,7 +4,7 @@
 //
 
 // NOTE — dual-access declaration: background restoration is an iOS-only feature, and its
-// *public API surface* is gated `#if os(iOS)` accordingly (plan Phase 8, task 1). The
+// *public API surface* is gated `#if os(iOS)` accordingly. The
 // restoration *logic*, however, compiles on every platform so that it stays testable under
 // `swift test` on macOS (SPM tests have no UIKit/UIApplication; tests drive the internal
 // surface via `@testable import`). Swift cannot conditionally-compile just an access
@@ -21,7 +21,7 @@
 /// Pass one of these as ``Configuration/restoration`` when creating a ``Central``; the
 /// `identifier` is registered with CoreBluetooth at manager creation
 /// (`CBCentralManagerOptionRestoreIdentifierKey`), which is why manager creation happens
-/// synchronously inside `Central.init` (Phase 3 guarantee). Restoration results arrive on
+/// synchronously inside `Central.init`. Restoration results arrive on
 /// ``Central/restorationEvents()``.
 ///
 /// No `launchOptions` are needed:

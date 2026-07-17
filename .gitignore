@@ -17,3 +17,4 @@ docs/
 
 # Internal planning documents (local only)
 plans/
+Examples/*/.build/

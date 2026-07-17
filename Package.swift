@@ -21,7 +21,11 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0")
     ],
     targets: [
-        .target(name: "BLESwiftCore", swiftSettings: sharedSwiftSettings),
+        .target(
+            name: "BLESwiftCore",
+            resources: [.copy("BLESwiftCore.docc")],
+            swiftSettings: sharedSwiftSettings
+        ),
         .target(
             name: "BLESwift",
             dependencies: [
@@ -34,6 +38,7 @@ let package = Package(
         .target(
             name: "BLESwiftTestSupport",
             dependencies: ["BLESwiftCore"],
+            resources: [.copy("BLESwiftTestSupport.docc")],
             swiftSettings: sharedSwiftSettings
         ),
         .testTarget(

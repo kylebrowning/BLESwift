@@ -3,8 +3,8 @@
 //  BLESwift
 //
 
-/// Races `operation` against a `duration`-long timer, task-group style (Phase 0 finding: no
-/// stdlib timeout API exists in Swift 6.2).
+/// Races `operation` against a `duration`-long timer, task-group style (no stdlib timeout
+/// API exists in Swift 6.2).
 ///
 /// If `duration` is `nil`, `operation` runs with no timeout at all — `withTimeout` becomes a
 /// transparent passthrough. Otherwise, whichever of `operation` or the timer finishes first

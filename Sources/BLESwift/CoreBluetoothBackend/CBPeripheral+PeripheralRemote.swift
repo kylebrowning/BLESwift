@@ -84,7 +84,7 @@ extension CBPeripheral {
 /// `CBCharacteristicWriteType`, so they need bridging overloads even though CoreBluetooth
 /// already has same-named methods. The remaining members are identifier-based (see
 /// ``PeripheralRemote``) and are implemented below by resolving the identifier to a
-/// `CBService`/`CBCharacteristic` via ``bleSwiftService(_:)``/``bleSwiftCharacteristic(_:)`` and
+/// `CBService`/`CBCharacteristic` via `bleSwiftService(_:)`/`bleSwiftCharacteristic(_:)` and
 /// delegating to the corresponding CoreBluetooth method — silently no-op-ing when the
 /// service or characteristic has not yet been discovered, matching the `nil`-returning
 /// behavior of `bleSwiftService(_:)`/`bleSwiftCharacteristic(_:)`.

@@ -90,6 +90,32 @@ print("Battery: \(level)%")
 ``Receivable``/``Transmittable``. See <doc:ReadingWritingNotifications> for writes and
 notification streams.
 
+### Testing
+
+You don't need real hardware to unit-test code built on `Central`. The **BLESwiftTestSupport**
+module ships `FakeCentral`/`FakePeripheral` — scriptable stand-ins for
+`CBCentralManager`/`CBPeripheral` — plus `Central`'s public
+`init(backend:queue:configuration:startupBackgroundTask:connectedPeripheral:)`, which wires a
+real `Central` to them instead of CoreBluetooth:
+
+```swift
+import BLESwift
+import BLESwiftCore
+import BLESwiftTestSupport
+import Dispatch
+
+let queue = DispatchSerialQueue(label: "MyAppTests.rig")
+let fakeCentral = FakeCentral(queue: queue)
+let central = Central(backend: fakeCentral, queue: queue)
+```
+
+From there, `central` behaves exactly like a production `Central` — `stateEvents()`,
+`connect(_:)`, and every `Peripheral` GATT method work unchanged, because `Central` itself has
+no idea it isn't talking to real hardware. See the **BLESwiftTestSupport** module's "Testing
+Your BLE Code" article for the full rig pattern, the queue-confined contract these fakes
+enforce, and the scripting reference (`connectBehavior`, `scriptedReadValues`,
+`availableServices`, and more).
+
 ## See Also
 
 - <doc:Scanning>

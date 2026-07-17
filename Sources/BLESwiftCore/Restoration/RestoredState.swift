@@ -12,7 +12,7 @@
 // enum case cannot carry a `package` payload type) — and, per A3.1, no longer desirable
 // either: these are pure value types in a CB-free module, and the public-seam architecture
 // (any `CentralManaging` conformance, including a replay/test backend on any platform, can
-// legitimately construct a `RestoredState`) supersedes the original Phase-8 minimal-surface
+// legitimately construct a `RestoredState`) supersedes the original minimal-surface
 // rationale. The BEHAVIORAL restoration surface — `RestorationConfiguration`,
 // `Configuration.restoration`, `Central.restorationEvents()` (all in the `BLESwift` module)
 // — stays iOS-gated as before; only these inert value types widen.

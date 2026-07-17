@@ -32,7 +32,7 @@ enum ReplayMode: Sendable {
 /// A multicast primitive: fans out each ``yield(_:)``ed `Element` to every currently
 /// subscribed `AsyncStream`, with configurable replay semantics for late subscribers.
 ///
-/// `AsyncStream` itself supports only one consumer (Phase 0 finding); `Broadcaster` is
+/// `AsyncStream` itself supports only one consumer; `Broadcaster` is
 /// BLESwift's own multicast layer built on top of it (swift-async-algorithms' channel type
 /// *distributes* — each element reaches exactly one consumer — and is not a multicast
 /// primitive regardless of it not being a dependency).
