@@ -76,6 +76,23 @@ final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate {
         forward(.didUpdateNotificationState(characteristic: identifier, isNotifying: characteristic.isNotifying, error: error as NSError?))
     }
 
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverDescriptorsFor characteristic: CBCharacteristic, error: Error?) {
+        guard let identifier = characteristicIdentifier(for: characteristic) else { return }
+        forward(.didDiscoverDescriptors(characteristic: identifier, error: error as NSError?))
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor descriptor: CBDescriptor, error: Error?) {
+        guard let identifier = descriptorIdentifier(for: descriptor) else { return }
+        // Convert CoreBluetooth's untyped `Any?` descriptor value to `Data` EAGERLY, right
+        // here at the proxy boundary — the raw CB payload never crosses into the actor.
+        forward(.didUpdateValueForDescriptor(descriptor: identifier, value: Self.descriptorData(from: descriptor.value), error: error as NSError?))
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor descriptor: CBDescriptor, error: Error?) {
+        guard let identifier = descriptorIdentifier(for: descriptor) else { return }
+        forward(.didWriteValueForDescriptor(descriptor: identifier, error: error as NSError?))
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
         forward(.didReadRSSI(RSSI.intValue, error: error as NSError?))
     }
@@ -96,6 +113,43 @@ final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate {
     private func characteristicIdentifier(for characteristic: CBCharacteristic) -> CharacteristicIdentifier? {
         guard let service = characteristic.service else { return nil }
         return CharacteristicIdentifier(cbuuid: characteristic.uuid, service: ServiceIdentifier(cbuuid: service.uuid))
+    }
+
+    /// Resolves `descriptor`'s owning characteristic (and, transitively, its service), or
+    /// `nil` if CoreBluetooth ever hands back a descriptor whose `characteristic` (or that
+    /// characteristic's `service`) is unset — both are optional in CoreBluetooth, though
+    /// neither is expected in practice.
+    private func descriptorIdentifier(for descriptor: CBDescriptor) -> DescriptorIdentifier? {
+        guard let characteristic = descriptor.characteristic,
+              let identifier = characteristicIdentifier(for: characteristic) else { return nil }
+        return DescriptorIdentifier(cbuuid: descriptor.uuid, characteristic: identifier)
+    }
+
+    /// Converts a `CBDescriptor.value` (typed `Any?` by CoreBluetooth) to `Data`, eagerly,
+    /// at the proxy boundary. CoreBluetooth documents the concrete class per descriptor UUID:
+    ///
+    /// - `NSData` (Characteristic Format, Characteristic Aggregate Format) → the bytes
+    ///   verbatim.
+    /// - `NSString` (Characteristic User Description) → its UTF-8 bytes.
+    /// - `NSNumber` (Characteristic Extended Properties, Client/Server Characteristic
+    ///   Configuration, L2CAP PSM) → its 16-bit value as two little-endian bytes, the GATT
+    ///   wire encoding for every one of these numeric descriptors.
+    /// - `nil` (value not yet read) → `nil`.
+    /// - Any other/unknown shape → `nil`, rather than guessing at a byte layout.
+    private static func descriptorData(from value: Any?) -> Data? {
+        switch value {
+        case nil:
+            return nil
+        case let data as Data:
+            return data
+        case let string as String:
+            return Data(string.utf8)
+        case let number as NSNumber:
+            var littleEndian = number.uint16Value.littleEndian
+            return withUnsafeBytes(of: &littleEndian) { Data($0) }
+        default:
+            return nil
+        }
     }
 
     private func forward(_ event: PeripheralEvent) {

@@ -54,6 +54,15 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _onWrite: ((CharacteristicIdentifier, Data) -> Void)?
     nonisolated(unsafe) private var _eventHandlerSetCount = 0
     nonisolated(unsafe) private var _scriptedProperties: [CharacteristicIdentifier: CharacteristicProperties] = [:]
+    nonisolated(unsafe) private var _discoveredDescriptors: Set<DescriptorIdentifier> = []
+    nonisolated(unsafe) private var _scriptedDescriptorValues: [DescriptorIdentifier: Data] = [:]
+    nonisolated(unsafe) private var _availableDescriptors: [CharacteristicIdentifier: Set<DescriptorIdentifier>]?
+    nonisolated(unsafe) private var _descriptorWriteCallCounts: [DescriptorIdentifier: Int] = [:]
+    nonisolated(unsafe) private var _writtenDescriptorValues: [DescriptorIdentifier: Data] = [:]
+    nonisolated(unsafe) private var _discoverDescriptorsCallCount = 0
+    nonisolated(unsafe) private var _descriptorReadCallCount = 0
+    nonisolated(unsafe) private var _holdDescriptorReadCompletions = false
+    nonisolated(unsafe) private var _heldDescriptorReads: [(descriptor: DescriptorIdentifier, value: Data?)] = []
 
     /// Creates a `FakePeripheral` confined to `queue`.
     ///
@@ -269,6 +278,110 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
+    /// The value ``readValue(for:)`` reports back via `didUpdateValueForDescriptor`, keyed
+    /// by descriptor. In permissive mode (``availableDescriptors`` is `nil`), scripting a
+    /// value here also makes that descriptor "exist": ``discoverDescriptors(for:)`` reveals
+    /// every scripted descriptor under the characteristic being discovered. A descriptor with
+    /// no entry reports back empty `Data`. Configure via ``onQueue(_:)``.
+    public var scriptedDescriptorValues: [DescriptorIdentifier: Data] {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _scriptedDescriptorValues
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _scriptedDescriptorValues = newValue
+        }
+    }
+
+    /// The descriptors this fake actually has, per characteristic — the descriptor
+    /// counterpart to ``availableServices``. `nil` (the default) keeps the permissive
+    /// behavior: ``discoverDescriptors(for:)`` reveals every descriptor scripted in
+    /// ``scriptedDescriptorValues`` under the characteristic. When non-`nil`,
+    /// ``discoverDescriptors(for:)`` reveals only the descriptors listed for that
+    /// characteristic here — so a descriptor requested but absent stays undiscovered, exactly
+    /// like real CoreBluetooth, letting `Central`'s post-discovery `isDiscovered(_:)` recheck
+    /// genuinely fail with ``BLESwiftError/missingDescriptor(_:)``. Use this (rather than
+    /// scripting a read value) to make a write-only descriptor exist. Configure via
+    /// ``onQueue(_:)``.
+    public var availableDescriptors: [CharacteristicIdentifier: Set<DescriptorIdentifier>]? {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _availableDescriptors
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _availableDescriptors = newValue
+        }
+    }
+
+    /// The number of times ``writeValue(_:for:)`` (the descriptor overload) has been called,
+    /// keyed by descriptor. Read via ``onQueue(_:)``.
+    public var descriptorWriteCallCounts: [DescriptorIdentifier: Int] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _descriptorWriteCallCounts
+    }
+
+    /// The most recent bytes written to each descriptor via ``writeValue(_:for:)`` (the
+    /// descriptor overload). Read via ``onQueue(_:)``.
+    public var writtenDescriptorValues: [DescriptorIdentifier: Data] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _writtenDescriptorValues
+    }
+
+    /// The number of times ``discoverDescriptors(for:)`` has been called.
+    public var discoverDescriptorsCallCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _discoverDescriptorsCallCount
+    }
+
+    /// The number of times ``readValue(for:)`` (the descriptor overload) has been called.
+    public var descriptorReadCallCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _descriptorReadCallCount
+    }
+
+    /// Whether ``readValue(for:)`` (the descriptor overload) withholds its
+    /// `didUpdateValueForDescriptor` completion instead of delivering it immediately —
+    /// the descriptor counterpart to ``holdReadCompletions``. `false` by default. Held
+    /// completions are released by ``simulateNextHeldDescriptorReadCompletion()``. Configure
+    /// via ``onQueue(_:)``.
+    public var holdDescriptorReadCompletions: Bool {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _holdDescriptorReadCompletions
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _holdDescriptorReadCompletions = newValue
+        }
+    }
+
+    /// Delivers the oldest still-held descriptor-read completion (FIFO order), if any. A
+    /// no-op if none are held.
+    public func simulateNextHeldDescriptorReadCompletion() {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            guard !_heldDescriptorReads.isEmpty else { return }
+            let (descriptor, value) = _heldDescriptorReads.removeFirst()
+            deliver(.didUpdateValueForDescriptor(descriptor: descriptor, value: value, error: nil))
+        }
+    }
+
+    /// Marks `descriptors` as discovered (along with their owning characteristic and
+    /// service) without going through ``discoverDescriptors(for:)``/an event, for tests that
+    /// need to seed descriptor discovery state directly. No event corresponds to this, so it
+    /// is a pure, synchronous state seed via ``onQueue(_:)``.
+    public func simulateDiscoveredDescriptors(_ descriptors: [DescriptorIdentifier]) {
+        onQueue {
+            for descriptor in descriptors {
+                _discoveredServices.insert(descriptor.characteristic.service)
+                _discoveredCharacteristics.insert(descriptor.characteristic)
+            }
+            _discoveredDescriptors.formUnion(descriptors)
+        }
+    }
+
     /// Simulates a connection-state change, asynchronously. Does not itself deliver an
     /// event — connection events are delivered by `FakeCentral`, which owns the
     /// connect/disconnect flow. Off-queue safe to call directly; flush with
@@ -471,6 +584,47 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
+    /// Records the call and asynchronously delivers `didDiscoverDescriptors` on ``queue``.
+    ///
+    /// If ``availableDescriptors`` is `nil` (the default), reveals every descriptor scripted
+    /// in ``scriptedDescriptorValues`` under `characteristic` — the permissive behavior. If
+    /// ``availableDescriptors`` is set, reveals only the descriptors listed for
+    /// `characteristic` there; anything absent is never added, exactly like real
+    /// CoreBluetooth silently not adding a nonexistent descriptor to `.descriptors`.
+    public func discoverDescriptors(for characteristic: CharacteristicIdentifier) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _discoverDescriptorsCallCount += 1
+        if let available = _availableDescriptors {
+            _discoveredDescriptors.formUnion(available[characteristic] ?? [])
+        } else {
+            _discoveredDescriptors.formUnion(_scriptedDescriptorValues.keys.filter { $0.characteristic == characteristic })
+        }
+        queue.async { [self] in deliver(.didDiscoverDescriptors(characteristic: characteristic, error: nil)) }
+    }
+
+    /// Records the call and, unless ``holdDescriptorReadCompletions`` is `true`,
+    /// asynchronously delivers `didUpdateValueForDescriptor` on ``queue`` with the value
+    /// scripted in ``scriptedDescriptorValues`` for `descriptor` (empty `Data` if none).
+    public func readValue(for descriptor: DescriptorIdentifier) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _descriptorReadCallCount += 1
+        let value = _scriptedDescriptorValues[descriptor]
+        if _holdDescriptorReadCompletions {
+            _heldDescriptorReads.append((descriptor, value))
+            return
+        }
+        queue.async { [self] in deliver(.didUpdateValueForDescriptor(descriptor: descriptor, value: value, error: nil)) }
+    }
+
+    /// Records the call (and the written bytes) and asynchronously delivers
+    /// `didWriteValueForDescriptor` on ``queue``.
+    public func writeValue(_ data: Data, for descriptor: DescriptorIdentifier) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _descriptorWriteCallCounts[descriptor, default: 0] += 1
+        _writtenDescriptorValues[descriptor] = data
+        queue.async { [self] in deliver(.didWriteValueForDescriptor(descriptor: descriptor, error: nil)) }
+    }
+
     /// Asynchronously delivers `didReadRSSI` on ``queue`` with ``scriptedRSSI``.
     public func readRSSI() {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -514,6 +668,13 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     public func properties(of characteristic: CharacteristicIdentifier) -> CharacteristicProperties {
         dispatchPrecondition(condition: .onQueue(queue))
         return _scriptedProperties[characteristic] ?? Self.defaultProperties
+    }
+
+    /// Whether `descriptor` has been discovered (via ``discoverDescriptors(for:)`` or
+    /// ``simulateDiscoveredDescriptors(_:)``).
+    public func isDiscovered(_ descriptor: DescriptorIdentifier) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _discoveredDescriptors.contains(descriptor)
     }
 
     private func deliver(_ event: PeripheralEvent) {

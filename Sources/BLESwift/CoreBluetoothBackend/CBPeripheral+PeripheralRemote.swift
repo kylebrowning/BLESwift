@@ -74,6 +74,14 @@ extension CBPeripheral {
             CharacteristicIdentifier(cbuuid: $0.uuid, service: identifier.service) == identifier
         }
     }
+
+    /// Finds an already-discovered descriptor by identifier, or `nil` if its owning service,
+    /// characteristic, or the descriptor itself has not been discovered.
+    fileprivate func bleSwiftDescriptor(_ identifier: DescriptorIdentifier) -> CBDescriptor? {
+        bleSwiftCharacteristic(identifier.characteristic)?.descriptors?.first {
+            DescriptorIdentifier(cbuuid: $0.uuid, characteristic: identifier.characteristic) == identifier
+        }
+    }
 }
 
 /// `identifier`, `name`, `readRSSI()`, and `canSendWriteWithoutResponse` are already
@@ -132,6 +140,26 @@ extension CBPeripheral: PeripheralRemote {
         setNotifyValue(enabled, for: cbCharacteristic)
     }
 
+    /// Discovers all descriptors of `characteristic`. A no-op if it has not yet been
+    /// discovered.
+    public func discoverDescriptors(for characteristic: CharacteristicIdentifier) {
+        guard let cbCharacteristic = bleSwiftCharacteristic(characteristic) else { return }
+        discoverDescriptors(for: cbCharacteristic)
+    }
+
+    /// Requests the current value of `descriptor`. A no-op if it has not yet been
+    /// discovered.
+    public func readValue(for descriptor: DescriptorIdentifier) {
+        guard let cbDescriptor = bleSwiftDescriptor(descriptor) else { return }
+        readValue(for: cbDescriptor)
+    }
+
+    /// Writes `data` to `descriptor`. A no-op if it has not yet been discovered.
+    public func writeValue(_ data: Data, for descriptor: DescriptorIdentifier) {
+        guard let cbDescriptor = bleSwiftDescriptor(descriptor) else { return }
+        writeValue(data, for: cbDescriptor)
+    }
+
     /// The maximum payload length in bytes for a single write of `type`.
     public func maximumWriteValueLength(for type: WriteType) -> Int {
         maximumWriteValueLength(for: type.cbWriteType)
@@ -145,6 +173,11 @@ extension CBPeripheral: PeripheralRemote {
     /// Whether `characteristic` has already been discovered on this peripheral.
     public func isDiscovered(_ characteristic: CharacteristicIdentifier) -> Bool {
         bleSwiftCharacteristic(characteristic) != nil
+    }
+
+    /// Whether `descriptor` has already been discovered on this peripheral.
+    public func isDiscovered(_ descriptor: DescriptorIdentifier) -> Bool {
+        bleSwiftDescriptor(descriptor) != nil
     }
 
     /// Whether `characteristic` currently has notifications enabled. `false` if it has not
