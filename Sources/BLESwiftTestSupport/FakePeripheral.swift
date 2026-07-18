@@ -53,6 +53,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _setNotifyValueCalls: [(characteristic: CharacteristicIdentifier, enabled: Bool)] = []
     nonisolated(unsafe) private var _onWrite: ((CharacteristicIdentifier, Data) -> Void)?
     nonisolated(unsafe) private var _eventHandlerSetCount = 0
+    nonisolated(unsafe) private var _scriptedProperties: [CharacteristicIdentifier: CharacteristicProperties] = [:]
 
     /// Creates a `FakePeripheral` confined to `queue`.
     ///
@@ -164,6 +165,26 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         set {
             dispatchPrecondition(condition: .onQueue(queue))
             _scriptedReadValues = newValue
+        }
+    }
+
+    /// The default ``properties(of:)`` reports for any characteristic with no entry in
+    /// ``scriptedProperties`` — `[.read, .write, .notify]`, the common capability set, chosen
+    /// so pre-existing tests that never script properties keep observing a sensible value.
+    public static let defaultProperties: CharacteristicProperties = [.read, .write, .notify]
+
+    /// The ``CharacteristicProperties`` ``properties(of:)`` reports back, keyed by
+    /// characteristic. A characteristic with no entry reports ``defaultProperties``
+    /// (`[.read, .write, .notify]`), keeping existing tests unchanged. Configure via
+    /// ``onQueue(_:)``.
+    public var scriptedProperties: [CharacteristicIdentifier: CharacteristicProperties] {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _scriptedProperties
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _scriptedProperties = newValue
         }
     }
 
@@ -483,6 +504,16 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     public func isNotifying(_ characteristic: CharacteristicIdentifier) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _notifyingCharacteristics.contains(characteristic)
+    }
+
+    /// The scripted ``CharacteristicProperties`` for `characteristic` (see
+    /// ``scriptedProperties``), or ``defaultProperties`` (`[.read, .write, .notify]`) if none
+    /// was scripted. Unlike real CoreBluetooth, this does not gate on discovery — tests seed
+    /// discovery separately; scripting properties for a characteristic is enough for
+    /// ``properties(of:)`` to report them.
+    public func properties(of characteristic: CharacteristicIdentifier) -> CharacteristicProperties {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _scriptedProperties[characteristic] ?? Self.defaultProperties
     }
 
     private func deliver(_ event: PeripheralEvent) {

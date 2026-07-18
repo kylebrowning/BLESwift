@@ -74,6 +74,25 @@ extension Peripheral {
         try await central.performWrite(peripheral: id, characteristic: characteristic, data: data, type: type, timeout: timeout)
     }
 
+    /// The set of operations `characteristic` advertises support for — whether it's
+    /// readable, writable, notifiable, and so on.
+    ///
+    /// Use this for capability-driven UI or clearer error paths, rather than discovering a
+    /// characteristic's capabilities by attempting an operation and inspecting the error.
+    /// Like ``read(from:timeout:)``/``write(_:to:type:timeout:)``, this lazily discovers the
+    /// owning service and characteristic first if needed, and serializes against other
+    /// operations on the *same* characteristic.
+    ///
+    /// - Parameter characteristic: The characteristic to introspect.
+    /// - Returns: The characteristic's advertised ``CharacteristicProperties``.
+    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)`` if
+    ///   discovery fails; or whatever error CoreBluetooth reports for that discovery.
+    public func properties(of characteristic: CharacteristicIdentifier) async throws -> CharacteristicProperties {
+        let central = try resolveCentral()
+        return try await central.properties(peripheral: id, characteristic: characteristic)
+    }
+
     /// Reads the peripheral's current RSSI (signal strength), in dBm.
     ///
     /// RSSI has no owning characteristic, so concurrent `readRSSI()` calls are serialized
