@@ -137,6 +137,29 @@ public protocol PeripheralRemote: AnyObject {
     /// `readValue(for:)`/`writeValue(_:for:type:)`.
     func properties(of characteristic: CharacteristicIdentifier) -> CharacteristicProperties
 
+    /// Every service currently discovered on this peripheral, as ``ServiceIdentifier``
+    /// values — the enumeration counterpart to the UUID-first `isDiscovered(_:)` check.
+    /// Empty until a `discoverServices(_:)` completion has landed (or if the peripheral
+    /// genuinely exposes no services). Maps `CBPeripheral.services` at the CoreBluetooth
+    /// seam (the `CBService`s never cross this boundary); the order is unspecified. Backs
+    /// `Central`'s enumeration API, which lists a connected peripheral's services without
+    /// knowing their UUIDs up front.
+    var discoveredServices: [ServiceIdentifier] { get }
+
+    /// Every characteristic currently discovered under `service`, as
+    /// ``CharacteristicIdentifier`` values. Empty if `service` has not been discovered, has
+    /// had no `discoverCharacteristics(_:for:)` completion land yet, or genuinely exposes
+    /// none. Maps `CBService.characteristics` at the CoreBluetooth seam; the order is
+    /// unspecified.
+    func discoveredCharacteristics(for service: ServiceIdentifier) -> [CharacteristicIdentifier]
+
+    /// Every descriptor currently discovered under `characteristic`, as
+    /// ``DescriptorIdentifier`` values. Empty if `characteristic` has not been discovered,
+    /// has had no `discoverDescriptors(for:)` completion land yet, or genuinely exposes
+    /// none. Maps `CBCharacteristic.descriptors` at the CoreBluetooth seam; the order is
+    /// unspecified.
+    func discoveredDescriptors(for characteristic: CharacteristicIdentifier) -> [DescriptorIdentifier]
+
     /// Opens an L2CAP channel to `psm`. Completion arrives asynchronously as
     /// ``PeripheralEvent/didOpenL2CAPChannel(channel:error:)`` (one per call, in call
     /// order). Mirrors `CBPeripheral.openL2CAPChannel(_:)`, taking BLESwift's owned

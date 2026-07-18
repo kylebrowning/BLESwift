@@ -1688,6 +1688,19 @@ public actor Central {
             // the invalidation structurally. This is purely the observer fan-out — routed
             // to only `peripheral`'s own broadcaster, never any other peripheral's.
             log("Services modified/invalidated: \(invalidatedServices)", level: .info, category: "gatt")
+            // Reset the enumeration caches touched by the invalidation, so a subsequent
+            // `discoverServices()`/`discoverCharacteristics(for:)`/`discoverDescriptors(for:)`
+            // re-enumerates and can pick up a service/characteristic that appeared — matching
+            // the re-discovery targeted ops get for free from CoreBluetooth's own graph
+            // pruning (the enumeration cache is the one BLESwift-side discovery state without
+            // an `isDiscovered(_:)` mirror; see `Session.didEnumerateServices`).
+            if case .connected(var session) = connections[peripheral] {
+                session.didEnumerateServices = false
+                session.enumeratedCharacteristicServices.subtract(invalidatedServices)
+                session.enumeratedDescriptorCharacteristics = session.enumeratedDescriptorCharacteristics
+                    .filter { !invalidatedServices.contains($0.service) }
+                connections[peripheral] = .connected(session)
+            }
             serviceChangesRegistry.broadcaster(for: peripheral).yield(invalidatedServices)
 
         case .isReadyToSendWriteWithoutResponse:
@@ -2528,6 +2541,222 @@ public actor Central {
         guard peripheral.isDiscovered(descriptor) else {
             throw BLESwiftError.missingDescriptor(descriptor)
         }
+    }
+
+    // MARK: - GATT enumeration
+
+    /// Lists `identifier`'s services, discovering them first if they haven't been enumerated
+    /// on this connection. Routed here by `Peripheral.discoverServices()`. Unlike the
+    /// UUID-first lazy discovery above, this asks CoreBluetooth for *all* services
+    /// (`discoverServices(nil)`) and hands back whatever it found — the caller supplies no
+    /// UUIDs up front.
+    ///
+    /// The result is cached per connection (``Session/didEnumerateServices``): a second call
+    /// re-uses the first enumeration and issues no further `discoverServices` call, until a
+    /// `didModifyServices` invalidation resets it.
+    ///
+    /// - Throws: ``BLESwiftError/notConnected`` if `identifier` is not connected;
+    ///   ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled; or whatever
+    ///   error CoreBluetooth reports for the discovery.
+    func enumerateServices(peripheral identifier: PeripheralIdentifier) async throws -> [ServiceIdentifier] {
+        guard case .connected(let session) = connections[identifier] else {
+            throw BLESwiftError.notConnected
+        }
+        let peripheral = session.peripheral
+
+        if !session.didEnumerateServices {
+            try await awaitDiscoverAllServices(on: peripheral, identifier: identifier)
+            // Re-read the entry: the await above suspended, so the session may have been
+            // torn down and rebuilt (or dropped) in the meantime — don't write back a stale copy.
+            guard case .connected(var refreshed) = connections[identifier] else {
+                throw BLESwiftError.notConnected
+            }
+            refreshed.didEnumerateServices = true
+            connections[identifier] = .connected(refreshed)
+        }
+
+        return peripheral.discoveredServices
+    }
+
+    /// Lists `service`'s characteristics on `identifier`, discovering the owning service (if
+    /// needed) and then *all* of its characteristics (`discoverCharacteristics(nil, for:)`)
+    /// the first time this is asked for `service` on this connection. Routed here by
+    /// `Peripheral.discoverCharacteristics(for:)`.
+    ///
+    /// Cached per service (``Session/enumeratedCharacteristicServices``): a second call for
+    /// the same service issues no further discovery call, until a `didModifyServices`
+    /// invalidation of that service resets it.
+    ///
+    /// - Throws: ``BLESwiftError/notConnected`` if `identifier` is not connected;
+    ///   ``BLESwiftError/missingService(_:)`` if `service` isn't in the peripheral's GATT
+    ///   table; ``BLESwiftError/operationCancelled`` on task cancellation; or whatever error
+    ///   CoreBluetooth reports for the discovery.
+    func enumerateCharacteristics(
+        peripheral identifier: PeripheralIdentifier,
+        service: ServiceIdentifier
+    ) async throws -> [CharacteristicIdentifier] {
+        guard case .connected(let session) = connections[identifier] else {
+            throw BLESwiftError.notConnected
+        }
+        let peripheral = session.peripheral
+
+        // The owning service must be discovered before its characteristics can be — a real
+        // `discoverCharacteristics(_:for:)` is a silent no-op on an undiscovered service (see
+        // the shim). This also surfaces `.missingService` for a service that isn't there.
+        try await ensureServiceDiscovered(service, on: peripheral, identifier: identifier)
+
+        guard case .connected(let refreshed) = connections[identifier] else {
+            throw BLESwiftError.notConnected
+        }
+        if !refreshed.enumeratedCharacteristicServices.contains(service) {
+            try await awaitDiscoverAllCharacteristics(service: service, on: peripheral, identifier: identifier)
+            guard case .connected(var updated) = connections[identifier] else {
+                throw BLESwiftError.notConnected
+            }
+            updated.enumeratedCharacteristicServices.insert(service)
+            connections[identifier] = .connected(updated)
+        }
+
+        return peripheral.discoveredCharacteristics(for: service)
+    }
+
+    /// Lists `characteristic`'s descriptors on `identifier`, discovering the owning service
+    /// and characteristic (if needed) and then the characteristic's descriptors the first
+    /// time this is asked for `characteristic` on this connection. Routed here by
+    /// `Peripheral.discoverDescriptors(for:)` — the public wrapper over the internal
+    /// descriptor discovery the descriptor read/write ops already use.
+    ///
+    /// Cached per characteristic (``Session/enumeratedDescriptorCharacteristics``).
+    ///
+    /// - Throws: ``BLESwiftError/notConnected`` if `identifier` is not connected; whatever
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)`` the
+    ///   owning-characteristic discovery throws; ``BLESwiftError/operationCancelled`` on task
+    ///   cancellation; or whatever error CoreBluetooth reports for the discovery.
+    func enumerateDescriptors(
+        peripheral identifier: PeripheralIdentifier,
+        characteristic: CharacteristicIdentifier
+    ) async throws -> [DescriptorIdentifier] {
+        guard case .connected(let session) = connections[identifier] else {
+            throw BLESwiftError.notConnected
+        }
+        let peripheral = session.peripheral
+
+        // Discover the owning service + characteristic first (a no-op if already discovered).
+        try await ensureDiscovered(characteristic, on: peripheral, identifier: identifier)
+
+        guard case .connected(let refreshed) = connections[identifier] else {
+            throw BLESwiftError.notConnected
+        }
+        if !refreshed.enumeratedDescriptorCharacteristics.contains(characteristic) {
+            try await awaitDiscoverAllDescriptors(characteristic: characteristic, on: peripheral, identifier: identifier)
+            guard case .connected(var updated) = connections[identifier] else {
+                throw BLESwiftError.notConnected
+            }
+            updated.enumeratedDescriptorCharacteristics.insert(characteristic)
+            connections[identifier] = .connected(updated)
+        }
+
+        return peripheral.discoveredDescriptors(for: characteristic)
+    }
+
+    /// Issues `discoverServices(nil)` (discover *all*) and suspends until ``handle(_:from:)``
+    /// resolves it from the `didDiscoverServices` path. Shares the exact take-then-resume +
+    /// cancellation-handler machinery as ``ensureServiceDiscovered(_:on:identifier:)`` —
+    /// registers under a fresh token in `pendingDiscoverServices` (so disconnect teardown
+    /// fails it via ``failPendingGATTContinuations(for:error:)``, and a timeout/cancel removes
+    /// exactly this token via ``cancelDiscoverServicesWaiter(identifier:token:)``) — differing
+    /// only in the `nil` (all-services) filter it passes.
+    private func awaitDiscoverAllServices(on peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
+        // See `awaitWriteWithoutResponseReadiness`'s matching declaration for why this is
+        // `Mutex`-boxed rather than a plain `var`.
+        let assignedToken = Mutex<UInt64?>(nil)
+        try await withCancellableGATTContinuation(
+            register: { (continuation: CheckedContinuation<Void, Error>) in
+                guard case .connected(var session) = connections[identifier] else {
+                    continuation.resume(throwing: BLESwiftError.notConnected)
+                    return
+                }
+                let token = session.nextGATTWaiterToken()
+                assignedToken.withLock { $0 = token }
+                session.pendingDiscoverServices[token] = continuation
+                connections[identifier] = .connected(session)
+                peripheral.discoverServices(nil)
+            },
+            onCancelled: {
+                self.queue.async {
+                    self.assumeIsolated { central in
+                        guard let token = assignedToken.withLock({ $0 }) else { return }
+                        central.cancelDiscoverServicesWaiter(identifier: identifier, token: token)
+                    }
+                }
+            }
+        )
+    }
+
+    /// Issues `discoverCharacteristics(nil, for: service)` (discover *all* of the service's
+    /// characteristics) and suspends until ``handle(_:from:)`` resolves it. Shares the
+    /// machinery of ``ensureCharacteristicDiscovered(_:on:identifier:)``, differing only in
+    /// the `nil` (all-characteristics) filter.
+    private func awaitDiscoverAllCharacteristics(
+        service: ServiceIdentifier,
+        on peripheral: any PeripheralRemote,
+        identifier: PeripheralIdentifier
+    ) async throws {
+        let assignedToken = Mutex<UInt64?>(nil)
+        try await withCancellableGATTContinuation(
+            register: { (continuation: CheckedContinuation<Void, Error>) in
+                guard case .connected(var session) = connections[identifier] else {
+                    continuation.resume(throwing: BLESwiftError.notConnected)
+                    return
+                }
+                let token = session.nextGATTWaiterToken()
+                assignedToken.withLock { $0 = token }
+                session.pendingDiscoverCharacteristics[service, default: [:]][token] = continuation
+                connections[identifier] = .connected(session)
+                peripheral.discoverCharacteristics(nil, for: service)
+            },
+            onCancelled: {
+                self.queue.async {
+                    self.assumeIsolated { central in
+                        guard let token = assignedToken.withLock({ $0 }) else { return }
+                        central.cancelDiscoverCharacteristicsWaiter(identifier: identifier, service: service, token: token)
+                    }
+                }
+            }
+        )
+    }
+
+    /// Issues `discoverDescriptors(for: characteristic)` and suspends until ``handle(_:from:)``
+    /// resolves it. `discoverDescriptors(for:)` already takes no filter (a characteristic's
+    /// descriptors are always discovered as a group), so this is the enumeration-side twin of
+    /// ``ensureDescriptorsDiscovered(_:on:identifier:)`` minus the per-descriptor cache check.
+    private func awaitDiscoverAllDescriptors(
+        characteristic: CharacteristicIdentifier,
+        on peripheral: any PeripheralRemote,
+        identifier: PeripheralIdentifier
+    ) async throws {
+        let assignedToken = Mutex<UInt64?>(nil)
+        try await withCancellableGATTContinuation(
+            register: { (continuation: CheckedContinuation<Void, Error>) in
+                guard case .connected(var session) = connections[identifier] else {
+                    continuation.resume(throwing: BLESwiftError.notConnected)
+                    return
+                }
+                let token = session.nextGATTWaiterToken()
+                assignedToken.withLock { $0 = token }
+                session.pendingDiscoverDescriptors[characteristic, default: [:]][token] = continuation
+                connections[identifier] = .connected(session)
+                peripheral.discoverDescriptors(for: characteristic)
+            },
+            onCancelled: {
+                self.queue.async {
+                    self.assumeIsolated { central in
+                        guard let token = assignedToken.withLock({ $0 }) else { return }
+                        central.cancelDiscoverDescriptorsWaiter(identifier: identifier, characteristic: characteristic, token: token)
+                    }
+                }
+            }
+        )
     }
 
     // MARK: - Notifications
@@ -4011,6 +4240,29 @@ private struct Session {
     /// characteristic, by the same per-waiter token as ``pendingDiscoverCharacteristics`` —
     /// for the same cross-operation-concurrency and individual-cancellation reasons.
     var pendingDiscoverDescriptors: [CharacteristicIdentifier: [UInt64: CheckedContinuation<Void, Error>]] = [:]
+
+    // MARK: - GATT enumeration cache
+
+    /// Whether a full-graph service enumeration (`discoverServices(nil)`) has completed for
+    /// this connection. The enumeration API's cache: unlike targeted discovery — where the
+    /// shim's own `isDiscovered(_:)` (backed by CoreBluetooth's service graph) IS the cache —
+    /// "list *all* services" has no single identifier to re-check, and an empty result is
+    /// indistinguishable from "not yet enumerated", so a distinct flag records it. Reset to
+    /// `false` on `didModifyServices`, so a subsequent `discoverServices()` re-enumerates and
+    /// can pick up a service that appeared, mirroring the re-discovery targeted ops get for
+    /// free from CoreBluetooth's graph pruning.
+    var didEnumerateServices = false
+
+    /// The services whose characteristics have been fully enumerated
+    /// (`discoverCharacteristics(nil, for:)` completed) for this connection — the
+    /// per-service counterpart to ``didEnumerateServices``. An invalidated service is
+    /// removed on `didModifyServices`.
+    var enumeratedCharacteristicServices: Set<ServiceIdentifier> = []
+
+    /// The characteristics whose descriptors have been fully enumerated
+    /// (`discoverDescriptors(for:)` completed) for this connection. A characteristic under an
+    /// invalidated service is removed on `didModifyServices`.
+    var enumeratedDescriptorCharacteristics: Set<CharacteristicIdentifier> = []
 
     // MARK: - Notifications
 

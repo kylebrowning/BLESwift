@@ -42,6 +42,36 @@ if properties.contains(.notify) {
 Like every other operation here, it lazily discovers the service and characteristic the first
 time it's used, and serializes against other operations on the same characteristic.
 
+### Enumerating an unknown peripheral's GATT graph
+
+Every operation above is *UUID-first*: you name the ``CharacteristicIdentifier`` up front. To
+inspect a peripheral whose UUIDs you *don't* know — a `ble inspect`-style browser — enumerate
+the GATT graph instead. ``Peripheral/discoverServices()`` lists every service; feed one of the
+results to ``Peripheral/discoverCharacteristics(for:)`` to list its characteristics; and
+``Peripheral/discoverDescriptors(for:)`` lists a characteristic's descriptors:
+
+```swift
+for service in try await peripheral.discoverServices() {
+    print(service)
+    for characteristic in try await peripheral.discoverCharacteristics(for: service) {
+        let properties = try await peripheral.properties(of: characteristic)
+        print("  \(characteristic) — \(properties)")
+
+        for descriptor in try await peripheral.discoverDescriptors(for: characteristic) {
+            print("    \(descriptor)")
+        }
+    }
+}
+```
+
+Each enumeration is cached for the connection: a second ``Peripheral/discoverServices()`` (or
+``Peripheral/discoverCharacteristics(for:)`` for the same service) re-uses the first discovery
+and issues no further round-trip, until a `didModifyServices` invalidation — observable on
+``Peripheral/serviceChanges()`` — resets it, after which the next call re-enumerates and picks
+up whatever changed. The listed identifiers are exactly the value types the UUID-first
+operations take, so a browser can read/write/subscribe against anything it discovered with no
+extra bridging.
+
 Any type conforming to ``Receivable``/``Transmittable`` can be read/written — every fixed-width
 integer type (`Int8`/`16`/`32`/`64`, `UInt8`/`16`/`32`/`64`), `String` (UTF-8, throwing
 ``BLESwiftError/invalidStringEncoding`` instead of crashing on invalid data), and
