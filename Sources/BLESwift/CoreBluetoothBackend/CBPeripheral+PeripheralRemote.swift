@@ -194,6 +194,31 @@ extension CBPeripheral: PeripheralRemote {
         return CharacteristicProperties(cbCharacteristic.properties)
     }
 
+    /// Every discovered service, mapping `CBPeripheral.services`' `CBUUID`s back to
+    /// ``ServiceIdentifier`` at this sanctioned seam (the `CBService`s never escape). `[]`
+    /// before any service discovery has landed.
+    public var discoveredServices: [ServiceIdentifier] {
+        services?.map { ServiceIdentifier(cbuuid: $0.uuid) } ?? []
+    }
+
+    /// Every discovered characteristic under `service`, mapping
+    /// `CBService.characteristics`' `CBUUID`s back to ``CharacteristicIdentifier``. `[]` if
+    /// `service` has not been discovered, or has had no characteristic discovery land yet.
+    public func discoveredCharacteristics(for service: ServiceIdentifier) -> [CharacteristicIdentifier] {
+        bleSwiftService(service)?.characteristics?.map {
+            CharacteristicIdentifier(cbuuid: $0.uuid, service: service)
+        } ?? []
+    }
+
+    /// Every discovered descriptor under `characteristic`, mapping
+    /// `CBCharacteristic.descriptors`' `CBUUID`s back to ``DescriptorIdentifier``. `[]` if
+    /// `characteristic` has not been discovered, or has had no descriptor discovery land yet.
+    public func discoveredDescriptors(for characteristic: CharacteristicIdentifier) -> [DescriptorIdentifier] {
+        bleSwiftCharacteristic(characteristic)?.descriptors?.map {
+            DescriptorIdentifier(cbuuid: $0.uuid, characteristic: characteristic)
+        } ?? []
+    }
+
     /// Opens an L2CAP channel to `psm`, bridging BLESwift's ``L2CAPPSM`` to CoreBluetooth's
     /// `CBL2CAPPSM`. A distinct overload of `CBPeripheral`'s own `openL2CAPChannel(_:)`
     /// (which takes a `CBL2CAPPSM`), disambiguated by the parameter type; it forwards to

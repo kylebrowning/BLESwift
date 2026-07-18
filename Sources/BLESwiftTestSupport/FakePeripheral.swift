@@ -48,6 +48,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _writeCallCounts: [CharacteristicIdentifier: Int] = [:]
     nonisolated(unsafe) private var _discoverServicesCallCount = 0
     nonisolated(unsafe) private var _discoverCharacteristicsCallCount = 0
+    nonisolated(unsafe) private var _holdServiceDiscoveryCompletions = false
+    nonisolated(unsafe) private var _heldServiceDiscoveryCount = 0
     nonisolated(unsafe) private var _holdReadCompletions = false
     nonisolated(unsafe) private var _heldReads: [(characteristic: CharacteristicIdentifier, value: Data?)] = []
     nonisolated(unsafe) private var _availableServices: [ServiceIdentifier: Set<CharacteristicIdentifier>]?
@@ -257,6 +259,37 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     public var discoverServicesCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoverServicesCallCount
+    }
+
+    /// Whether ``discoverServices(_:)`` withholds its `didDiscoverServices` completion
+    /// instead of delivering it immediately — the service-discovery counterpart to
+    /// ``holdReadCompletions``. `false` by default. Lets a test observe a *pending*
+    /// enumeration (e.g. to disconnect out from under it), which this fake would otherwise
+    /// complete within the same `queue.async` turn. Held completions are released, in FIFO
+    /// order, by ``simulateNextHeldServiceDiscoveryCompletion()``. Configure via
+    /// ``onQueue(_:)``.
+    public var holdServiceDiscoveryCompletions: Bool {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _holdServiceDiscoveryCompletions
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _holdServiceDiscoveryCompletions = newValue
+        }
+    }
+
+    /// Delivers the oldest still-held `didDiscoverServices` completion (FIFO), if any. A
+    /// no-op if none are held. The scripted-graph mutations that ``discoverServices(_:)``
+    /// performs have already been applied (only the *completion event* was withheld), so the
+    /// enumeration resumes seeing the fully-discovered graph.
+    public func simulateNextHeldServiceDiscoveryCompletion() {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            guard _heldServiceDiscoveryCount > 0 else { return }
+            _heldServiceDiscoveryCount -= 1
+            deliver(.didDiscoverServices(error: nil))
+        }
     }
 
     /// The number of times ``discoverCharacteristics(_:for:)`` has been called.
@@ -555,6 +588,10 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         } else if let services {
             _discoveredServices.formUnion(services)
         }
+        if _holdServiceDiscoveryCompletions {
+            _heldServiceDiscoveryCount += 1
+            return
+        }
         queue.async { [self] in deliver(.didDiscoverServices(error: nil)) }
     }
 
@@ -740,6 +777,26 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     public func isDiscovered(_ descriptor: DescriptorIdentifier) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoveredDescriptors.contains(descriptor)
+    }
+
+    /// Every service this fake has discovered so far (via ``discoverServices(_:)`` or
+    /// ``simulateDiscoveredServices(_:)``). Order is unspecified (a `Set` drives it), matching
+    /// the protocol contract — enumeration tests compare as sets.
+    public var discoveredServices: [ServiceIdentifier] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return Array(_discoveredServices)
+    }
+
+    /// Every characteristic this fake has discovered under `service`. Order is unspecified.
+    public func discoveredCharacteristics(for service: ServiceIdentifier) -> [CharacteristicIdentifier] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _discoveredCharacteristics.filter { $0.service == service }
+    }
+
+    /// Every descriptor this fake has discovered under `characteristic`. Order is unspecified.
+    public func discoveredDescriptors(for characteristic: CharacteristicIdentifier) -> [DescriptorIdentifier] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _discoveredDescriptors.filter { $0.characteristic == characteristic }
     }
 
     /// Records the call and, per ``l2capOpenBehavior``, asynchronously delivers
