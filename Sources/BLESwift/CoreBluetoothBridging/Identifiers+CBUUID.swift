@@ -36,3 +36,16 @@ extension CharacteristicIdentifier {
         CBUUID(string: uuidString)
     }
 }
+
+extension DescriptorIdentifier {
+
+    /// Creates a `DescriptorIdentifier` from a `CBUUID` and its owning characteristic.
+    init(cbuuid: CBUUID, characteristic: CharacteristicIdentifier) {
+        self.init(uuid: cbuuid.uuidString, characteristic: characteristic)
+    }
+
+    /// The `CBUUID` representation of this identifier.
+    var cbuuid: CBUUID {
+        CBUUID(string: uuidString)
+    }
+}

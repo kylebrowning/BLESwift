@@ -1356,6 +1356,23 @@ public actor Central {
         }
         session.pendingWriteWithoutResponseReady.removeAll()
 
+        for continuation in session.pendingDescriptorReads.values {
+            continuation.resume(throwing: error)
+        }
+        session.pendingDescriptorReads.removeAll()
+
+        for continuation in session.pendingDescriptorWrites.values {
+            continuation.resume(throwing: error)
+        }
+        session.pendingDescriptorWrites.removeAll()
+
+        for waiters in session.pendingDiscoverDescriptors.values {
+            for continuation in waiters.values {
+                continuation.resume(throwing: error)
+            }
+        }
+        session.pendingDiscoverDescriptors.removeAll()
+
         connections[identifier] = .connected(session)
     }
 
@@ -1642,6 +1659,15 @@ public actor Central {
         case .didUpdateNotificationState(let characteristic, let isNotifying, let error):
             resumePendingNotifyStateChange(characteristic: characteristic, isNotifying: isNotifying, for: peripheral, error: error)
 
+        case .didDiscoverDescriptors(let characteristic, let error):
+            resumeDiscoverDescriptorsWaiters(characteristic: characteristic, for: peripheral, error: error)
+
+        case .didUpdateValueForDescriptor(let descriptor, let value, let error):
+            resumePendingDescriptorRead(descriptor: descriptor, value: value, for: peripheral, error: error)
+
+        case .didWriteValueForDescriptor(let descriptor, let error):
+            resumePendingDescriptorWrite(descriptor: descriptor, for: peripheral, error: error)
+
         case .didReadRSSI(let rssi, let error):
             resumePendingRSSIRead(rssi: rssi, for: peripheral, error: error)
 
@@ -1727,6 +1753,39 @@ public actor Central {
         guard let continuation = session.pendingDiscoverCharacteristics[service]?.removeValue(forKey: token) else { return }
         if session.pendingDiscoverCharacteristics[service]?.isEmpty == true {
             session.pendingDiscoverCharacteristics.removeValue(forKey: service)
+        }
+        connections[identifier] = .connected(session)
+        continuation.resume(throwing: BLESwiftError.operationCancelled)
+    }
+
+    /// Take-then-resumes every waiter registered for `characteristic` in
+    /// `session.pendingDiscoverDescriptors`. `didDiscoverDescriptorsFor:` carries the
+    /// characteristic, so waiters are keyed by it (like ``resumeDiscoverCharacteristicsWaiters(service:for:error:)``
+    /// keys by service) — still resumed as a group per key, for the same
+    /// cross-operation-concurrency reason.
+    private func resumeDiscoverDescriptorsWaiters(characteristic: CharacteristicIdentifier, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
+        guard case .connected(var session) = connections[peripheralIdentifier] else {
+            log("Ignoring didDiscoverDescriptors for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
+            return
+        }
+        let waiters = session.pendingDiscoverDescriptors.removeValue(forKey: characteristic) ?? [:]
+        connections[peripheralIdentifier] = .connected(session)
+        for waiter in waiters.values {
+            if let error {
+                waiter.resume(throwing: error)
+            } else {
+                waiter.resume(returning: ())
+            }
+        }
+    }
+
+    /// Take-then-resumes a single descriptor-discovery waiter by characteristic + token —
+    /// see ``cancelDiscoverCharacteristicsWaiter(identifier:service:token:)``.
+    private func cancelDiscoverDescriptorsWaiter(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, token: UInt64) {
+        guard case .connected(var session) = connections[identifier] else { return }
+        guard let continuation = session.pendingDiscoverDescriptors[characteristic]?.removeValue(forKey: token) else { return }
+        if session.pendingDiscoverDescriptors[characteristic]?.isEmpty == true {
+            session.pendingDiscoverDescriptors.removeValue(forKey: characteristic)
         }
         connections[identifier] = .connected(session)
         continuation.resume(throwing: BLESwiftError.operationCancelled)
@@ -1907,6 +1966,63 @@ public actor Central {
     private func cancelPendingRead(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingReads.removeValue(forKey: characteristic) else { return }
+        connections[identifier] = .connected(session)
+        continuation.resume(throwing: BLESwiftError.operationCancelled)
+    }
+
+    /// Take-then-resumes the single pending descriptor-read continuation for `descriptor`,
+    /// if any (single-slot, guaranteed by the parent characteristic's FIFO).
+    private func resumePendingDescriptorRead(descriptor: DescriptorIdentifier, value: Data?, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
+        guard case .connected(var session) = connections[peripheralIdentifier] else {
+            log("Ignoring didUpdateValueForDescriptor for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
+            return
+        }
+        guard let continuation = session.pendingDescriptorReads.removeValue(forKey: descriptor) else {
+            log("Ignoring didUpdateValueForDescriptor for \(descriptor) with no pending read", level: .debug, category: "gatt")
+            return
+        }
+        connections[peripheralIdentifier] = .connected(session)
+        if let error {
+            continuation.resume(throwing: error)
+        } else {
+            continuation.resume(returning: value ?? Data())
+        }
+    }
+
+    /// Take-then-resumes the single pending descriptor-read continuation for `descriptor`,
+    /// if still pending — the reaction to cancellation (task cancellation or a `withTimeout`
+    /// timeout) rather than a real `didUpdateValueForDescriptor` completion.
+    private func cancelPendingDescriptorRead(identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier) {
+        guard case .connected(var session) = connections[identifier] else { return }
+        guard let continuation = session.pendingDescriptorReads.removeValue(forKey: descriptor) else { return }
+        connections[identifier] = .connected(session)
+        continuation.resume(throwing: BLESwiftError.operationCancelled)
+    }
+
+    /// Take-then-resumes the single pending descriptor-write continuation for `descriptor`,
+    /// if any (single-slot, guaranteed by the parent characteristic's FIFO).
+    private func resumePendingDescriptorWrite(descriptor: DescriptorIdentifier, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
+        guard case .connected(var session) = connections[peripheralIdentifier] else {
+            log("Ignoring didWriteValueForDescriptor for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
+            return
+        }
+        guard let continuation = session.pendingDescriptorWrites.removeValue(forKey: descriptor) else {
+            log("Ignoring didWriteValueForDescriptor for \(descriptor) with no pending write", level: .debug, category: "gatt")
+            return
+        }
+        connections[peripheralIdentifier] = .connected(session)
+        if let error {
+            continuation.resume(throwing: error)
+        } else {
+            continuation.resume(returning: ())
+        }
+    }
+
+    /// Take-then-resumes the single pending descriptor-write continuation for `descriptor`,
+    /// if still pending — see ``cancelPendingDescriptorRead(identifier:descriptor:)``.
+    private func cancelPendingDescriptorWrite(identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier) {
+        guard case .connected(var session) = connections[identifier] else { return }
+        guard let continuation = session.pendingDescriptorWrites.removeValue(forKey: descriptor) else { return }
         connections[identifier] = .connected(session)
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
@@ -2106,6 +2222,96 @@ public actor Central {
         )
     }
 
+    /// Reads `descriptor`'s current value, routed here by
+    /// `Peripheral.readDescriptor(_:timeout:)`.
+    ///
+    /// Mirrors ``performRead(peripheral:characteristic:timeout:)``'s timeout wrapping, but
+    /// serializes on the *parent characteristic's* FIFO lane
+    /// (``runOnFIFO(identifier:characteristic:operation:)`` keyed by `descriptor.characteristic`)
+    /// — so a descriptor read/write never races a characteristic read/write on the same
+    /// characteristic, avoiding CoreBluetooth's read/write completion ambiguity.
+    func performReadDescriptor(peripheral identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier, timeout: Duration?) async throws -> Data {
+        try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+            try await self.runOnFIFO(identifier: identifier, characteristic: descriptor.characteristic) {
+                try await self.performReadDescriptorNow(identifier: identifier, descriptor: descriptor)
+            }
+        }
+    }
+
+    /// The actual discovery-then-read sequence for ``performReadDescriptor(peripheral:descriptor:timeout:)``,
+    /// run inside the parent characteristic's FIFO chain.
+    private func performReadDescriptorNow(identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier) async throws -> Data {
+        guard case .connected(let session) = connections[identifier] else {
+            throw BLESwiftError.notConnected
+        }
+        let peripheral = session.peripheral
+
+        try await ensureDescriptorDiscovered(descriptor, on: peripheral, identifier: identifier)
+
+        return try await withCancellableGATTContinuation(
+            register: { continuation in
+                guard case .connected(var session) = connections[identifier] else {
+                    continuation.resume(throwing: BLESwiftError.notConnected)
+                    return
+                }
+                session.pendingDescriptorReads[descriptor] = continuation
+                connections[identifier] = .connected(session)
+                peripheral.readValue(for: descriptor)
+            },
+            onCancelled: {
+                self.queue.async {
+                    self.assumeIsolated { central in
+                        central.cancelPendingDescriptorRead(identifier: identifier, descriptor: descriptor)
+                    }
+                }
+            }
+        )
+    }
+
+    /// Writes `data` to `descriptor`, routed here by
+    /// `Peripheral.writeDescriptor(_:value:timeout:)`. See
+    /// ``performReadDescriptor(peripheral:descriptor:timeout:)`` for the timeout/FIFO
+    /// wrapping, which this mirrors. Descriptor writes are always with-response (CoreBluetooth
+    /// exposes no write-type parameter for a `CBDescriptor`), so this always awaits the
+    /// `didWriteValueForDescriptor` completion.
+    func performWriteDescriptor(peripheral identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier, data: Data, timeout: Duration?) async throws {
+        try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+            try await self.runOnFIFO(identifier: identifier, characteristic: descriptor.characteristic) {
+                try await self.performWriteDescriptorNow(identifier: identifier, descriptor: descriptor, data: data)
+            }
+        }
+    }
+
+    /// The actual discovery-then-write sequence for ``performWriteDescriptor(peripheral:descriptor:data:timeout:)``,
+    /// run inside the parent characteristic's FIFO chain.
+    private func performWriteDescriptorNow(identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier, data: Data) async throws {
+        guard case .connected(let session) = connections[identifier] else {
+            throw BLESwiftError.notConnected
+        }
+        let peripheral = session.peripheral
+
+        try await ensureDescriptorDiscovered(descriptor, on: peripheral, identifier: identifier)
+
+        try await withCancellableGATTContinuation(
+            register: { (continuation: CheckedContinuation<Void, Error>) in
+                guard case .connected(var session) = connections[identifier] else {
+                    continuation.resume(throwing: BLESwiftError.notConnected)
+                    return
+                }
+                session.pendingDescriptorWrites[descriptor] = continuation
+                connections[identifier] = .connected(session)
+                peripheral.writeValue(data, for: descriptor)
+            },
+            onCancelled: {
+                self.queue.async {
+                    self.assumeIsolated { central in
+                        central.cancelPendingDescriptorWrite(identifier: identifier, descriptor: descriptor)
+                    }
+                }
+            }
+        )
+    }
+
     /// Reads the peripheral's current RSSI, routed here by `Peripheral.readRSSI(timeout:)`.
     ///
     /// RSSI has no owning characteristic, so it is serialized via its own single tail
@@ -2253,6 +2459,61 @@ public actor Central {
 
         guard peripheral.isDiscovered(characteristic) else {
             throw BLESwiftError.missingCharacteristic(characteristic)
+        }
+    }
+
+    /// Ensures `descriptor` (and its owning characteristic and service) has been discovered
+    /// on `peripheral` — extending the lazy service → characteristic discovery chain one
+    /// level to descriptors. Discovers the characteristic first (which itself discovers the
+    /// service), then the characteristic's descriptors, before every descriptor read/write.
+    ///
+    /// - Throws: whatever ``ensureDiscovered(_:on:identifier:)`` throws for the owning
+    ///   service/characteristic, or ``BLESwiftError/missingDescriptor(_:)`` if `descriptor`
+    ///   is still not discovered once descriptor discovery completes.
+    private func ensureDescriptorDiscovered(_ descriptor: DescriptorIdentifier, on peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
+        try await ensureDiscovered(descriptor.characteristic, on: peripheral, identifier: identifier)
+        try await ensureDescriptorsDiscovered(descriptor, on: peripheral, identifier: identifier)
+    }
+
+    /// Ensures `descriptor` has been discovered, calling `discoverDescriptors(for:)` on its
+    /// owning characteristic and awaiting completion only if `peripheral.isDiscovered(descriptor)`
+    /// doesn't already report it discovered. See ``ensureDescriptorDiscovered(_:on:identifier:)``.
+    ///
+    /// Unlike characteristic discovery, `discoverDescriptors(for:)` takes no filter — a
+    /// characteristic's descriptors are always discovered as a group — so the cache check is
+    /// on the specific descriptor, and a still-undiscovered one triggers a full
+    /// (re-)discovery of the characteristic's descriptors.
+    private func ensureDescriptorsDiscovered(_ descriptor: DescriptorIdentifier, on peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
+        guard !peripheral.isDiscovered(descriptor) else { return }
+
+        // See `awaitWriteWithoutResponseReadiness`'s matching declaration for why this is
+        // `Mutex`-boxed rather than a plain `var`.
+        let assignedToken = Mutex<UInt64?>(nil)
+        let characteristic = descriptor.characteristic
+        try await withCancellableGATTContinuation(
+            register: { (continuation: CheckedContinuation<Void, Error>) in
+                guard case .connected(var session) = connections[identifier] else {
+                    continuation.resume(throwing: BLESwiftError.notConnected)
+                    return
+                }
+                let token = session.nextGATTWaiterToken()
+                assignedToken.withLock { $0 = token }
+                session.pendingDiscoverDescriptors[characteristic, default: [:]][token] = continuation
+                connections[identifier] = .connected(session)
+                peripheral.discoverDescriptors(for: characteristic)
+            },
+            onCancelled: {
+                self.queue.async {
+                    self.assumeIsolated { central in
+                        guard let token = assignedToken.withLock({ $0 }) else { return }
+                        central.cancelDiscoverDescriptorsWaiter(identifier: identifier, characteristic: characteristic, token: token)
+                    }
+                }
+            }
+        )
+
+        guard peripheral.isDiscovered(descriptor) else {
+            throw BLESwiftError.missingDescriptor(descriptor)
         }
     }
 
@@ -3573,6 +3834,24 @@ private struct Session {
     /// `peripheralIsReady(toSendWriteWithoutResponse:)` are peripheral-wide in
     /// CoreBluetooth's own API, not per-characteristic.
     var pendingWriteWithoutResponseReady: [UInt64: CheckedContinuation<Void, Error>] = [:]
+
+    /// The single pending descriptor-read continuation for each descriptor currently being
+    /// read. Single-slot per descriptor, guaranteed by ``fifoTails``: descriptor operations
+    /// serialize on their *parent characteristic's* FIFO lane (see
+    /// `Central.performReadDescriptor(peripheral:descriptor:timeout:)`), so only one
+    /// descriptor operation per characteristic — read or write — is ever in flight.
+    /// Take-then-resume.
+    var pendingDescriptorReads: [DescriptorIdentifier: CheckedContinuation<Data, Error>] = [:]
+
+    /// The single pending descriptor-write continuation for each descriptor currently being
+    /// written (descriptor writes are always with-response). See ``pendingDescriptorReads``.
+    var pendingDescriptorWrites: [DescriptorIdentifier: CheckedContinuation<Void, Error>] = [:]
+
+    /// Pending descriptor-discovery waiters, keyed by characteristic
+    /// (`didDiscoverDescriptorsFor:` carries the characteristic) and then, within each
+    /// characteristic, by the same per-waiter token as ``pendingDiscoverCharacteristics`` —
+    /// for the same cross-operation-concurrency and individual-cancellation reasons.
+    var pendingDiscoverDescriptors: [CharacteristicIdentifier: [UInt64: CheckedContinuation<Void, Error>]] = [:]
 
     // MARK: - Notifications
 
