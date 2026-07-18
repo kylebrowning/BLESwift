@@ -150,6 +150,74 @@ extension Peripheral {
         try await central.performWriteDescriptor(peripheral: id, descriptor: descriptor, data: value, timeout: timeout)
     }
 
+    /// Discovers and lists this peripheral's GATT services.
+    ///
+    /// The entry point to GATT *enumeration* — inspecting a peripheral whose UUIDs you don't
+    /// know up front (a `ble inspect`-style browser), rather than the UUID-first
+    /// read/write/notify path everything else here uses. Triggers CoreBluetooth's
+    /// service discovery for *all* services and returns whatever the peripheral exposes.
+    ///
+    /// The discovery is cached for this connection: a second call re-uses the first
+    /// enumeration and issues no further discovery, until a `didModifyServices` invalidation
+    /// (observable on ``serviceChanges()``) resets it — after which the next call
+    /// re-enumerates, picking up any service that appeared.
+    ///
+    /// - Returns: The discovered ``ServiceIdentifier``s (empty if the peripheral exposes no
+    ///   services). The order is unspecified.
+    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
+    ///   ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled; or whatever
+    ///   error CoreBluetooth reports for the discovery.
+    public func discoverServices() async throws -> [ServiceIdentifier] {
+        let central = try resolveCentral()
+        return try await central.enumerateServices(peripheral: id)
+    }
+
+    /// Discovers and lists the characteristics of `service`.
+    ///
+    /// The characteristic-level step of GATT enumeration (see ``discoverServices()``):
+    /// pass a ``ServiceIdentifier`` — typically one returned by ``discoverServices()`` — to
+    /// list its characteristics without knowing their UUIDs. Discovers the owning service
+    /// first if needed, then all of its characteristics.
+    ///
+    /// Cached per service for this connection (see ``discoverServices()`` for the caching and
+    /// invalidation semantics).
+    ///
+    /// - Parameter service: The service whose characteristics to enumerate.
+    /// - Returns: The discovered ``CharacteristicIdentifier``s (empty if `service` exposes
+    ///   none). The order is unspecified.
+    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
+    ///   ``BLESwiftError/missingService(_:)`` if `service` isn't in the peripheral's GATT
+    ///   table; ``BLESwiftError/operationCancelled`` on task cancellation; or whatever error
+    ///   CoreBluetooth reports for the discovery.
+    public func discoverCharacteristics(for service: ServiceIdentifier) async throws -> [CharacteristicIdentifier] {
+        let central = try resolveCentral()
+        return try await central.enumerateCharacteristics(peripheral: id, service: service)
+    }
+
+    /// Discovers and lists the descriptors of `characteristic`.
+    ///
+    /// The descriptor-level step of GATT enumeration (see ``discoverServices()``), building on
+    /// the same descriptor discovery ``readDescriptor(_:timeout:)``/``writeDescriptor(_:value:timeout:)``
+    /// use. Discovers the owning service and characteristic first if needed, then the
+    /// characteristic's descriptors as a group.
+    ///
+    /// Cached per characteristic for this connection.
+    ///
+    /// - Parameter characteristic: The characteristic whose descriptors to enumerate.
+    /// - Returns: The discovered ``DescriptorIdentifier``s (empty if `characteristic` exposes
+    ///   none). The order is unspecified. Note the Client Characteristic Configuration
+    ///   descriptor — the notify/indicate toggle — is managed implicitly by BLESwift's
+    ///   notification API and, like ``DescriptorIdentifier`` itself, is not surfaced here.
+    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)`` if
+    ///   the owning service/characteristic isn't in the peripheral's GATT table;
+    ///   ``BLESwiftError/operationCancelled`` on task cancellation; or whatever error
+    ///   CoreBluetooth reports for the discovery.
+    public func discoverDescriptors(for characteristic: CharacteristicIdentifier) async throws -> [DescriptorIdentifier] {
+        let central = try resolveCentral()
+        return try await central.enumerateDescriptors(peripheral: id, characteristic: characteristic)
+    }
+
     /// Reads the peripheral's current RSSI (signal strength), in dBm.
     ///
     /// RSSI has no owning characteristic, so concurrent `readRSSI()` calls are serialized
