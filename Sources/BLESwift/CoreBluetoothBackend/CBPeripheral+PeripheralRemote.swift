@@ -193,4 +193,12 @@ extension CBPeripheral: PeripheralRemote {
         guard let cbCharacteristic = bleSwiftCharacteristic(characteristic) else { return [] }
         return CharacteristicProperties(cbCharacteristic.properties)
     }
+
+    /// Opens an L2CAP channel to `psm`, bridging BLESwift's ``L2CAPPSM`` to CoreBluetooth's
+    /// `CBL2CAPPSM`. A distinct overload of `CBPeripheral`'s own `openL2CAPChannel(_:)`
+    /// (which takes a `CBL2CAPPSM`), disambiguated by the parameter type; it forwards to
+    /// that native method. Completion arrives via `peripheral(_:didOpen:error:)`.
+    public func openL2CAPChannel(_ psm: L2CAPPSM) {
+        openL2CAPChannel(CBL2CAPPSM(psm.rawValue))
+    }
 }

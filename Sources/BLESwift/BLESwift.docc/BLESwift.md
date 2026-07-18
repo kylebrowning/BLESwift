@@ -71,6 +71,12 @@ BLESwift supports any number of concurrent peripheral connections — see
 - <doc:ReadingWritingNotifications>
 - ``BufferingPolicy``
 
+### L2CAP Channels
+
+- <doc:L2CAPChannels>
+- ``L2CAPChannel``
+- ``L2CAPPSM``
+
 ### Background Restoration
 
 - <doc:BackgroundRestoration>
