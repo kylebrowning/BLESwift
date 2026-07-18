@@ -30,6 +30,27 @@ outside the package — the exact mechanism `BLESwiftTestSupport` uses — but i
 general-purpose plugin API: conforming your own backend type is possible but unsupported. See
 ``CentralManaging``'s doc comment for the full caveat.
 
+### Naming a GATT graph
+
+``GATTAssignedNumbers`` turns the UUIDs BLESwift speaks in into the human-readable names the
+Bluetooth SIG assigns to standard attributes — for logging, debugging, and capability-driven
+UI. It pairs naturally with the GATT enumeration API: once you have listed a peripheral's
+services, characteristics, and descriptors, you can name every node in the graph. Both the
+16-bit shorthand and the expanded 128-bit Base-UUID form resolve to the same name; an
+unknown or vendor-private UUID simply returns `nil`.
+
+```swift
+func describe(_ service: ServiceIdentifier, characteristics: [CharacteristicIdentifier]) {
+    // `.name` is a convenience for GATTAssignedNumbers.name(for:).
+    let serviceName = service.name ?? service.uuidString      // "Heart Rate"
+    print("Service: \(serviceName)")
+    for characteristic in characteristics {
+        let name = characteristic.name ?? characteristic.uuidString
+        print("  • \(name)")                                  // "  • Heart Rate Measurement"
+    }
+}
+```
+
 ## Topics
 
 ### Backend Seam
@@ -53,6 +74,10 @@ general-purpose plugin API: conforming your own backend type is possible but uns
 - ``PeripheralIdentifier``
 - ``ServiceIdentifier``
 - ``CharacteristicIdentifier``
+
+### Assigned Numbers
+
+- ``GATTAssignedNumbers``
 
 ### Advertisement & Discovery
 
