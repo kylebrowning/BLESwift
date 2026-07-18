@@ -136,4 +136,10 @@ public protocol PeripheralRemote: AnyObject {
     /// yet been discovered — callers trigger lazy discovery first, exactly as they do before
     /// `readValue(for:)`/`writeValue(_:for:type:)`.
     func properties(of characteristic: CharacteristicIdentifier) -> CharacteristicProperties
+
+    /// Opens an L2CAP channel to `psm`. Completion arrives asynchronously as
+    /// ``PeripheralEvent/didOpenL2CAPChannel(channel:error:)`` (one per call, in call
+    /// order). Mirrors `CBPeripheral.openL2CAPChannel(_:)`, taking BLESwift's owned
+    /// ``L2CAPPSM`` rather than CoreBluetooth's `CBL2CAPPSM`.
+    func openL2CAPChannel(_ psm: L2CAPPSM)
 }

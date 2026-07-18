@@ -559,6 +559,7 @@ public actor Central {
         endStartupBackgroundTask()
         failAllSessionsPendingGATTContinuations(error: .stopped)
         finishAllSessionsNotificationStreams(error: BLESwiftError.stopped)
+        closeAllSessionsL2CAPChannels(error: BLESwiftError.stopped)
         connections.removeAll()
 
         // Give up this actor's own reference before returning `cbManager` — see the
@@ -1138,6 +1139,12 @@ public actor Central {
         // `handleTermination` `.disconnecting`-branch call is then a defensive no-op.
         finishNotificationStreams(for: identifier, error: BLESwiftError.explicitDisconnect)
 
+        // Same reasoning again for open L2CAP channels (step 2-adjacent): they live in
+        // `Session`, which the `.disconnecting` phase below does not carry — tear them down
+        // now, while still `.connected`, finishing each inbound stream with the disconnect
+        // error. The later `handleTermination` `.disconnecting`-branch call is a no-op.
+        closeL2CAPChannels(for: identifier, error: BLESwiftError.explicitDisconnect)
+
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connections[identifier] = .disconnecting(Disconnecting(
                 identifier: identifier,
@@ -1195,6 +1202,7 @@ public actor Central {
 
             failPendingGATTContinuations(for: identifier, error: .notConnected)
             finishNotificationStreams(for: identifier, error: resolvedError)
+            closeL2CAPChannels(for: identifier, error: resolvedError)
 
             let willReconnect = !policy.isNever
             connectionBroadcaster.yield(.disconnected(identifier, error: resolvedError, willReconnect: willReconnect))
@@ -1225,6 +1233,7 @@ public actor Central {
             let resolvedError = error ?? BLESwiftError.unexpectedDisconnect
             failPendingGATTContinuations(for: identifier, error: .unexpectedDisconnect)
             finishNotificationStreams(for: identifier, error: resolvedError)
+            closeL2CAPChannels(for: identifier, error: resolvedError)
             connections.removeValue(forKey: identifier)
 
             // Final teardown of the session's peripheral reference: detach its event
@@ -1256,6 +1265,7 @@ public actor Central {
             // path, which never had a `Session`/GATT state to begin with.
             failPendingGATTContinuations(for: identifier, error: .explicitDisconnect)
             finishNotificationStreams(for: identifier, error: BLESwiftError.explicitDisconnect)
+            closeL2CAPChannels(for: identifier, error: BLESwiftError.explicitDisconnect)
 
             connectionBroadcaster.yield(.disconnected(identifier, error: error, willReconnect: false))
 
@@ -1682,6 +1692,9 @@ public actor Central {
 
         case .isReadyToSendWriteWithoutResponse:
             resumeWriteWithoutResponseWaiters(for: peripheral)
+
+        case .didOpenL2CAPChannel(let channel, let error):
+            resumePendingL2CAPOpen(for: peripheral, channel: channel, error: error)
         }
     }
 
@@ -3054,6 +3067,152 @@ public actor Central {
         }
     }
 
+    // MARK: - L2CAP
+
+    /// Opens an L2CAP channel to `psm` on `identifier`, routed here by
+    /// `Peripheral.openL2CAPChannel(psm:timeout:)`. Wraps the open in `timeout` via
+    /// ``withTimeout(_:throwing:operation:)`` (error ``BLESwiftError/timedOut``), then
+    /// registers the resulting transport in the session and hands back an ``L2CAPChannel``.
+    func performOpenL2CAPChannel(
+        peripheral identifier: PeripheralIdentifier,
+        psm: L2CAPPSM,
+        timeout: Duration?
+    ) async throws -> L2CAPChannel {
+        try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+            let transport = try await self.awaitL2CAPOpen(identifier: identifier, psm: psm)
+            return try await self.registerL2CAPChannel(identifier: identifier, transport: transport)
+        }
+    }
+
+    /// Issues the CoreBluetooth L2CAP open and suspends until ``handle(_:from:)`` resolves it
+    /// from the `didOpenL2CAPChannel` path — never directly from here. Follows the
+    /// take-then-resume + cancellation-handler discipline of every GATT continuation (see
+    /// ``withCancellableGATTContinuation(register:onCancelled:)``): the waiter is registered
+    /// under a fresh monotonic token *before* the open is issued (so a `didOpen` that lands
+    /// synchronously still finds it), and cancelling the surrounding `Task`/`withTimeout`
+    /// removes exactly this token and resumes it — leaving the session otherwise untouched.
+    private func awaitL2CAPOpen(identifier: PeripheralIdentifier, psm: L2CAPPSM) async throws -> any L2CAPChannelRemote {
+        guard case .connected(var session) = connections[identifier] else {
+            throw BLESwiftError.notConnected
+        }
+        let token = session.nextGATTWaiterToken()
+        connections[identifier] = .connected(session)
+
+        return try await withCancellableGATTContinuation(
+            register: { (continuation: CheckedContinuation<any L2CAPChannelRemote, Error>) in
+                guard case .connected(var session) = connections[identifier] else {
+                    continuation.resume(throwing: BLESwiftError.notConnected)
+                    return
+                }
+                let peripheral = session.peripheral
+                session.pendingL2CAPOpens[token] = continuation
+                connections[identifier] = .connected(session)
+                peripheral.openL2CAPChannel(psm)
+            },
+            onCancelled: {
+                self.queue.async {
+                    self.assumeIsolated { central in
+                        central.cancelPendingL2CAPOpen(identifier: identifier, token: token)
+                    }
+                }
+            }
+        )
+    }
+
+    /// Take-then-resumes the oldest pending L2CAP-open waiter (FIFO by token) for
+    /// `identifier` — the reaction to a real `didOpenL2CAPChannel` event. On error resumes
+    /// throwing; on success resumes with the opened transport; a callback carrying neither is
+    /// treated as ``BLESwiftError/l2capOpenFailed``. If no waiter is pending (or the session
+    /// is gone), any channel that did come through is torn down so its pump queue doesn't
+    /// leak.
+    private func resumePendingL2CAPOpen(for identifier: PeripheralIdentifier, channel: (any L2CAPChannelRemote)?, error: NSError?) {
+        guard case .connected(var session) = connections[identifier] else {
+            channel?.close(error: BLESwiftError.notConnected)
+            return
+        }
+        guard let token = session.pendingL2CAPOpens.keys.min() else {
+            log("Ignoring didOpenL2CAPChannel for \(identifier) with no pending open", level: .debug, category: "l2cap")
+            channel?.close(error: BLESwiftError.notConnected)
+            return
+        }
+        let continuation = session.pendingL2CAPOpens.removeValue(forKey: token)
+        connections[identifier] = .connected(session)
+        if let error {
+            continuation?.resume(throwing: error)
+        } else if let channel {
+            continuation?.resume(returning: channel)
+        } else {
+            continuation?.resume(throwing: BLESwiftError.l2capOpenFailed)
+        }
+    }
+
+    /// Take-then-resumes a single pending L2CAP-open waiter by token — the reaction to that
+    /// waiter's `withTaskCancellationHandler` firing (task cancellation or a `withTimeout`
+    /// timeout), rather than a real `didOpen`. Removing only this token leaves any other
+    /// concurrently pending open untouched, keeping the session healthy.
+    private func cancelPendingL2CAPOpen(identifier: PeripheralIdentifier, token: UInt64) {
+        guard case .connected(var session) = connections[identifier] else { return }
+        guard let continuation = session.pendingL2CAPOpens.removeValue(forKey: token) else { return }
+        connections[identifier] = .connected(session)
+        continuation.resume(throwing: BLESwiftError.operationCancelled)
+    }
+
+    /// Registers a freshly-opened `transport` in `identifier`'s session under a new token and
+    /// returns the public ``L2CAPChannel`` handle. If the peripheral disconnected between the
+    /// open completing and this running, the transport is closed immediately (so its pump
+    /// queue doesn't leak) and ``BLESwiftError/notConnected`` is thrown.
+    private func registerL2CAPChannel(identifier: PeripheralIdentifier, transport: any L2CAPChannelRemote) throws -> L2CAPChannel {
+        guard case .connected(var session) = connections[identifier] else {
+            transport.close(error: BLESwiftError.notConnected)
+            throw BLESwiftError.notConnected
+        }
+        let token = UUID()
+        session.l2capChannels[token] = transport
+        connections[identifier] = .connected(session)
+        log("Opened L2CAP channel \(transport.psm) for \(identifier)", level: .info, category: "l2cap")
+        return L2CAPChannel(remote: transport, token: token, peripheral: identifier, central: self)
+    }
+
+    /// Closes and deregisters a single L2CAP channel — the reaction to an explicit
+    /// `L2CAPChannel.close()`. A no-op if the session is gone or the token is unknown (e.g.
+    /// the channel was already torn down by a disconnect).
+    func closeL2CAPChannel(peripheral identifier: PeripheralIdentifier, token: UUID) {
+        guard case .connected(var session) = connections[identifier] else { return }
+        guard let transport = session.l2capChannels.removeValue(forKey: token) else { return }
+        connections[identifier] = .connected(session)
+        transport.close(error: nil)
+    }
+
+    /// Closes every open L2CAP channel on `identifier`'s session with `error`, finishing each
+    /// inbound stream with it — the L2CAP counterpart of ``finishNotificationStreams(for:error:)``,
+    /// and called alongside it at every teardown site to preserve the documented 5-step
+    /// cleanup ordering (its channels are step-2-adjacent per-connection resources).
+    ///
+    /// Must run while `identifier`'s entry is still `.connected` — the channels live inside
+    /// `Session`, so once the entry moves on they'd be dropped without being torn down. A
+    /// no-op otherwise, which makes the defensive calls on the `.connecting`/`.disconnecting`
+    /// paths (no session, or none ever had channels) harmless.
+    func closeL2CAPChannels(for identifier: PeripheralIdentifier, error: Error) {
+        guard case .connected(var session) = connections[identifier] else { return }
+        guard !session.l2capChannels.isEmpty else { return }
+        log("Closing \(session.l2capChannels.count) L2CAP channel(s) for \(identifier): \(error)", level: .debug, category: "l2cap")
+        let channels = session.l2capChannels
+        session.l2capChannels.removeAll()
+        connections[identifier] = .connected(session)
+        for transport in channels.values {
+            transport.close(error: error)
+        }
+    }
+
+    /// Calls ``closeL2CAPChannels(for:error:)`` for every currently-connected peripheral (a
+    /// key snapshot, same anti-pattern guard as ``finishAllSessionsNotificationStreams(error:)``).
+    /// Used by ``stopAndExtractState()``.
+    func closeAllSessionsL2CAPChannels(error: Error) {
+        for identifier in Array(connections.keys) {
+            closeL2CAPChannels(for: identifier, error: error)
+        }
+    }
+
     // MARK: - Per-characteristic FIFO
 
     /// Serializes GATT operations on the same characteristic: awaits `characteristic`'s
@@ -3869,6 +4028,23 @@ private struct Session {
     /// Each pump bridges the raw `Data` multicast into one subscriber's typed stream and
     /// ends on its own when that raw stream finishes; entries removed on termination.
     var notificationPumps: [UUID: Task<Void, Never>] = [:]
+
+    // MARK: - L2CAP
+
+    /// Pending L2CAP channel-open waiters, keyed by the same monotonic token as the GATT
+    /// discovery waiters (``nextGATTWaiterToken()``). FIFO-matched: a `didOpenL2CAPChannel`
+    /// event resolves the oldest (smallest-token) waiter, matching CoreBluetooth delivering
+    /// exactly one `didOpen` per `openL2CAPChannel(_:)` call, in call order. Take-then-resume;
+    /// individually cancellable by token (`Central.cancelPendingL2CAPOpen(identifier:token:)`).
+    var pendingL2CAPOpens: [UInt64: CheckedContinuation<any L2CAPChannelRemote, Error>] = [:]
+
+    /// Every open L2CAP channel's transport, keyed by the registration token carried by its
+    /// `L2CAPChannel` handle. Lives inside `Session` like every other per-connection
+    /// resource, so disconnect cleanup (`Central.closeL2CAPChannels(for:error:)`) tears them
+    /// all down — finishing each inbound stream with the disconnect error — while the session
+    /// still exists. Removed individually by an explicit `L2CAPChannel.close()`
+    /// (`Central.closeL2CAPChannel(peripheral:token:)`).
+    var l2capChannels: [UUID: any L2CAPChannelRemote] = [:]
 
     /// The single `Session`-building shape for every **adoption** path — restoration
     /// adoption (`Central.adoptRestoredConnection(_:)`) and

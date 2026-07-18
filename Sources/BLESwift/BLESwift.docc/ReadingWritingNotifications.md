@@ -135,3 +135,4 @@ leftover notification from an earlier, abandoned exchange can't be mistaken for 
 
 - <doc:GettingStarted>
 - <doc:ConnectionsAndReconnection>
+- <doc:L2CAPChannels>

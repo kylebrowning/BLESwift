@@ -64,4 +64,13 @@ public enum PeripheralEvent: Sendable {
     /// previously signaling back-pressure. Mirrors
     /// `peripheralIsReady(toSendWriteWithoutResponse:)`.
     case isReadyToSendWriteWithoutResponse
+
+    /// An L2CAP channel-open attempt completed. Mirrors `peripheral(_:didOpen:error:)`.
+    ///
+    /// On success `channel` is the opened transport (carrying its own ``L2CAPPSM``) and
+    /// `error` is `nil`; on failure `channel` is `nil` and `error` describes the failure.
+    /// The channel is delivered as a BLESwift-owned ``L2CAPChannelRemote``, never a
+    /// CoreBluetooth `CBL2CAPChannel` — the CoreBluetooth backend wraps the raw channel at
+    /// its own seam before emitting this event.
+    case didOpenL2CAPChannel(channel: (any L2CAPChannelRemote)?, error: NSError?)
 }
