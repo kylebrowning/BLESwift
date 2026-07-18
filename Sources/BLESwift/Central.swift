@@ -1966,6 +1966,36 @@ public actor Central {
         )
     }
 
+    /// Reports the set of operations `characteristic` advertises support for, routed here by
+    /// `Peripheral.properties(of:)`.
+    ///
+    /// Triggers lazy discovery of the owning service and characteristic first — exactly like
+    /// ``performRead(peripheral:characteristic:timeout:)`` — then reads the discovered
+    /// characteristic's ``CharacteristicProperties`` straight off the shim (a pure,
+    /// synchronous query, needing no completion continuation). Serialized against other
+    /// operations on the same characteristic via ``runOnFIFO(identifier:characteristic:operation:)``
+    /// so its discovery ordering matches every other GATT op's; introspection carries no
+    /// caller-facing timeout, so unlike read/write it is not wrapped in
+    /// ``withTimeout(_:throwing:operation:)``.
+    func properties(peripheral identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) async throws -> CharacteristicProperties {
+        try await runOnFIFO(identifier: identifier, characteristic: characteristic) {
+            try await self.propertiesNow(identifier: identifier, characteristic: characteristic)
+        }
+    }
+
+    /// The actual discovery-then-introspect sequence for
+    /// ``properties(peripheral:characteristic:)``, run inside `characteristic`'s FIFO chain.
+    private func propertiesNow(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) async throws -> CharacteristicProperties {
+        guard case .connected(let session) = connections[identifier] else {
+            throw BLESwiftError.notConnected
+        }
+        let peripheral = session.peripheral
+
+        try await ensureDiscovered(characteristic, on: peripheral, identifier: identifier)
+
+        return peripheral.properties(of: characteristic)
+    }
+
     /// Writes `data` to `characteristic`, routed here by
     /// `Peripheral.write(_:to:type:timeout:)`. See ``performRead(peripheral:characteristic:timeout:)``
     /// for the timeout/FIFO wrapping, which this mirrors.
