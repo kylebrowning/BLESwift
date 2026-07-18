@@ -48,6 +48,26 @@ public struct Configuration: Sendable {
     #endif
 
     #if os(iOS)
+    /// Enables CoreBluetooth **peripheral-role background state restoration** (iOS only),
+    /// registering ``PeripheralRestorationConfiguration/identifier`` with CoreBluetooth
+    /// (`CBPeripheralManagerOptionRestoreIdentifierKey`) when the `CBPeripheralManager` is
+    /// created inside `PeripheralHost.init(configuration:)`. `nil` (the default) disables
+    /// peripheral-role restoration. Restoration results arrive on
+    /// ``PeripheralHost/restorationEvents()``.
+    ///
+    /// This is a **separate** setting from ``restoration`` (which governs the central role):
+    /// CoreBluetooth requires a distinct restore identifier per manager, so a
+    /// ``Central`` and a ``PeripheralHost`` in the same app must use different identifiers.
+    public var peripheralRestoration: PeripheralRestorationConfiguration?
+    #else
+    /// Internal on non-iOS platforms: peripheral-role restoration is an iOS-only feature, but
+    /// its logic is compiled everywhere for test parity — see the dual-access note in
+    /// `RestorationConfiguration.swift`. Always `nil` in production on these platforms (only
+    /// tests, via `@testable`, ever set it).
+    var peripheralRestoration: PeripheralRestorationConfiguration?
+    #endif
+
+    #if os(iOS)
     /// Creates a `Configuration`.
     ///
     /// - Parameters:
@@ -58,18 +78,23 @@ public struct Configuration: Sendable {
     ///   - logger: The `swift-log` logger `Central` writes to. Defaults to a
     ///     `Logger(label: "BLESwift")` using whatever `LogHandler` the app has bootstrapped
     ///     (or the default console handler, if none).
-    ///   - restoration: Enables CoreBluetooth background state restoration — see
-    ///     ``restoration``. Defaults to `nil` (disabled).
+    ///   - restoration: Enables CoreBluetooth background state restoration for the *central*
+    ///     role — see ``restoration``. Defaults to `nil` (disabled).
+    ///   - peripheralRestoration: Enables CoreBluetooth background state restoration for the
+    ///     *peripheral* role — see ``peripheralRestoration``. Must use a restore identifier
+    ///     distinct from `restoration`'s. Defaults to `nil` (disabled).
     public init(
         showPowerAlert: Bool = false,
         warningOptions: WarningOptions = .default,
         logger: Logger = Logger(label: "BLESwift"),
-        restoration: RestorationConfiguration? = nil
+        restoration: RestorationConfiguration? = nil,
+        peripheralRestoration: PeripheralRestorationConfiguration? = nil
     ) {
         self.showPowerAlert = showPowerAlert
         self.warningOptions = warningOptions
         self.logger = logger
         self.restoration = restoration
+        self.peripheralRestoration = peripheralRestoration
     }
     #else
     /// Creates a `Configuration`.
@@ -91,6 +116,7 @@ public struct Configuration: Sendable {
         self.warningOptions = warningOptions
         self.logger = logger
         self.restoration = nil
+        self.peripheralRestoration = nil
     }
     #endif
 }

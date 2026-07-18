@@ -120,6 +120,50 @@ only once the update has actually been queued.
 ``BLESwiftError/stopped``. Use ``PeripheralHost/stopAdvertising()`` /
 ``PeripheralHost/removeAllServices()`` for a softer stop.
 
+## Restoring state after a background relaunch
+
+On iOS, CoreBluetooth can relaunch your app in the background and hand back the GATT database
+and advertising state it preserved while your app was suspended or terminated. Opt in by
+passing a ``PeripheralRestorationConfiguration`` as ``Configuration/peripheralRestoration`` —
+its identifier is registered with CoreBluetooth
+(`CBPeripheralManagerOptionRestoreIdentifierKey`) when the manager is created:
+
+```swift
+let host = PeripheralHost(configuration: Configuration(
+    peripheralRestoration: PeripheralRestorationConfiguration(identifier: "com.example.peripheral")
+))
+```
+
+- Important: The peripheral restore identifier must be **distinct** from any ``Central``'s
+  ``RestorationConfiguration/identifier`` — CoreBluetooth requires a unique restore identifier
+  per manager. That is why the two are separate ``Configuration`` settings.
+
+Restoration results arrive on ``PeripheralHost/restorationEvents()`` — a **buffered, replayed**
+stream, exactly like ``Central/restorationEvents()``. Every event is buffered from the host's
+creation and replayed, in order, to the first consumer, so state restored during launch is
+never lost even if your consumer task starts strictly afterwards:
+
+```swift
+Task {
+    for await event in await host.restorationEvents() {
+        switch event {
+        case .willRestore(let state):
+            print("Restored \(state.services.count) service(s)")
+            if let advertisement = state.advertisement {
+                print("Advertising resumed as \(advertisement.localName ?? "<no name>")")
+            }
+        }
+    }
+}
+```
+
+Peripheral-role restoration has a single event: CoreBluetooth itself re-publishes the preserved
+services and resumes the preserved advertisement on your behalf, so there is nothing to
+re-drive. `PeripheralHost` reflects a resumed advertisement in its ``PeripheralHost/isAdvertising``
+snapshot (it does **not** re-issue ``PeripheralHost/startAdvertising(_:)`` — CoreBluetooth
+already did), and pushing notifications via ``PeripheralHost/updateValue(_:for:onSubscribed:)``
+works against the restored characteristics without re-adding them.
+
 ## Testing without hardware
 
 `BLESwiftTestSupport`'s `FakePeripheralManager` is a queue-confined, CoreBluetooth-free stand-in
@@ -158,3 +202,9 @@ notifications from — bridge the two fake families with `FakeGATTBridge`; see
 - ``ATTError``
 - ``Subscriber``
 - ``SubscriptionEvent``
+
+### Background restoration
+
+- ``PeripheralRestorationConfiguration``
+- ``PeripheralRestorationEvent``
+- ``RestoredPeripheralState``
