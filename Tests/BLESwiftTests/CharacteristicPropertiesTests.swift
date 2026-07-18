@@ -62,7 +62,7 @@ struct CharacteristicPropertiesTests {
     @Test("properties(of:) returns exactly what the fake scripts")
     func scriptedRoundTrip() async throws {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.scriptedProperties[Self.heartRateMeasurement] = [.read, .indicate, .authenticatedSignedWrites]
         }
 
@@ -85,14 +85,14 @@ struct CharacteristicPropertiesTests {
     func triggersDiscoveryOnce() async throws {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
 
-        #expect(fakePeripheral.onQueue { fakePeripheral.isDiscovered(Self.heartRateMeasurement) } == false)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.isDiscovered(Self.heartRateMeasurement) } == false)
 
         _ = try await peripheral.properties(of: Self.heartRateMeasurement)
 
-        #expect(fakePeripheral.onQueue { fakePeripheral.isDiscovered(Self.heartRateService) } == true)
-        #expect(fakePeripheral.onQueue { fakePeripheral.isDiscovered(Self.heartRateMeasurement) } == true)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 1)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.isDiscovered(Self.heartRateService) } == true)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.isDiscovered(Self.heartRateMeasurement) } == true)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 1)
     }
 
     @Test("a second properties(of:) reuses the discovery cache, discovering nothing new")
@@ -102,14 +102,23 @@ struct CharacteristicPropertiesTests {
         _ = try await peripheral.properties(of: Self.heartRateMeasurement)
         _ = try await peripheral.properties(of: Self.heartRateMeasurement)
 
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 1)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 1)
     }
 
     @Test("properties(of:) on a disconnected peripheral throws .notConnected")
     func throwsWhenDisconnected() async throws {
-        let (central, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-        try await central.disconnect(fakePeripheral.peripheralIdentifier)
+        let (central, fakeCentral, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
+
+        // `disconnect(_:)` is graceful: while the radio is `.poweredOn` it asks CoreBluetooth
+        // to cancel the connection and suspends until the matching `.didDisconnect` callback
+        // arrives. `FakeCentral` never synthesizes that callback on its own, so drive it
+        // explicitly (exactly as the connection-lifecycle tests do) rather than deadlocking
+        // on the never-resumed continuation.
+        let disconnectTask = Task { try await central.disconnect(fakePeripheral.peripheralIdentifier) }
+        await waitFor { await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
+        fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
+        try await disconnectTask.value
 
         await #expect(throws: BLESwiftError.self) {
             _ = try await peripheral.properties(of: Self.heartRateMeasurement)

@@ -26,7 +26,7 @@ struct RetrievalTests {
     func knownPeripheralsResolvesScriptedEntry() async throws {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {
+        await fakeCentral.onQueue {
             fakeCentral.retrievablePeripherals[fakePeripheral.identifier] = fakePeripheral
         }
 
@@ -41,7 +41,7 @@ struct RetrievalTests {
     func knownPeripheralsOmitsUnknownAndHandlesEmpty() async throws {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {
+        await fakeCentral.onQueue {
             fakeCentral.retrievablePeripherals[fakePeripheral.identifier] = fakePeripheral
         }
 
@@ -68,7 +68,7 @@ struct RetrievalTests {
 
         let heartRatePeripheral = FakePeripheral(name: "Heart Rate Monitor", queue: queue)
         let batteryPeripheral = FakePeripheral(name: "Battery Pack", queue: queue)
-        fakeCentral.onQueue {
+        await fakeCentral.onQueue {
             fakeCentral.systemConnectedPeripherals = [
                 (peripheral: heartRatePeripheral, services: [Self.heartRateService]),
                 (peripheral: batteryPeripheral, services: [Self.batteryService])
@@ -91,7 +91,7 @@ struct RetrievalTests {
 
         // Scripted, but disjoint from the query.
         let batteryPeripheral = FakePeripheral(name: "Battery Pack", queue: queue)
-        fakeCentral.onQueue {
+        await fakeCentral.onQueue {
             fakeCentral.systemConnectedPeripherals = [
                 (peripheral: batteryPeripheral, services: [Self.batteryService])
             ]
@@ -110,7 +110,7 @@ struct RetrievalTests {
         // Plan 04 §6: on real CoreBluetooth, a system-connected peripheral is a fortiori
         // known; in fakes these are two separately scripted maps, so both must be scripted
         // to mirror that reality.
-        fakeCentral.onQueue {
+        await fakeCentral.onQueue {
             fakeCentral.systemConnectedPeripherals = [
                 (peripheral: fakePeripheral, services: [Self.heartRateService])
             ]

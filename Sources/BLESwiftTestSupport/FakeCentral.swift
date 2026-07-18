@@ -31,9 +31,10 @@ import Synchronization
 ///   returns before its event lands; callers that need the event to have landed call
 ///   ``onQueue(_:)`` (which, being on the same serial queue, only returns once every
 ///   previously-scheduled `.async` block — including the pending delivery — has run).
-/// - **`onQueue(_:)` is the only place `queue.sync` appears in this type**, and is the
-///   only sanctioned door for off-queue code to configure or inspect state: it hops onto
-///   `queue`, where every precondition-guarded accessor above is legal to call.
+/// - **`onQueue(_:)` is the only sanctioned door for off-queue code to configure or
+///   inspect state**: it hops onto `queue` (asynchronously — `queue.async` + an awaited
+///   continuation, never a thread-parking `queue.sync`; see its own docs and issue #13),
+///   where every precondition-guarded accessor above is legal to call.
 ///   `static var bluetoothAuthorization` is the one exception — it is not scoped to any
 ///   single fake's queue, so it is backed by a `Mutex` instead (see its doc comment).
 public final class FakeCentral: CentralManaging, Sendable {
@@ -92,17 +93,28 @@ public final class FakeCentral: CentralManaging, Sendable {
         self._radioState = state
     }
 
-    /// Runs `body` synchronously on ``queue`` and returns its result — the only
-    /// sanctioned way for off-queue code to configure this fake (``eventHandler``,
-    /// ``connectBehavior``, scripted values) or read its counters/state for assertions.
-    /// Because `queue` is serial, this also flushes every previously-scheduled `.async`
-    /// event delivery before `body` runs.
+    /// Hops onto ``queue`` (via `queue.async` + a continuation) to run `body`, then returns
+    /// its result — the only sanctioned way for off-queue code to configure this fake
+    /// (``eventHandler``, ``connectBehavior``, scripted values) or read its counters/state
+    /// for assertions. Because `queue` is serial, this also flushes every previously-
+    /// scheduled `.async` event delivery before `body` runs.
     ///
-    /// - Warning: Never call this from within an ``eventHandler`` callback, or from any
-    ///   other code already executing on `queue` — like `CBCentralManager`'s own queue,
-    ///   doing so is a reentrant deadlock.
-    public func onQueue<T>(_ body: () -> T) -> T {
-        queue.sync(execute: body)
+    /// This is `async` and **never blocks the calling thread** — it does *not* use
+    /// `queue.sync`. That matters under `swift test`'s parallel runner: test bodies execute
+    /// on Swift's fixed-width cooperative thread pool, and a blocking `queue.sync` there
+    /// would park a cooperative thread, so enough concurrent callers could exhaust the pool
+    /// and deadlock every timing test's `Task.sleep`/`withTimeout` continuation (issue #13).
+    /// Awaiting a continuation instead keeps the thread free while the hop is pending.
+    ///
+    /// - Warning: Never `await` this from within an ``eventHandler`` callback, or from any
+    ///   other code already executing on `queue` — like `CBCentralManager`'s own queue: the
+    ///   caller holds `queue` while awaiting a `body` enqueued *behind* itself, a deadlock.
+    public func onQueue<T: Sendable>(_ body: @Sendable @escaping () -> T) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async {
+                continuation.resume(returning: body())
+            }
+        }
     }
 
     /// The current radio state.

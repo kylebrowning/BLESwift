@@ -58,7 +58,7 @@ func makeConnectedTestCentral() async throws -> (Central, FakeCentral, FakePerip
     // last-release `setNotifyValue(false)`, which is ledger-guarded on `.poweredOn`) are
     // deliberately skipped while the radio isn't on, exactly as on real hardware.
     fakeCentral.simulateStateChange(.poweredOn)
-    fakeCentral.onQueue {
+    await fakeCentral.onQueue {
         fakeCentral.retrievablePeripherals[fakePeripheral.identifier] = fakePeripheral
         fakeCentral.connectBehavior = .succeed
     }
@@ -87,9 +87,9 @@ func addFakePeripheral(
     fakeCentral: FakeCentral,
     identifier: UUID = UUID(),
     name: String? = "Fake Peripheral 2"
-) -> FakePeripheral {
+) async -> FakePeripheral {
     let peripheral = FakePeripheral(identifier: identifier, name: name, queue: fakeCentral.queue)
-    fakeCentral.onQueue {
+    await fakeCentral.onQueue {
         fakeCentral.retrievablePeripherals[identifier] = peripheral
     }
     return peripheral

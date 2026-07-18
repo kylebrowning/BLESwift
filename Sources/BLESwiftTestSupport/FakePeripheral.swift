@@ -18,9 +18,10 @@ import Foundation
 /// `nonisolated(unsafe)`, safe only because every CB-mirroring method (the
 /// `PeripheralRemote` conformance) and every property getter/setter asserts
 /// `dispatchPrecondition(condition: .onQueue(queue))` at entry and then touches state
-/// inline — no `queue.sync` anywhere except inside ``onQueue(_:)``, which is the only
-/// sanctioned door for off-queue code. Event delivery is always `queue.async`, never
-/// inline from a "simulate" call.
+/// inline — no `queue.sync` anywhere in this type. ``onQueue(_:)``, the only sanctioned
+/// door for off-queue code, hops on asynchronously (`queue.async` + an awaited
+/// continuation, never a thread-parking `queue.sync`; see its docs and issue #13). Event
+/// delivery is always `queue.async`, never inline from a "simulate" call.
 public final class FakePeripheral: PeripheralRemote, Sendable {
 
     /// The identifier CoreBluetooth would assign this peripheral. Immutable, so it needs
@@ -96,16 +97,25 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         PeripheralIdentifier(uuid: identifier, name: name)
     }
 
-    /// Runs `body` synchronously on ``queue`` and returns its result — the only
-    /// sanctioned way for off-queue code to configure this fake (``eventHandler``,
-    /// scripted values) or read its counters/state for assertions. Because `queue` is
-    /// serial, this also flushes every previously-scheduled `.async` event delivery
-    /// before `body` runs.
+    /// Hops onto ``queue`` (via `queue.async` + a continuation) to run `body`, then returns
+    /// its result — the only sanctioned way for off-queue code to configure this fake
+    /// (``eventHandler``, scripted values) or read its counters/state for assertions.
+    /// Because `queue` is serial, this also flushes every previously-scheduled `.async`
+    /// event delivery before `body` runs.
     ///
-    /// - Warning: Never call this from within an ``eventHandler`` callback, or from any
-    ///   other code already executing on `queue` — doing so is a reentrant deadlock.
-    public func onQueue<T>(_ body: () -> T) -> T {
-        queue.sync(execute: body)
+    /// This is `async` and **never blocks the calling thread** — it does *not* use
+    /// `queue.sync`, whose cooperative-thread parking under the parallel test runner is the
+    /// deadlock fixed in issue #13 (see ``FakeCentral/onQueue(_:)`` for the full rationale).
+    ///
+    /// - Warning: Never `await` this from within an ``eventHandler`` callback, or from any
+    ///   other code already executing on `queue` — the caller holds `queue` while awaiting a
+    ///   `body` enqueued behind itself, a deadlock.
+    public func onQueue<T: Sendable>(_ body: @Sendable @escaping () -> T) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async {
+                continuation.resume(returning: body())
+            }
+        }
     }
 
     /// Receives every `PeripheralEvent` this fake delivers, on ``queue``. The
@@ -374,9 +384,11 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     /// Marks `descriptors` as discovered (along with their owning characteristic and
     /// service) without going through ``discoverDescriptors(for:)``/an event, for tests that
     /// need to seed descriptor discovery state directly. No event corresponds to this, so it
-    /// is a pure, synchronous state seed via ``onQueue(_:)``.
+    /// seeds state on ``queue`` via `queue.async` (like the other `simulate*` calls); a
+    /// later ``onQueue(_:)`` read observes it (FIFO on the serial queue).
     public func simulateDiscoveredDescriptors(_ descriptors: [DescriptorIdentifier]) {
-        onQueue {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
             for descriptor in descriptors {
                 _discoveredServices.insert(descriptor.characteristic.service)
                 _discoveredCharacteristics.insert(descriptor.characteristic)
@@ -410,10 +422,13 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     /// Marks this peripheral as no longer able to accept a write-without-response until
     /// the next ``simulateReadyToSendWriteWithoutResponse()``. No event corresponds to
     /// this in CoreBluetooth (only the "ready again" signal is a delegate callback), so
-    /// this is a pure, synchronous state seed via ``onQueue(_:)`` rather than an
-    /// asynchronous delivery.
+    /// this seeds state on ``queue`` via `queue.async` (like the other `simulate*` calls)
+    /// rather than delivering an event; a later ``onQueue(_:)`` read observes it.
     public func simulateWriteWithoutResponseBackPressure() {
-        onQueue { _canSendWriteWithoutResponse = false }
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            _canSendWriteWithoutResponse = false
+        }
     }
 
     /// Simulates a notification (or an out-of-band read completion) by, asynchronously,
@@ -428,15 +443,20 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
 
     /// Marks `services` as discovered without going through ``discoverServices(_:)``/an
     /// event, for tests that need to seed discovery state directly. No event corresponds
-    /// to this, so it is a pure, synchronous state seed via ``onQueue(_:)``.
+    /// to this, so it seeds state on ``queue`` via `queue.async` (like the other `simulate*`
+    /// calls); a later ``onQueue(_:)`` read observes it (FIFO on the serial queue).
     public func simulateDiscoveredServices(_ services: [ServiceIdentifier]) {
-        onQueue { _discoveredServices.formUnion(services) }
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            _discoveredServices.formUnion(services)
+        }
     }
 
     /// Marks `characteristics` as discovered on `service` without going through
     /// ``discoverCharacteristics(_:for:)``/an event.
     public func simulateDiscoveredCharacteristics(_ characteristics: [CharacteristicIdentifier], for service: ServiceIdentifier) {
-        onQueue {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
             _discoveredServices.insert(service)
             _discoveredCharacteristics.formUnion(characteristics)
         }
