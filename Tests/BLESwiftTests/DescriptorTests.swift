@@ -33,7 +33,7 @@ struct DescriptorTests {
     func readRoundTrip() async throws {
         let (_, _, fakePeripheral, peripheral) = try await descriptorConnected()
         let payload = Data("Heart Rate".utf8)
-        fakePeripheral.onQueue { fakePeripheral.scriptedDescriptorValues[Self.userDescription] = payload }
+        await fakePeripheral.onQueue { fakePeripheral.scriptedDescriptorValues[Self.userDescription] = payload }
 
         let value = try await peripheral.readDescriptor(Self.userDescription)
         #expect(value == payload)
@@ -43,15 +43,15 @@ struct DescriptorTests {
     func writeRoundTrip() async throws {
         let (_, _, fakePeripheral, peripheral) = try await descriptorConnected()
         // Make the descriptor exist without scripting a read value (write-only path).
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.availableDescriptors = [Self.heartRateMeasurement: [Self.userDescription]]
         }
         let payload = Data([0x01, 0x02, 0x03])
 
         try await peripheral.writeDescriptor(Self.userDescription, value: payload)
 
-        #expect(fakePeripheral.onQueue { fakePeripheral.descriptorWriteCallCounts[Self.userDescription] } == 1)
-        #expect(fakePeripheral.onQueue { fakePeripheral.writtenDescriptorValues[Self.userDescription] } == payload)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.descriptorWriteCallCounts[Self.userDescription] } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.writtenDescriptorValues[Self.userDescription] } == payload)
     }
 
     // MARK: - Lazy discovery / cache short-circuit
@@ -59,30 +59,30 @@ struct DescriptorTests {
     @Test("Descriptor discovery is lazy and cached: a second read issues no further discovery calls")
     func discoveryCacheHit() async throws {
         let (_, _, fakePeripheral, peripheral) = try await descriptorConnected()
-        fakePeripheral.onQueue { fakePeripheral.scriptedDescriptorValues[Self.userDescription] = Data([1]) }
+        await fakePeripheral.onQueue { fakePeripheral.scriptedDescriptorValues[Self.userDescription] = Data([1]) }
 
         _ = try await peripheral.readDescriptor(Self.userDescription)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 1)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 1)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverDescriptorsCallCount } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverDescriptorsCallCount } == 1)
 
         _ = try await peripheral.readDescriptor(Self.userDescription)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 1)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 1)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverDescriptorsCallCount } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverDescriptorsCallCount } == 1)
     }
 
     @Test("Pre-seeded descriptor discovery short-circuits entirely: no discovery calls at all")
     func preSeededDiscoverySkipsDiscoveryCalls() async throws {
         let (_, _, fakePeripheral, peripheral) = try await descriptorConnected()
         fakePeripheral.simulateDiscoveredDescriptors([Self.userDescription])
-        fakePeripheral.onQueue { fakePeripheral.scriptedDescriptorValues[Self.userDescription] = Data([9]) }
+        await fakePeripheral.onQueue { fakePeripheral.scriptedDescriptorValues[Self.userDescription] = Data([9]) }
 
         let value = try await peripheral.readDescriptor(Self.userDescription)
         #expect(value == Data([9]))
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 0)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 0)
-        #expect(fakePeripheral.onQueue { fakePeripheral.discoverDescriptorsCallCount } == 0)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 0)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverCharacteristicsCallCount } == 0)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.discoverDescriptorsCallCount } == 0)
     }
 
     // MARK: - Missing descriptor
@@ -91,7 +91,7 @@ struct DescriptorTests {
     func missingDescriptorThrows() async throws {
         let (_, _, fakePeripheral, peripheral) = try await descriptorConnected()
         // The characteristic exists and has a descriptor — but not the one we ask for.
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.availableDescriptors = [Self.heartRateMeasurement: [Self.presentationFormat]]
         }
 
@@ -110,7 +110,7 @@ struct DescriptorTests {
     @Test("A descriptor read that never completes throws .timedOut")
     func readTimesOut() async throws {
         let (_, _, fakePeripheral, peripheral) = try await descriptorConnected()
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             // Descriptor exists (so discovery succeeds) but its read completion is withheld.
             fakePeripheral.scriptedDescriptorValues[Self.userDescription] = Data([1])
             fakePeripheral.holdDescriptorReadCompletions = true
@@ -131,7 +131,7 @@ struct DescriptorTests {
     @Test("A pending descriptor read fails when the connection is lost mid-flight")
     func descriptorReadFailsOnDisconnect() async throws {
         let (central, fakeCentral, fakePeripheral, peripheral) = try await descriptorConnected()
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.scriptedDescriptorValues[Self.userDescription] = Data([1])
             fakePeripheral.holdDescriptorReadCompletions = true
         }
@@ -139,7 +139,7 @@ struct DescriptorTests {
         let readTask = Task<Data, Error> {
             try await peripheral.readDescriptor(Self.userDescription)
         }
-        await waitUntilDescriptor { fakePeripheral.onQueue { fakePeripheral.descriptorReadCallCount } == 1 }
+        await waitUntilDescriptor { await fakePeripheral.onQueue { fakePeripheral.descriptorReadCallCount } == 1 }
 
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
 
@@ -166,7 +166,7 @@ struct DescriptorTests {
 /// `Peripheral` handle alongside the `Central`/`FakeCentral`/`FakePeripheral` backing it.
 private func descriptorConnected() async throws -> (Central, FakeCentral, FakePeripheral, Peripheral) {
     let (central, fakeCentral, fakePeripheral) = makeTestCentral()
-    fakeCentral.onQueue {
+    await fakeCentral.onQueue {
         fakeCentral.retrievablePeripherals[fakePeripheral.identifier] = fakePeripheral
         fakeCentral.connectBehavior = .succeed
     }

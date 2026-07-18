@@ -32,8 +32,8 @@ struct ConcurrentConnectRegressionTests {
     @Test("Two concurrent connect(sameID): exactly one succeeds, the other throws .duplicateConnect, neither hangs", .timeLimit(.minutes(1)))
     func twoConcurrentConnectsSameID() async throws {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
-        register(fakePeripheral, on: fakeCentral)
-        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+        await register(fakePeripheral, on: fakeCentral)
+        await fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
         let id = fakePeripheral.peripheralIdentifier
 
         let outcome = await runWithTimeout(.seconds(5)) { () -> [ConnectOutcome] in
@@ -64,10 +64,10 @@ struct ConcurrentConnectRegressionTests {
     @Test("connect() racing a restoration manual-connect for the same id: no hang, one throws .duplicateConnect", .timeLimit(.minutes(1)))
     func connectRacingRestorationConnect() async throws {
         let (central, fakeCentral, fakePeripheral) = makeRestorationTestCentral(connectingTimeout: .seconds(30))
-        register(fakePeripheral, on: fakeCentral)
+        await register(fakePeripheral, on: fakeCentral)
         // The restoration manual re-connect hangs, so it stays in-flight (slot reserved and
         // attached) while the racing user connect runs.
-        fakeCentral.onQueue { fakeCentral.connectBehavior = .hang }
+        await fakeCentral.onQueue { fakeCentral.connectBehavior = .hang }
         let id = fakePeripheral.peripheralIdentifier
 
         // Restore a *connecting* peripheral: routing spawns a restoration manual re-connect
@@ -78,7 +78,7 @@ struct ConcurrentConnectRegressionTests {
 
         // Wait until the restoration connect has actually issued its CoreBluetooth attempt —
         // i.e. it has reserved and attached to id's slot.
-        await waitUntil { fakeCentral.onQueue { fakeCentral.connectCallCount } == 1 }
+        await waitUntil { await fakeCentral.onQueue { fakeCentral.connectCallCount } == 1 }
 
         // Now race a user connect(id): the slot is occupied by the restoration attempt, so
         // this must throw .duplicateConnect promptly rather than overwrite it and hang.
@@ -111,8 +111,8 @@ struct ConcurrentConnectRegressionTests {
     @Test("An in-flight auto-reconnect attempt racing a user connect(sameID): no hang, no orphan", .timeLimit(.minutes(1)))
     func reconnectAttemptRacingUserConnect() async throws {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
-        register(fakePeripheral, on: fakeCentral)
-        fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
+        await register(fakePeripheral, on: fakeCentral)
+        await fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
         let id = fakePeripheral.peripheralIdentifier
 
         // Establish a connection with an auto-reconnect policy, then drop it — the reconnect
@@ -121,12 +121,12 @@ struct ConcurrentConnectRegressionTests {
 
         // The reconnect *attempt* (after the backoff) must hang, so it stays in-flight (slot
         // reserved and attached) while the racing user connect runs.
-        fakeCentral.onQueue { fakeCentral.connectBehavior = .hang }
+        await fakeCentral.onQueue { fakeCentral.connectBehavior = .hang }
         fakeCentral.simulateDisconnect(id, error: nil)
 
         // Wait until the reconnect attempt has issued its CoreBluetooth connect (call #2) —
         // i.e. it now owns id's slot.
-        await waitUntil { fakeCentral.onQueue { fakeCentral.connectCallCount } == 2 }
+        await waitUntil { await fakeCentral.onQueue { fakeCentral.connectCallCount } == 2 }
 
         // Race a user connect(id) against the in-flight reconnect attempt.
         let outcome = await runWithTimeout(.seconds(5)) {
@@ -210,8 +210,8 @@ private func runWithTimeout<T: Sendable>(
 
 /// Registers `peripheral` as retrievable on `central` (its identifier keys the lookup
 /// `Central` performs when reserving a connect slot).
-private func register(_ peripheral: FakePeripheral, on central: FakeCentral) {
-    central.onQueue {
+private func register(_ peripheral: FakePeripheral, on central: FakeCentral) async {
+    await central.onQueue {
         central.retrievablePeripherals[peripheral.identifier] = peripheral
     }
 }

@@ -18,7 +18,7 @@ struct ScanTests {
     func discoveryEventFlow() async throws {
         let (central, fakeCentral, _) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         let stream = await central.scan(services: nil)
         var iterator = stream.makeAsyncIterator()
@@ -40,7 +40,7 @@ struct ScanTests {
     func duplicateCoalescingOff() async throws {
         let (central, fakeCentral, _) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         let stream = await central.scan(services: nil, allowDuplicates: false)
         var iterator = stream.makeAsyncIterator()
@@ -59,7 +59,7 @@ struct ScanTests {
         // sighting above had wrongly yielded an .updated, this .next() would return that
         // instead of the second peripheral's .discovered.
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -70)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         let other = PeripheralIdentifier(uuid: UUID(), name: nil)
         fakeCentral.simulateDiscovery(peripheral: other, advertisement: advertisement, rssi: -40)
@@ -76,7 +76,7 @@ struct ScanTests {
     func duplicateCoalescingOn() async throws {
         let (central, fakeCentral, _) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         let stream = await central.scan(services: nil, allowDuplicates: true)
         var iterator = stream.makeAsyncIterator()
@@ -103,7 +103,7 @@ struct ScanTests {
     func lostAtDeadline() async throws {
         let (central, fakeCentral, _) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         let stream = await central.scan(services: nil, allowDuplicates: true, lossTimeout: .milliseconds(50))
         var iterator = stream.makeAsyncIterator()
@@ -129,7 +129,7 @@ struct ScanTests {
     func throttleSuppression() async throws {
         let (central, fakeCentral, _) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         let stream = await central.scan(services: nil, allowDuplicates: true, rssiThreshold: 10)
         var iterator = stream.makeAsyncIterator()
@@ -145,7 +145,7 @@ struct ScanTests {
 
         // Delta of 5 from -50 is below the threshold of 10 — suppressed.
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -55)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         // A throttled sighting doesn't update the stored baseline, so this delta is
         // computed against the *original* -50 (a delta of 20) and clears the threshold.
@@ -162,7 +162,7 @@ struct ScanTests {
     func cancelStopsScan() async throws {
         let (central, fakeCentral, _) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         let stream = await central.scan(services: nil)
 
@@ -174,9 +174,9 @@ struct ScanTests {
 
         // Flush the actor's queue so the onTermination-driven cleanup (which hops via
         // queue.async) has definitely run before asserting.
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
-        #expect(fakeCentral.onQueue { fakeCentral.stopScanCallCount } == 1)
+        #expect(await fakeCentral.onQueue { fakeCentral.stopScanCallCount } == 1)
         #expect(central.isScanning == false)
     }
 
@@ -184,7 +184,7 @@ struct ScanTests {
     func secondScanRejection() async throws {
         let (central, fakeCentral, _) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         let firstStream = await central.scan(services: nil)
         var firstIterator = firstStream.makeAsyncIterator()
@@ -218,7 +218,7 @@ struct ScanTests {
     func timeoutFinishesCleanly() async throws {
         let (central, fakeCentral, _) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         let stream = await central.scan(services: nil, timeout: .milliseconds(50))
 
@@ -233,7 +233,7 @@ struct ScanTests {
 
         #expect(events.isEmpty)
 
-        fakeCentral.onQueue {} // flush the onTermination-driven cleanup
+        await fakeCentral.onQueue {} // flush the onTermination-driven cleanup
         #expect(central.isScanning == false)
     }
 
@@ -241,7 +241,7 @@ struct ScanTests {
     func leavingPoweredOnFailsActiveScan() async throws {
         let (central, fakeCentral, _) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         let stream = await central.scan(services: nil)
         var iterator = stream.makeAsyncIterator()
@@ -262,7 +262,7 @@ struct ScanTests {
     func isScanningReflectsActiveScan() async throws {
         let (central, fakeCentral, _) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
 
         #expect(central.isScanning == false)
 
@@ -271,7 +271,7 @@ struct ScanTests {
 
         for try await _ in stream {}
 
-        fakeCentral.onQueue {} // flush the onTermination-driven cleanup
+        await fakeCentral.onQueue {} // flush the onTermination-driven cleanup
         #expect(central.isScanning == false)
     }
 }

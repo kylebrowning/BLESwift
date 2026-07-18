@@ -61,22 +61,22 @@ struct MultiPeripheralGATTIsolationTests {
     @Test("Reads on A and B, both against the SAME characteristic identifier, interleave freely — FIFO tails are per-session, not global")
     func readsOnTwoPeripheralsInterleaveEvenOnTheSameCharacteristic() async throws {
         let (_, _, fakePeripheralA, peripheralA, fakePeripheralB, peripheralB) = try await connectedPair()
-        fakePeripheralA.onQueue {
+        await fakePeripheralA.onQueue {
             fakePeripheralA.holdReadCompletions = true
             fakePeripheralA.scriptedReadValues[Self.heartRateMeasurement] = Data([0xAA])
         }
-        fakePeripheralB.onQueue {
+        await fakePeripheralB.onQueue {
             fakePeripheralB.holdReadCompletions = true
             fakePeripheralB.scriptedReadValues[Self.heartRateMeasurement] = Data([0xBB])
         }
 
         let readA = Task<UInt8, Error> { try await peripheralA.read(from: Self.heartRateMeasurement) }
-        await waitFor { fakePeripheralA.onQueue { fakePeripheralA.readCallCount } == 1 }
+        await waitFor { await fakePeripheralA.onQueue { fakePeripheralA.readCallCount } == 1 }
 
         let readB = Task<UInt8, Error> { try await peripheralB.read(from: Self.heartRateMeasurement) }
         // B must be able to start without waiting on A's still-held read, even though both
         // target the identical characteristic identifier.
-        await waitFor { fakePeripheralB.onQueue { fakePeripheralB.readCallCount } == 1 }
+        await waitFor { await fakePeripheralB.onQueue { fakePeripheralB.readCallCount } == 1 }
 
         fakePeripheralA.simulateNextHeldReadCompletion()
         fakePeripheralB.simulateNextHeldReadCompletion()
@@ -92,8 +92,8 @@ struct MultiPeripheralGATTIsolationTests {
     @Test("readRSSI() on A and B, called concurrently, each resolve with their OWN peripheral's scripted value")
     func concurrentRSSIReadsResolveWithOwnValue() async throws {
         let (_, _, fakePeripheralA, peripheralA, fakePeripheralB, peripheralB) = try await connectedPair()
-        fakePeripheralA.onQueue { fakePeripheralA.scriptedRSSI = -40 }
-        fakePeripheralB.onQueue { fakePeripheralB.scriptedRSSI = -85 }
+        await fakePeripheralA.onQueue { fakePeripheralA.scriptedRSSI = -40 }
+        await fakePeripheralB.onQueue { fakePeripheralB.scriptedRSSI = -85 }
 
         async let rssiA = peripheralA.readRSSI()
         async let rssiB = peripheralB.readRSSI()
@@ -113,8 +113,8 @@ struct MultiPeripheralGATTIsolationTests {
         async let writeB: Void = peripheralB.write(UInt8(2), to: Self.heartRateMeasurement)
         _ = try await (writeA, writeB)
 
-        #expect(fakePeripheralA.onQueue { fakePeripheralA.writeCallCounts[Self.heartRateMeasurement] } == 1)
-        #expect(fakePeripheralB.onQueue { fakePeripheralB.writeCallCounts[Self.heartRateMeasurement] } == 1)
+        #expect(await fakePeripheralA.onQueue { fakePeripheralA.writeCallCounts[Self.heartRateMeasurement] } == 1)
+        #expect(await fakePeripheralB.onQueue { fakePeripheralB.writeCallCounts[Self.heartRateMeasurement] } == 1)
     }
 
     // MARK: - isReadyToSendWriteWithoutResponse routing
@@ -130,20 +130,20 @@ struct MultiPeripheralGATTIsolationTests {
 
         // Give both every opportunity to (incorrectly) proceed while both are blocked.
         try await Task.sleep(for: .milliseconds(50))
-        #expect(fakePeripheralA.onQueue { fakePeripheralA.writeCallCounts[Self.heartRateMeasurement] } == nil)
-        #expect(fakePeripheralB.onQueue { fakePeripheralB.writeCallCounts[Self.heartRateMeasurement] } == nil)
+        #expect(await fakePeripheralA.onQueue { fakePeripheralA.writeCallCounts[Self.heartRateMeasurement] } == nil)
+        #expect(await fakePeripheralB.onQueue { fakePeripheralB.writeCallCounts[Self.heartRateMeasurement] } == nil)
 
         fakePeripheralA.simulateReadyToSendWriteWithoutResponse()
         try await writeATask.value
-        #expect(fakePeripheralA.onQueue { fakePeripheralA.writeCallCounts[Self.heartRateMeasurement] } == 1)
+        #expect(await fakePeripheralA.onQueue { fakePeripheralA.writeCallCounts[Self.heartRateMeasurement] } == 1)
 
         // B's readiness signal was never raised — its write must still be blocked.
         try await Task.sleep(for: .milliseconds(50))
-        #expect(fakePeripheralB.onQueue { fakePeripheralB.writeCallCounts[Self.heartRateMeasurement] } == nil)
+        #expect(await fakePeripheralB.onQueue { fakePeripheralB.writeCallCounts[Self.heartRateMeasurement] } == nil)
 
         fakePeripheralB.simulateReadyToSendWriteWithoutResponse()
         try await writeBTask.value
-        #expect(fakePeripheralB.onQueue { fakePeripheralB.writeCallCounts[Self.heartRateMeasurement] } == 1)
+        #expect(await fakePeripheralB.onQueue { fakePeripheralB.writeCallCounts[Self.heartRateMeasurement] } == 1)
     }
 
     // MARK: - Untracked-peripheral drop
@@ -160,7 +160,7 @@ struct MultiPeripheralGATTIsolationTests {
 
         // Dropped, not crashed, and not misrouted: B's own subsequent read still resolves
         // with its OWN scripted value, untouched by the bogus delivery.
-        fakePeripheralB.onQueue { fakePeripheralB.scriptedReadValues[Self.heartRateMeasurement] = Data([0x42]) }
+        await fakePeripheralB.onQueue { fakePeripheralB.scriptedReadValues[Self.heartRateMeasurement] = Data([0x42]) }
         let value: UInt8 = try await peripheralB.read(from: Self.heartRateMeasurement)
         #expect(value == 0x42)
 
@@ -178,11 +178,11 @@ struct MultiPeripheralGATTIsolationTests {
 /// and the connected `Peripheral` handles.
 private func connectedPair() async throws -> (Central, FakeCentral, FakePeripheral, Peripheral, FakePeripheral, Peripheral) {
     let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
-    let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+    let fakePeripheralB = await addFakePeripheral(to: central, fakeCentral: fakeCentral)
     // Power the radio on first: the last-release `setNotifyValue(false)` is ledger-guarded
     // on `.poweredOn`, matching `makeConnectedTestCentral()`'s own setup.
     fakeCentral.simulateStateChange(.poweredOn)
-    fakeCentral.onQueue {
+    await fakeCentral.onQueue {
         fakeCentral.retrievablePeripherals[fakePeripheralA.identifier] = fakePeripheralA
         fakeCentral.connectBehavior = .succeed
     }

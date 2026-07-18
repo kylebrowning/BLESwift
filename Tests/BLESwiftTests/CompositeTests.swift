@@ -35,7 +35,7 @@ struct CompositeTests {
         // installed (notify enabled) by the time the write arrived, to verify
         // listen-before-write ordering.
         let notifyingAtWrite = Mutex<Bool?>(nil)
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.onWrite = { _, _ in
                 notifyingAtWrite.withLock { $0 = fakePeripheral.notifyingCharacteristics.contains(Self.rxCharacteristic) }
                 fakePeripheral.simulateNotification(for: Self.rxCharacteristic, value: Data([0xAB, 0xCD]))
@@ -50,11 +50,11 @@ struct CompositeTests {
 
         #expect(response == Data([0xAB, 0xCD]))
         #expect(notifyingAtWrite.withLock { $0 } == true, "the listen must be installed before the write is issued")
-        #expect(fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.txCharacteristic] } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.txCharacteristic] } == 1)
 
         // The one-shot subscription is released afterward: notify disabled again.
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
-        #expect(fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.last?.enabled } == false)
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
+        #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.last?.enabled } == false)
     }
 
     // MARK: - writeAndAssemble
@@ -62,7 +62,7 @@ struct CompositeTests {
     @Test("writeAndAssemble accumulates packets to exactly expectedLength and decodes")
     func assembleExact() async throws {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.onWrite = { _, _ in
                 fakePeripheral.simulateNotification(for: Self.rxCharacteristic, value: Data([1, 2]))
                 fakePeripheral.simulateNotification(for: Self.rxCharacteristic, value: Data([3, 4]))
@@ -82,7 +82,7 @@ struct CompositeTests {
     @Test("writeAndAssemble overshooting expectedLength throws .tooMuchData carrying everything received")
     func assembleOvershoot() async throws {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.onWrite = { _, _ in
                 fakePeripheral.simulateNotification(for: Self.rxCharacteristic, value: Data([1, 2, 3]))
                 fakePeripheral.simulateNotification(for: Self.rxCharacteristic, value: Data([4, 5, 6]))
@@ -109,7 +109,7 @@ struct CompositeTests {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
         // The device sends 2 of the expected 4 bytes, then goes silent forever. A
         // partially-assembled reply must not defeat the overall timeout.
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.onWrite = { _, _ in
                 fakePeripheral.simulateNotification(for: Self.rxCharacteristic, value: Data([1, 2]))
             }
@@ -144,7 +144,7 @@ struct CompositeTests {
         }
 
         // Wait until the flush's subscription is live, then land a packet mid-window.
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.rxCharacteristic) } }
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.rxCharacteristic) } }
         try await Task.sleep(for: .milliseconds(100))
         let packetTime = clock.now
         fakePeripheral.simulateNotification(for: Self.rxCharacteristic, value: Data([0xEE]))
@@ -158,8 +158,8 @@ struct CompositeTests {
         #expect(elapsedSincePacket >= .milliseconds(240), "a packet mid-window must restart the quiet period")
 
         // The flush's one-shot subscription is released afterward.
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
-        #expect(fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.last?.enabled } == false)
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
+        #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.last?.enabled } == false)
     }
 
     @Test("flush with a silent characteristic completes after one quiet period")
@@ -205,16 +205,16 @@ struct MultiPeripheralCompositeTests {
     @Test("writeAndAwaitNotification on A, running concurrently with a plain notification stream on B (identical characteristic UUIDs), has no cross-talk in either direction")
     func writeAndAwaitNotificationOnOneDoesNotCrossTalkWithAnothersStream() async throws {
         let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
-        let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+        let fakePeripheralB = await addFakePeripheral(to: central, fakeCentral: fakeCentral)
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {
+        await fakeCentral.onQueue {
             fakeCentral.retrievablePeripherals[fakePeripheralA.identifier] = fakePeripheralA
             fakeCentral.connectBehavior = .succeed
         }
         let peripheralA = try await central.connect(fakePeripheralA.peripheralIdentifier)
         let peripheralB = try await central.connect(fakePeripheralB.peripheralIdentifier)
 
-        fakePeripheralA.onQueue {
+        await fakePeripheralA.onQueue {
             fakePeripheralA.onWrite = { _, _ in
                 fakePeripheralA.simulateNotification(for: Self.rxCharacteristic, value: Data([0xAB, 0xCD]))
             }
@@ -224,7 +224,7 @@ struct MultiPeripheralCompositeTests {
         // composite round-trip — started before A's write, so it's live throughout.
         let streamB: AsyncThrowingStream<Data, Error> = peripheralB.notifications(for: Self.rxCharacteristic)
         let collectorB = Task { try await collectData(streamB, count: 1) }
-        await waitFor { fakePeripheralB.onQueue { fakePeripheralB.notifyingCharacteristics.contains(Self.rxCharacteristic) } }
+        await waitFor { await fakePeripheralB.onQueue { fakePeripheralB.notifyingCharacteristics.contains(Self.rxCharacteristic) } }
 
         let response: Data = try await peripheralA.writeAndAwaitNotification(
             write: UInt8(0x01),
@@ -240,8 +240,8 @@ struct MultiPeripheralCompositeTests {
 
         // A's one-shot subscription must have released cleanly, independent of B's
         // still-live one.
-        await waitFor { fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 2 }
-        #expect(fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.last?.enabled } == false)
-        #expect(fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 1)
+        await waitFor { await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 2 }
+        #expect(await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.last?.enabled } == false)
+        #expect(await fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 1)
     }
 }
