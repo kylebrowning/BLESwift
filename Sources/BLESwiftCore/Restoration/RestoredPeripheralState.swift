@@ -27,8 +27,10 @@ public struct RestoredPeripheralState: Sendable, Hashable {
 
     /// The advertisement CoreBluetooth was broadcasting when the app was terminated
     /// (`CBPeripheralManagerRestoredStateAdvertisementDataKey`), or `nil` if it was not
-    /// advertising. Note that `PeripheralHost` does **not** automatically resume a restored
-    /// advertisement.
+    /// advertising. When non-`nil`, CoreBluetooth *resumes* this advertisement across the
+    /// relaunch on the app's behalf, so `PeripheralHost` reflects it in its `isAdvertising`
+    /// snapshot — but `PeripheralHost` does **not** itself re-issue `startAdvertising`
+    /// (CoreBluetooth already did).
     public let advertisement: PeripheralAdvertisement?
 
     /// Creates a `RestoredPeripheralState`.

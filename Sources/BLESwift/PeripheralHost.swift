@@ -107,16 +107,29 @@ public actor PeripheralHost {
     /// Monotonic allocator for ``readyWaiters`` tokens.
     private var nextReadyWaiterToken: UInt64 = 0
 
+    // MARK: - Background restoration state
+
+    /// Multicasts every ``PeripheralRestorationEvent``. Replay `.allUntilFirstConsumer`: every
+    /// event is buffered from init and replayed, in order, to the **first**
+    /// ``restorationEvents()`` consumer — peripheral-role restoration happens during app
+    /// launch, typically before any consumer task has started, and losing those events would
+    /// defeat the feature. Mirrors ``Central``'s `restorationBroadcaster` exactly.
+    private let restorationBroadcaster = Broadcaster<PeripheralRestorationEvent>(replay: .allUntilFirstConsumer)
+
     /// Creates a `PeripheralHost`, synchronously creating its underlying `CBPeripheralManager`
     /// on a fresh, dedicated `DispatchSerialQueue`.
     ///
-    /// Manager creation is synchronous (not deferred behind an async `start()`) so that a
-    /// future peripheral-role state-restoration option can register its restore identifier at
-    /// creation time — the same reason ``Central/init(configuration:)`` creates its manager
-    /// synchronously.
+    /// Manager creation is synchronous (not deferred behind an async `start()`) so that
+    /// peripheral-role state restoration can register its restore identifier at creation
+    /// time — the same reason ``Central/init(configuration:)`` creates its manager
+    /// synchronously. An async two-step start would miss `willRestoreState`, which can arrive
+    /// before the async step ever runs.
     ///
-    /// - Parameter configuration: Start-time options. Only `logger` and `showPowerAlert` apply
-    ///   to the peripheral role. Defaults to `Configuration()`.
+    /// - Parameter configuration: Start-time options. `logger` and `showPowerAlert` apply to
+    ///   the peripheral role; on iOS, a non-`nil` `configuration.peripheralRestoration`
+    ///   registers its identifier with CoreBluetooth
+    ///   (`CBPeripheralManagerOptionRestoreIdentifierKey`) at manager creation. Defaults to
+    ///   `Configuration()`.
     public init(configuration: Configuration = Configuration()) {
         let queue = DispatchSerialQueue(label: "com.bleswift.PeripheralHost")
         self.queue = queue
@@ -125,9 +138,21 @@ public actor PeripheralHost {
         let proxy = PeripheralManagerDelegateProxy()
         self.proxy = proxy
 
+        #if os(iOS)
+        var options: [String: Any] = [
+            CBPeripheralManagerOptionShowPowerAlertKey: configuration.showPowerAlert
+        ]
+        // The peripheral manager's restore identifier MUST differ from any `Central`'s — a
+        // CoreBluetooth requirement (distinct identifiers per manager), enforced by exposing it
+        // as its own `Configuration.peripheralRestoration` setting.
+        if let peripheralRestoration = configuration.peripheralRestoration {
+            options[CBPeripheralManagerOptionRestoreIdentifierKey] = peripheralRestoration.identifier
+        }
+        #else
         let options: [String: Any] = [
             CBPeripheralManagerOptionShowPowerAlertKey: configuration.showPowerAlert
         ]
+        #endif
 
         let manager = CBPeripheralManager(delegate: proxy, queue: queue, options: options)
         self.manager = manager
@@ -425,6 +450,30 @@ public actor PeripheralHost {
         }
     }
 
+    // MARK: - Public surface: background restoration
+
+    #if os(iOS)
+    /// Returns a stream of every ``PeripheralRestorationEvent`` — **replaying every event
+    /// buffered since this `PeripheralHost` was created** to the first consumer, in order.
+    ///
+    /// Peripheral-role restoration happens during app launch, usually before any consumer task
+    /// has had a chance to start; the replay guarantees nothing is lost as long as the consumer
+    /// subscribes *eventually*. Consumers subscribing after the first see only events from
+    /// their subscription onward. Mirrors ``Central/restorationEvents()``.
+    ///
+    /// Events appear here only when ``Configuration/peripheralRestoration`` was set; without it
+    /// the stream stays silent forever.
+    public func restorationEvents() -> AsyncStream<PeripheralRestorationEvent> {
+        restorationBroadcaster.stream()
+    }
+    #else
+    /// Internal mirror of the iOS-only public `restorationEvents()` — see the dual-access note
+    /// in `RestorationConfiguration.swift`. Reachable off-iOS only via `@testable`.
+    func restorationEvents() -> AsyncStream<PeripheralRestorationEvent> {
+        restorationBroadcaster.stream()
+    }
+    #endif
+
     // MARK: - Event handling
 
     /// The delegate proxy (or fake) forwards every ``PeripheralHostEvent`` here, already on
@@ -467,12 +516,30 @@ public actor PeripheralHost {
         case .readyToUpdateSubscribers:
             resumeReadyWaiters()
 
-        case .willRestoreState:
-            // Peripheral-role state restoration is not yet wired (see plans/05-peripheral-role.md,
-            // Phase 6). The event type is compiled everywhere so this switch stays exhaustive;
-            // the production iOS proxy does not yet register a restore identifier, so this case
-            // is unreachable in practice today.
-            break
+        case .willRestoreState(let restored):
+            // Peripheral-role restoration is simpler than the central side: CoreBluetooth
+            // itself re-publishes the preserved GATT database and resumes the preserved
+            // advertisement on the app's behalf, so there is no `.poweredOn`-gated routing to
+            // stage (contrast `Central.handle(_:)`'s `.willRestoreState`, which holds a
+            // `pendingRestoration` until the radio powers on to re-drive connections). BLESwift
+            // only reflects that restored state and surfaces it:
+            //
+            //  - Advertising: a non-`nil` restored advertisement means the peripheral WAS
+            //    advertising when terminated, and CoreBluetooth resumes it across the relaunch,
+            //    so the `isAdvertising` snapshot is brought back in line. BLESwift does not
+            //    itself re-issue `startAdvertising` — CoreBluetooth already did.
+            //  - Services: the restored services surface on the event; the iOS proxy separately
+            //    re-registers the live `CBMutableCharacteristic` handles from the restored
+            //    services so `updateValue(_:for:onSubscribed:)` works post-restoration (see
+            //    `PeripheralManagerDelegateProxy.peripheralManager(_:willRestoreState:)`).
+            //
+            // Delivered (buffered/replayed by `restorationBroadcaster`) before the first
+            // `.didUpdateState`, exactly as the central side is — see the proxy's buffering.
+            if restored.advertisement != nil {
+                isAdvertisingBox.withLock { $0 = true }
+            }
+            log("Will restore state: \(restored.services.count) service(s), advertising: \(restored.advertisement != nil)", level: .info, category: "restore")
+            restorationBroadcaster.yield(.willRestore(restored))
         }
     }
 

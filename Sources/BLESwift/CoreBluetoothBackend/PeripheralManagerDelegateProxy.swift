@@ -132,6 +132,23 @@ final class PeripheralManagerDelegateProxy: NSObject, CBPeripheralManagerDelegat
         let services = (dict[CBPeripheralManagerRestoredStateServicesKey] as? [CBMutableService]) ?? []
         let serviceIdentifiers = services.map { ServiceIdentifier(cbuuid: $0.uuid) }
 
+        // Re-register the live characteristic handles CoreBluetooth restored, so
+        // `updateValue(_:for:onSubscribed:)` can resolve them after a background relaunch — the
+        // restored `CBMutableService` tree already carries the app's own
+        // `CBMutableCharacteristic`s (the objects it added before termination). Queue-confined,
+        // like every other touch of `characteristicHandles` (this is a delegate callback on the
+        // CB queue). Idempotent with a later `add(_:)`.
+        for service in services {
+            let serviceIdentifier = ServiceIdentifier(cbuuid: service.uuid)
+            for characteristic in service.characteristics ?? [] {
+                guard let mutable = characteristic as? CBMutableCharacteristic else { continue }
+                registerCharacteristic(
+                    mutable,
+                    for: CharacteristicIdentifier(cbuuid: mutable.uuid, service: serviceIdentifier)
+                )
+            }
+        }
+
         var advertisement: PeripheralAdvertisement?
         if let advertisementData = dict[CBPeripheralManagerRestoredStateAdvertisementDataKey] as? [String: Any] {
             let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
