@@ -27,9 +27,9 @@ everything below, so every type on this page is available without a separate imp
   `Central`, with no CoreBluetooth dependency. Most apps never import it directly.
 - **`BLESwift`** (this module) — `Central`, the CoreBluetooth-backed production
   implementation of the backend seam, and every type re-exported from `BLESwiftCore`.
-- **`BLESwiftTestSupport`** — scriptable `FakeCentral`/`FakePeripheral` fakes for
-  unit-testing your own BLE code without hardware. See <doc:GettingStarted>'s "Testing"
-  section.
+- **`BLESwiftTestSupport`** — scriptable `FakeCentral`/`FakePeripheral` (central-role) and
+  `FakePeripheralManager` (peripheral-role) fakes for unit-testing your own BLE code without
+  hardware. See <doc:GettingStarted>'s "Testing" section.
 
 ## Topics
 
@@ -80,6 +80,25 @@ BLESwift supports any number of concurrent peripheral connections — see
 ### Background Restoration
 
 - <doc:BackgroundRestoration>
+
+### Peripheral Role (GATT server)
+
+Host a GATT database and advertise it — the peripheral half of CoreBluetooth. See
+<doc:PeripheralRole>.
+
+- <doc:PeripheralRole>
+- ``PeripheralHost``
+- ``GATTService``
+- ``GATTCharacteristic``
+- ``CharacteristicProperties``
+- ``AttributePermissions``
+- ``PeripheralAdvertisement``
+- ``ReadRequest``
+- ``WriteRequest``
+- ``RequestToken``
+- ``ATTError``
+- ``Subscriber``
+- ``SubscriptionEvent``
 
 ### Identifiers
 

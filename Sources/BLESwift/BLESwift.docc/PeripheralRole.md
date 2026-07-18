@@ -1,0 +1,155 @@
+# Hosting a GATT server (peripheral role)
+
+Advertise services, host a GATT database, and answer reads, writes, and subscriptions from
+remote centrals with ``PeripheralHost``.
+
+## Overview
+
+Where ``Central`` is the *central* role — scanning for and connecting to remote peripherals —
+``PeripheralHost`` is the other half of CoreBluetooth: the *peripheral* role. It wraps a single
+`CBPeripheralManager` in an actor whose isolation is tied directly to the `DispatchSerialQueue`
+its manager delivers delegate callbacks on, exactly like ``Central``. You build a GATT database
+from value types, advertise it, and respond to remote centrals through `async`/`AsyncSequence`
+APIs — no delegate, no callbacks.
+
+- Important: The peripheral role is not usable at runtime on every platform. tvOS and watchOS
+  restrict or disallow BLE advertising; the radio may report ``CentralState/unsupported`` there.
+  The API compiles everywhere (its CoreBluetooth types are available on all five platforms) —
+  whether advertising actually starts is a runtime property surfaced through ``PeripheralHost/state``
+  and ``PeripheralHost/startAdvertising(_:)``.
+
+## Building a GATT database
+
+A service is a value type, ``GATTService``, holding value-type ``GATTCharacteristic``s.
+Properties and permissions mirror CoreBluetooth's option sets:
+
+```swift
+let heartRate = ServiceIdentifier(uuid: "180D")
+let measurement = CharacteristicIdentifier(uuid: "2A37", service: heartRate)
+
+let service = GATTService(identifier: heartRate, characteristics: [
+    GATTCharacteristic(
+        identifier: measurement,
+        properties: [.read, .notify],
+        permissions: [.readable]
+    )
+])
+```
+
+A characteristic with a non-`nil` ``GATTCharacteristic/value`` is *static* — CoreBluetooth
+answers reads from that constant itself. A `nil` value (the default) makes it *dynamic*: reads
+and writes surface as requests for your code to answer, and you push notifications yourself.
+
+## Advertising
+
+Create a host, add the service (awaiting CoreBluetooth's confirmation), then start advertising:
+
+```swift
+let host = PeripheralHost()
+
+// Wait for the radio to power on.
+for await state in await host.stateEvents() where state == .poweredOn { break }
+
+try await host.add(service)
+try await host.startAdvertising(
+    PeripheralAdvertisement(localName: "My Rig", serviceUUIDs: [heartRate])
+)
+```
+
+``PeripheralHost/startAdvertising(_:)`` returns once `peripheralManagerDidStartAdvertising`
+fires. Only a local name and service UUIDs are advertised — the only two fields CoreBluetooth
+honors on the advertising side (see ``PeripheralAdvertisement``).
+
+## Answering reads and writes
+
+Consume the request streams and answer each request exactly once. Subscribe **before** you
+start advertising — the streams do not replay.
+
+```swift
+Task {
+    for await request in await host.readRequests() {
+        await host.respond(to: request, with: .success(currentValue))
+    }
+}
+
+Task {
+    for await request in await host.writeRequests() {
+        for entry in request.entries {
+            apply(entry.value, to: entry.characteristic)
+        }
+        await host.respond(to: request, with: .success(()))
+    }
+}
+```
+
+Reject a request instead with a `.failure(ATTError)` — e.g. `.failure(.writeNotPermitted)`. A
+write request arrives as a **batch** (``WriteRequest/entries``); a single
+`respond(to:with:)` call acknowledges the whole batch.
+
+## Notifying subscribers with back-pressure
+
+Track subscribers via ``PeripheralHost/subscriptionEvents()`` (or the
+``PeripheralHost/subscribers(for:)`` snapshot), then push values with
+``PeripheralHost/updateValue(_:for:onSubscribed:)``:
+
+```swift
+Task {
+    for await event in await host.subscriptionEvents() {
+        switch event {
+        case .subscribed(let central, let characteristic):
+            print("\(central.id) is listening to \(characteristic)")
+        case .unsubscribed(let central, let characteristic):
+            print("\(central.id) stopped listening to \(characteristic)")
+        }
+    }
+}
+
+// Later, push a new value to every subscriber:
+try await host.updateValue(newReading, for: measurement)
+```
+
+``PeripheralHost/updateValue(_:for:onSubscribed:)`` applies the same back-pressure discipline
+as the central-side `writeWithoutResponse`: when CoreBluetooth's transmit queue is full it
+suspends until `peripheralManagerIsReady(toUpdateSubscribers:)` and retries, so the call returns
+only once the update has actually been queued.
+
+## Tearing down
+
+``PeripheralHost/stopAndExtractState()`` detaches the delegate and hands the underlying
+`CBPeripheralManager` back to you, failing every pending operation with
+``BLESwiftError/stopped``. Use ``PeripheralHost/stopAdvertising()`` /
+``PeripheralHost/removeAllServices()`` for a softer stop.
+
+## Testing without hardware
+
+`BLESwiftTestSupport`'s `FakePeripheralManager` is a queue-confined, CoreBluetooth-free stand-in
+for `CBPeripheralManager`. Drive a real ``PeripheralHost`` through
+``PeripheralHost/init(backend:queue:configuration:)`` and script the events a real manager would
+deliver — simulate reads, writes, subscriptions, and transmit-queue back-pressure — all without
+a device.
+
+## Topics
+
+### Essentials
+
+- ``PeripheralHost``
+
+### GATT database
+
+- ``GATTService``
+- ``GATTCharacteristic``
+- ``CharacteristicProperties``
+- ``AttributePermissions``
+
+### Advertising
+
+- ``PeripheralAdvertisement``
+
+### Requests and responses
+
+- ``ReadRequest``
+- ``WriteRequest``
+- ``RequestToken``
+- ``ATTError``
+- ``Subscriber``
+- ``SubscriptionEvent``
