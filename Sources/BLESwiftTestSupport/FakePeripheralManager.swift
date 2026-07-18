@@ -67,6 +67,9 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
     nonisolated(unsafe) private var _respondCalls: [RespondCall] = []
     nonisolated(unsafe) private var _updateValueCalls: [UpdateValueCall] = []
     nonisolated(unsafe) private var _scriptedUpdateValueReturns: [Bool] = []
+    nonisolated(unsafe) private var _onAddService: ((GATTService) -> Void)?
+    nonisolated(unsafe) private var _onRespond: ((RespondCall) -> Void)?
+    nonisolated(unsafe) private var _onUpdateValue: ((UpdateValueCall) -> Void)?
 
     private static let authorizationBox = Mutex<BluetoothAuthorization>(.allowedAlways)
 
@@ -200,6 +203,39 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         set { dispatchPrecondition(condition: .onQueue(queue)); _scriptedUpdateValueReturns = newValue }
     }
 
+    /// A cross-role **bridge hook** invoked synchronously, on ``queue``, from inside ``add(_:)``
+    /// with the service just published — the seam ``FakeGATTBridge`` uses to mirror this host's
+    /// hosted GATT database into a central-side ``FakePeripheral``'s discovery state, so the
+    /// central discovers exactly what the host published. Fires in addition to (not instead of)
+    /// recording the service in ``addedServices`` and delivering `.didAddService`. `nil` (the
+    /// default) is unchanged behavior. Configure via ``onQueue(_:)``.
+    public var onAddService: ((GATTService) -> Void)? {
+        get { dispatchPrecondition(condition: .onQueue(queue)); return _onAddService }
+        set { dispatchPrecondition(condition: .onQueue(queue)); _onAddService = newValue }
+    }
+
+    /// A cross-role **bridge hook** invoked synchronously, on ``queue``, from inside
+    /// ``respond(to:value:error:)`` with the recorded ``RespondCall`` — the seam
+    /// ``FakeGATTBridge`` uses to route this host's answer back to the central as a read result
+    /// (the response `value`) or a write acknowledgement (`error`, or success). Fires in
+    /// addition to recording the call in ``respondCalls``. `nil` (the default) is unchanged
+    /// behavior. Configure via ``onQueue(_:)``.
+    public var onRespond: ((RespondCall) -> Void)? {
+        get { dispatchPrecondition(condition: .onQueue(queue)); return _onRespond }
+        set { dispatchPrecondition(condition: .onQueue(queue)); _onRespond = newValue }
+    }
+
+    /// A cross-role **bridge hook** invoked synchronously, on ``queue``, from inside
+    /// ``updateValue(_:for:onSubscribed:)`` with the recorded ``UpdateValueCall`` (including the
+    /// back-pressure `returned` flag) — the seam ``FakeGATTBridge`` uses to surface this host's
+    /// notification as a central-side notification. Fires in addition to recording the call in
+    /// ``updateValueCalls``. `nil` (the default) is unchanged behavior. Configure via
+    /// ``onQueue(_:)``.
+    public var onUpdateValue: ((UpdateValueCall) -> Void)? {
+        get { dispatchPrecondition(condition: .onQueue(queue)); return _onUpdateValue }
+        set { dispatchPrecondition(condition: .onQueue(queue)); _onUpdateValue = newValue }
+    }
+
     // MARK: - Simulation (off-queue safe; hop onto queue themselves)
 
     /// Simulates the radio changing state and, asynchronously, delivers
@@ -331,6 +367,7 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
     public func add(_ service: GATTService) {
         dispatchPrecondition(condition: .onQueue(queue))
         _addedServices.append(service)
+        _onAddService?(service)
         let error = _addServiceError
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -348,7 +385,9 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
     /// Records the response in ``respondCalls``.
     public func respond(to token: RequestToken, value: Data?, error: ATTError?) {
         dispatchPrecondition(condition: .onQueue(queue))
-        _respondCalls.append(RespondCall(token: token, value: value, error: error))
+        let call = RespondCall(token: token, value: value, error: error)
+        _respondCalls.append(call)
+        _onRespond?(call)
     }
 
     /// Records the call and returns the next scripted back-pressure value from
@@ -356,7 +395,9 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
     public func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         let returned = _scriptedUpdateValueReturns.isEmpty ? true : _scriptedUpdateValueReturns.removeFirst()
-        _updateValueCalls.append(UpdateValueCall(value: value, characteristic: characteristic, centrals: centrals, returned: returned))
+        let call = UpdateValueCall(value: value, characteristic: characteristic, centrals: centrals, returned: returned)
+        _updateValueCalls.append(call)
+        _onUpdateValue?(call)
         return returned
     }
 

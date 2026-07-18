@@ -128,6 +128,11 @@ for `CBPeripheralManager`. Drive a real ``PeripheralHost`` through
 deliver — simulate reads, writes, subscriptions, and transmit-queue back-pressure — all without
 a device.
 
+To drive a real ``PeripheralHost`` *and* a real ``Central`` against each other in one process —
+the peripheral hosting a database that the central connects to, reads, writes, and receives
+notifications from — bridge the two fake families with `FakeGATTBridge`; see
+<doc:CrossRoleExample>.
+
 ## Topics
 
 ### Essentials
