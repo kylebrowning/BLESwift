@@ -22,6 +22,26 @@ try await peripheral.write(someTransmittableValue, to: characteristic, type: .wi
 (`canSendWriteWithoutResponse`) before writing, if needed, avoiding a payload that CoreBluetooth
 silently drops.
 
+### Introspecting a characteristic's capabilities
+
+``Peripheral/properties(of:)`` reports the set of operations a characteristic advertises —
+whether it's readable, writable, notifiable, and so on — as a ``CharacteristicProperties``
+option set. Use it to drive capability-based UI, or to branch before an operation, instead of
+attempting the operation and inspecting the error:
+
+```swift
+let properties = try await peripheral.properties(of: characteristic)
+
+if properties.contains(.notify) {
+    // subscribe for streaming updates
+} else if properties.contains(.read) {
+    // fall back to a one-shot read
+}
+```
+
+Like every other operation here, it lazily discovers the service and characteristic the first
+time it's used, and serializes against other operations on the same characteristic.
+
 Any type conforming to ``Receivable``/``Transmittable`` can be read/written — every fixed-width
 integer type (`Int8`/`16`/`32`/`64`, `UInt8`/`16`/`32`/`64`), `String` (UTF-8, throwing
 ``BLESwiftError/invalidStringEncoding`` instead of crashing on invalid data), and

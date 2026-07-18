@@ -105,4 +105,11 @@ public protocol PeripheralRemote: AnyObject {
     /// characteristic with ``BLESwiftError/readConflictsWithNotification`` rather than letting
     /// CoreBluetooth's ambiguous `didUpdateValueFor` delivery race the two.
     func isNotifying(_ characteristic: CharacteristicIdentifier) -> Bool
+
+    /// The set of operations `characteristic` advertises support for. Mirrors
+    /// `CBCharacteristic.properties`, mapped to BLESwift's own ``CharacteristicProperties``
+    /// at the CoreBluetooth seam. Returns `[]` (an empty set) if `characteristic` has not
+    /// yet been discovered — callers trigger lazy discovery first, exactly as they do before
+    /// `readValue(for:)`/`writeValue(_:for:type:)`.
+    func properties(of characteristic: CharacteristicIdentifier) -> CharacteristicProperties
 }

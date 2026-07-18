@@ -152,4 +152,12 @@ extension CBPeripheral: PeripheralRemote {
     public func isNotifying(_ characteristic: CharacteristicIdentifier) -> Bool {
         bleSwiftCharacteristic(characteristic)?.isNotifying ?? false
     }
+
+    /// The set of operations `characteristic` advertises support for, mapping the native
+    /// `CBCharacteristic.properties` at this sanctioned CoreBluetooth seam. `[]` (empty) if
+    /// it has not yet been discovered.
+    public func properties(of characteristic: CharacteristicIdentifier) -> CharacteristicProperties {
+        guard let cbCharacteristic = bleSwiftCharacteristic(characteristic) else { return [] }
+        return CharacteristicProperties(cbCharacteristic.properties)
+    }
 }
