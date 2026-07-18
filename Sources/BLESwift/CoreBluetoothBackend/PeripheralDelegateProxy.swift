@@ -105,6 +105,17 @@ final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate {
         forward(.isReadyToSendWriteWithoutResponse)
     }
 
+    func peripheral(_ peripheral: CBPeripheral, didOpen channel: CBL2CAPChannel?, error: Error?) {
+        // Wrap the raw `CBL2CAPChannel` in a BLESwift-owned transport at this seam (which
+        // also starts its dedicated stream pump off the actor) so nothing downstream ever
+        // sees a CoreBluetooth type. On failure there is no channel to wrap.
+        if let channel {
+            forward(.didOpenL2CAPChannel(channel: CBL2CAPChannelTransport(channel: channel), error: nil))
+        } else {
+            forward(.didOpenL2CAPChannel(channel: nil, error: error as NSError?))
+        }
+    }
+
     // MARK: - Forwarding
 
     /// Resolves `characteristic`'s owning service, or `nil` if CoreBluetooth ever hands

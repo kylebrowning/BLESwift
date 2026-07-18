@@ -63,6 +63,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _descriptorReadCallCount = 0
     nonisolated(unsafe) private var _holdDescriptorReadCompletions = false
     nonisolated(unsafe) private var _heldDescriptorReads: [(descriptor: DescriptorIdentifier, value: Data?)] = []
+    nonisolated(unsafe) private var _l2capOpenBehavior: L2CAPOpenBehavior = .succeed
+    nonisolated(unsafe) private var _openL2CAPChannelCalls: [L2CAPPSM] = []
+    nonisolated(unsafe) private var _lastOpenedL2CAPChannel: FakeL2CAPChannel?
 
     /// Creates a `FakePeripheral` confined to `queue`.
     ///
@@ -459,6 +462,48 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
+    // MARK: - L2CAP scripting
+
+    /// How this fake responds to ``openL2CAPChannel(_:)``.
+    public enum L2CAPOpenBehavior: Sendable {
+        /// Vend a fresh ``FakeL2CAPChannel`` and deliver a successful
+        /// `didOpenL2CAPChannel`. The default.
+        case succeed
+        /// Deliver a failing `didOpenL2CAPChannel` carrying `error` and no channel.
+        case fail(NSError)
+        /// Record the call but deliver nothing — for exercising open timeout / cancellation.
+        case hold
+    }
+
+    /// How ``openL2CAPChannel(_:)`` responds. Defaults to ``L2CAPOpenBehavior/succeed``.
+    /// Configure via ``onQueue(_:)``.
+    public var l2capOpenBehavior: L2CAPOpenBehavior {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _l2capOpenBehavior
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _l2capOpenBehavior = newValue
+        }
+    }
+
+    /// Every `L2CAPPSM` ``openL2CAPChannel(_:)`` was called with, in order. Read via
+    /// ``onQueue(_:)``.
+    public var openL2CAPChannelCalls: [L2CAPPSM] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _openL2CAPChannelCalls
+    }
+
+    /// The most recent ``FakeL2CAPChannel`` this fake vended from a `.succeed`
+    /// ``openL2CAPChannel(_:)`` — use it to drive `simulateInbound`/inspect `writtenData` on
+    /// the channel the `Central` actually handed back. Read via ``onQueue(_:)``. `nil` if no
+    /// channel has been vended (or the last open failed / was held).
+    public var lastOpenedL2CAPChannel: FakeL2CAPChannel? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _lastOpenedL2CAPChannel
+    }
+
     // MARK: - PeripheralRemote
 
     /// The peripheral's current connection state.
@@ -675,6 +720,25 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     public func isDiscovered(_ descriptor: DescriptorIdentifier) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoveredDescriptors.contains(descriptor)
+    }
+
+    /// Records the call and, per ``l2capOpenBehavior``, asynchronously delivers
+    /// `didOpenL2CAPChannel` on ``queue`` — a success carrying a fresh ``FakeL2CAPChannel``
+    /// (also stashed in ``lastOpenedL2CAPChannel``), a failure carrying the scripted error,
+    /// or nothing at all (`.hold`, for open timeout / cancellation tests).
+    public func openL2CAPChannel(_ psm: L2CAPPSM) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _openL2CAPChannelCalls.append(psm)
+        switch _l2capOpenBehavior {
+        case .succeed:
+            let channel = FakeL2CAPChannel(psm: psm, queue: queue)
+            _lastOpenedL2CAPChannel = channel
+            queue.async { [self] in deliver(.didOpenL2CAPChannel(channel: channel, error: nil)) }
+        case .fail(let error):
+            queue.async { [self] in deliver(.didOpenL2CAPChannel(channel: nil, error: error)) }
+        case .hold:
+            break
+        }
     }
 
     private func deliver(_ event: PeripheralEvent) {

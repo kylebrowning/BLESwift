@@ -101,6 +101,15 @@ public enum BLESwiftError: Error, Sendable, Equatable {
     /// argument and why (e.g. a non-positive flush timeout). BLESwift throws instead of
     /// crashing on argument validation failures.
     case invalidArgument(String)
+    /// An L2CAP channel-open completed reporting neither an opened channel nor an error — a
+    /// malformed `peripheral(_:didOpen:error:)` callback. `Peripheral.openL2CAPChannel`
+    /// surfaces this rather than hanging on an outcome that never arrives.
+    case l2capOpenFailed
+    /// An operation on an L2CAP channel failed because the channel is closed — torn down by
+    /// a disconnect, an explicit `close()`, or a transport error. A pending or subsequent
+    /// `write(_:)`, and the inbound stream, end with this (or the underlying transport
+    /// error, when there is one).
+    case l2capChannelClosed
 }
 
 extension BLESwiftError: LocalizedError {
@@ -165,6 +174,10 @@ extension BLESwiftError: LocalizedError {
             return "Cannot read a characteristic that is currently notifying"
         case let .invalidArgument(reason):
             return "Invalid argument: \(reason)"
+        case .l2capOpenFailed:
+            return "Opening the L2CAP channel failed"
+        case .l2capChannelClosed:
+            return "The L2CAP channel is closed"
         }
     }
 }
