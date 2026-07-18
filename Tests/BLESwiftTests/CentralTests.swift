@@ -28,7 +28,7 @@ struct CentralTests {
         fakeCentral.simulateStateChange(.poweredOn)
         // Flush the fake's async event delivery, then let the actor's `handle(_:)` (also
         // scheduled via the same serial queue) run to completion before subscribing.
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
         #expect(central.state == .poweredOn)
 
         var iterator = await central.stateEvents().makeAsyncIterator()
@@ -42,7 +42,7 @@ struct CentralTests {
         let (central, fakeCentral, _) = makeTestCentral()
 
         fakeCentral.simulateStateChange(.poweredOn)
-        fakeCentral.onQueue {}
+        await fakeCentral.onQueue {}
         #expect(central.state == .poweredOn)
 
         let stream1 = await central.stateEvents()
@@ -57,7 +57,7 @@ struct CentralTests {
         await Task.yield()
 
         fakeCentral.simulateStateChange(.poweredOff)
-        fakeCentral.onQueue {} // flush
+        await fakeCentral.onQueue {} // flush
 
         let (result1, result2) = await (collected1, collected2)
         #expect(result1 == [.poweredOn, .poweredOff])

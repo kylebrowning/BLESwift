@@ -56,7 +56,7 @@ struct PeripheralHostTests {
         ])
         try await host.add(service)
 
-        let added = fake.onQueue { fake.addedServices }
+        let added = await fake.onQueue { fake.addedServices }
         #expect(added.count == 1)
         #expect(added.first?.identifier == heartRate)
         #expect(added.first?.characteristics.first?.properties == [.read, .notify])
@@ -66,7 +66,7 @@ struct PeripheralHostTests {
     func addServiceError() async throws {
         let (host, fake, _) = makeFakePeripheralHost()
         let expected = NSError(domain: "BLESwiftTests", code: 7)
-        fake.onQueue { fake.addServiceError = expected }
+        await fake.onQueue { fake.addServiceError = expected }
 
         await #expect(throws: expected) {
             try await host.add(GATTService(identifier: heartRate))
@@ -77,25 +77,25 @@ struct PeripheralHostTests {
     func advertising() async throws {
         let (host, fake, _) = makeFakePeripheralHost()
         fake.simulateStateChange(.poweredOn)
-        fake.onQueue {} // flush
+        await fake.onQueue {} // flush
 
         #expect(!host.isAdvertising)
         try await host.startAdvertising(PeripheralAdvertisement(localName: "Rig", serviceUUIDs: [heartRate]))
         #expect(host.isAdvertising)
 
-        let advertisement = fake.onQueue { fake.lastAdvertisement }
+        let advertisement = await fake.onQueue { fake.lastAdvertisement }
         #expect(advertisement?.localName == "Rig")
         #expect(advertisement?.serviceUUIDs == [heartRate])
 
         await host.stopAdvertising()
-        #expect(fake.onQueue { fake.stopAdvertisingCallCount } == 1)
+        #expect(await fake.onQueue { fake.stopAdvertisingCallCount } == 1)
     }
 
     @Test("startAdvertising surfaces a failure error")
     func advertisingFailure() async throws {
         let (host, fake, _) = makeFakePeripheralHost()
         let expected = NSError(domain: "BLESwiftTests", code: 9)
-        fake.onQueue { fake.startAdvertisingError = expected }
+        await fake.onQueue { fake.startAdvertisingError = expected }
 
         await #expect(throws: expected) {
             try await host.startAdvertising(PeripheralAdvertisement(localName: "Rig"))
@@ -118,7 +118,7 @@ struct PeripheralHostTests {
 
         await host.respond(to: request, with: .success(Data([0x11, 0x22])))
 
-        let responses = fake.onQueue { fake.respondCalls }
+        let responses = await fake.onQueue { fake.respondCalls }
         #expect(responses.count == 1)
         #expect(responses.first?.token == request.token)
         #expect(responses.first?.value == Data([0x11, 0x22]))
@@ -136,7 +136,7 @@ struct PeripheralHostTests {
 
         await host.respond(to: request, with: .failure(.readNotPermitted))
 
-        let responses = fake.onQueue { fake.respondCalls }
+        let responses = await fake.onQueue { fake.respondCalls }
         #expect(responses.first?.error == .readNotPermitted)
         #expect(responses.first?.value == nil)
     }
@@ -157,7 +157,7 @@ struct PeripheralHostTests {
 
         await host.respond(to: request, with: .success(()))
 
-        let responses = fake.onQueue { fake.respondCalls }
+        let responses = await fake.onQueue { fake.respondCalls }
         #expect(responses.count == 1)
         #expect(responses.first?.token == request.token)
         #expect(responses.first?.error == nil)
@@ -193,22 +193,22 @@ struct PeripheralHostTests {
         let (host, fake, _) = makeFakePeripheralHost()
         fake.simulateStateChange(.poweredOn)
         // Script exactly one full-queue return, so the first updateValue returns false.
-        fake.onQueue { fake.scriptedUpdateValueReturns = [false] }
+        await fake.onQueue { fake.scriptedUpdateValueReturns = [false] }
 
         let central = aCentral()
         fake.simulateSubscribe(central: central, to: measurement)
-        fake.onQueue {} // flush subscribe
+        await fake.onQueue {} // flush subscribe
 
         let update = Task { try await host.updateValue(Data([0xAA]), for: measurement) }
 
         // The first (false) call must have happened, and the update must still be pending.
-        await waitFor { fake.onQueue { fake.updateValueCalls.count } >= 1 }
-        #expect(fake.onQueue { fake.updateValueCalls.first?.returned } == false)
+        await waitFor { await fake.onQueue { fake.updateValueCalls.count } >= 1 }
+        #expect(await fake.onQueue { fake.updateValueCalls.first?.returned } == false)
 
         fake.simulateReadyToUpdate()
         try await update.value
 
-        let calls = fake.onQueue { fake.updateValueCalls }
+        let calls = await fake.onQueue { fake.updateValueCalls }
         #expect(calls.count == 2)
         #expect(calls.last?.returned == true)
         #expect(calls.last?.value == Data([0xAA]))
@@ -218,10 +218,10 @@ struct PeripheralHostTests {
     func updateValueFailsOnPowerOff() async throws {
         let (host, fake, _) = makeFakePeripheralHost()
         fake.simulateStateChange(.poweredOn)
-        fake.onQueue { fake.scriptedUpdateValueReturns = [false] }
+        await fake.onQueue { fake.scriptedUpdateValueReturns = [false] }
 
         let update = Task { try await host.updateValue(Data([0x01]), for: measurement) }
-        await waitFor { fake.onQueue { fake.updateValueCalls.count } >= 1 }
+        await waitFor { await fake.onQueue { fake.updateValueCalls.count } >= 1 }
 
         fake.simulateStateChange(.poweredOff)
 
@@ -235,11 +235,11 @@ struct PeripheralHostTests {
         let (host, fake, _) = makeFakePeripheralHost()
         fake.simulateStateChange(.poweredOn)
         try await host.add(GATTService(identifier: heartRate))
-        #expect(fake.onQueue { fake.addedServices.count } == 1)
+        #expect(await fake.onQueue { fake.addedServices.count } == 1)
 
         await host.removeAllServices()
-        #expect(fake.onQueue { fake.removeAllServicesCallCount } == 1)
-        #expect(fake.onQueue { fake.addedServices.isEmpty })
+        #expect(await fake.onQueue { fake.removeAllServicesCallCount } == 1)
+        #expect(await fake.onQueue { fake.addedServices.isEmpty })
 
         // A backend-backed host was not created against a real CBPeripheralManager.
         do {

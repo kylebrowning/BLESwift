@@ -43,15 +43,24 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
         self.inboundContinuation = continuation
     }
 
-    /// Runs `body` synchronously on ``queue`` and returns its result — the only sanctioned
-    /// way for off-queue code to inspect this fake's state. Because `queue` is serial, this
-    /// also flushes every previously-scheduled `.async` delivery first.
+    /// Hops onto ``queue`` (via `queue.async` + a continuation) to run `body`, then returns
+    /// its result — the only sanctioned way for off-queue code to inspect this fake's state.
+    /// Because `queue` is serial, this also flushes every previously-scheduled `.async`
+    /// delivery first.
     ///
-    /// - Warning: Never call from within code already on ``queue`` (a reentrant deadlock) —
-    ///   in particular, not from the peripheral's event handler, since a `FakeL2CAPChannel`
+    /// This is `async` and **never blocks the calling thread** — it does *not* use
+    /// `queue.sync`, whose cooperative-thread parking under the parallel test runner is the
+    /// deadlock fixed in issue #13 (see ``FakeCentral/onQueue(_:)`` for the full rationale).
+    ///
+    /// - Warning: Never `await` from within code already on ``queue`` (a deadlock) — in
+    ///   particular, not from the peripheral's event handler, since a `FakeL2CAPChannel`
     ///   shares its peripheral's queue.
-    public func onQueue<T>(_ body: () -> T) -> T {
-        queue.sync(execute: body)
+    public func onQueue<T: Sendable>(_ body: @Sendable @escaping () -> T) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async {
+                continuation.resume(returning: body())
+            }
+        }
     }
 
     // MARK: - L2CAPChannelRemote

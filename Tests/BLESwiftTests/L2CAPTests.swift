@@ -24,14 +24,14 @@ struct L2CAPTests {
 
         #expect(channel.psm == Self.psm)
         #expect(channel.peripheral == fakePeripheral.peripheralIdentifier)
-        #expect(fakePeripheral.onQueue { fakePeripheral.openL2CAPChannelCalls } == [Self.psm])
+        #expect(await fakePeripheral.onQueue { fakePeripheral.openL2CAPChannelCalls } == [Self.psm])
     }
 
     @Test("openL2CAPChannel throws the CoreBluetooth error when the open fails")
     func openFailsWithError() async throws {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
         let scriptedError = NSError(domain: "L2CAPTests", code: 42)
-        fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .fail(scriptedError) }
+        await fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .fail(scriptedError) }
 
         do {
             _ = try await peripheral.openL2CAPChannel(psm: Self.psm)
@@ -45,7 +45,7 @@ struct L2CAPTests {
     @Test("openL2CAPChannel times out, leaving the session healthy")
     func openTimesOut() async throws {
         let (central, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-        fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .hold }
+        await fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .hold }
 
         do {
             _ = try await peripheral.openL2CAPChannel(psm: Self.psm, timeout: .milliseconds(50))
@@ -63,11 +63,11 @@ struct L2CAPTests {
     @Test("Cancelling an in-flight open leaves the session healthy")
     func cancellationMidOpenLeavesSessionHealthy() async throws {
         let (central, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-        fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .hold }
+        await fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .hold }
 
         let openTask = Task { try await peripheral.openL2CAPChannel(psm: Self.psm) }
         // Wait until the open has actually been issued to the fake before cancelling.
-        await waitFor { fakePeripheral.onQueue { !fakePeripheral.openL2CAPChannelCalls.isEmpty } }
+        await waitFor { await fakePeripheral.onQueue { !fakePeripheral.openL2CAPChannelCalls.isEmpty } }
         openTask.cancel()
 
         do {
@@ -82,7 +82,7 @@ struct L2CAPTests {
             Issue.record("expected the peripheral to remain .connected after a cancelled open")
             return
         }
-        fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .succeed }
+        await fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .succeed }
         let channel = try await peripheral.openL2CAPChannel(psm: Self.psm)
         #expect(channel.psm == Self.psm)
     }
@@ -94,7 +94,7 @@ struct L2CAPTests {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
 
         let channel = try await peripheral.openL2CAPChannel(psm: Self.psm)
-        let fakeChannel = fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel }
+        let fakeChannel = await fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel }
         let fake = try #require(fakeChannel)
 
         let payload = Data([0x01, 0x02, 0x03])
@@ -110,14 +110,14 @@ struct L2CAPTests {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
 
         let channel = try await peripheral.openL2CAPChannel(psm: Self.psm)
-        let fake = try #require(fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel })
+        let fake = try #require(await fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel })
 
         let first = Data([0xAA, 0xBB])
         let second = Data([0xCC])
         try await channel.write(first)
         try await channel.write(second)
 
-        let written = fake.onQueue { fake.writtenData }
+        let written = await fake.onQueue { fake.writtenData }
         #expect(written == [first, second])
     }
 
@@ -128,7 +128,7 @@ struct L2CAPTests {
         let (_, fakeCentral, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
 
         let channel = try await peripheral.openL2CAPChannel(psm: Self.psm)
-        let fake = try #require(fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel })
+        let fake = try #require(await fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel })
 
         let task = Task { () -> Error? in
             do {
@@ -143,7 +143,7 @@ struct L2CAPTests {
 
         let error = await task.value
         #expect(error as? BLESwiftError == .unexpectedDisconnect)
-        #expect(fake.onQueue { fake.isClosed })
+        #expect(await fake.onQueue { fake.isClosed })
     }
 
     @Test("Explicit close finishes incomingData cleanly and deregisters the channel")
@@ -151,7 +151,7 @@ struct L2CAPTests {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
 
         let channel = try await peripheral.openL2CAPChannel(psm: Self.psm)
-        let fake = try #require(fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel })
+        let fake = try #require(await fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel })
 
         let task = Task { () -> Error? in
             do {
@@ -166,6 +166,6 @@ struct L2CAPTests {
 
         let error = await task.value
         #expect(error == nil)
-        #expect(fake.onQueue { fake.isClosed })
+        #expect(await fake.onQueue { fake.isClosed })
     }
 }

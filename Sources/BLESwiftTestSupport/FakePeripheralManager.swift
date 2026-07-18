@@ -88,14 +88,23 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         self._radioState = state
     }
 
-    /// Runs `body` synchronously on ``queue`` and returns its result — the one sanctioned way
-    /// for off-queue code to configure this fake or read its recorded calls for assertions.
-    /// Also flushes every previously-scheduled `.async` event delivery first.
+    /// Hops onto ``queue`` (via `queue.async` + a continuation) to run `body`, then returns
+    /// its result — the one sanctioned way for off-queue code to configure this fake or read
+    /// its recorded calls for assertions. Also flushes every previously-scheduled `.async`
+    /// event delivery first.
     ///
-    /// - Warning: Never call from within an ``eventHandler`` callback or other on-queue code —
-    ///   a reentrant deadlock, like `CBPeripheralManager`'s own queue.
-    public func onQueue<T>(_ body: () -> T) -> T {
-        queue.sync(execute: body)
+    /// This is `async` and **never blocks the calling thread** — it does *not* use
+    /// `queue.sync`, whose cooperative-thread parking under the parallel test runner is the
+    /// deadlock fixed in issue #13 (see ``FakeCentral/onQueue(_:)`` for the full rationale).
+    ///
+    /// - Warning: Never `await` from within an ``eventHandler`` callback or other on-queue
+    ///   code — a deadlock, like `CBPeripheralManager`'s own queue.
+    public func onQueue<T: Sendable>(_ body: @Sendable @escaping () -> T) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async {
+                continuation.resume(returning: body())
+            }
+        }
     }
 
     // MARK: - Inspectable state (via onQueue)

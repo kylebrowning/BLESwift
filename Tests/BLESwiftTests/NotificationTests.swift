@@ -36,7 +36,7 @@ struct NotificationTests {
         // Both subscribers registered (registration is asynchronous) and notify enabled,
         // before emitting anything both are expected to observe.
         await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheral.peripheralIdentifier) == 2 }
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
 
         fakePeripheral.simulateNotification(for: Self.heartRateMeasurement, value: Data([1]))
         fakePeripheral.simulateNotification(for: Self.heartRateMeasurement, value: Data([2]))
@@ -58,9 +58,9 @@ struct NotificationTests {
         let taskA = Task { for try await _ in streamA {} }
 
         // First subscriber: exactly one setNotifyValue call, an enable.
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 1 }
-        #expect(fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.first?.enabled } == true)
-        #expect(fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.first?.characteristic } == Self.heartRateMeasurement)
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 1 }
+        #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.first?.enabled } == true)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.first?.characteristic } == Self.heartRateMeasurement)
 
         let streamB: AsyncThrowingStream<Data, Error> = peripheral.notifications(for: Self.heartRateMeasurement)
         let taskB = Task { for try await _ in streamB {} }
@@ -69,21 +69,21 @@ struct NotificationTests {
         // further setNotifyValue call.
         await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheral.peripheralIdentifier) == 2 }
         fakePeripheral.simulateNotification(for: Self.heartRateMeasurement, value: Data([1]))
-        fakePeripheral.onQueue {} // flush the delivery
-        #expect(fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 1)
+        await fakePeripheral.onQueue {} // flush the delivery
+        #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 1)
 
         // First subscriber cancels: still no disable — a subscriber remains.
         taskA.cancel()
         _ = try? await taskA.value
         await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheral.peripheralIdentifier) == 1 }
-        #expect(fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 1)
 
         // Last subscriber cancels: exactly one disable.
         taskB.cancel()
         _ = try? await taskB.value
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
-        #expect(fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.last?.enabled } == false)
-        #expect(fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.isEmpty } == true)
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
+        #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.last?.enabled } == false)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.isEmpty } == true)
     }
 
     // MARK: - Per-subscriber decode isolation
@@ -107,7 +107,7 @@ struct NotificationTests {
 
         // Both subscribers registered (registration is asynchronous) before emitting.
         await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheral.peripheralIdentifier) == 2 }
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
 
         // 0xFF is not valid standalone UTF-8: fails the String subscriber's decode layer,
         // passes the Data subscriber's identity decode untouched.
@@ -123,7 +123,7 @@ struct NotificationTests {
 
         // The failing subscriber's release must not have disabled notifications — the
         // sibling still holds a refcount.
-        #expect(fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 1)
+        #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 1)
     }
 
     // MARK: - Disconnect teardown
@@ -142,7 +142,7 @@ struct NotificationTests {
             }
         }
 
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
 
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
 
@@ -160,7 +160,7 @@ struct NotificationTests {
     @Test("An active notification subscription takes precedence over a pending read on the same characteristic")
     func notificationRoutingTakesPrecedenceOverPendingRead() async throws {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.holdReadCompletions = true
             fakePeripheral.scriptedReadValues[Self.heartRateMeasurement] = Data([9])
         }
@@ -170,7 +170,7 @@ struct NotificationTests {
         let readTask = Task<UInt8, Error> {
             try await peripheral.read(from: Self.heartRateMeasurement)
         }
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.readCallCount } == 1 }
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.readCallCount } == 1 }
 
         // The stream is created (and so referenced) entirely inside the subscriber task:
         // when `collectData` returns, the last reference to it drops, its `onTermination`
@@ -180,7 +180,7 @@ struct NotificationTests {
         let subscriberTask = Task {
             try await collectData(peripheral.notifications(for: Self.heartRateMeasurement), count: 1)
         }
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
 
         // Routed to the subscription FIRST (the ported fallback-chain order) — were the
         // pending read resolved instead, `readTask` would return 7, not 9, below.
@@ -190,7 +190,7 @@ struct NotificationTests {
 
         // Once the subscriber is gone (its `break` above released the last refcount and
         // disabled notify), the held read completion falls through to the pending read.
-        await waitFor { fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
+        await waitFor { await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
         fakePeripheral.simulateNextHeldReadCompletion()
         let readValue = try await readTask.value
         #expect(readValue == 9)
@@ -236,8 +236,8 @@ struct MultiPeripheralNotificationTests {
             return collected
         }
 
-        await waitFor { fakePeripheralA.onQueue { fakePeripheralA.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
-        await waitFor { fakePeripheralB.onQueue { fakePeripheralB.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
+        await waitFor { await fakePeripheralA.onQueue { fakePeripheralA.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
+        await waitFor { await fakePeripheralB.onQueue { fakePeripheralB.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
 
         // Two values from A only; one from B only — the identical characteristic UUID on
         // each peripheral must not cross-deliver.
@@ -258,28 +258,28 @@ struct MultiPeripheralNotificationTests {
         let streamA: AsyncThrowingStream<Data, Error> = peripheralA.notifications(for: Self.heartRateMeasurement)
         let taskA = Task { for try await _ in streamA {} }
         await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheralA.peripheralIdentifier) == 1 }
-        #expect(fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 1)
+        #expect(await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 1)
         // B's fake must be untouched by A's subscription.
-        #expect(fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 0)
+        #expect(await fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 0)
 
         let streamB: AsyncThrowingStream<Data, Error> = peripheralB.notifications(for: Self.heartRateMeasurement)
         let taskB = Task { for try await _ in streamB {} }
         await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheralB.peripheralIdentifier) == 1 }
-        #expect(fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 1)
+        #expect(await fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 1)
         // A's fake must be untouched by B's subscription starting.
-        #expect(fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 1)
+        #expect(await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 1)
 
         taskA.cancel()
         _ = try? await taskA.value
-        await waitFor { fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 2 }
-        #expect(fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.last?.enabled } == false)
+        await waitFor { await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 2 }
+        #expect(await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.last?.enabled } == false)
         // B's still-live subscription must be untouched by A's cancellation.
-        #expect(fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 1)
+        #expect(await fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 1)
 
         taskB.cancel()
         _ = try? await taskB.value
-        await waitFor { fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 2 }
-        #expect(fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.last?.enabled } == false)
+        await waitFor { await fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 2 }
+        #expect(await fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.last?.enabled } == false)
     }
 
     @Test("An unexpected disconnect of A finishes A's notification streams with .unexpectedDisconnect while B's streams keep delivering")
@@ -298,8 +298,8 @@ struct MultiPeripheralNotificationTests {
         let streamB: AsyncThrowingStream<Data, Error> = peripheralB.notifications(for: Self.heartRateMeasurement)
         let taskB = Task { try await collectData(streamB, count: 1) }
 
-        await waitFor { fakePeripheralA.onQueue { fakePeripheralA.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
-        await waitFor { fakePeripheralB.onQueue { fakePeripheralB.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
+        await waitFor { await fakePeripheralA.onQueue { fakePeripheralA.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
+        await waitFor { await fakePeripheralB.onQueue { fakePeripheralB.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
 
         fakeCentral.simulateDisconnect(fakePeripheralA.peripheralIdentifier, error: nil)
 
@@ -327,12 +327,12 @@ struct MultiPeripheralNotificationTests {
 /// the fake peripherals, and the connected `Peripheral` handles.
 private func connectedPair() async throws -> (Central, FakeCentral, FakePeripheral, Peripheral, FakePeripheral, Peripheral) {
     let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
-    let fakePeripheralB = addFakePeripheral(to: central, fakeCentral: fakeCentral)
+    let fakePeripheralB = await addFakePeripheral(to: central, fakeCentral: fakeCentral)
     // Power the radio on first: the last-release `setNotifyValue(false)` is ledger-guarded
     // on `.poweredOn` (see `Central.releaseNotificationSubscriber`), matching
     // `makeConnectedTestCentral()`'s own setup.
     fakeCentral.simulateStateChange(.poweredOn)
-    fakeCentral.onQueue {
+    await fakeCentral.onQueue {
         fakeCentral.retrievablePeripherals[fakePeripheralA.identifier] = fakePeripheralA
         fakeCentral.connectBehavior = .succeed
     }
