@@ -84,9 +84,10 @@ BLESwift supports any number of concurrent peripheral connections — see
 ### Peripheral Role (GATT server)
 
 Host a GATT database and advertise it — the peripheral half of CoreBluetooth. See
-<doc:PeripheralRole>.
+<doc:PeripheralRole>, and <doc:CrossRoleExample> to drive both roles at once over fakes.
 
 - <doc:PeripheralRole>
+- <doc:CrossRoleExample>
 - ``PeripheralHost``
 - ``GATTService``
 - ``GATTCharacteristic``

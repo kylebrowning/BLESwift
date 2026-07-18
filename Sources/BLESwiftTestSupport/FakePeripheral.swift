@@ -55,6 +55,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _availableServices: [ServiceIdentifier: Set<CharacteristicIdentifier>]?
     nonisolated(unsafe) private var _setNotifyValueCalls: [(characteristic: CharacteristicIdentifier, enabled: Bool)] = []
     nonisolated(unsafe) private var _onWrite: ((CharacteristicIdentifier, Data) -> Void)?
+    nonisolated(unsafe) private var _onReadRequest: ((CharacteristicIdentifier) -> Void)?
+    nonisolated(unsafe) private var _onWriteRequest: ((CharacteristicIdentifier, Data, WriteType) -> Void)?
+    nonisolated(unsafe) private var _onSubscriptionChange: ((CharacteristicIdentifier, Bool) -> Void)?
     nonisolated(unsafe) private var _eventHandlerSetCount = 0
     nonisolated(unsafe) private var _scriptedProperties: [CharacteristicIdentifier: CharacteristicProperties] = [:]
     nonisolated(unsafe) private var _discoveredDescriptors: Set<DescriptorIdentifier> = []
@@ -175,6 +178,64 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         set {
             dispatchPrecondition(condition: .onQueue(queue))
             _onWrite = newValue
+        }
+    }
+
+    /// A cross-role **bridge hook** invoked synchronously, on ``queue``, from inside
+    /// ``readValue(for:)`` — the seam ``FakeGATTBridge`` uses to route a central-side read to a
+    /// remote ``FakePeripheralManager`` host. When non-`nil`, ``readValue(for:)`` fires this
+    /// closure and returns **without** delivering its own `didUpdateValue` completion (bypassing
+    /// ``scriptedReadValues`` and ``holdReadCompletions`` entirely): the bridge is then
+    /// responsible for delivering the eventual completion via
+    /// ``simulateNotification(for:value:error:)`` once the host answers. `nil` (the default)
+    /// leaves ``readValue(for:)``'s original scripted behavior untouched. Configure via
+    /// ``onQueue(_:)``.
+    public var onReadRequest: ((CharacteristicIdentifier) -> Void)? {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _onReadRequest
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _onReadRequest = newValue
+        }
+    }
+
+    /// A cross-role **bridge hook** invoked synchronously, on ``queue``, from inside
+    /// ``writeValue(_:for:type:)`` — the seam ``FakeGATTBridge`` uses to route a central-side
+    /// write to a remote ``FakePeripheralManager`` host. Distinct from ``onWrite`` (an
+    /// instant-response scripting seam that never suppresses completion): when this hook is
+    /// non-`nil` **and** the write is `.withResponse`, ``writeValue(_:for:type:)`` fires this
+    /// closure and returns **without** delivering its own `didWriteValue` completion — the
+    /// bridge delivers it via ``simulateWriteCompletion(for:error:)`` once the host answers. A
+    /// `.withoutResponse` write (which has no completion) still fires this hook but completes as
+    /// usual. `nil` (the default) is unchanged behavior. Configure via ``onQueue(_:)``.
+    public var onWriteRequest: ((CharacteristicIdentifier, Data, WriteType) -> Void)? {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _onWriteRequest
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _onWriteRequest = newValue
+        }
+    }
+
+    /// A cross-role **bridge hook** invoked synchronously, on ``queue``, from inside
+    /// ``setNotifyValue(_:for:)`` with the characteristic and its new enabled/disabled state —
+    /// the seam ``FakeGATTBridge`` uses to forward a central-side subscribe (`true`) or
+    /// unsubscribe (`false`) to a remote ``FakePeripheralManager`` host. This hook never
+    /// suppresses anything: ``setNotifyValue(_:for:)`` still delivers its own
+    /// `didUpdateNotificationState` completion (the central's local confirmation) as usual.
+    /// `nil` (the default) is unchanged behavior. Configure via ``onQueue(_:)``.
+    public var onSubscriptionChange: ((CharacteristicIdentifier, Bool) -> Void)? {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _onSubscriptionChange
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _onSubscriptionChange = newValue
         }
     }
 
@@ -474,6 +535,22 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
+    /// Simulates the completion of an in-flight write by, asynchronously, delivering
+    /// `PeripheralEvent.didWriteValue(characteristic:error:)` on ``queue``.
+    ///
+    /// The counterpart to ``simulateNotification(for:value:error:)`` for writes: it exists so a
+    /// cross-role bridge (``FakeGATTBridge``) can deliver a `.withResponse` write's completion
+    /// *after* a remote ``FakePeripheralManager`` host has answered the corresponding
+    /// ``WriteRequest`` — the write having been suppressed from auto-completing via
+    /// ``onWriteRequest``. Off-queue safe to call directly; flush with ``onQueue(_:)`` before
+    /// asserting the completion landed.
+    public func simulateWriteCompletion(for characteristic: CharacteristicIdentifier, error: NSError? = nil) {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            deliver(.didWriteValue(characteristic: characteristic, error: error))
+        }
+    }
+
     /// Marks `services` as discovered without going through ``discoverServices(_:)``/an
     /// event, for tests that need to seed discovery state directly. No event corresponds
     /// to this, so it seeds state on ``queue`` via `queue.async` (like the other `simulate*`
@@ -512,6 +589,31 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
             _discoveredServices.subtract(invalidatedServices)
             _discoveredCharacteristics = _discoveredCharacteristics.filter { !invalidatedServices.contains($0.service) }
             deliver(.didModifyServices(invalidatedServices))
+        }
+    }
+
+    /// Mirrors one hosted `GATTService` into this fake's queue-confined discovery state — the
+    /// central-side counterpart a cross-role bridge (``FakeGATTBridge``) drives from a remote
+    /// ``FakePeripheralManager`` host's `onAddService` hook, so the central discovers exactly the
+    /// services and characteristics (with their properties) the host actually published.
+    ///
+    /// **Off-queue safe.** Like the other `simulate*` methods, this hops onto ``queue`` itself
+    /// (via `queue.async`) rather than requiring the caller already be on it — so the bridge can
+    /// call it directly from the *host's* queue (a distinct serial queue) without an ``onQueue(_:)``
+    /// round trip. The whole read-modify-write of ``availableServices``/``scriptedProperties``
+    /// runs inside that one `queue.async`, so it is atomic on ``queue`` and composes with any
+    /// concurrently mirrored service. Flush with ``onQueue(_:)`` before asserting the result.
+    public func simulateMirroredService(_ service: GATTService) {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            var services = _availableServices ?? [:]
+            var characteristics = services[service.identifier] ?? []
+            for characteristic in service.characteristics {
+                characteristics.insert(characteristic.identifier)
+                _scriptedProperties[characteristic.identifier] = characteristic.properties
+            }
+            services[service.identifier] = characteristics
+            _availableServices = services
         }
     }
 
@@ -627,6 +729,12 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     public func readValue(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         _readCallCount += 1
+        // A bridged read routes to a remote host instead of completing from scripted state:
+        // fire the hook and let the bridge deliver the completion later (see ``onReadRequest``).
+        if let onReadRequest = _onReadRequest {
+            onReadRequest(characteristic)
+            return
+        }
         let value = _scriptedReadValues[characteristic]
         if _holdReadCompletions {
             _heldReads.append((characteristic, value))
@@ -667,6 +775,14 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         _writeCallCounts[characteristic, default: 0] += 1
         _onWrite?(characteristic, data)
+        if let onWriteRequest = _onWriteRequest {
+            onWriteRequest(characteristic, data, type)
+            // A bridged `.withResponse` write's completion is delivered by the bridge once the
+            // remote host answers (via ``simulateWriteCompletion(for:error:)``), so it must not
+            // also auto-complete here. `.withoutResponse` has no completion, so it falls
+            // through unchanged.
+            if type == .withResponse { return }
+        }
         queue.async { [self] in deliver(.didWriteValue(characteristic: characteristic, error: nil)) }
     }
 
@@ -681,6 +797,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         } else {
             _notifyingCharacteristics.remove(characteristic)
         }
+        // Forward the subscribe/unsubscribe to a remote host, if bridged (see
+        // ``onSubscriptionChange``). Never suppresses the local confirmation below.
+        _onSubscriptionChange?(characteristic, enabled)
         queue.async { [self] in
             deliver(.didUpdateNotificationState(characteristic: characteristic, isNotifying: enabled, error: nil))
         }
