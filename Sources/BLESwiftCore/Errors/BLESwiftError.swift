@@ -36,6 +36,8 @@ public enum BLESwiftError: Error, Sendable, Equatable {
     case missingService(ServiceIdentifier)
     /// A Bluetooth characteristic was not found.
     case missingCharacteristic(CharacteristicIdentifier)
+    /// A Bluetooth characteristic descriptor was not found.
+    case missingDescriptor(DescriptorIdentifier)
     /// A Bluetooth operation was cancelled (e.g. via `cancelAllOperations`).
     case cancelled
     /// `disconnect()` was called explicitly.
@@ -119,6 +121,8 @@ extension BLESwiftError: LocalizedError {
             return "Service not found: \(service.uuidString)"
         case let .missingCharacteristic(characteristic):
             return "Characteristic not found: \(characteristic.uuidString)"
+        case let .missingDescriptor(descriptor):
+            return "Descriptor not found: \(descriptor.uuidString)"
         case .cancelled:
             return "Cancelled"
         case .explicitDisconnect:

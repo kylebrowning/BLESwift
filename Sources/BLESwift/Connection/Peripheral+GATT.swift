@@ -93,6 +93,63 @@ extension Peripheral {
         return try await central.properties(peripheral: id, characteristic: characteristic)
     }
 
+    /// Reads `descriptor`'s current value as raw `Data`.
+    ///
+    /// Descriptors — the Characteristic User Description, Presentation Format, and
+    /// vendor-specific descriptors, among others — complete GATT attribute coverage beyond
+    /// characteristics. The owning service, characteristic, and the characteristic's
+    /// descriptors are discovered first if needed (extending BLESwift's lazy discovery one
+    /// level, cache-short-circuited exactly like service/characteristic discovery). The
+    /// operation is serialized on the *parent characteristic's* FIFO lane, so a descriptor
+    /// read never races a read or write on the same characteristic.
+    ///
+    /// The value is returned as raw `Data`: a descriptor's payload shape depends on its type
+    /// (a UTF-8 string for the User Description, a little-endian integer for the Extended
+    /// Properties, opaque bytes for a vendor descriptor), so BLESwift hands back the bytes and
+    /// lets the caller interpret them — see ``Data`` extraction helpers, or decode manually.
+    /// (CoreBluetooth's own `Any?`-typed descriptor value is converted to `Data` eagerly at
+    /// the backend boundary; `NSString` becomes its UTF-8 bytes, `NSNumber` its 16-bit
+    /// little-endian encoding, `NSData` its bytes verbatim.)
+    ///
+    /// - Parameters:
+    ///   - descriptor: The descriptor to read from.
+    ///   - timeout: How long to wait before giving up with ``BLESwiftError/timedOut``. `nil`
+    ///     (the default) waits indefinitely.
+    /// - Returns: The descriptor's value, as raw `Data`.
+    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``/``BLESwiftError/missingDescriptor(_:)``
+    ///   if discovery fails; ``BLESwiftError/timedOut`` on timeout; or whatever error
+    ///   CoreBluetooth reports for the read.
+    public func readDescriptor(_ descriptor: DescriptorIdentifier, timeout: Duration? = nil) async throws -> Data {
+        let central = try resolveCentral()
+        return try await central.performReadDescriptor(peripheral: id, descriptor: descriptor, timeout: timeout)
+    }
+
+    /// Writes `value` to `descriptor`.
+    ///
+    /// The owning service, characteristic, and the characteristic's descriptors are
+    /// discovered first if needed, and the operation is serialized on the *parent
+    /// characteristic's* FIFO lane (see ``readDescriptor(_:timeout:)``). Descriptor writes
+    /// are always with-response — CoreBluetooth exposes no write-type choice for a
+    /// descriptor — so this always awaits the write confirmation before returning.
+    ///
+    /// `value` is written as raw `Data`; encode whatever the specific descriptor expects (for
+    /// example, UTF-8 bytes for a writable User Description) yourself.
+    ///
+    /// - Parameters:
+    ///   - descriptor: The descriptor to write to.
+    ///   - value: The raw bytes to write.
+    ///   - timeout: How long to wait before giving up with ``BLESwiftError/timedOut``. `nil`
+    ///     (the default) waits indefinitely.
+    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``/``BLESwiftError/missingDescriptor(_:)``
+    ///   if discovery fails; ``BLESwiftError/timedOut`` on timeout; or whatever error
+    ///   CoreBluetooth reports for the write.
+    public func writeDescriptor(_ descriptor: DescriptorIdentifier, value: Data, timeout: Duration? = nil) async throws {
+        let central = try resolveCentral()
+        try await central.performWriteDescriptor(peripheral: id, descriptor: descriptor, data: value, timeout: timeout)
+    }
+
     /// Reads the peripheral's current RSSI (signal strength), in dBm.
     ///
     /// RSSI has no owning characteristic, so concurrent `readRSSI()` calls are serialized

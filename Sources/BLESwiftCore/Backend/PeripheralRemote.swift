@@ -85,6 +85,26 @@ public protocol PeripheralRemote: AnyObject {
     /// `CBPeripheral.setNotifyValue(_:for:)`.
     func setNotifyValue(_ enabled: Bool, for characteristic: CharacteristicIdentifier)
 
+    /// Discovers all descriptors of an already-discovered characteristic. A no-op if
+    /// `characteristic` has not yet been discovered. Mirrors
+    /// `CBPeripheral.discoverDescriptors(for:)` — which, unlike characteristic discovery,
+    /// takes no filter list: a characteristic's descriptors are always discovered as a
+    /// group.
+    func discoverDescriptors(for characteristic: CharacteristicIdentifier)
+
+    /// Requests the current value of an already-discovered descriptor. A no-op if
+    /// `descriptor` has not yet been discovered. Mirrors `CBPeripheral.readValue(for:)` for
+    /// a `CBDescriptor` — its completion (``PeripheralEvent/didUpdateValueForDescriptor(descriptor:value:error:)``)
+    /// carries the value already converted to `Data`.
+    func readValue(for descriptor: DescriptorIdentifier)
+
+    /// Writes `data` to an already-discovered descriptor. A no-op if `descriptor` has not
+    /// yet been discovered. Mirrors `CBPeripheral.writeValue(_:for:)` for a `CBDescriptor` —
+    /// which, unlike a characteristic write, has no write-type parameter (descriptor writes
+    /// are always with-response) and always delivers a
+    /// ``PeripheralEvent/didWriteValueForDescriptor(descriptor:error:)`` completion.
+    func writeValue(_ data: Data, for descriptor: DescriptorIdentifier)
+
     /// Requests the peripheral's current RSSI. Mirrors `CBPeripheral.readRSSI()`.
     func readRSSI()
 
@@ -99,6 +119,10 @@ public protocol PeripheralRemote: AnyObject {
     /// Whether `characteristic` has already been discovered on this peripheral, for
     /// discovery-cache short-circuiting.
     func isDiscovered(_ characteristic: CharacteristicIdentifier) -> Bool
+
+    /// Whether `descriptor` has already been discovered on this peripheral, for
+    /// discovery-cache short-circuiting.
+    func isDiscovered(_ descriptor: DescriptorIdentifier) -> Bool
 
     /// Whether `characteristic` currently has notifications enabled. Mirrors
     /// `CBCharacteristic.isNotifying`. Used to reject a concurrent `read` on the same

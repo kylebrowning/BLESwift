@@ -36,6 +36,23 @@ public enum PeripheralEvent: Sendable {
     /// `peripheral(_:didUpdateNotificationStateFor:error:)`.
     case didUpdateNotificationState(characteristic: CharacteristicIdentifier, isNotifying: Bool, error: NSError?)
 
+    /// Descriptor discovery for `characteristic` completed (successfully or not). Mirrors
+    /// `peripheral(_:didDiscoverDescriptorsFor:error:)`.
+    case didDiscoverDescriptors(characteristic: CharacteristicIdentifier, error: NSError?)
+
+    /// `descriptor`'s value was read. Mirrors `peripheral(_:didUpdateValueFor:error:)` for a
+    /// `CBDescriptor`.
+    ///
+    /// CoreBluetooth types a descriptor's value as `Any?` (`NSData`/`NSString`/`NSNumber`,
+    /// depending on the descriptor); BLESwift converts it to `Data` **eagerly, at the proxy
+    /// boundary**, so the raw untyped payload never crosses into the actor — see the
+    /// conversion documented on `PeripheralDelegateProxy`.
+    case didUpdateValueForDescriptor(descriptor: DescriptorIdentifier, value: Data?, error: NSError?)
+
+    /// A write to `descriptor` completed (successfully or not). Mirrors
+    /// `peripheral(_:didWriteValueFor:error:)` for a `CBDescriptor`.
+    case didWriteValueForDescriptor(descriptor: DescriptorIdentifier, error: NSError?)
+
     /// An RSSI read completed (successfully or not). Mirrors
     /// `peripheral(_:didReadRSSI:error:)`.
     case didReadRSSI(Int, error: NSError?)
