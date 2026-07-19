@@ -71,12 +71,21 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
     /// Pump-confined.
     nonisolated(unsafe) private var opened = false
 
-    /// Creates a transport over an already-open channel's streams.
-    init(psm: L2CAPPSM, inputStream: InputStream, outputStream: OutputStream) {
+    /// The `CBL2CAPChannel` these streams belong to. CoreBluetooth tears down the underlying
+    /// L2CAP connection when the channel object deallocates, so the transport must keep it
+    /// alive for the channel's lifetime; ``teardown(error:)`` releases it, which is also what
+    /// closes the OS-level channel. Held as `AnyObject` so the stream-only initializer (and
+    /// tests) can pass `nil`. Pump-confined.
+    nonisolated(unsafe) private var underlyingChannel: AnyObject?
+
+    /// Creates a transport over an already-open channel's streams. `retaining` keeps the
+    /// object that owns the streams (the `CBL2CAPChannel`) alive until teardown.
+    init(psm: L2CAPPSM, inputStream: InputStream, outputStream: OutputStream, retaining underlyingChannel: AnyObject? = nil) {
         self.psm = psm
         self.pumpQueue = DispatchQueue(label: "com.bleswift.l2cap.pump.\(psm.rawValue).\(UUID().uuidString)")
         self.inputStream = inputStream
         self.outputStream = outputStream
+        self.underlyingChannel = underlyingChannel
         let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
         self.inboundStream = stream
         self.inboundContinuation = continuation
@@ -90,7 +99,8 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
         self.init(
             psm: L2CAPPSM(channel.psm),
             inputStream: channel.inputStream,
-            outputStream: channel.outputStream
+            outputStream: channel.outputStream,
+            retaining: channel
         )
     }
 
@@ -220,6 +230,9 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
         for job in pending {
             job.continuation.resume(throwing: error ?? BLESwiftError.l2capChannelClosed)
         }
+
+        // Releasing the `CBL2CAPChannel` is what closes the OS-level channel.
+        underlyingChannel = nil
     }
 
     // MARK: - StreamDelegate (``pumpQueue`` only)
