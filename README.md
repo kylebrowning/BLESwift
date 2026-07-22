@@ -1,6 +1,6 @@
 # BLESwift
 
-**BLESwift** ("BLE Interface") is an async/await-first Bluetooth Low Energy library for Swift 6.2.
+**BLESwift** is an async/await-first Bluetooth Low Energy library for Swift 6.2.
 It wraps CoreBluetooth in a single actor whose isolation is tied directly to the dispatch queue
 CoreBluetooth delivers its callbacks on — no closures, no callback compatibility layer, and no
 delegate protocols to implement. Connecting, reading, writing, and scanning are `async throws`
