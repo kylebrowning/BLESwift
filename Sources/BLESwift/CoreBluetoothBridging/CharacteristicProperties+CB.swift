@@ -30,10 +30,8 @@ extension CharacteristicProperties {
     }
 
     /// The `CBCharacteristicProperties` representation of this option set, for building a
-    /// `CBMutableCharacteristic` in the peripheral role.
-    ///
-    /// Maps bit-by-bit — the exact inverse of ``init(_:)`` — because BLESwift's raw-value
-    /// layout intentionally does *not* match `CBCharacteristicProperties`.
+    /// `CBMutableCharacteristic` in the peripheral role. Maps bit-by-bit — the exact
+    /// inverse of ``init(_:)``.
     var cbProperties: CBCharacteristicProperties {
         var properties: CBCharacteristicProperties = []
         if contains(.read) { properties.insert(.read) }

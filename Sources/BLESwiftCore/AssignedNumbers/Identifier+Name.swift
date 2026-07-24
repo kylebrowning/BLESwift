@@ -10,9 +10,7 @@
 extension ServiceIdentifier {
 
     /// The human-readable Bluetooth SIG (or well-known vendor) name of this service, if one
-    /// is assigned; otherwise `nil`.
-    ///
-    /// A convenience for ``GATTAssignedNumbers/name(for:)-(ServiceIdentifier)``.
+    /// is assigned; otherwise `nil`. A convenience for ``GATTAssignedNumbers/name(for:)-(ServiceIdentifier)``.
     public var name: String? {
         GATTAssignedNumbers.name(for: self)
     }
@@ -21,9 +19,8 @@ extension ServiceIdentifier {
 extension CharacteristicIdentifier {
 
     /// The human-readable Bluetooth SIG (or well-known vendor) name of this characteristic,
-    /// if one is assigned; otherwise `nil`.
-    ///
-    /// A convenience for ``GATTAssignedNumbers/name(for:)-(CharacteristicIdentifier)``.
+    /// if one is assigned; otherwise `nil`. A convenience for
+    /// ``GATTAssignedNumbers/name(for:)-(CharacteristicIdentifier)``.
     public var name: String? {
         GATTAssignedNumbers.name(for: self)
     }
@@ -32,9 +29,8 @@ extension CharacteristicIdentifier {
 extension DescriptorIdentifier {
 
     /// The human-readable Bluetooth SIG name of this descriptor, if one is assigned;
-    /// otherwise `nil`.
-    ///
-    /// A convenience for ``GATTAssignedNumbers/name(for:)-(DescriptorIdentifier)``.
+    /// otherwise `nil`. A convenience for
+    /// ``GATTAssignedNumbers/name(for:)-(DescriptorIdentifier)``.
     public var name: String? {
         GATTAssignedNumbers.name(for: self)
     }

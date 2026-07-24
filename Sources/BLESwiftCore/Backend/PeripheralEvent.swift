@@ -5,15 +5,9 @@
 
 import Foundation
 
-/// This is part of BLESwift's backend implementation seam (see ``PeripheralRemote``).
-/// Conforming your own backend is possible but unsupported: the semantic contract (event
-/// ordering, queue confinement, delivery asynchrony) is documented on ``PeripheralRemote``
-/// on a best-effort basis and may gain requirements in any release.
-///
 /// A `Sendable` representation of a `CBPeripheralDelegate` callback, speaking exclusively
-/// in BLESwift-owned (never CoreBluetooth) types.
-///
-/// See ``CentralEvent`` for why errors are typed `NSError?` rather than `any Error`.
+/// in BLESwift-owned types. See ``PeripheralRemote`` for the delivery contract, and
+/// ``CentralEvent`` for why errors are typed `NSError?` rather than `any Error`.
 public enum PeripheralEvent: Sendable {
 
     /// Service discovery completed (successfully or not). Mirrors
@@ -41,12 +35,8 @@ public enum PeripheralEvent: Sendable {
     case didDiscoverDescriptors(characteristic: CharacteristicIdentifier, error: NSError?)
 
     /// `descriptor`'s value was read. Mirrors `peripheral(_:didUpdateValueFor:error:)` for a
-    /// `CBDescriptor`.
-    ///
-    /// CoreBluetooth types a descriptor's value as `Any?` (`NSData`/`NSString`/`NSNumber`,
-    /// depending on the descriptor); BLESwift converts it to `Data` **eagerly, at the proxy
-    /// boundary**, so the raw untyped payload never crosses into the actor — see the
-    /// conversion documented on `PeripheralDelegateProxy`.
+    /// `CBDescriptor`. CoreBluetooth's untyped `Any?` value is converted to `Data` eagerly,
+    /// at the proxy boundary, so it never crosses into the actor.
     case didUpdateValueForDescriptor(descriptor: DescriptorIdentifier, value: Data?, error: NSError?)
 
     /// A write to `descriptor` completed (successfully or not). Mirrors
@@ -66,11 +56,7 @@ public enum PeripheralEvent: Sendable {
     case isReadyToSendWriteWithoutResponse
 
     /// An L2CAP channel-open attempt completed. Mirrors `peripheral(_:didOpen:error:)`.
-    ///
-    /// On success `channel` is the opened transport (carrying its own ``L2CAPPSM``) and
-    /// `error` is `nil`; on failure `channel` is `nil` and `error` describes the failure.
-    /// The channel is delivered as a BLESwift-owned ``L2CAPChannelRemote``, never a
-    /// CoreBluetooth `CBL2CAPChannel` — the CoreBluetooth backend wraps the raw channel at
-    /// its own seam before emitting this event.
+    /// On success `channel` is the opened transport and `error` is `nil`; on failure
+    /// `channel` is `nil` and `error` describes the failure.
     case didOpenL2CAPChannel(channel: (any L2CAPChannelRemote)?, error: NSError?)
 }

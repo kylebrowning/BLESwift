@@ -7,49 +7,37 @@ import BLESwiftCore
 import Foundation
 
 /// GATT operations — read, write, RSSI, and service-change notifications — all routed
-/// through the owning ``Central`` actor.
-///
-/// Every method here lazily discovers the service/characteristic it needs first (cache
-/// short-circuited by the CoreBluetooth shim's own `isDiscovered(_:)` — BLESwift keeps no
-/// separate discovery cache; see `Central.ensureDiscovered(_:on:identifier:)`), and
-/// `serviceChanges()` provides a multicast stream for observing service invalidation.
+/// through the owning ``Central`` actor. Every method lazily discovers the
+/// service/characteristic it needs first.
 extension Peripheral {
 
-    /// Reads `characteristic`'s current value and decodes it as `Value`.
-    ///
-    /// Concurrent operations on the *same* characteristic are serialized in the order
-    /// they're called (a per-characteristic FIFO — different characteristics interleave
-    /// freely). The owning service and characteristic are discovered first if needed.
+    /// Reads `characteristic`'s current value and decodes it as `Value`. Concurrent
+    /// operations on the *same* characteristic are serialized in call order (a
+    /// per-characteristic FIFO); different characteristics interleave freely.
     ///
     /// - Parameters:
     ///   - characteristic: The characteristic to read from.
     ///   - timeout: How long to wait before giving up with ``BLESwiftError/timedOut``. `nil`
     ///     (the default) waits indefinitely.
     /// - Returns: The characteristic's value, decoded as `Value`.
-    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
+    /// - Throws: ``BLESwiftError/notConnected``;
     ///   ``BLESwiftError/readConflictsWithNotification`` if `characteristic` currently has
     ///   notifications enabled (CoreBluetooth can't disambiguate a read completion from a
-    ///   notification on the same characteristic, so BLESwift throws instead of allowing
-    ///   the conflict); ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``
-    ///   if discovery fails; ``BLESwiftError/timedOut`` on timeout; whatever `Value`'s
-    ///   `Receivable` decoding throws; or whatever error CoreBluetooth reports for the read.
+    ///   notification on the same characteristic);
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``;
+    ///   ``BLESwiftError/timedOut``; whatever `Value`'s `Receivable` decoding throws; or
+    ///   whatever error CoreBluetooth reports.
     public func read<Value: Receivable>(from characteristic: CharacteristicIdentifier, timeout: Duration? = nil) async throws -> Value {
         let central = try resolveCentral()
         let data = try await central.performRead(peripheral: id, characteristic: characteristic, timeout: timeout)
         return try Value(bluetoothData: data)
     }
 
-    /// Writes `value` to `characteristic`.
-    ///
-    /// Concurrent operations on the *same* characteristic are serialized in the order
-    /// they're called (see ``read(from:timeout:)``). The owning service and characteristic
-    /// are discovered first if needed.
-    ///
-    /// For `type: .withoutResponse`, this awaits CoreBluetooth's write-without-response
-    /// back-pressure signal (`canSendWriteWithoutResponse`) before writing, if it currently
-    /// reports `false` — otherwise CoreBluetooth may silently drop the payload.
-    /// CoreBluetooth delivers no completion callback for a `.withoutResponse` write, so
-    /// this returns as soon as the write call itself is made.
+    /// Writes `value` to `characteristic`. Serialized like ``read(from:timeout:)``. For
+    /// `type: .withoutResponse`, awaits CoreBluetooth's back-pressure signal
+    /// (`canSendWriteWithoutResponse`) first if it currently reports `false` — otherwise
+    /// CoreBluetooth may silently drop the payload; this write type has no completion
+    /// callback, so the call returns as soon as it is made.
     ///
     /// - Parameters:
     ///   - value: The value to write.
@@ -58,11 +46,10 @@ extension Peripheral {
     ///     `.withResponse`.
     ///   - timeout: How long to wait before giving up with ``BLESwiftError/timedOut``. `nil`
     ///     (the default) waits indefinitely.
-    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
-    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)`` if
-    ///   discovery fails; ``BLESwiftError/timedOut`` on timeout; whatever `value`'s
-    ///   `Transmittable` encoding throws; or whatever error CoreBluetooth reports for the
-    ///   write.
+    /// - Throws: ``BLESwiftError/notConnected``;
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``;
+    ///   ``BLESwiftError/timedOut``; whatever `value`'s `Transmittable` encoding throws; or
+    ///   whatever error CoreBluetooth reports.
     public func write<Value: Transmittable>(
         _ value: Value,
         to characteristic: CharacteristicIdentifier,
@@ -77,169 +64,111 @@ extension Peripheral {
     /// The set of operations `characteristic` advertises support for — whether it's
     /// readable, writable, notifiable, and so on.
     ///
-    /// Use this for capability-driven UI or clearer error paths, rather than discovering a
-    /// characteristic's capabilities by attempting an operation and inspecting the error.
-    /// Like ``read(from:timeout:)``/``write(_:to:type:timeout:)``, this lazily discovers the
-    /// owning service and characteristic first if needed, and serializes against other
-    /// operations on the *same* characteristic.
-    ///
     /// - Parameter characteristic: The characteristic to introspect.
     /// - Returns: The characteristic's advertised ``CharacteristicProperties``.
-    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
-    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)`` if
-    ///   discovery fails; or whatever error CoreBluetooth reports for that discovery.
+    /// - Throws: ``BLESwiftError/notConnected``;
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``;
+    ///   or whatever error CoreBluetooth reports.
     public func properties(of characteristic: CharacteristicIdentifier) async throws -> CharacteristicProperties {
         let central = try resolveCentral()
         return try await central.properties(peripheral: id, characteristic: characteristic)
     }
 
-    /// Reads `descriptor`'s current value as raw `Data`.
-    ///
-    /// Descriptors — the Characteristic User Description, Presentation Format, and
-    /// vendor-specific descriptors, among others — complete GATT attribute coverage beyond
-    /// characteristics. The owning service, characteristic, and the characteristic's
-    /// descriptors are discovered first if needed (extending BLESwift's lazy discovery one
-    /// level, cache-short-circuited exactly like service/characteristic discovery). The
-    /// operation is serialized on the *parent characteristic's* FIFO lane, so a descriptor
-    /// read never races a read or write on the same characteristic.
-    ///
-    /// The value is returned as raw `Data`: a descriptor's payload shape depends on its type
-    /// (a UTF-8 string for the User Description, a little-endian integer for the Extended
-    /// Properties, opaque bytes for a vendor descriptor), so BLESwift hands back the bytes and
-    /// lets the caller interpret them — see ``Data`` extraction helpers, or decode manually.
-    /// (CoreBluetooth's own `Any?`-typed descriptor value is converted to `Data` eagerly at
-    /// the backend boundary; `NSString` becomes its UTF-8 bytes, `NSNumber` its 16-bit
-    /// little-endian encoding, `NSData` its bytes verbatim.)
+    /// Reads `descriptor`'s current value as raw `Data`. Serialized on the parent
+    /// characteristic's FIFO lane. The value's shape depends on the descriptor's type (UTF-8
+    /// for User Description, little-endian integer for Extended Properties, opaque bytes for
+    /// vendor descriptors); BLESwift hands back the raw bytes and lets the caller interpret
+    /// them.
     ///
     /// - Parameters:
     ///   - descriptor: The descriptor to read from.
     ///   - timeout: How long to wait before giving up with ``BLESwiftError/timedOut``. `nil`
     ///     (the default) waits indefinitely.
     /// - Returns: The descriptor's value, as raw `Data`.
-    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
-    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``/``BLESwiftError/missingDescriptor(_:)``
-    ///   if discovery fails; ``BLESwiftError/timedOut`` on timeout; or whatever error
-    ///   CoreBluetooth reports for the read.
+    /// - Throws: ``BLESwiftError/notConnected``;
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``/``BLESwiftError/missingDescriptor(_:)``;
+    ///   ``BLESwiftError/timedOut``; or whatever error CoreBluetooth reports.
     public func readDescriptor(_ descriptor: DescriptorIdentifier, timeout: Duration? = nil) async throws -> Data {
         let central = try resolveCentral()
         return try await central.performReadDescriptor(peripheral: id, descriptor: descriptor, timeout: timeout)
     }
 
-    /// Writes `value` to `descriptor`.
-    ///
-    /// The owning service, characteristic, and the characteristic's descriptors are
-    /// discovered first if needed, and the operation is serialized on the *parent
-    /// characteristic's* FIFO lane (see ``readDescriptor(_:timeout:)``). Descriptor writes
-    /// are always with-response — CoreBluetooth exposes no write-type choice for a
-    /// descriptor — so this always awaits the write confirmation before returning.
-    ///
-    /// `value` is written as raw `Data`; encode whatever the specific descriptor expects (for
-    /// example, UTF-8 bytes for a writable User Description) yourself.
+    /// Writes `value` to `descriptor`, as raw `Data` — encode whatever the descriptor
+    /// expects yourself. Serialized on the parent characteristic's FIFO lane. Descriptor
+    /// writes are always with-response; CoreBluetooth exposes no write-type choice here.
     ///
     /// - Parameters:
     ///   - descriptor: The descriptor to write to.
     ///   - value: The raw bytes to write.
     ///   - timeout: How long to wait before giving up with ``BLESwiftError/timedOut``. `nil`
     ///     (the default) waits indefinitely.
-    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
-    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``/``BLESwiftError/missingDescriptor(_:)``
-    ///   if discovery fails; ``BLESwiftError/timedOut`` on timeout; or whatever error
-    ///   CoreBluetooth reports for the write.
+    /// - Throws: ``BLESwiftError/notConnected``;
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``/``BLESwiftError/missingDescriptor(_:)``;
+    ///   ``BLESwiftError/timedOut``; or whatever error CoreBluetooth reports.
     public func writeDescriptor(_ descriptor: DescriptorIdentifier, value: Data, timeout: Duration? = nil) async throws {
         let central = try resolveCentral()
         try await central.performWriteDescriptor(peripheral: id, descriptor: descriptor, data: value, timeout: timeout)
     }
 
-    /// Discovers and lists this peripheral's GATT services.
+    /// Discovers and lists this peripheral's GATT services (the entry point to enumerating a
+    /// peripheral whose UUIDs aren't known up front). Cached for this connection until a
+    /// `didModifyServices` invalidation (observable on ``serviceChanges()``) resets it.
     ///
-    /// The entry point to GATT *enumeration* — inspecting a peripheral whose UUIDs you don't
-    /// know up front (a `ble inspect`-style browser), rather than the UUID-first
-    /// read/write/notify path everything else here uses. Triggers CoreBluetooth's
-    /// service discovery for *all* services and returns whatever the peripheral exposes.
-    ///
-    /// The discovery is cached for this connection: a second call re-uses the first
-    /// enumeration and issues no further discovery, until a `didModifyServices` invalidation
-    /// (observable on ``serviceChanges()``) resets it — after which the next call
-    /// re-enumerates, picking up any service that appeared.
-    ///
-    /// - Returns: The discovered ``ServiceIdentifier``s (empty if the peripheral exposes no
-    ///   services). The order is unspecified.
-    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
-    ///   ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled; or whatever
-    ///   error CoreBluetooth reports for the discovery.
+    /// - Returns: The discovered ``ServiceIdentifier``s (empty if none). Order unspecified.
+    /// - Throws: ``BLESwiftError/notConnected``; ``BLESwiftError/operationCancelled``; or
+    ///   whatever error CoreBluetooth reports.
     public func discoverServices() async throws -> [ServiceIdentifier] {
         let central = try resolveCentral()
         return try await central.enumerateServices(peripheral: id)
     }
 
-    /// Discovers and lists the characteristics of `service`.
-    ///
-    /// The characteristic-level step of GATT enumeration (see ``discoverServices()``):
-    /// pass a ``ServiceIdentifier`` — typically one returned by ``discoverServices()`` — to
-    /// list its characteristics without knowing their UUIDs. Discovers the owning service
-    /// first if needed, then all of its characteristics.
-    ///
-    /// Cached per service for this connection (see ``discoverServices()`` for the caching and
-    /// invalidation semantics).
+    /// Discovers and lists the characteristics of `service`. The characteristic-level step
+    /// of GATT enumeration (see ``discoverServices()``); cached per service, same
+    /// invalidation semantics.
     ///
     /// - Parameter service: The service whose characteristics to enumerate.
-    /// - Returns: The discovered ``CharacteristicIdentifier``s (empty if `service` exposes
-    ///   none). The order is unspecified.
-    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
-    ///   ``BLESwiftError/missingService(_:)`` if `service` isn't in the peripheral's GATT
-    ///   table; ``BLESwiftError/operationCancelled`` on task cancellation; or whatever error
-    ///   CoreBluetooth reports for the discovery.
+    /// - Returns: The discovered ``CharacteristicIdentifier``s (empty if none). Order
+    ///   unspecified.
+    /// - Throws: ``BLESwiftError/notConnected``; ``BLESwiftError/missingService(_:)``;
+    ///   ``BLESwiftError/operationCancelled``; or whatever error CoreBluetooth reports.
     public func discoverCharacteristics(for service: ServiceIdentifier) async throws -> [CharacteristicIdentifier] {
         let central = try resolveCentral()
         return try await central.enumerateCharacteristics(peripheral: id, service: service)
     }
 
-    /// Discovers and lists the descriptors of `characteristic`.
-    ///
-    /// The descriptor-level step of GATT enumeration (see ``discoverServices()``), building on
-    /// the same descriptor discovery ``readDescriptor(_:timeout:)``/``writeDescriptor(_:value:timeout:)``
-    /// use. Discovers the owning service and characteristic first if needed, then the
-    /// characteristic's descriptors as a group.
-    ///
-    /// Cached per characteristic for this connection.
+    /// Discovers and lists the descriptors of `characteristic`. The descriptor-level step of
+    /// GATT enumeration (see ``discoverServices()``); cached per characteristic.
     ///
     /// - Parameter characteristic: The characteristic whose descriptors to enumerate.
-    /// - Returns: The discovered ``DescriptorIdentifier``s (empty if `characteristic` exposes
-    ///   none). The order is unspecified. Note the Client Characteristic Configuration
-    ///   descriptor — the notify/indicate toggle — is managed implicitly by BLESwift's
-    ///   notification API and, like ``DescriptorIdentifier`` itself, is not surfaced here.
-    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
-    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)`` if
-    ///   the owning service/characteristic isn't in the peripheral's GATT table;
-    ///   ``BLESwiftError/operationCancelled`` on task cancellation; or whatever error
-    ///   CoreBluetooth reports for the discovery.
+    /// - Returns: The discovered ``DescriptorIdentifier``s (empty if none). Order
+    ///   unspecified. The Client Characteristic Configuration descriptor (the
+    ///   notify/indicate toggle) is managed implicitly by BLESwift's notification API and
+    ///   not surfaced here.
+    /// - Throws: ``BLESwiftError/notConnected``;
+    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``;
+    ///   ``BLESwiftError/operationCancelled``; or whatever error CoreBluetooth reports.
     public func discoverDescriptors(for characteristic: CharacteristicIdentifier) async throws -> [DescriptorIdentifier] {
         let central = try resolveCentral()
         return try await central.enumerateDescriptors(peripheral: id, characteristic: characteristic)
     }
 
-    /// Reads the peripheral's current RSSI (signal strength), in dBm.
-    ///
-    /// RSSI has no owning characteristic, so concurrent `readRSSI()` calls are serialized
-    /// against each other independently of any characteristic's FIFO.
+    /// Reads the peripheral's current RSSI (signal strength), in dBm. Has no owning
+    /// characteristic, so concurrent calls are serialized independently of any
+    /// characteristic's FIFO.
     ///
     /// - Parameter timeout: How long to wait before giving up with ``BLESwiftError/timedOut``.
     ///   `nil` (the default) waits indefinitely.
     /// - Returns: The current RSSI, in dBm.
-    /// - Throws: ``BLESwiftError/notConnected`` if this peripheral is no longer connected;
-    ///   ``BLESwiftError/timedOut`` on timeout; or whatever error CoreBluetooth reports for the
-    ///   RSSI read.
+    /// - Throws: ``BLESwiftError/notConnected``; ``BLESwiftError/timedOut``; or whatever
+    ///   error CoreBluetooth reports.
     public func readRSSI(timeout: Duration? = nil) async throws -> Int {
         let central = try resolveCentral()
         return try await central.performReadRSSI(peripheral: id, timeout: timeout)
     }
 
-    /// This peripheral's maximum payload length in bytes for a single write of `type`.
-    ///
-    /// Unlike every other method here, this never throws: it's a best-effort sizing hint,
-    /// not an operation with a meaningful failure mode. Returns a documented default
-    /// (the classic BLE ATT_MTU-3 default of 20 bytes) if this peripheral is no longer
-    /// connected, rather than failing.
+    /// This peripheral's maximum payload length in bytes for a single write of `type`. A
+    /// best-effort sizing hint that never throws; returns a documented default (the classic
+    /// ATT_MTU-3 default of 20 bytes) if this peripheral is no longer connected.
     ///
     /// - Parameter type: Which write type to report the maximum payload length for.
     /// - Returns: The maximum payload length, in bytes.
@@ -250,24 +179,12 @@ extension Peripheral {
         return await central.maximumWriteValueLength(peripheral: id, for: type)
     }
 
-    /// Returns a multicast stream of every `didModifyServices` invalidation — the set of
-    /// services CoreBluetooth just removed (or replaced) on THIS peripheral. Another
-    /// peripheral's invalidations never appear here, even while both are connected through
-    /// the same `Central`.
-    ///
-    /// CoreBluetooth itself prunes invalidated services from its own service graph as part
-    /// of reporting this event, which the CoreBluetooth shim's `isDiscovered(_:)` reflects
-    /// automatically — BLESwift keeps no separate discovery cache to invalidate. A subsequent
-    /// `read`/`write`/etc. against an invalidated service therefore re-discovers it lazily,
-    /// exactly as if it had never been discovered.
-    ///
-    /// No replay: a late subscriber only sees invalidations that happen after it starts
-    /// consuming. Not actor-isolated to fetch (unlike ``Central/connectionEvents()``): the
-    /// underlying registry is itself `Sendable` and independently thread-safe, so this
-    /// can hand back a stream synchronously even if the owning ``Central`` has already been
-    /// deallocated (in which case the returned stream finishes immediately, with nothing to
-    /// subscribe to). The stream survives this peripheral disconnecting and reconnecting —
-    /// it is keyed by identifier, not by any particular connection attempt.
+    /// Returns a multicast stream of every `didModifyServices` invalidation for THIS
+    /// peripheral only. No replay — a late subscriber only sees invalidations after it
+    /// starts consuming. Not actor-isolated to fetch, so this hands back a stream
+    /// synchronously even if the owning ``Central`` has already deallocated (the stream then
+    /// finishes immediately). Survives this peripheral disconnecting and reconnecting; keyed
+    /// by identifier, not by connection attempt.
     public func serviceChanges() -> AsyncStream<[ServiceIdentifier]> {
         guard let central = centralBox.central else {
             return AsyncStream { continuation in continuation.finish() }

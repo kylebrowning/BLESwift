@@ -7,23 +7,15 @@ import Synchronization
 
 /// The throwing counterpart to ``Broadcaster``: a multicast primitive that fans out each
 /// ``yield(_:)``ed `Element` to every currently subscribed `AsyncThrowingStream`, and can
-/// ``finish(throwing:)`` every subscriber with an error.
+/// ``finish(throwing:)`` every subscriber with an error. Exists because notification
+/// streams must be able to finish with an error, while ``Broadcaster`` is `AsyncStream`-based
+/// and structurally cannot. Modeled directly on `Broadcaster` — same `Mutex`-guarded state,
+/// same rationale.
 ///
-/// Exists because notification streams MUST be able to finish with
-/// ``BLESwiftError/unexpectedDisconnect``/decode errors, while ``Broadcaster`` is
-/// `AsyncStream`-based and structurally cannot carry a terminal error. Modeled directly on
-/// `Broadcaster`: the same `Mutex`-guarded state (rather than actor confinement, so
-/// `onTermination` — which fires on an arbitrary thread — can unregister synchronously
-/// without an actor hop), the same tokened continuation registry, and the same
-/// lock-then-callback-after-release discipline on the finish path (see ``finish(throwing:)``).
-///
-/// Unlike `Broadcaster` there are no replay modes: BLESwift's one use for this type is the raw
-/// notification multicast, and notifications are live-only — there is no meaningful
-/// "current value" for a late subscriber to learn. One deliberate difference from
-/// `Broadcaster`'s post-finish behavior: a stream created *after* ``finish(throwing:)``
-/// finishes immediately **with the same terminal error** (a `Broadcaster` finishes late
-/// streams cleanly) — for an error-carrying stream, silently ending a late subscriber would
-/// hide the very failure this type exists to deliver.
+/// Unlike `Broadcaster` there are no replay modes (notifications are live-only), and a
+/// stream created *after* ``finish(throwing:)`` finishes immediately **with the same
+/// terminal error** rather than cleanly — silently ending a late subscriber would hide the
+/// very failure this type exists to deliver.
 final class ThrowingBroadcaster<Element: Sendable>: Sendable {
 
     /// All of a `ThrowingBroadcaster`'s mutable state, guarded as one unit by
@@ -74,9 +66,7 @@ final class ThrowingBroadcaster<Element: Sendable>: Sendable {
             }
 
             guard let token = registration.token else {
-                // Outside the lock, mirroring `Broadcaster` — `finish(throwing:)` on a
-                // continuation synchronously invokes its `onTermination` (none installed
-                // yet here, but the discipline is uniform: never finish under `box`'s lock).
+                // Outside the lock — same never-finish-under-lock discipline as `Broadcaster`.
                 continuation.finish(throwing: registration.terminalError)
                 return
             }
@@ -88,11 +78,8 @@ final class ThrowingBroadcaster<Element: Sendable>: Sendable {
     }
 
     /// Fans `element` out to every currently subscribed stream. A no-op after
-    /// ``finish(throwing:)``.
-    ///
-    /// Safe to call while holding no other locks; `yield` on a live continuation never
-    /// re-enters `onTermination` (unlike `finish`), so fanning out under `box`'s lock is
-    /// sound — the same reasoning as `Broadcaster.yield(_:)`.
+    /// ``finish(throwing:)``. Same reasoning as `Broadcaster.yield(_:)` for why fanning out
+    /// under `box`'s lock is sound.
     func yield(_ element: Element) {
         box.withLock { state in
             guard !state.finished else { return }
@@ -106,13 +93,8 @@ final class ThrowingBroadcaster<Element: Sendable>: Sendable {
     /// Every stream created after this call finishes immediately the same way. Idempotent:
     /// the first call's `error` wins; later calls are no-ops.
     func finish(throwing error: Error? = nil) {
-        // `AsyncThrowingStream.Continuation.finish(throwing:)` synchronously invokes that
-        // continuation's `onTermination` handler on the calling thread — which, for a
-        // continuation this broadcaster handed out, re-enters `box.withLock` (see
-        // `stream(policy:)`). `Mutex` is not reentrant, so finishing under the lock would
-        // deadlock/abort (the `Broadcaster` reentrancy lesson). So: pull the continuations
-        // out (and mark `finished`/record the terminal error) under the lock, then finish
-        // each one only after the lock has been released.
+        // Same reentrancy hazard and pull-then-finish-after-release discipline as
+        // `Broadcaster.finish()`.
         let continuationsToFinish: [AsyncThrowingStream<Element, Error>.Continuation] = box.withLock { state in
             guard !state.finished else { return [] }
             state.finished = true

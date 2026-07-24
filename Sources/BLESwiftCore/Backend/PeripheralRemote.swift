@@ -5,37 +5,19 @@
 
 import Foundation
 
-/// This is BLESwift's backend implementation seam. BLESwift ships two conformances —
-/// CoreBluetooth (the `BLESwift` module) and scriptable fakes (`BLESwiftTestSupport`).
-/// Conforming your own types is possible but unsupported: the semantic contract (event
-/// ordering, queue confinement, delivery asynchrony) is documented here on a best-effort
-/// basis and may gain requirements in any release.
+/// A protocol seam over `CBPeripheral`, speaking exclusively in BLESwift-owned types.
+/// Conformances: CoreBluetooth (`BLESwift`) and scriptable fakes (`BLESwiftTestSupport`);
+/// conforming your own type is possible but unsupported.
 ///
-/// A protocol seam over `CBPeripheral`, mirroring only the API surface BLESwift uses,
-/// speaking exclusively in BLESwift-owned (never CoreBluetooth) types.
+/// **Identifier-based, not object-graph-based.** `PeripheralRemote` takes
+/// ``ServiceIdentifier``/``CharacteristicIdentifier`` value types throughout rather than
+/// `CBService`/`CBCharacteristic` references; the `CBPeripheral` conformance resolves them
+/// internally, silently no-op-ing an operation whose target has not yet been discovered.
 ///
-/// `CBPeripheral` has no accessible public initializer and cannot be instantiated in
-/// tests, so `Central` (in the `BLESwift` module) is written entirely against this
-/// protocol instead of the concrete CoreBluetooth type. `CBPeripheral` conforms
-/// retroactively (`BLESwift`'s `CBPeripheral+PeripheralRemote.swift`); `BLESwiftTestSupport`'s
-/// `FakePeripheral` conforms for tests, standing in for hardware.
-///
-/// **Identifier-based, not object-graph-based.** Real `CBPeripheral` GATT operations
-/// take `CBService`/`CBCharacteristic` object references, which only exist once
-/// discovery has run. `PeripheralRemote` instead takes BLESwift's ``ServiceIdentifier`` and
-/// ``CharacteristicIdentifier`` value types throughout; the `CBPeripheral` conformance
-/// resolves those identifiers to the underlying `CBService`/`CBCharacteristic` internally,
-/// silently no-op-ing an operation whose service or characteristic has not yet
-/// been discovered. This keeps the fake peripheral trivial (no `CBService`/`CBCharacteristic`
-/// stand-ins needed) and avoids a nested existential hierarchy.
-///
-/// - Important: Every ``eventHandler`` delivery must happen **asynchronously**, on the
-///   single serial `DispatchSerialQueue` the owning `Central` was constructed with — never
-///   deliver inline from within a method call on this protocol.
-///
-/// - Note: ``connectionState`` is named to avoid colliding with `CBPeripheral`'s own
-///   identically-named `state` property — see ``CentralManaging``'s note on
-///   ``CentralManaging/radioState``/``CentralManaging/bluetoothAuthorization`` for why.
+/// - Important: Every ``eventHandler`` delivery must happen asynchronously, on the serial
+///   queue the owning `Central` was constructed with — never deliver inline.
+/// - Note: ``connectionState`` is renamed to avoid colliding with `CBPeripheral`'s own
+///   `state` property, exactly as on ``CentralManaging``.
 public protocol PeripheralRemote: AnyObject {
 
     /// The identifier CoreBluetooth uses for this peripheral. Mirrors
@@ -87,22 +69,17 @@ public protocol PeripheralRemote: AnyObject {
 
     /// Discovers all descriptors of an already-discovered characteristic. A no-op if
     /// `characteristic` has not yet been discovered. Mirrors
-    /// `CBPeripheral.discoverDescriptors(for:)` — which, unlike characteristic discovery,
-    /// takes no filter list: a characteristic's descriptors are always discovered as a
-    /// group.
+    /// `CBPeripheral.discoverDescriptors(for:)`.
     func discoverDescriptors(for characteristic: CharacteristicIdentifier)
 
     /// Requests the current value of an already-discovered descriptor. A no-op if
     /// `descriptor` has not yet been discovered. Mirrors `CBPeripheral.readValue(for:)` for
-    /// a `CBDescriptor` — its completion (``PeripheralEvent/didUpdateValueForDescriptor(descriptor:value:error:)``)
-    /// carries the value already converted to `Data`.
+    /// a `CBDescriptor`.
     func readValue(for descriptor: DescriptorIdentifier)
 
     /// Writes `data` to an already-discovered descriptor. A no-op if `descriptor` has not
-    /// yet been discovered. Mirrors `CBPeripheral.writeValue(_:for:)` for a `CBDescriptor` —
-    /// which, unlike a characteristic write, has no write-type parameter (descriptor writes
-    /// are always with-response) and always delivers a
-    /// ``PeripheralEvent/didWriteValueForDescriptor(descriptor:error:)`` completion.
+    /// yet been discovered. Descriptor writes are always with-response. Mirrors
+    /// `CBPeripheral.writeValue(_:for:)` for a `CBDescriptor`.
     func writeValue(_ data: Data, for descriptor: DescriptorIdentifier)
 
     /// Requests the peripheral's current RSSI. Mirrors `CBPeripheral.readRSSI()`.
@@ -126,38 +103,25 @@ public protocol PeripheralRemote: AnyObject {
 
     /// Whether `characteristic` currently has notifications enabled. Mirrors
     /// `CBCharacteristic.isNotifying`. Used to reject a concurrent `read` on the same
-    /// characteristic with ``BLESwiftError/readConflictsWithNotification`` rather than letting
-    /// CoreBluetooth's ambiguous `didUpdateValueFor` delivery race the two.
+    /// characteristic with ``BLESwiftError/readConflictsWithNotification``.
     func isNotifying(_ characteristic: CharacteristicIdentifier) -> Bool
 
     /// The set of operations `characteristic` advertises support for. Mirrors
-    /// `CBCharacteristic.properties`, mapped to BLESwift's own ``CharacteristicProperties``
-    /// at the CoreBluetooth seam. Returns `[]` (an empty set) if `characteristic` has not
-    /// yet been discovered — callers trigger lazy discovery first, exactly as they do before
-    /// `readValue(for:)`/`writeValue(_:for:type:)`.
+    /// `CBCharacteristic.properties`. Returns `[]` if `characteristic` has not yet been
+    /// discovered.
     func properties(of characteristic: CharacteristicIdentifier) -> CharacteristicProperties
 
-    /// Every service currently discovered on this peripheral, as ``ServiceIdentifier``
-    /// values — the enumeration counterpart to the UUID-first `isDiscovered(_:)` check.
-    /// Empty until a `discoverServices(_:)` completion has landed (or if the peripheral
-    /// genuinely exposes no services). Maps `CBPeripheral.services` at the CoreBluetooth
-    /// seam (the `CBService`s never cross this boundary); the order is unspecified. Backs
-    /// `Central`'s enumeration API, which lists a connected peripheral's services without
-    /// knowing their UUIDs up front.
+    /// Every service currently discovered on this peripheral. Empty until a
+    /// `discoverServices(_:)` completion has landed. Maps `CBPeripheral.services`; order is
+    /// unspecified.
     var discoveredServices: [ServiceIdentifier] { get }
 
-    /// Every characteristic currently discovered under `service`, as
-    /// ``CharacteristicIdentifier`` values. Empty if `service` has not been discovered, has
-    /// had no `discoverCharacteristics(_:for:)` completion land yet, or genuinely exposes
-    /// none. Maps `CBService.characteristics` at the CoreBluetooth seam; the order is
-    /// unspecified.
+    /// Every characteristic currently discovered under `service`. Maps
+    /// `CBService.characteristics`; order is unspecified.
     func discoveredCharacteristics(for service: ServiceIdentifier) -> [CharacteristicIdentifier]
 
-    /// Every descriptor currently discovered under `characteristic`, as
-    /// ``DescriptorIdentifier`` values. Empty if `characteristic` has not been discovered,
-    /// has had no `discoverDescriptors(for:)` completion land yet, or genuinely exposes
-    /// none. Maps `CBCharacteristic.descriptors` at the CoreBluetooth seam; the order is
-    /// unspecified.
+    /// Every descriptor currently discovered under `characteristic`. Maps
+    /// `CBCharacteristic.descriptors`; order is unspecified.
     func discoveredDescriptors(for characteristic: CharacteristicIdentifier) -> [DescriptorIdentifier]
 
     /// Opens an L2CAP channel to `psm`. Completion arrives asynchronously as

@@ -6,9 +6,8 @@
 import BLESwiftCore
 import CoreBluetooth
 
-/// `CBATTError.Code` bridging for ``ATTError`` — the only place in `BLESwift` this failure
-/// code crosses to/from CoreBluetooth. The two share raw-value layout by construction (with
-/// ``ATTError`` omitting `CBATTError.Code.success`, which the success half of a `Result`
+/// `CBATTError.Code` bridging for ``ATTError``. The two share raw-value layout by
+/// construction (``ATTError`` omits `.success`, which the success half of a `Result`
 /// expresses instead), so the bridge is a raw-value passthrough.
 extension ATTError {
 

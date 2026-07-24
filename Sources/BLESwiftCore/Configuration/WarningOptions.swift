@@ -26,14 +26,6 @@ public struct WarningOptions: Sendable {
 
     /// Creates a `WarningOptions`, specifying whether iOS can display a system alert when
     /// certain connection-related events occur while the app is suspended.
-    ///
-    /// - Parameters:
-    ///   - notifyOnConnection: Whether iOS should show a system alert when the suspended
-    ///     app connects to a peripheral.
-    ///   - notifyOnDisconnection: Whether iOS should show a system alert when the
-    ///     suspended app disconnects from a peripheral.
-    ///   - notifyOnNotification: Whether iOS should show a system alert when the suspended
-    ///     app receives a notification from a peripheral.
     public init(notifyOnConnection: Bool, notifyOnDisconnection: Bool, notifyOnNotification: Bool) {
         self.notifyOnConnection = notifyOnConnection
         self.notifyOnDisconnection = notifyOnDisconnection

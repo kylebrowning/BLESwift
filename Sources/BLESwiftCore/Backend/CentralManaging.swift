@@ -5,36 +5,17 @@
 
 import Foundation
 
-/// This is BLESwift's backend implementation seam. BLESwift ships two conformances —
-/// CoreBluetooth (the `BLESwift` module) and scriptable fakes (`BLESwiftTestSupport`).
-/// Conforming your own types is possible but unsupported: the semantic contract (event
-/// ordering, queue confinement, delivery asynchrony) is documented here on a best-effort
-/// basis and may gain requirements in any release.
+/// A protocol seam over `CBCentralManager`, speaking exclusively in BLESwift-owned types.
+/// Conformances: CoreBluetooth (`BLESwift`) and scriptable fakes (`BLESwiftTestSupport`);
+/// conforming your own type is possible but unsupported.
 ///
-/// A protocol seam over `CBCentralManager`, mirroring only the API surface BLESwift uses,
-/// speaking exclusively in BLESwift-owned (never CoreBluetooth) types.
-///
-/// `CBCentralManager` cannot be instantiated or subclassed in tests (see
-/// ``PeripheralRemote`` for the equivalent `CBPeripheral` constraint), so `Central` (in the
-/// `BLESwift` module) is written entirely against this protocol instead of the concrete
-/// CoreBluetooth type. `CBCentralManager` conforms retroactively (`BLESwift`'s
-/// `CBCentralManager+CentralManaging.swift`); `BLESwiftTestSupport`'s `FakeCentral` conforms
-/// for tests, standing in for hardware.
-///
-/// - Important: Every ``eventHandler`` delivery must happen **asynchronously**, on the
-///   single serial `DispatchSerialQueue` the owning `Central` was constructed with — never
-///   deliver inline from within a method call on this protocol.
-///
-/// - Note: ``radioState``/``bluetoothAuthorization`` are named to avoid colliding with
-///   `CBCentralManager`'s/`CBManager`'s own identically-named `state`/`authorization`
-///   properties — a same-name, different-type member cannot be added to those types via
-///   retroactive extension (Swift treats it as an invalid override/redeclaration). This is
-///   a seam-only rename; `Central`'s own public `state`/`authorization` API is unaffected.
+/// - Important: Every ``eventHandler`` delivery must happen asynchronously, on the serial
+///   queue the owning `Central` was constructed with — never deliver inline.
+/// - Note: ``radioState``/``bluetoothAuthorization`` are renamed to avoid clashing with
+///   `CBCentralManager`/`CBManager`'s identically-named members.
 public protocol CentralManaging: AnyObject {
 
-    /// Receives every ``CentralEvent`` this backend produces. Set by `Central` at
-    /// creation/adoption time; assigning `nil` detaches event delivery. See the delivery
-    /// contract on the protocol's doc comment.
+    /// Receives every ``CentralEvent`` this backend produces; `nil` detaches delivery.
     var eventHandler: ((CentralEvent) -> Void)? { get set }
 
     /// The current state of the Bluetooth radio. Mirrors `CBCentralManager.state`.
@@ -51,22 +32,16 @@ public protocol CentralManaging: AnyObject {
     /// Stops any active scan. Mirrors `CBCentralManager.stopScan()`.
     func stopScan()
 
-    /// Initiates a connection to `peripheral`. Mirrors
-    /// `CBCentralManager.connect(_:options:)`.
+    /// Initiates a connection to `peripheral`. Mirrors `CBCentralManager.connect(_:options:)`.
     ///
-    /// `peripheral` is typed as an existential (rather than an associated type) so
-    /// `Central` can hold this protocol itself as `any CentralManaging` — an
-    /// associated-type requirement would make these calls uncompilable on the
-    /// existential. Conformances that mirror concrete CoreBluetooth types (e.g.
-    /// `CBCentralManager`, whose real methods take `CBPeripheral`) downcast internally,
-    /// silently ignoring `peripheral` values from a mismatched shim family (e.g. a
-    /// fake peripheral passed to `CBCentralManager`) rather than trapping — mixing shim
-    /// families is a programmer error, not a runtime condition to crash on.
+    /// `peripheral` is an existential (not an associated type) so `Central` can hold this
+    /// protocol as `any CentralManaging`. Conformances downcast internally; `peripheral`
+    /// values from a mismatched shim family are silently ignored rather than trapped.
     func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?)
 
     /// Cancels an active or pending connection to `peripheral`. Mirrors
     /// `CBCentralManager.cancelPeripheralConnection(_:)`. See ``connect(_:options:)`` for
-    /// why `peripheral` is an existential and how mismatched shim families are handled.
+    /// how mismatched shim families are handled.
     func cancelPeripheralConnection(_ peripheral: any PeripheralRemote)
 
     /// Looks up previously-seen peripherals by identifier. Mirrors
@@ -76,10 +51,5 @@ public protocol CentralManaging: AnyObject {
     /// Looks up peripherals currently connected to the system (by any app) that expose at
     /// least one of the given services. Mirrors
     /// `CBCentralManager.retrieveConnectedPeripherals(withServices:)`.
-    ///
-    /// Takes ``ServiceIdentifier``, not `CBUUID`, for the same reason every other member
-    /// of this protocol speaks BLESwift-owned types only (see the protocol's own doc
-    /// comment) — the `CBUUID` conversion happens at the `CBCentralManager` conformance's
-    /// call site, same as ``scanForPeripherals(withServices:options:)``'s.
     func retrieveConnectedPeripherals(withServices services: [ServiceIdentifier]) -> [any PeripheralRemote]
 }

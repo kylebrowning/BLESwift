@@ -9,13 +9,10 @@ import BLESwiftCore
 /// and carried by ``ConnectionState/connected(_:)``.
 ///
 /// `Peripheral` is a lightweight, `Sendable` façade: it holds only ``id`` and an internal
-/// **weak** reference back to the ``Central`` actor that vended it (see `WeakCentralBox`)
-/// — never a strong one, so holding onto a `Peripheral` after its `Central` has been
-/// deallocated does not keep that actor alive. GATT operations (reads, writes,
-/// notifications — added in later phases) are declared as `async throws` methods on this
-/// type that route through the owning actor; once the connection is torn down, the actor
-/// drops its tracked session, and any further call through a stale `Peripheral` throws
-/// ``BLESwiftError/notConnected``.
+/// **weak** reference back to the ``Central`` actor that vended it — never a strong one, so
+/// holding onto a `Peripheral` after its `Central` deallocates does not keep that actor
+/// alive. Once the connection is torn down, any further call through a stale `Peripheral`
+/// throws ``BLESwiftError/notConnected``.
 public struct Peripheral: Sendable {
 
     /// This peripheral's identifier.
@@ -32,9 +29,6 @@ public struct Peripheral: Sendable {
     }
 
     /// Resolves the ``Central`` actor this peripheral belongs to.
-    ///
-    /// Later phases (GATT operations, notifications) use this to route their calls through
-    /// the actor.
     ///
     /// - Throws: ``BLESwiftError/notConnected`` if the owning `Central` has already been
     ///   deallocated.
@@ -62,16 +56,9 @@ public struct Peripheral: Sendable {
 /// Holds a `weak` reference to a ``Central``, letting ``Peripheral`` refer to the actor that
 /// created it without retaining it.
 ///
-/// `central` is declared `nonisolated(unsafe)` rather than requiring `@unchecked Sendable`
-/// on this whole type (`@unchecked Sendable` is forbidden throughout this package): it is
-/// written exactly
-/// once, at initialization, and never reassigned afterward by this type's own code — the
-/// only further "mutation" is Swift's weak-reference runtime zeroing `central` out when the
-/// referenced `Central` deallocates, which the language guarantees is safe to observe
-/// concurrently (that guarantee is the entire point of `weak`). `nonisolated(unsafe)`
-/// therefore narrowly and correctly disables the compiler's Sendable check for this one
-/// property, relying instead on `weak`'s own thread safety — not on an unaudited, type-wide
-/// escape hatch.
+/// `central` is `nonisolated(unsafe)` rather than `@unchecked Sendable` on the whole type:
+/// it's written once at init, and weak's runtime zeroing is safe to observe concurrently by
+/// the language's own guarantee — a narrower escape hatch than an unaudited, type-wide one.
 final class WeakCentralBox: Sendable {
     nonisolated(unsafe) weak var central: Central?
 

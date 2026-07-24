@@ -9,13 +9,10 @@ import Foundation
 /// The state of a single in-progress `Central.scan(...)` call.
 ///
 /// Actor-confined: every stored property here is read and written only from within
-/// `Central`'s isolation — `Central` holds at most one `ActiveScan` at a time (BLESwift's
-/// single-scan discipline; see ``BLESwiftError/alreadyScanning``), in its `activeScan` property.
-/// A reference type (not `Sendable`) so its per-peripheral loss-timer and timeout `Task`
-/// bookkeeping can be mutated in place across the several actor-isolated methods that
-/// service one scan session, without struct-copy churn. Never passed across an isolation
-/// boundary or captured by an escaping (e.g. `Task { }`) closure — only `Sendable` values
-/// read out of it (identifiers, `Duration`s) are captured by those.
+/// `Central`'s isolation — `Central` holds at most one `ActiveScan` at a time (see
+/// ``BLESwiftError/alreadyScanning``). A reference type (not `Sendable`) so its
+/// per-peripheral loss-timer and timeout `Task` bookkeeping can be mutated in place. Never
+/// passed across an isolation boundary or captured by an escaping closure.
 final class ActiveScan {
 
     /// The continuation for the `AsyncThrowingStream<ScanEvent, Error>` this scan vends to

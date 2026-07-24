@@ -6,15 +6,11 @@
 import BLESwiftCore
 import Synchronization
 
-/// A scriptable stand-in for the UIKit-backed startup background task (the
-/// `StartupBackgroundTaskRunning` seam): SPM tests run on macOS with no
-/// `UIApplication`, so this fake records the `begin`/`end` lifecycle and lets you fire the
-/// captured expiration handler exactly as UIKit would when background time runs out.
+/// A scriptable stand-in for `StartupBackgroundTaskRunning`; records the `begin`/`end`
+/// lifecycle and lets you fire the captured expiration handler as UIKit would.
 ///
-/// `Mutex`-guarded (not queue-confined like `FakeCentral`/`FakePeripheral`): the real
-/// UIKit conformance is callable from any thread/actor — `begin` from `Central.init`,
-/// `end` from the actor, expiration from the main thread — and this fake mirrors that
-/// contract.
+/// `Mutex`-guarded, not queue-confined like `FakeCentral`/`FakePeripheral`: the real
+/// conformance is callable from any thread/actor, and this fake mirrors that.
 public final class FakeStartupBackgroundTask: StartupBackgroundTaskRunning {
 
     private struct State {
@@ -38,8 +34,7 @@ public final class FakeStartupBackgroundTask: StartupBackgroundTaskRunning {
         state.withLock { $0.endCount }
     }
 
-    /// Records the call and captures `onExpiration`, incrementing ``beginCount``. `StartupBackgroundTaskRunning`'s
-    /// protocol witness — fire the captured handler with ``fireExpiration()``.
+    /// Records the call and captures `onExpiration`, incrementing ``beginCount``.
     public func begin(onExpiration: @escaping @Sendable () -> Void) {
         state.withLock {
             $0.beginCount += 1
@@ -47,8 +42,7 @@ public final class FakeStartupBackgroundTask: StartupBackgroundTaskRunning {
         }
     }
 
-    /// Records the call, incrementing ``endCount``. `StartupBackgroundTaskRunning`'s protocol
-    /// witness.
+    /// Records the call, incrementing ``endCount``.
     public func end() {
         state.withLock { $0.endCount += 1 }
     }

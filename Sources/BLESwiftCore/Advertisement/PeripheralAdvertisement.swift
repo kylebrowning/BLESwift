@@ -6,13 +6,9 @@
 /// The advertisement packet a `PeripheralHost` broadcasts via
 /// `PeripheralHost/startAdvertising(_:)`.
 ///
-/// Deliberately carries only the two fields CoreBluetooth's `CBPeripheralManager`
-/// **honors** when advertising — a local name and a set of service UUIDs
-/// (`CBAdvertisementDataLocalNameKey` / `CBAdvertisementDataServiceUUIDsKey`). Every other
-/// advertisement field a *scanning* central can observe (manufacturer data, service data,
-/// tx power, …) is ignored by CoreBluetooth on the advertising side, so this type omits
-/// them rather than implying they take effect. (The scan-side ``AdvertisementData`` is the
-/// fuller, receive-side view.)
+/// Carries only the two fields `CBPeripheralManager` actually honors when advertising —
+/// local name and service UUIDs; every other field a scanning central can observe is
+/// ignored on the advertising side, so this type omits them.
 public struct PeripheralAdvertisement: Sendable, Hashable {
 
     /// The local name to advertise (`CBAdvertisementDataLocalNameKey`), or `nil` to
@@ -24,10 +20,6 @@ public struct PeripheralAdvertisement: Sendable, Hashable {
     public let serviceUUIDs: [ServiceIdentifier]
 
     /// Creates a `PeripheralAdvertisement`.
-    ///
-    /// - Parameters:
-    ///   - localName: The local name to advertise. Defaults to `nil`.
-    ///   - serviceUUIDs: The service UUIDs to advertise. Defaults to `[]`.
     public init(localName: String? = nil, serviceUUIDs: [ServiceIdentifier] = []) {
         self.localName = localName
         self.serviceUUIDs = serviceUUIDs

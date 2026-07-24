@@ -13,14 +13,11 @@ import ObjectiveC
 /// `objc_(get|set)AssociatedObject`.
 private nonisolated(unsafe) var peripheralManagerProxyKey: UInt8 = 0
 
-/// `CBPeripheralManager` conforms to ``PeripheralManaging`` — the retroactive conformance
-/// that lets `PeripheralHost` drive a real manager through the same seam a
-/// `FakePeripheralManager` implements. Mirrors `CBCentralManager+CentralManaging.swift`:
-/// `radioState`/`bluetoothAuthorization` bridge the identically-named-but-differently-typed
-/// CoreBluetooth members; the value-type GATT database is compiled to
-/// `CBMutableService`/`CBMutableCharacteristic` here, at the seam; and `respond`/`updateValue`
-/// reach the shared ``PeripheralManagerDelegateProxy`` (via the associated object) to recover
-/// the `CBATTRequest`/`CBMutableCharacteristic`/`CBCentral` objects the value-type API hides.
+/// `CBPeripheralManager` conforms to ``PeripheralManaging`` — the seam that lets
+/// `PeripheralHost` drive a real manager the same way it drives a `FakePeripheralManager`.
+/// The value-type GATT database is compiled to `CBMutableService`/`CBMutableCharacteristic`
+/// here, and `respond`/`updateValue` reach the shared ``PeripheralManagerDelegateProxy`` to
+/// recover the `CBATTRequest`/`CBCentral` objects the value-type API hides.
 ///
 /// No `@retroactive` needed — package-scoped, same as the central conformance.
 extension CBPeripheralManager: PeripheralManaging {
@@ -31,12 +28,10 @@ extension CBPeripheralManager: PeripheralManaging {
         objc_getAssociatedObject(self, &peripheralManagerProxyKey) as? PeripheralManagerDelegateProxy
     }
 
-    /// Registers `proxy` as this manager's associated proxy, so the registry-reading members
-    /// below (`respond`, `updateValue`) can reach it. Called by
-    /// `PeripheralHost.init(configuration:)`, which constructs its own proxy and passes it to
-    /// `CBPeripheralManager(delegate:queue:options:)` directly (the ``eventHandler`` setter's
-    /// fresh-proxy path is wrong for that case — see `CBCentralManager+CentralManaging`'s
-    /// note); this makes the same instance reachable via the associated object.
+    /// Registers `proxy` as this manager's associated proxy, so `respond`/`updateValue` can
+    /// reach it. Called by `PeripheralHost.init(configuration:)`, which constructs its own
+    /// proxy and passes it directly to `CBPeripheralManager(delegate:queue:options:)` — the
+    /// ``eventHandler`` setter's fresh-proxy path is wrong for that case.
     func bleSwiftRegisterProxy(_ proxy: PeripheralManagerDelegateProxy) {
         objc_setAssociatedObject(self, &peripheralManagerProxyKey, proxy, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }

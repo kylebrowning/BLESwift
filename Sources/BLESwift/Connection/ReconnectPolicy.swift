@@ -4,19 +4,13 @@
 //
 
 /// Declares whether, and how, ``Central`` should automatically retry connecting to a
-/// peripheral after an unexpected disconnect (or a connection attempt that failed, timed
-/// out, or was cancelled some way other than an explicit ``Central/disconnect(_:)``/
-/// ``Central/disconnect(_:immediate:)``/``Central/disconnectAll()``/
-/// ``Central/cancelAllOperations(error:)`` call).
+/// peripheral after an unexpected disconnect (or a failed/timed-out/cancelled attempt).
 ///
-/// Set per `connect(_:timeout:reconnect:warningOptions:)` call as a single declarative
-/// value, independently for each peripheral — each `connect` call's policy governs only that
-/// peripheral's own reconnect loop. Observe retry progress via ``Central/connectionEvents()``'s
-/// ``ConnectionEvent/reconnecting(_:attempt:)`` case.
+/// Set per `connect(_:timeout:reconnect:warningOptions:)` call, independently for each
+/// peripheral. Observe retry progress via ``ConnectionEvent/reconnecting(_:attempt:)``.
 ///
 /// - Note: Reconnection never re-arms any previously-active notification streams — those
-///   finish (with an error) at disconnect time, same as every other pending operation.
-///   Consumers should re-subscribe via `Peripheral.notifications(for:)` in response to a
+///   finish (with an error) at disconnect time. Re-subscribe in response to a
 ///   ``ConnectionEvent/connected(_:)`` event.
 public struct ReconnectPolicy: Sendable {
 
@@ -62,11 +56,9 @@ public struct ReconnectPolicy: Sendable {
         ReconnectPolicy(kind: .custom(nextDelay))
     }
 
-    /// Whether this policy ever reconnects. `.never` is the only case that doesn't; used to
-    /// decide ``ConnectionEvent/disconnected(_:error:willReconnect:)``'s `willReconnect`
-    /// flag, and whether a reconnect loop should be started at all — a synchronous
-    /// approximation, since `.custom` policies can only truly decide (asynchronously) once
-    /// asked for their first delay.
+    /// Whether this policy ever reconnects. Used for `willReconnect` and whether to start a
+    /// reconnect loop at all — a synchronous approximation, since `.custom` policies can
+    /// only truly decide once asked for their first delay.
     var isNever: Bool {
         if case .never = kind {
             return true

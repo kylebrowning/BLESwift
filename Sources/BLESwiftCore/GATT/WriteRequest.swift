@@ -8,11 +8,9 @@ import Foundation
 /// A write request from a remote central for one or more characteristics your
 /// `PeripheralHost` hosts, surfaced on `PeripheralHost/writeRequests()`.
 ///
-/// CoreBluetooth delivers writes in a **batch** (`peripheralManager(_:didReceiveWrite:)`
-/// hands over an array of requests), and the whole batch is answered by a **single**
+/// CoreBluetooth delivers writes in a batch, answered by a single
 /// `PeripheralHost/respond(to:with:)-(WriteRequest,_)` call: `.success` applies every
-/// ``entries`` write; a `.failure(ATTError)` rejects the batch (per ATT, referencing the
-/// first entry). Answer each write request exactly once. A `Sendable` value type.
+/// ``entries`` write; `.failure(ATTError)` rejects the whole batch.
 public struct WriteRequest: Sendable, Hashable {
 
     /// One write within a batch.
@@ -32,12 +30,6 @@ public struct WriteRequest: Sendable, Hashable {
         public let value: Data
 
         /// Creates a write `Entry`.
-        ///
-        /// - Parameters:
-        ///   - central: The remote central that issued the write.
-        ///   - characteristic: The characteristic being written.
-        ///   - offset: The byte offset the write begins at. Defaults to `0`.
-        ///   - value: The value to write.
         public init(
             central: Subscriber,
             characteristic: CharacteristicIdentifier,
@@ -59,10 +51,6 @@ public struct WriteRequest: Sendable, Hashable {
     public let entries: [Entry]
 
     /// Creates a `WriteRequest`.
-    ///
-    /// - Parameters:
-    ///   - token: The token mapping this batch back to CoreBluetooth.
-    ///   - entries: The writes in this batch.
     public init(token: RequestToken, entries: [Entry]) {
         self.token = token
         self.entries = entries

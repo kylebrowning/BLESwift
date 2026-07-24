@@ -5,18 +5,12 @@
 
 import Foundation
 
-/// A typed, `Sendable` view of the advertisement packet a peripheral is broadcasting.
-///
-/// CoreBluetooth delivers this data as `[String: Any]`, which cannot cross actor
-/// isolation boundaries. `AdvertisementData` is parsed from that dictionary once, at the
-/// point it is received from CoreBluetooth (in the `BLESwift` module's internal
-/// `init(advertisementData:)` — the only place the raw advertisement dictionary is
-/// touched), into `Sendable` values.
+/// A typed, `Sendable` view of the advertisement packet a peripheral is broadcasting;
+/// parsed once from CoreBluetooth's `[String: Any]` payload.
 public struct AdvertisementData: Sendable {
 
-    /// The peripheral's locally-advertised name (`CBAdvertisementDataLocalNameKey`).
-    ///
-    /// May differ from the name CoreBluetooth otherwise caches for the peripheral.
+    /// The peripheral's locally-advertised name (`CBAdvertisementDataLocalNameKey`); may
+    /// differ from the name CoreBluetooth otherwise caches.
     public let localName: String?
 
     /// The service UUIDs found in the advertisement packet
@@ -25,9 +19,6 @@ public struct AdvertisementData: Sendable {
 
     /// Manufacturer-specific advertisement data
     /// (`CBAdvertisementDataManufacturerDataKey`).
-    ///
-    /// The first two bytes are typically a company identifier assigned by the Bluetooth
-    /// SIG; the remainder is manufacturer-defined.
     public let manufacturerData: Data?
 
     /// A mapping of service UUID to service-specific advertisement data
@@ -42,9 +33,8 @@ public struct AdvertisementData: Sendable {
     /// (`CBAdvertisementDataIsConnectable`).
     public let isConnectable: Bool?
 
-    /// Service UUIDs found in the "overflow" area of the advertisement packet, which are
-    /// only discoverable via active scanning of a peripheral with a specific Bluetooth
-    /// chipset (`CBAdvertisementDataOverflowServiceUUIDsKey`).
+    /// Service UUIDs found in the "overflow" area of the advertisement packet
+    /// (`CBAdvertisementDataOverflowServiceUUIDsKey`).
     public let overflowServiceUUIDs: [ServiceIdentifier]?
 
     /// Service UUIDs the peripheral is soliciting from a central
@@ -52,10 +42,6 @@ public struct AdvertisementData: Sendable {
     public let solicitedServiceUUIDs: [ServiceIdentifier]?
 
     /// Creates an `AdvertisementData` directly, with every field defaulted to `nil`.
-    ///
-    /// The construction path for tests and previews — production advertisement data is
-    /// always parsed from CoreBluetooth's raw dictionary by the `BLESwift` module's
-    /// internal `init(advertisementData:)`.
     public init(
         localName: String? = nil,
         serviceUUIDs: [ServiceIdentifier]? = nil,

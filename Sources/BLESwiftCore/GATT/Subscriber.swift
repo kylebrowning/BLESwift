@@ -24,10 +24,6 @@ public struct Subscriber: Sendable, Hashable {
     public let maximumUpdateValueLength: Int
 
     /// Creates a `Subscriber`.
-    ///
-    /// - Parameters:
-    ///   - id: The remote central's identifier.
-    ///   - maximumUpdateValueLength: The central's maximum single-update byte length.
     public init(id: UUID, maximumUpdateValueLength: Int) {
         self.id = id
         self.maximumUpdateValueLength = maximumUpdateValueLength

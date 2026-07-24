@@ -11,28 +11,20 @@ import Foundation
 /// `InputStream`/`OutputStream` and pumps them as async byte I/O.
 ///
 /// ## No RunLoop, and never the actor
-/// `CBL2CAPChannel` vends `InputStream`/`OutputStream`, which are event-driven — classically
-/// via a `RunLoop`. BLESwift's hard rule is that **nothing** may schedule a RunLoop on the
-/// `Central` actor's executor. This transport therefore schedules **both** streams on its
-/// own dedicated serial `DispatchQueue` (``pumpQueue``) using
-/// `CFReadStreamSetDispatchQueue`/`CFWriteStreamSetDispatchQueue` — a GCD-scheduled stream,
-/// not a RunLoop-scheduled one, and on a queue that is neither the actor's executor nor any
-/// RunLoop. Every `StreamDelegate` callback, every read, and every write runs on
-/// ``pumpQueue``, completely off the actor.
+/// `InputStream`/`OutputStream` are classically RunLoop-driven, but nothing may schedule a
+/// RunLoop on the `Central` actor's executor. This transport instead schedules both streams
+/// on its own dedicated serial ``pumpQueue`` via `CFReadStreamSetDispatchQueue`/
+/// `CFWriteStreamSetDispatchQueue` — GCD-scheduled, never a RunLoop, and off the actor.
 ///
 /// ## Sendable via queue confinement (not locks, not `@unchecked`)
-/// Like `FakePeripheral`/`FakeCentral`, this type is `Sendable` by confinement: every
-/// mutable stored property is `nonisolated(unsafe)` and touched **only** on ``pumpQueue`` —
-/// a `dispatchPrecondition(condition: .onQueue(pumpQueue))` guards each entry point, and
-/// ``write(_:)``/``close(error:)`` hop on via `pumpQueue.async`. This is a documented,
-/// narrow confinement, not a type-wide `@unchecked Sendable` (which stays grep-forbidden).
+/// Every mutable stored property is `nonisolated(unsafe)` and touched **only** on
+/// ``pumpQueue`` — a `dispatchPrecondition` guards each entry point, and
+/// ``write(_:)``/``close(error:)`` hop on via `pumpQueue.async`. A documented, narrow
+/// confinement, not a type-wide `@unchecked Sendable` (which stays grep-forbidden).
 ///
 /// ## Deterministic teardown
-/// ``close(error:)`` — invoked by an explicit `L2CAPChannel.close()` or by `Central`'s
-/// disconnect/stop cleanup — hops onto ``pumpQueue``, closes and **unschedules** both
-/// streams (`CFReadStreamSetDispatchQueue(…, nil)`, delegate cleared), finishes the inbound
-/// stream, and fails any queued write. After it runs no further callback can arrive, so
-/// ``pumpQueue`` goes idle and is released along with the transport. It is idempotent.
+/// ``close(error:)`` hops onto ``pumpQueue``, closes and unschedules both streams, finishes
+/// the inbound stream, and fails any queued write. Idempotent.
 final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegate {
 
     let psm: L2CAPPSM
@@ -41,16 +33,13 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
     /// created per transport, never the actor's executor and never a RunLoop.
     private let pumpQueue: DispatchQueue
 
-    /// `InputStream`/`OutputStream` are not `Sendable`, but these are touched **only** on
-    /// ``pumpQueue`` (scheduled, read, closed, and unscheduled there) — the same documented
-    /// queue-confinement that makes every other stored property here safe. `nonisolated(unsafe)`
-    /// asserts that narrowly, rather than a type-wide `@unchecked Sendable`.
+    /// `InputStream`/`OutputStream` are not `Sendable`, but touched only on ``pumpQueue`` —
+    /// same queue-confinement as every other stored property here.
     nonisolated(unsafe) private let inputStream: InputStream
     nonisolated(unsafe) private let outputStream: OutputStream
 
-    /// The single inbound stream vended to the `L2CAPChannel` handle. `AsyncThrowingStream`
-    /// and its `Continuation` are both `Sendable`, so these are immutable `let`s; the
-    /// continuation is only ever `yield`ed/`finish`ed from ``pumpQueue``.
+    /// The single inbound stream vended to the `L2CAPChannel` handle. The continuation is
+    /// only ever `yield`ed/`finish`ed from ``pumpQueue``.
     private let inboundStream: AsyncThrowingStream<Data, Error>
     private let inboundContinuation: AsyncThrowingStream<Data, Error>.Continuation
 
@@ -73,9 +62,8 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
 
     /// The `CBL2CAPChannel` these streams belong to. CoreBluetooth tears down the underlying
     /// L2CAP connection when the channel object deallocates, so the transport must keep it
-    /// alive for the channel's lifetime; ``teardown(error:)`` releases it, which is also what
-    /// closes the OS-level channel. Held as `AnyObject` so the stream-only initializer (and
-    /// tests) can pass `nil`. Pump-confined.
+    /// alive; ``teardown(error:)`` releases it. `AnyObject` so the stream-only initializer
+    /// (and tests) can pass `nil`. Pump-confined.
     nonisolated(unsafe) private var underlyingChannel: AnyObject?
 
     /// Creates a transport over an already-open channel's streams. `retaining` keeps the

@@ -4,14 +4,8 @@
 //
 
 /// An Attribute Protocol (ATT) failure code your peripheral returns when it cannot fulfil a
-/// read or write request — the failure half of a `PeripheralHost/respond(to:with:)-(ReadRequest,_)`
-/// / `PeripheralHost/respond(to:with:)-(WriteRequest,_)` result.
-///
-/// A `Sendable`, value-type mirror of CoreBluetooth's `CBATTError.Code` (excluding its
-/// `success` case, which the success half of a `Result` already expresses). The raw values
-/// match `CBATTError.Code`'s exactly, so the `BLESwift` module bridges the two by raw value
-/// at the CoreBluetooth seam. Conforms to `Error` so it slots directly into
-/// `Result<_, ATTError>`.
+/// read or write request. A `Sendable`, value-type mirror of CoreBluetooth's
+/// `CBATTError.Code` (excluding its `success` case). Raw values match `CBATTError.Code`'s.
 public enum ATTError: Int, Error, Sendable, Hashable {
 
     /// The attribute handle is invalid on this peripheral.

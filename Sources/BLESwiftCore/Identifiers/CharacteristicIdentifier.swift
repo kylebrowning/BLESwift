@@ -24,9 +24,6 @@ public struct CharacteristicIdentifier: Sendable, CustomStringConvertible {
     /// 8-character) shorthand UUID. Hex digits may be upper- or lowercase; the stored form
     /// is always uppercase.
     ///
-    /// - Parameters:
-    ///   - uuid: A valid UUID string.
-    ///   - service: The service this characteristic belongs to.
     /// - Warning: If `uuid` is not a valid 4-, 8-, or 36-character hex UUID string, this
     ///   traps, mirroring `CBUUID(string:)`'s own behavior.
     public init(uuid: String, service: ServiceIdentifier) {

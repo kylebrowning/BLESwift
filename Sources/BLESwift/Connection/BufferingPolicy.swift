@@ -3,13 +3,9 @@
 //  BLESwift
 //
 
-/// How a notification stream buffers values its consumer hasn't consumed yet.
-///
-/// BLESwift's own mirror of `AsyncStream.Continuation.BufferingPolicy` (which is nested inside
-/// a generic type and so can't appear directly in
-/// ``Peripheral/notifications(for:policy:)``'s signature without naming the element type).
-/// Notifications arrive at the peripheral's pace, not the consumer's — this policy decides
-/// what happens when the consumer falls behind.
+/// How a notification stream buffers values its consumer hasn't consumed yet. BLESwift's
+/// own mirror of `AsyncStream.Continuation.BufferingPolicy`, which can't appear directly in
+/// ``Peripheral/notifications(for:policy:)``'s signature without naming the element type.
 public enum BufferingPolicy: Sendable, Equatable {
 
     /// Buffer every unconsumed value, without limit. The default.

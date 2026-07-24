@@ -13,15 +13,10 @@ extension Peripheral {
 
     /// Writes `value` to one characteristic, then returns the first notification
     /// subsequently received on another — with the listen installed **before** the write
-    /// is issued, so a device that responds instantly cannot slip its notification into a
-    /// gap between the two.
-    ///
-    /// Both steps happen inside one actor-isolated critical section on the owning
-    /// ``Central``, preserving the listen-before-write ordering guarantee: the
-    /// subscription is established before the write is issued. The write is always
-    /// `.withResponse`. If `notifyCharacteristic` already has active notification
-    /// subscribers, this call transparently joins (and does not disturb) their shared
-    /// subscription; the notification consumed here is still delivered to them too.
+    /// is issued (inside one actor-isolated critical section), so a device that responds
+    /// instantly cannot slip its notification into the gap. The write is always
+    /// `.withResponse`. If `notifyCharacteristic` already has active subscribers, this call
+    /// transparently joins their shared subscription without disturbing it.
     ///
     /// - Parameters:
     ///   - value: The value to write.
@@ -60,7 +55,7 @@ extension Peripheral {
     /// Accumulation past `expectedLength` throws
     /// ``BLESwiftError/tooMuchData(expected:received:)`` (carrying everything received), and
     /// `timeout` covers the **whole assembly** — a device that sends part of the reply and
-    /// then goes silent still times out (this specific behavior is encoded as a test).
+    /// then goes silent still times out.
     ///
     /// - Parameters:
     ///   - value: The value to write.
@@ -96,15 +91,11 @@ extension Peripheral {
 
     /// Drains and discards any stale, buffered notifications on `characteristic`,
     /// returning once a full `quietPeriod` passes with no data — every packet that does
-    /// arrive restarts the window.
-    ///
-    /// An absence-of-data loop, useful before a request/response exchange (e.g.
-    /// ``writeAndAwaitNotification(write:to:awaitOn:timeout:)``) to make sure a leftover
-    /// notification from an earlier, abandoned exchange can't be mistaken for the fresh
-    /// reply. Notifications are enabled for the duration of the flush and released
-    /// afterward (refcounted — an existing subscription is joined, not disturbed, though
-    /// any concurrent subscribers will also observe the flushed packets: a flush drains
-    /// the characteristic, not other subscribers' streams).
+    /// arrive restarts the window. Useful before a request/response exchange so a leftover
+    /// notification from an abandoned exchange can't be mistaken for the fresh reply.
+    /// Notifications are enabled for the duration and released afterward (refcounted — an
+    /// existing subscription is joined, not disturbed; concurrent subscribers also observe
+    /// the flushed packets).
     ///
     /// - Parameters:
     ///   - characteristic: The characteristic to flush.

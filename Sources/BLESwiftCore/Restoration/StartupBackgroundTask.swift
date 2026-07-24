@@ -3,44 +3,26 @@
 //  BLESwiftCore
 //
 
-/// The seam over iOS's `UIApplication` background-task API protecting the **startup
-/// restoration window** — the span from `Central.init` (restoration enabled) until
-/// restoration completes or is ruled out — from the app being suspended mid-restoration.
+/// The seam over iOS's `UIApplication` background-task API protecting the startup
+/// restoration window (`Central.init` with restoration enabled until restoration completes
+/// or is ruled out) from the app being suspended mid-restoration.
 ///
-/// A protocol (rather than direct `UIApplication` calls inside `Central`) for two reasons:
-/// - **Testability**: SPM tests run on macOS with no UIKit/`UIApplication`; a fake
-///   conformance lets tests drive `begin`/`end`/expiration and observe `Central`'s
-///   reaction.
-/// - **Isolation**: `UIApplication` is MainActor-isolated while `Central` is its own
-///   actor; the UIKit conformance (`BLESwift`'s `UIKitStartupBackgroundTask`) contains the
-///   documented main-queue hop so `Central` itself never touches MainActor state.
-///
-/// This is BLESwift's startup-background-task implementation seam. BLESwift ships two
-/// real conformances — `UIKitStartupBackgroundTask` (the `BLESwift` module, UIKit-backed)
-/// and a scriptable fake (`BLESwiftTestSupport`), plus the no-op conformance below.
-/// Conforming your own types is possible but unsupported: the semantic contract is
-/// documented here on a best-effort basis and may gain requirements in any release.
-///
-/// `UIKitStartupBackgroundTask` stays in the `BLESwift` module, since it imports `UIKit`;
-/// only the CB-free seam and the no-op conformance live here.
+/// A protocol rather than direct `UIApplication` calls inside `Central`, since SPM tests
+/// run on macOS with no UIKit, and `UIApplication` is MainActor-isolated while `Central` is
+/// its own actor — the UIKit conformance (`BLESwift`'s `UIKitStartupBackgroundTask`)
+/// contains the main-queue hop so `Central` itself never touches MainActor state.
 public protocol StartupBackgroundTaskRunning: Sendable {
 
-    /// Begins the platform background task. `onExpiration` fires (on an arbitrary
-    /// thread/actor) if the system's background time runs out before ``end()`` — the
-    /// conformance itself is responsible for also ending the underlying platform task on
-    /// expiration, as UIKit requires. At most one begin per instance; later calls are
-    /// no-ops.
+    /// Begins the platform background task. `onExpiration` fires if the system's
+    /// background time runs out before ``end()``. At most one begin per instance; later
+    /// calls are no-ops.
     func begin(onExpiration: @escaping @Sendable () -> Void)
 
-    /// Ends the platform background task. Idempotent; safe to call before ``begin(onExpiration:)``'s
-    /// asynchronous platform work has completed (the conformance must resolve that race).
+    /// Ends the platform background task. Idempotent.
     func end()
 }
 
-/// The no-op conformance used whenever there is no platform background task to manage:
-/// non-iOS platforms, iOS `Central`s created without restoration, adopted managers
-/// (`Central(adopting:)` — the restoration window, if any, belonged to the manager's
-/// previous owner), and test-backed `Central`s that don't inject a fake.
+/// The no-op conformance used whenever there is no platform background task to manage.
 package final class NoOpStartupBackgroundTask: StartupBackgroundTaskRunning {
     package init() {}
     package func begin(onExpiration: @escaping @Sendable () -> Void) {}

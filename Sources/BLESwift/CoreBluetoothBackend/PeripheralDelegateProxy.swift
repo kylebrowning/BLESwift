@@ -13,32 +13,16 @@ import Synchronization
 /// `CBPeripheral`.
 ///
 /// One instance per `CBPeripheral`, created lazily and retained via an associated object
-/// by `CBPeripheral`'s `eventHandler` setter (see `CBPeripheral+PeripheralRemote.swift`) —
-/// `CBPeripheral.delegate` is `weak`, so something must keep this instance alive for as
-/// long as its peripheral is expected to deliver events.
+/// by `CBPeripheral`'s `eventHandler` setter — `CBPeripheral.delegate` is `weak`, so
+/// something must keep this instance alive.
 ///
-/// Split out of the combined `CentralDelegateProxy` this phase: previously one proxy
-/// handled both `CBCentralManagerDelegate` and `CBPeripheralDelegate`, using a `weak var
-/// central: Central?` back-reference. Per-peripheral event routing is now a plain closure
-/// `Central` supplies at each attach site (capturing the `PeripheralIdentifier` it already
-/// knows), so this proxy needs no reference back to `Central` at all.
-///
-/// Holds its handler `Mutex`-guarded (matching ``CentralDelegateProxy``'s pattern):
-/// assignment happens from whatever isolation domain `Central` attaches from (actor-isolated
-/// code, or a `queue.sync` hop during init), and delivery arrives from CoreBluetooth's own
-/// callback queue — the same queue by construction, but the `Mutex` keeps assignment and
-/// delivery race-free regardless.
-///
-/// Forwarding stays synchronous — no `Task {` — exactly like ``CentralDelegateProxy``: by
-/// the time a callback lands here, it is already running on `Central`'s own executor
-/// queue, so the handler closure `Central` installed (which calls `assumeIsolated`) can
-/// forward inline with no ordering hazard.
+/// Holds its handler `Mutex`-guarded, matching ``CentralDelegateProxy``'s pattern.
+/// Forwarding stays synchronous — no `Task {` — since by the time a callback lands here it
+/// is already running on `Central`'s own executor queue.
 final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate {
 
     /// Typed `@Sendable` for the same `Mutex`-storage reason documented on
-    /// `CentralDelegateProxy.handlerBox` — see that doc comment. `CBPeripheral`'s
-    /// `eventHandler` setter bridges the protocol's non-`@Sendable` closure into this
-    /// storage the same way.
+    /// `CentralDelegateProxy.handlerBox`.
     private let handlerBox = Mutex<(@Sendable (PeripheralEvent) -> Void)?>(nil)
 
     /// The `PeripheralEvent` handler this proxy forwards to.

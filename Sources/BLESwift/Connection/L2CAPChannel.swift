@@ -7,43 +7,15 @@ import BLESwiftCore
 import Foundation
 
 /// A `Sendable` handle to an open L2CAP channel, returned by
-/// ``Peripheral/openL2CAPChannel(psm:timeout:)``.
+/// ``Peripheral/openL2CAPChannel(psm:timeout:)`` — a bidirectional byte pipe for transfers
+/// that outgrow GATT.
 ///
-/// An L2CAP connection-oriented channel is a bidirectional byte pipe — the high-throughput
-/// path CoreBluetooth exposes for transfers that outgrow GATT (firmware images, file sync,
-/// streaming). BLESwift surfaces it as async byte I/O:
-///
-/// - ``incomingData`` is an `AsyncThrowingStream<Data, Error>` of inbound packets. Iterate
-///   it to receive. It finishes by **throwing** when the channel closes on error or the
-///   peripheral disconnects (with the disconnect error), or cleanly when the peer ends the
-///   stream. **Single-consumer** — iterate the one stream; don't read ``incomingData`` from
-///   multiple tasks.
-/// - ``write(_:)`` sends bytes outbound, suspending until they are fully written (it honors
-///   the channel's back-pressure rather than dropping data).
+/// - ``incomingData`` is a **single-consumer** `AsyncThrowingStream<Data, Error>`; it
+///   finishes by throwing when the channel closes on error or the peripheral disconnects,
+///   or cleanly when the peer ends the stream.
+/// - ``write(_:)`` suspends until bytes are fully written, honoring back-pressure.
 /// - ``close()`` tears the channel down explicitly. A disconnect (or `Central` being
-///   stopped) also tears every open channel down automatically, finishing ``incomingData``
-///   with the disconnect error.
-///
-/// ```swift
-/// let channel = try await peripheral.openL2CAPChannel(psm: psm)
-///
-/// // Receive.
-/// Task {
-///     do {
-///         for try await packet in channel.incomingData {
-///             handle(packet)
-///         }
-///     } catch {
-///         // Channel closed / peripheral disconnected.
-///     }
-/// }
-///
-/// // Send.
-/// try await channel.write(payload)
-///
-/// // Done.
-/// await channel.close()
-/// ```
+///   stopped) also tears every open channel down automatically.
 public struct L2CAPChannel: Sendable {
 
     /// The PSM this channel was opened against.
@@ -53,7 +25,7 @@ public struct L2CAPChannel: Sendable {
     public let peripheral: PeripheralIdentifier
 
     /// The backing transport — a CoreBluetooth stream pump in production, an in-memory fake
-    /// in tests. `Sendable`, and owns its own off-actor pump.
+    /// in tests.
     private let remote: any L2CAPChannelRemote
 
     /// This channel's registration token in the owning session, used to deregister it on
@@ -61,7 +33,7 @@ public struct L2CAPChannel: Sendable {
     private let token: UUID
 
     /// A weak handle to the owning ``Central`` — so ``close()`` can deregister this channel
-    /// without keeping the actor alive (see ``WeakCentralBox``).
+    /// without keeping the actor alive.
     private let centralBox: WeakCentralBox
 
     /// Creates a channel handle over `remote`, registered under `token` in `central`'s
@@ -74,19 +46,14 @@ public struct L2CAPChannel: Sendable {
         self.centralBox = WeakCentralBox(central)
     }
 
-    /// The inbound byte stream: every packet the peripheral sends, in order.
-    ///
-    /// Finishes by **throwing** when the channel closes on error or the peripheral
-    /// disconnects (with the disconnect error), or cleanly when the peer ends the stream.
-    /// Single-consumer — iterate the one returned stream.
+    /// The inbound byte stream: every packet the peripheral sends, in order. Single-consumer
+    /// — iterate the one returned stream.
     public var incomingData: AsyncThrowingStream<Data, Error> {
         remote.inbound()
     }
 
-    /// Sends `data` outbound, suspending until it has been fully written.
-    ///
-    /// Honors the channel's back-pressure: rather than dropping bytes the peer can't yet
-    /// accept, this waits until they have all been handed to the transport.
+    /// Sends `data` outbound, suspending until it has been fully written. Honors the
+    /// channel's back-pressure rather than dropping bytes.
     ///
     /// - Parameter data: The bytes to send.
     /// - Throws: ``BLESwiftError/l2capChannelClosed`` if the channel has been closed (by

@@ -12,54 +12,34 @@ import ObjectiveC
 /// `objc_(get|set)AssociatedObject` — the value is never read or written.
 private nonisolated(unsafe) var centralManagerProxyKey: UInt8 = 0
 
-/// `CBCentralManager` already implements `stopScan()` with an identical signature, so that
-/// member requires no additional code. Every other requirement needs a bridging
-/// implementation: `radioState`/`bluetoothAuthorization` map CoreBluetooth's own
-/// identically-named-but-differently-typed `state`/`authorization` properties (they can't
-/// share the name — see ``CentralManaging``'s note); `scanForPeripherals(withServices:options:)`
-/// builds the `[CBUUID]?`/options dictionary CoreBluetooth expects; `connect(_:options:)`,
-/// `cancelPeripheralConnection(_:)`, and `retrievePeripherals(withIdentifiers:)` take/return
-/// `any PeripheralRemote` in the protocol (see ``CentralManaging`` for why) but `CBPeripheral`
-/// in the real `CBCentralManager` API, so downcast to `CBPeripheral`, guard-let-else-return
-/// on a mismatch (never trap — mixing shim families is a programmer error, not a runtime
-/// condition to crash on), and delegate to the real method;
-/// `retrieveConnectedPeripherals(withServices:)` builds the `[CBUUID]` array CoreBluetooth
-/// expects from `[ServiceIdentifier]`, same conversion as `scanForPeripherals`'s.
+/// Bridges `CentralManaging` to the real `CBCentralManager` API: mismatched `PeripheralRemote`
+/// downcasts are a no-op, never a trap (mixing shim families is a programmer error, not a
+/// runtime condition to crash on).
 ///
-/// No `@retroactive` needed: `CentralManaging` (in `BLESwiftCore`) and this conformance
-/// (in `BLESwift`) are different modules but the same SPM *package* — SE-0364's
-/// retroactive-conformance check (and its warning under `.treatAllWarnings(as: .error)`)
-/// is package-scoped, not module-scoped, so this doesn't trigger it.
+/// No `@retroactive` needed: `CentralManaging` and this conformance are different modules
+/// but the same SPM package — SE-0364's retroactive-conformance check is package-scoped.
 extension CBCentralManager: CentralManaging {
 
     /// Implements `eventHandler` with an associated-object-retained `CentralDelegateProxy`
     /// assigned to `.delegate` (which is `weak` — the association is what keeps the proxy
     /// alive). Setting a non-`nil` handler creates the proxy on first use and reuses it on
-    /// subsequent sets (updating its `handler`); setting `nil` clears both the proxy's
-    /// handler and `.delegate`, and drops the association.
+    /// subsequent sets; setting `nil` clears both the proxy's handler and `.delegate`.
     ///
     /// - Important: `Central.init(configuration:)` does **not** go through this property —
-    ///   it must create its `CentralDelegateProxy` and pass it directly to
-    ///   `CBCentralManager(delegate:queue:options:)` at construction time (this property's
-    ///   setter always creates a *fresh* proxy, which would be a second, disconnected
-    ///   instance if used here), then sets that proxy's `handler` afterward. This asymmetry
-    ///   is `Central`'s to document; `init(adopting:)` and the public backend init both use
-    ///   this property uniformly, since in both cases the manager already exists.
+    ///   this setter always creates a *fresh* proxy, which would be a second, disconnected
+    ///   instance if used at construction time. `init` passes its own proxy directly to
+    ///   `CBCentralManager(delegate:queue:options:)` instead.
     public var eventHandler: ((CentralEvent) -> Void)? {
         get {
             (objc_getAssociatedObject(self, &centralManagerProxyKey) as? CentralDelegateProxy)?.handler
         }
         set {
             // Bridges the protocol's plain (non-`@Sendable`) closure type into
-            // `CentralDelegateProxy.handler`'s `@Sendable` storage. Sound, not merely
-            // convenient: `Central` is the only caller of this setter, and every closure
-            // it ever passes here captures nothing but `[weak self]` of the `Central`
-            // actor itself (unconditionally `Sendable`) plus the event payload (also
-            // `Sendable`) — genuinely safe to hand across isolation domains. The compiler
-            // cannot see that through the protocol's necessarily non-`@Sendable` fixed
-            // signature (`eventHandler`'s type is fixed by `CentralManaging`), so this
-            // narrow `nonisolated(unsafe)` capture asserts it explicitly instead of
-            // widening the protocol's own closure type.
+            // `CentralDelegateProxy.handler`'s `@Sendable` storage. Sound: `Central` is the
+            // only caller, and every closure it passes here captures only `[weak self]` and
+            // the (`Sendable`) event payload — the compiler just can't see that through the
+            // protocol's fixed non-`@Sendable` signature, so `nonisolated(unsafe)` asserts
+            // it explicitly.
             let sendableValue: (@Sendable (CentralEvent) -> Void)?
             if let newValue {
                 nonisolated(unsafe) let captured = newValue

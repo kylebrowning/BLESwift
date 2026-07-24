@@ -8,58 +8,30 @@ import Dispatch
 import Foundation
 import Synchronization
 
-/// Interconnects the two otherwise-separate fake families so a `PeripheralHost`'s peripheral
-/// role and a `Central`'s central role can hold a full GATT conversation **in one process,
-/// entirely over fakes, with no CoreBluetooth and no hardware**.
-///
-/// On their own, ``FakeCentral``/``FakePeripheral`` (the central-side shim) and
-/// ``FakePeripheralManager`` (the peripheral-side shim) don't interconnect: each is scripted in
-/// isolation. `FakeGATTBridge` wires a central-side ``FakePeripheral`` to a peripheral-side
-/// ``FakePeripheralManager`` through the bridge hooks each fake exposes
+/// Interconnects ``FakeCentral``/``FakePeripheral`` (central-side) and
+/// ``FakePeripheralManager`` (peripheral-side) — which don't otherwise interconnect — so a
+/// `PeripheralHost` and a `Central` can hold a full GATT conversation in one process, over
+/// fakes only, with no CoreBluetooth or hardware. Wires each side's bridge hooks
 /// (``FakePeripheral/onReadRequest``, ``FakePeripheral/onWriteRequest``,
-/// ``FakePeripheral/onSubscriptionChange``; ``FakePeripheralManager/onAddService``,
-/// ``FakePeripheralManager/onRespond``, ``FakePeripheralManager/onUpdateValue``), so that:
-///
-/// - **Hosted database → discovery.** Every ``GATTService`` the host publishes with
-///   `PeripheralHost/add(_:)` is mirrored into the central-side ``FakePeripheral``'s discovery
-///   state (``FakePeripheral/availableServices`` and ``FakePeripheral/scriptedProperties``), so
-///   the central discovers exactly the services and characteristics — with the properties — the
-///   host actually hosts.
-/// - **Central read → host request → response → central result.** A central `read` reaches the
-///   host's `PeripheralHost/readRequests()` stream as a ``ReadRequest``; the value the host
-///   answers with (`PeripheralHost/respond(to:with:)`) flows back as the central's read result.
-/// - **Central write → host request → acknowledgement → central result.** A `.withResponse`
-///   `write` reaches `PeripheralHost/writeRequests()` as a ``WriteRequest``; the host's
-///   acknowledgement (or ``ATTError`` rejection) flows back as the central's write result.
-/// - **Central subscribe → host subscription.** Enabling notifications surfaces on the host's
-///   `PeripheralHost/subscriptionEvents()` (and ``PeripheralHost/subscribers(for:)``).
-/// - **Host notify → central notification.** A `PeripheralHost/updateValue(_:for:onSubscribed:)`
-///   surfaces as a value on the central's `Peripheral/notifications(for:)` stream.
+/// ``FakePeripheral/onSubscriptionChange``, ``FakePeripheralManager/onAddService``,
+/// ``FakePeripheralManager/onRespond``, ``FakePeripheralManager/onUpdateValue``) to route
+/// discovery, reads, writes, subscriptions, and notifications between the two roles.
 ///
 /// ## Concurrency
-///
-/// The central-side fakes and the peripheral-side fake live on **two distinct**
-/// `DispatchSerialQueue`s — one per role's actor executor. Every bridge hook runs on the queue
-/// of the fake that fired it, and forwards to the other side using only that side's
-/// *off-queue-safe* `simulate…` methods (each hops onto its own queue with `queue.async`), so
-/// each fake's queue-confinement invariant is preserved end to end. The only state shared across
-/// the two queues — the request-correlation table mapping a ``RequestToken`` back to the pending
-/// central operation — is held in a `Mutex`. No CoreBluetooth import, no unsafe blocking
-/// primitives, and no unchecked `Sendable` conformances.
+/// The two sides live on distinct `DispatchSerialQueue`s. Each bridge hook runs on the queue
+/// of the fake that fired it and forwards to the other side only via that side's
+/// off-queue-safe `simulate…` methods, preserving each fake's queue-confinement. The
+/// request-correlation table (``RequestToken`` → pending central operation) is the only
+/// state shared across queues, so it's `Mutex`-protected.
 ///
 /// ## Construction & lifetime
-///
-/// Create a bridge with the `async` factory ``make(central:peripheral:manager:subscriber:)`` — it
-/// must `await` onto each fake's queue to install the queue-confined hook closures. Those closures
-/// capture the bridge **weakly**, so it forms no retain cycle with the fakes; keep a strong
-/// reference to the bridge for as long as the interaction runs (a test holding it for the duration
-/// of the test body is enough). Once released, the hooks become no-ops and the two fakes revert to
-/// their standalone scripted behavior.
+/// Create via the `async` factory ``make(central:peripheral:manager:subscriber:)``, which
+/// awaits onto each fake's queue to install hooks. The bridge captures the fakes weakly (no
+/// retain cycle); keep a strong reference to the bridge for as long as the interaction runs —
+/// once released, hooks become no-ops.
 public final class FakeGATTBridge: Sendable {
 
-    /// The central-side fake central. Held so the whole link is reachable from one handle;
-    /// connection is scripted on it directly (`connectBehavior`, `retrievablePeripherals`) — the
-    /// bridge itself only interconnects GATT traffic, not the connect handshake.
+    /// The central-side fake central; connect is scripted directly on it, not by the bridge.
     public let central: FakeCentral
 
     /// The central-side fake peripheral (the remote the ``Central`` talks to). Its read/write/
@@ -78,10 +50,7 @@ public final class FakeGATTBridge: Sendable {
     /// One in-flight central operation awaiting the host's answer, keyed by the token the host
     /// echoes back in its `respond`.
     private enum PendingRequest: Sendable {
-        /// A read of `characteristic`; the response `value` becomes the read result.
         case read(CharacteristicIdentifier)
-        /// A `.withResponse` write to `characteristic`; the response `error` (or success)
-        /// becomes the write result.
         case write(CharacteristicIdentifier)
     }
 
@@ -89,13 +58,11 @@ public final class FakeGATTBridge: Sendable {
     /// and read on the host's queue (when the host responds), so it is `Mutex`-protected.
     private let pending = Mutex<[RequestToken: PendingRequest]>([:])
 
-    /// Creates a bridge interconnecting an existing central-side fake pair and a peripheral-side
-    /// fake manager, installing the hooks that route GATT traffic between them.
+    /// Creates a bridge, installing the hooks that route GATT traffic between an existing
+    /// central-side fake pair and a peripheral-side fake manager.
     ///
-    /// Each fake's hook setters (``FakePeripheral/onReadRequest`` et al.) are queue-confined, so
-    /// installing them means hopping onto each fake's queue — now an `async` hop (issue #13
-    /// replaced the old thread-parking `queue.sync` with `queue.async` + a continuation). That
-    /// makes construction asynchronous, so it lives here rather than in `init`.
+    /// Each fake's hook setters are queue-confined, so installing them means an `async` hop
+    /// onto each fake's queue — hence this factory rather than `init`.
     ///
     /// - Parameters:
     ///   - central: The central-side fake central (connection is scripted on it directly).
@@ -116,8 +83,8 @@ public final class FakeGATTBridge: Sendable {
         return bridge
     }
 
-    /// Stores the fakes and correlation table. Hook installation is deferred to ``make(central:peripheral:manager:subscriber:)``
-    /// because it must `await` onto each fake's queue.
+    /// Stores the fakes; hook installation is deferred to
+    /// ``make(central:peripheral:manager:subscriber:)`` since it must `await`.
     private init(
         central: FakeCentral,
         peripheral: FakePeripheral,
@@ -134,16 +101,14 @@ public final class FakeGATTBridge: Sendable {
 
     private func installCentralSideHooks() async {
         await peripheral.onQueue { [self] in
-            // Route a central read to the host as a ReadRequest; remember the token so the
-            // host's response can be matched back to this read.
+            // Route a central read to the host; remember the token to match the response back.
             peripheral.onReadRequest = { [weak self] characteristic in
                 guard let self else { return }
                 let token = self.manager.simulateReadRequest(central: self.subscriber, characteristic: characteristic)
                 self.pending.withLock { $0[token] = .read(characteristic) }
             }
 
-            // Route a central write to the host as a WriteRequest. Only a `.withResponse` write
-            // awaits an acknowledgement, so only it registers a pending entry.
+            // Route a central write to the host; only `.withResponse` writes await an ack.
             peripheral.onWriteRequest = { [weak self] characteristic, data, type in
                 guard let self else { return }
                 let token = self.manager.simulateWriteRequest(central: self.subscriber, characteristic: characteristic, value: data)
@@ -168,8 +133,7 @@ public final class FakeGATTBridge: Sendable {
 
     private func installPeripheralSideHooks() async {
         await manager.onQueue { [self] in
-            // Mirror every published service into the central's discovery state, so the central
-            // discovers exactly what the host hosts, with matching properties.
+            // Mirror every published service into the central's discovery state.
             manager.onAddService = { [weak self] service in
                 guard let self else { return }
                 self.mirror(service)
@@ -202,21 +166,16 @@ public final class FakeGATTBridge: Sendable {
 
     // MARK: - Helpers
 
-    /// Mirrors one hosted service into the central-side peripheral's discovery state. Called from
-    /// the host fake's queue (the two roles are on distinct serial queues), so it cannot touch the
-    /// central-side ``FakePeripheral/availableServices``/``FakePeripheral/scriptedProperties``
-    /// setters directly and cannot ``FakePeripheral/onQueue(_:)`` (that awaits, and this fires from
-    /// a synchronous hook). Instead it defers to the peripheral's *off-queue-safe*
-    /// ``FakePeripheral/simulateMirroredService(_:)``, which hops onto the central's queue itself
-    /// (`queue.async`) and performs the read-modify-write there, atomically.
+    /// Mirrors one hosted service into the central-side peripheral's discovery state. Runs on
+    /// the host's queue (distinct from the central's), so it defers to the off-queue-safe
+    /// ``FakePeripheral/simulateMirroredService(_:)`` rather than ``FakePeripheral/onQueue(_:)``,
+    /// which would require an `await` unavailable from this synchronous hook.
     private func mirror(_ service: GATTService) {
         peripheral.simulateMirroredService(service)
     }
 
-    /// Represents an ``ATTError`` as an `NSError` in `CBATTErrorDomain` with its matching raw
-    /// code — the same domain/code a real `CBPeripheral` reports a failed read/write with — so
-    /// the central surfaces a host's ATT rejection as a genuine error, without importing
-    /// CoreBluetooth here.
+    /// Represents an ``ATTError`` as an `NSError` in `CBATTErrorDomain`, matching what a real
+    /// `CBPeripheral` reports, without importing CoreBluetooth.
     private static func nsError(from attError: ATTError) -> NSError {
         NSError(domain: "CBATTErrorDomain", code: attError.rawValue)
     }

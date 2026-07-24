@@ -4,17 +4,10 @@
 //
 
 /// The set of operations a GATT characteristic advertises support for — read, write,
-/// notify, and so on.
+/// notify, and so on. A `Sendable` `OptionSet` mirroring `CBCharacteristicProperties`.
 ///
-/// A `Sendable` `OptionSet` mirroring `CBCharacteristicProperties`, letting callers ask
-/// "is this characteristic writable / notifiable / readable?" before attempting an
-/// operation, rather than discovering capabilities via errors.
-///
-/// BLESwift-owned; the backend's native `CBCharacteristicProperties` mapping lives in the
-/// `BLESwift` module (see `CharacteristicProperties+CB.swift`) — this type never exposes a
-/// CoreBluetooth type in its own public API. Its bit layout is BLESwift's own and is not
-/// guaranteed to match `CBCharacteristicProperties`'s raw values; always construct it from
-/// named members, never from a CoreBluetooth raw value.
+/// Its bit layout is BLESwift's own and is not guaranteed to match
+/// `CBCharacteristicProperties`'s raw values; always construct it from named members.
 public struct CharacteristicProperties: OptionSet, Sendable, Hashable {
 
     /// The raw bitmask backing this option set. BLESwift-owned — not

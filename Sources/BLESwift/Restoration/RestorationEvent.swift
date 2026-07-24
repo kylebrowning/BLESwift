@@ -13,10 +13,9 @@ import Foundation
 
 /// A background-restoration event, published by ``Central/restorationEvents()``.
 ///
-/// Surfaced as a **buffered, replayed** event stream, rather than a pair of delegate
-/// protocols: every event is buffered from `Central`'s creation and replayed in order to
-/// the first ``Central/restorationEvents()`` consumer, so nothing restored during launch is
-/// lost even if the consumer task starts strictly after CoreBluetooth delivered the state.
+/// Surfaced as a **buffered, replayed** event stream: every event is buffered from
+/// `Central`'s creation and replayed in order to the first consumer, so nothing restored
+/// during launch is lost even if the consumer task starts late.
 public enum RestorationEvent: Sendable {
 
     /// CoreBluetooth is restoring preserved state — the eager, `Sendable` capture of its
@@ -32,15 +31,13 @@ public enum RestorationEvent: Sendable {
     /// none are dropped or treated as extras.
     case restoredConnection(PeripheralIdentifier)
 
-    /// Restoring a connection failed.
-    ///
-    /// Emitted with ``BLESwiftError/notConnected`` for a peripheral restored in the
-    /// `disconnecting`/`disconnected` state (these are paths with no known way to recreate
-    /// or test, so this behavior is unverified), with the manual re-connect's error for a
-    /// restored-*connecting* peripheral (timeout:
-    /// ``BLESwiftError/connectionTimedOut``), with ``BLESwiftError/startupBackgroundTaskExpired``
-    /// if iOS's startup background time ran out mid-restoration, or with
-    /// ``BLESwiftError/bluetoothUnavailable`` if the radio never reached powered-on.
+    /// Restoring a connection failed. Emitted with ``BLESwiftError/notConnected`` for a
+    /// peripheral restored in the `disconnecting`/`disconnected` state, with the manual
+    /// re-connect's error for a restored-*connecting* peripheral (timeout:
+    /// ``BLESwiftError/connectionTimedOut``), with
+    /// ``BLESwiftError/startupBackgroundTaskExpired`` if iOS's startup background time ran
+    /// out mid-restoration, or with ``BLESwiftError/bluetoothUnavailable`` if the radio
+    /// never reached powered-on.
     case failedToRestoreConnection(PeripheralIdentifier, error: Error)
 
     /// A characteristic value arrived with no active notification subscriber and no

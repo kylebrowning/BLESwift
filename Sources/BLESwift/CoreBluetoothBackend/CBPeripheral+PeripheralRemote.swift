@@ -16,25 +16,18 @@ private nonisolated(unsafe) var peripheralProxyKey: UInt8 = 0
 extension CBPeripheral {
     /// Implements `eventHandler` with an associated-object-retained `PeripheralDelegateProxy`
     /// assigned to `.delegate` (which is `weak` — the association is what keeps the proxy
-    /// alive). Setting a non-`nil` handler creates the proxy on first use and reuses it on
-    /// subsequent sets (updating its `handler`); setting `nil` clears both the proxy's
-    /// handler and `.delegate`, and drops the association. `Central` sets this uniformly
-    /// on every session-creating path (see `PeripheralRemote`'s doc comment) — unlike
-    /// `CentralManaging`'s `eventHandler`, there is no construction-order asymmetry here:
-    /// every `CBPeripheral` this property is set on already exists (handed back by
-    /// CoreBluetooth), so this is always the sole wiring mechanism.
+    /// alive). Setting a non-`nil` handler creates the proxy on first use and reuses it;
+    /// setting `nil` clears both the proxy's handler and `.delegate`. Unlike
+    /// `CentralManaging`'s `eventHandler`, there is no construction-order asymmetry here —
+    /// every `CBPeripheral` this is set on already exists.
     public var eventHandler: ((PeripheralEvent) -> Void)? {
         get {
             (objc_getAssociatedObject(self, &peripheralProxyKey) as? PeripheralDelegateProxy)?.handler
         }
         set {
-            // Bridges the protocol's plain (non-`@Sendable`) closure type into
-            // `PeripheralDelegateProxy.handler`'s `@Sendable` storage — see
-            // `CBCentralManager.eventHandler`'s setter for the full justification of this
-            // `nonisolated(unsafe)` capture (identical reasoning: `Central` is the only
-            // caller, and every closure it passes here only captures `[weak self]` of the
-            // `Central` actor plus a captured `PeripheralIdentifier` value, both
-            // genuinely `Sendable`).
+            // Bridges the protocol's plain closure type into `PeripheralDelegateProxy`'s
+            // `@Sendable` storage — see `CBCentralManager.eventHandler`'s setter for the
+            // full justification of this `nonisolated(unsafe)` capture.
             let sendableValue: (@Sendable (PeripheralEvent) -> Void)?
             if let newValue {
                 nonisolated(unsafe) let captured = newValue
@@ -84,23 +77,13 @@ extension CBPeripheral {
     }
 }
 
-/// `identifier`, `name`, `readRSSI()`, and `canSendWriteWithoutResponse` are already
-/// implemented by `CBPeripheral` with identical signatures and require no additional code
-/// here. `connectionState` maps the native `state` (`CBPeripheralState`) — it can't share
-/// that name (see ``PeripheralRemote``'s note); `writeValue(_:for:type:)` and
-/// `maximumWriteValueLength(for:)` take ``WriteType`` rather than
-/// `CBCharacteristicWriteType`, so they need bridging overloads even though CoreBluetooth
-/// already has same-named methods. The remaining members are identifier-based (see
-/// ``PeripheralRemote``) and are implemented below by resolving the identifier to a
+/// Identifier-based members are implemented below by resolving to a
 /// `CBService`/`CBCharacteristic` via `bleSwiftService(_:)`/`bleSwiftCharacteristic(_:)` and
 /// delegating to the corresponding CoreBluetooth method — silently no-op-ing when the
-/// service or characteristic has not yet been discovered, matching the `nil`-returning
-/// behavior of `bleSwiftService(_:)`/`bleSwiftCharacteristic(_:)`.
+/// service or characteristic has not yet been discovered.
 ///
-/// No `@retroactive` needed: `PeripheralRemote` (in `BLESwiftCore`) and this conformance
-/// (in `BLESwift`) are different modules but the same SPM *package* — SE-0364's
-/// retroactive-conformance check (and its warning under `.treatAllWarnings(as: .error)`)
-/// is package-scoped, not module-scoped, so this doesn't trigger it.
+/// No `@retroactive` needed: `PeripheralRemote` and this conformance are different modules
+/// but the same SPM package — SE-0364's retroactive-conformance check is package-scoped.
 extension CBPeripheral: PeripheralRemote {
 
     /// Maps the native `state` (`CBPeripheralState`) to ``PeripheralConnectionState``.

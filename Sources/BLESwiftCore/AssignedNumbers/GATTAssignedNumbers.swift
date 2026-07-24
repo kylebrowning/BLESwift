@@ -4,37 +4,14 @@
 //
 
 /// A read-only lookup of the Bluetooth SIG's *assigned numbers* — the human-readable names
-/// for standard GATT services, characteristics, and descriptors.
+/// for standard GATT services, characteristics, and descriptors (e.g. `"180D"` →
+/// `"Heart Rate"`).
 ///
-/// BLESwift speaks purely in UUIDs. This namespace pairs with the GATT enumeration API so a
-/// browser (or a log line, or a capability-driven UI) can turn an otherwise opaque
-/// ``ServiceIdentifier``/``CharacteristicIdentifier``/``DescriptorIdentifier`` into a name a
-/// human can read — `"180D"` becomes `"Heart Rate"`, `"2A37"` becomes
-/// `"Heart Rate Measurement"`, `"2902"` becomes `"Client Characteristic Configuration"`.
+/// Both 16-bit and 128-bit forms of a SIG UUID resolve to the same name. Tables are
+/// generated from the Bluetooth SIG's dataset (see `Scripts/generate-assigned-numbers.md`),
+/// plus a small set of vendor UUIDs with no 16-bit form. An unrecognized UUID returns `nil`.
 ///
-/// ```swift
-/// let heartRate = ServiceIdentifier(uuid: "180D")
-/// GATTAssignedNumbers.name(for: heartRate)   // "Heart Rate"
-/// heartRate.name                             // "Heart Rate" (convenience accessor)
-/// ```
-///
-/// ## 16-bit and 128-bit both resolve
-///
-/// 16-bit SIG UUIDs are the common case, but a peripheral may report a well-known attribute
-/// as its full 128-bit form. Any UUID that is really a SIG short UUID — i.e. one matching the
-/// Bluetooth Base UUID `0000XXXX-0000-1000-8000-00805F9B34FB` — resolves to the same name as
-/// its 16-bit shorthand. A `"0000180D-…"` and a `"180D"` both name `"Heart Rate"`.
-///
-/// ## Coverage
-///
-/// The tables are generated from the Bluetooth SIG's public *assigned numbers* dataset (see
-/// `Scripts/generate-assigned-numbers.md` for the source and regeneration procedure), plus a
-/// small set of widely-deployed vendor UUIDs that have no 16-bit form (e.g. the Nordic UART
-/// Service). A UUID with no known name returns `nil` — an unknown or vendor-private attribute
-/// is never an error.
-///
-/// - Note: This is reference data for *display*. It is not a GATT field parser: it names an
-///   attribute, it does not describe the layout of its value.
+/// - Note: Reference data for display only — it names an attribute, not its value layout.
 public enum GATTAssignedNumbers {
 
     // MARK: - Services
@@ -90,20 +67,9 @@ public enum GATTAssignedNumbers {
         return vendor[uuid]
     }
 
-    /// Extracts the 16-bit Bluetooth SIG assigned number from an already-normalized
-    /// (uppercase, canonically-shaped) UUID string, or `nil` if the UUID is not a SIG short
-    /// UUID.
-    ///
-    /// Recognizes all three normalized shapes ``ServiceIdentifier`` and friends can store:
-    /// - a 4-character 16-bit shorthand (`"180D"`) — the value itself;
-    /// - an 8-character 32-bit shorthand whose high half is zero (`"0000180D"`) — the low
-    ///   half (a genuine non-zero-high 32-bit UUID has no 16-bit assigned number and yields
-    ///   `nil`);
-    /// - a 36-character 128-bit UUID matching the Bluetooth Base UUID
-    ///   `0000XXXX-0000-1000-8000-00805F9B34FB` — the `XXXX` field.
-    ///
-    /// - Parameter uuid: A normalized UUID string, as stored by the identifier types.
-    /// - Returns: The 16-bit assigned number, or `nil` if `uuid` is not a SIG short UUID.
+    /// Extracts the 16-bit Bluetooth SIG assigned number from an already-normalized UUID
+    /// string (4-char shorthand, zero-high 8-char shorthand, or full Bluetooth Base UUID),
+    /// or `nil` if the UUID is not a SIG short UUID.
     static func assignedNumber(forNormalizedUUID uuid: String) -> UInt16? {
         switch uuid.count {
         case 4:

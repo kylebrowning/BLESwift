@@ -5,15 +5,9 @@
 
 import Foundation
 
-/// This is part of BLESwift's peripheral-role backend implementation seam (see
-/// ``PeripheralManaging``). The `CBPeripheralManagerDelegate` counterpart to
-/// ``CentralEvent``.
-///
 /// A `Sendable` representation of a `CBPeripheralManagerDelegate` callback, speaking
-/// exclusively in BLESwift-owned (never CoreBluetooth) value types. The delegate proxy that
-/// bridges real CoreBluetooth callbacks into these events lives in the `BLESwift` module.
-/// Error payloads are typed `NSError?` (unconditionally `Sendable`), bridged with
-/// `as NSError?` where emitted.
+/// exclusively in BLESwift-owned types. The `CBPeripheralManagerDelegate` counterpart to
+/// ``CentralEvent`` — see ``PeripheralManaging`` for the delivery contract.
 public enum PeripheralHostEvent: Sendable {
 
     /// The Bluetooth radio's state changed. Mirrors
@@ -52,11 +46,6 @@ public enum PeripheralHostEvent: Sendable {
 
     /// CoreBluetooth restored preserved peripheral-role state after a background relaunch
     /// (iOS). Mirrors `peripheralManager(_:willRestoreState:)`, converted eagerly to the
-    /// `Sendable` ``RestoredPeripheralState`` by the proxy (buffered behind a `Mutex` and
-    /// forwarded just before the first `didUpdateState`, same timing hazard as the
-    /// central-side `willRestoreState`).
-    ///
-    /// Compiled on every platform so `PeripheralHost`'s restoration routing stays testable
-    /// under `swift test` on macOS; only the iOS proxy produces it from a real callback.
+    /// `Sendable` ``RestoredPeripheralState`` by the proxy.
     case willRestoreState(RestoredPeripheralState)
 }

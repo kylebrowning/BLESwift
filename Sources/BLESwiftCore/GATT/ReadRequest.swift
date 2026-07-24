@@ -30,12 +30,6 @@ public struct ReadRequest: Sendable, Hashable {
     public let offset: Int
 
     /// Creates a `ReadRequest`.
-    ///
-    /// - Parameters:
-    ///   - token: The token mapping this request back to CoreBluetooth.
-    ///   - central: The remote central that issued the request.
-    ///   - characteristic: The characteristic being read.
-    ///   - offset: The byte offset the read begins at. Defaults to `0`.
     public init(
         token: RequestToken,
         central: Subscriber,

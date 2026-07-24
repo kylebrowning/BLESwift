@@ -5,19 +5,11 @@
 
 import Foundation
 
-/// This is part of BLESwift's backend implementation seam (see ``CentralManaging``).
-/// Conforming your own backend is possible but unsupported: the semantic contract (event
-/// ordering, queue confinement, delivery asynchrony) is documented on ``CentralManaging``
-/// on a best-effort basis and may gain requirements in any release.
-///
 /// A `Sendable` representation of a `CBCentralManagerDelegate` callback, speaking
-/// exclusively in BLESwift-owned (never CoreBluetooth) types.
+/// exclusively in BLESwift-owned types. See ``CentralManaging`` for the delivery contract.
 ///
-/// The delegate proxy that bridges real CoreBluetooth callbacks into these events lives in
-/// the `BLESwift` module. Error payloads are typed `NSError?` rather than `any Error` —
-/// `NSError` is unconditionally `Sendable`, while an `any Error` existential is not
-/// guaranteed to be; CoreBluetooth's delegate errors are bridged with `as NSError?` at the
-/// point they are emitted.
+/// Error payloads are typed `NSError?` rather than `any Error`, since `NSError` is
+/// unconditionally `Sendable` and an `any Error` existential is not guaranteed to be.
 public enum CentralEvent: Sendable {
 
     /// The Bluetooth radio's state changed. Mirrors
@@ -41,14 +33,6 @@ public enum CentralEvent: Sendable {
 
     /// CoreBluetooth restored preserved state after a background relaunch (iOS). Mirrors
     /// `centralManager(_:willRestoreState:)`, with the raw dictionary already converted to
-    /// the `Sendable` ``RestoredState`` by the proxy (which buffers the callback behind a
-    /// `Mutex` and forwards this event just before the first `didUpdateState` — see
-    /// `CentralDelegateProxy` — because CoreBluetooth can deliver `willRestoreState`
-    /// during `CBCentralManager.init`, before the actor is wired to the proxy).
-    ///
-    /// The case itself is compiled on every platform (`RestoredState` has a `package`
-    /// mirror off-iOS — dual-access note in `RestorationConfiguration.swift`) so `Central`'s
-    /// restoration routing stays testable under `swift test` on macOS; only the iOS proxy
-    /// ever produces it from a real CoreBluetooth callback.
+    /// the `Sendable` ``RestoredState`` by the proxy.
     case willRestoreState(RestoredState)
 }

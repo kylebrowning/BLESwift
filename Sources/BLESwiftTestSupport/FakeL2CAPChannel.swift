@@ -7,17 +7,12 @@ import BLESwiftCore
 import Dispatch
 import Foundation
 
-/// An in-memory `L2CAPChannelRemote` for tests — models an open L2CAP channel as a pair of
-/// queue-confined pipes, with **no** CoreBluetooth `InputStream`/`OutputStream` (or hardware)
-/// involved. This is what lets inbound delivery, the write path, and teardown all be
-/// exercised without a device or CB streams.
+/// An in-memory `L2CAPChannelRemote` for tests — an open L2CAP channel as a pair of
+/// queue-confined pipes, with no CoreBluetooth streams or hardware involved.
 ///
-/// **Concurrency — queue-confined, not lock-protected.** Exactly like ``FakePeripheral``:
-/// every stored property is `nonisolated(unsafe)`, safe only because every entry point
-/// asserts `dispatchPrecondition(condition: .onQueue(queue))` and touches state inline —
-/// off-queue code goes through the single sanctioned door, ``onQueue(_:)``. Inbound delivery
-/// (``simulateInbound(_:)``) and teardown are always `queue.async`, never inline from a
-/// caller's thread.
+/// Queue-confined, not lock-protected, like ``FakePeripheral``: every stored property is
+/// `nonisolated(unsafe)`, safe only because every entry point runs on `queue` and touches
+/// state inline; off-queue code goes through ``onQueue(_:)``.
 public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
 
     public let psm: L2CAPPSM
@@ -43,18 +38,13 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
         self.inboundContinuation = continuation
     }
 
-    /// Hops onto ``queue`` (via `queue.async` + a continuation) to run `body`, then returns
-    /// its result — the only sanctioned way for off-queue code to inspect this fake's state.
-    /// Because `queue` is serial, this also flushes every previously-scheduled `.async`
-    /// delivery first.
+    /// Hops onto ``queue`` to run `body` and returns its result — the only sanctioned way
+    /// for off-queue code to inspect this fake's state; also flushes previously-scheduled
+    /// `.async` deliveries since `queue` is serial. Never blocks (see
+    /// ``FakeCentral/onQueue(_:)``).
     ///
-    /// This is `async` and **never blocks the calling thread** — it does *not* use
-    /// `queue.sync`, whose cooperative-thread parking under the parallel test runner is the
-    /// deadlock fixed in issue #13 (see ``FakeCentral/onQueue(_:)`` for the full rationale).
-    ///
-    /// - Warning: Never `await` from within code already on ``queue`` (a deadlock) — in
-    ///   particular, not from the peripheral's event handler, since a `FakeL2CAPChannel`
-    ///   shares its peripheral's queue.
+    /// - Warning: Never `await` from within code already on ``queue`` — deadlocks,
+    ///   including from the peripheral's event handler since a channel shares its queue.
     public func onQueue<T: Sendable>(_ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async {

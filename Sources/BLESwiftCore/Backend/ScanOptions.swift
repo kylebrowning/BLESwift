@@ -15,9 +15,6 @@ public struct ScanOptions: Sendable, Hashable {
     public var allowDuplicates: Bool
 
     /// Creates a `ScanOptions`.
-    ///
-    /// - Parameter allowDuplicates: Whether to keep reporting an already-discovered
-    ///   peripheral's further sightings. Defaults to `false`.
     public init(allowDuplicates: Bool = false) {
         self.allowDuplicates = allowDuplicates
     }

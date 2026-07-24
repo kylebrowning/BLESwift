@@ -24,23 +24,13 @@ public struct GATTCharacteristic: Sendable, Hashable {
     /// The characteristic's cached value, or `nil` for a *dynamic* characteristic whose
     /// value is served on demand.
     ///
-    /// A non-`nil` value makes this a **static** (cached) characteristic: CoreBluetooth
-    /// answers reads itself from this constant value, and the characteristic must be
-    /// read-only (no `.write`/`.writeWithoutResponse`/`.notify`/`.indicate`), mirroring
+    /// A non-`nil` value makes this a **static** characteristic: CoreBluetooth answers reads
+    /// itself, and the characteristic must be read-only, mirroring
     /// `CBMutableCharacteristic`'s own rule. `nil` makes it **dynamic**: reads and writes
-    /// surface on `PeripheralHost/readRequests()`/`PeripheralHost/writeRequests()` for
-    /// your code to answer, and you push updates with
-    /// `PeripheralHost/updateValue(_:for:onSubscribed:)`.
+    /// surface on `PeripheralHost/readRequests()`/`PeripheralHost/writeRequests()`.
     public let value: Data?
 
     /// Creates a characteristic definition.
-    ///
-    /// - Parameters:
-    ///   - identifier: The characteristic's identifier, scoped to its owning service.
-    ///   - properties: The operations this characteristic advertises. Defaults to `[.read]`.
-    ///   - permissions: The access permissions gating the value. Defaults to `[.readable]`.
-    ///   - value: A cached value for a static (read-only) characteristic, or `nil` (the
-    ///     default) for a dynamic characteristic answered on demand.
     public init(
         identifier: CharacteristicIdentifier,
         properties: CharacteristicProperties = [.read],

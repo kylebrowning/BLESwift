@@ -3,12 +3,10 @@
 //  BLESwift
 //
 
-// `@preconcurrency`: CoreBluetooth's `CBPeripheralManager` predates Swift's Sendable audit
-// and is not `Sendable` (never mark it unchecked-`Sendable`). `stopAndExtractState()` hands a
-// `CBPeripheralManager` back to a caller outside this actor's isolation domain — a legitimate
-// one-time ownership transfer (this actor gives up its own reference in the same call) — which
-// only type-checks against `CBPeripheralManager`'s *unaudited* Sendability under
-// `@preconcurrency`. Same rationale as `Central`'s.
+// `@preconcurrency`: `CBPeripheralManager` predates Sendable and is not `Sendable`.
+// `stopAndExtractState()` hands it back to a caller outside this actor's isolation domain —
+// a legitimate one-time ownership transfer — which only type-checks under `@preconcurrency`.
+// Same rationale as `Central`'s.
 import BLESwiftCore
 @preconcurrency import CoreBluetooth
 import Dispatch
@@ -18,25 +16,19 @@ import Synchronization
 
 /// BLESwift's peripheral-role entry point: an actor wrapping a single `CBPeripheralManager`.
 ///
-/// Where ``Central`` is the *central* role (scanning for and connecting to remote
-/// peripherals), `PeripheralHost` is the *peripheral* role — it hosts a GATT database,
-/// advertises it, and answers reads / writes / subscriptions from remote centrals. Its
-/// architecture mirrors ``Central`` exactly: the actor's isolation is tied directly to the
-/// `DispatchSerialQueue` its underlying `CBPeripheralManager` delivers delegate callbacks on
-/// (see ``unownedExecutor``), so every `PeripheralManagerDelegateProxy` callback already runs
-/// on the actor's own executor and forwards into actor-isolated code via `assumeIsolated`
-/// with no thread hop.
+/// Where ``Central`` is the *central* role, `PeripheralHost` is the *peripheral* role — it
+/// hosts a GATT database, advertises it, and answers reads / writes / subscriptions from
+/// remote centrals. Its architecture mirrors ``Central`` exactly: the actor's isolation is
+/// tied directly to the `DispatchSerialQueue` its `CBPeripheralManager` delivers delegate
+/// callbacks on (see ``unownedExecutor``), so every proxy callback already runs on the
+/// actor's own executor with no thread hop.
 ///
 /// - Important: The peripheral role is not usable at runtime on every Apple platform — tvOS
-///   and watchOS in particular restrict or disallow BLE advertising, and the radio may report
-///   ``CentralState/unsupported`` there. The API compiles on all five platforms (the
-///   CoreBluetooth types it uses are available everywhere); whether advertising actually
-///   starts is a runtime property of the device and OS, surfaced through ``state`` and
-///   ``startAdvertising(_:)``'s completion.
+///   and watchOS restrict or disallow BLE advertising, surfaced through ``state`` and
+///   ``startAdvertising(_:)``'s completion rather than a compile-time restriction.
 ///
 /// - Note: Subscribe to ``readRequests()`` / ``writeRequests()`` / ``subscriptionEvents()``
-///   **before** you ``startAdvertising(_:)``. Those streams do not replay — a request that
-///   arrives before you begin consuming is not buffered.
+///   **before** you ``startAdvertising(_:)``. Those streams do not replay.
 public actor PeripheralHost {
 
     /// The `DispatchSerialQueue` this actor's executor is tied to (see ``unownedExecutor``),
@@ -50,16 +42,14 @@ public actor PeripheralHost {
         queue.asUnownedSerialExecutor()
     }
 
-    /// The CoreBluetooth shim this host drives — a real `CBPeripheralManager` in production, a
-    /// `FakePeripheralManager` in tests. `Optional`/`var` so ``stopAndExtractState()`` can
-    /// `nil` it out as part of handing the underlying `CBPeripheralManager` back to the caller
+    /// The CoreBluetooth shim this host drives. `Optional`/`var` so ``stopAndExtractState()``
+    /// can `nil` it out as part of handing the `CBPeripheralManager` back to the caller
     /// (required for a sound non-`Sendable` ownership transfer — see ``Central``'s `manager`).
     private var manager: (any PeripheralManaging)?
 
     /// This host's `CBPeripheralManagerDelegate`, strongly owned here so it outlives the gap
-    /// between its creation and `CBPeripheralManager(delegate:queue:options:)`. Non-`nil` only
-    /// for ``init(configuration:)``; the backend init wires event delivery via the shim's own
-    /// `eventHandler` instead.
+    /// before `CBPeripheralManager(delegate:queue:options:)`. Non-`nil` only for
+    /// ``init(configuration:)``.
     private let proxy: PeripheralManagerDelegateProxy?
 
     /// The configuration this host was created with (for its logger and power-alert option).
@@ -109,27 +99,18 @@ public actor PeripheralHost {
 
     // MARK: - Background restoration state
 
-    /// Multicasts every ``PeripheralRestorationEvent``. Replay `.allUntilFirstConsumer`: every
-    /// event is buffered from init and replayed, in order, to the **first**
-    /// ``restorationEvents()`` consumer — peripheral-role restoration happens during app
-    /// launch, typically before any consumer task has started, and losing those events would
-    /// defeat the feature. Mirrors ``Central``'s `restorationBroadcaster` exactly.
+    /// Multicasts every ``PeripheralRestorationEvent``. Replay `.allUntilFirstConsumer`:
+    /// restoration happens during app launch, typically before any consumer task has
+    /// started, so events are buffered and replayed to the first ``restorationEvents()``
+    /// consumer. Mirrors ``Central``'s `restorationBroadcaster`.
     private let restorationBroadcaster = Broadcaster<PeripheralRestorationEvent>(replay: .allUntilFirstConsumer)
 
     /// Creates a `PeripheralHost`, synchronously creating its underlying `CBPeripheralManager`
-    /// on a fresh, dedicated `DispatchSerialQueue`.
+    /// on a fresh, dedicated `DispatchSerialQueue`. Creation is synchronous (not deferred
+    /// behind an async `start()`) so restoration can register its restore identifier before
+    /// `willRestoreState` can arrive — same reason as ``Central/init(configuration:)``.
     ///
-    /// Manager creation is synchronous (not deferred behind an async `start()`) so that
-    /// peripheral-role state restoration can register its restore identifier at creation
-    /// time — the same reason ``Central/init(configuration:)`` creates its manager
-    /// synchronously. An async two-step start would miss `willRestoreState`, which can arrive
-    /// before the async step ever runs.
-    ///
-    /// - Parameter configuration: Start-time options. `logger` and `showPowerAlert` apply to
-    ///   the peripheral role; on iOS, a non-`nil` `configuration.peripheralRestoration`
-    ///   registers its identifier with CoreBluetooth
-    ///   (`CBPeripheralManagerOptionRestoreIdentifierKey`) at manager creation. Defaults to
-    ///   `Configuration()`.
+    /// - Parameter configuration: Start-time options. Defaults to `Configuration()`.
     public init(configuration: Configuration = Configuration()) {
         let queue = DispatchSerialQueue(label: "com.bleswift.PeripheralHost")
         self.queue = queue
@@ -142,9 +123,7 @@ public actor PeripheralHost {
         var options: [String: Any] = [
             CBPeripheralManagerOptionShowPowerAlertKey: configuration.showPowerAlert
         ]
-        // The peripheral manager's restore identifier MUST differ from any `Central`'s — a
-        // CoreBluetooth requirement (distinct identifiers per manager), enforced by exposing it
-        // as its own `Configuration.peripheralRestoration` setting.
+        // Must differ from any `Central`'s restore identifier — a CoreBluetooth requirement.
         if let peripheralRestoration = configuration.peripheralRestoration {
             options[CBPeripheralManagerOptionRestoreIdentifierKey] = peripheralRestoration.identifier
         }
@@ -158,15 +137,11 @@ public actor PeripheralHost {
         self.manager = manager
 
         // Make the same proxy reachable via the associated object, so the conformance's
-        // `respond`/`updateValue`/`add` can recover the CoreBluetooth objects it registers —
-        // the proxy was passed to the constructor directly (not via the `eventHandler`
-        // setter, whose fresh-proxy path would be wrong here).
+        // `respond`/`updateValue`/`add` can recover the CoreBluetooth objects it registers.
         manager.bleSwiftRegisterProxy(proxy)
 
-        // `self` is fully initialized by this point, so it can be captured. Sets the proxy's
-        // handler directly (bypassing the `eventHandler` associated-object mechanism, which
-        // would create a second, wrong proxy) — the same construction-order bypass as
-        // `Central.init(configuration:)`.
+        // Sets the proxy's handler directly, bypassing the `eventHandler` associated-object
+        // mechanism (which would create a second, wrong proxy) — same as `Central.init`.
         proxy.handler = { [weak self] event in
             guard let self else { return }
             self.assumeIsolated { $0.handle(event) }
@@ -174,20 +149,17 @@ public actor PeripheralHost {
     }
 
     /// Creates a `PeripheralHost` driving a custom backend — the seam that lets a scriptable
-    /// fake (`BLESwiftTestSupport`'s `FakePeripheralManager`) stand in for a real
-    /// `CBPeripheralManager`. Production apps use ``init(configuration:)``.
+    /// fake stand in for a real `CBPeripheralManager`. Production apps use
+    /// ``init(configuration:)``.
     ///
     /// - Important: `queue` **must be the exact `DispatchSerialQueue` instance** `backend`
-    ///   confines its event deliveries to — the same queue-confined contract
-    ///   ``PeripheralManaging`` documents. A mismatched queue is not detectable eagerly and
-    ///   surfaces only as an `assumeIsolated` trap the first time an event arrives off-queue.
+    ///   confines its event deliveries to. A mismatch surfaces only as an `assumeIsolated`
+    ///   trap the first time an event arrives off-queue.
     ///
-    /// - Important: **Retention.** Like ``Central``'s backend init, the closure installed on
-    ///   `backend.eventHandler` captures `self` **strongly** — `backend` is strongly held by
-    ///   this host (`self.manager = backend`), so `PeripheralHost` → `backend` → closure →
-    ///   `PeripheralHost` is a deliberate cycle that keeps a host alive for as long as
-    ///   `backend` lives. Clear it explicitly (`backend.eventHandler = nil`) for deterministic
-    ///   teardown; harmless for the short-lived test rigs this initializer exists for.
+    /// - Important: **Retention.** The closure installed on `backend.eventHandler` captures
+    ///   `self` strongly, and `backend` is held by this host — a deliberate reference cycle
+    ///   that keeps a host alive for as long as `backend` lives. Clear it explicitly
+    ///   (`backend.eventHandler = nil`) for deterministic teardown.
     ///
     /// - Parameters:
     ///   - backend: The ``PeripheralManaging`` conformance to drive.
@@ -203,10 +175,8 @@ public actor PeripheralHost {
         self.manager = backend
         self.proxy = nil
 
-        // `self` is fully initialized by this point. Wiring is hopped onto `queue` via
-        // `queue.sync` (safe: nothing else runs on `queue` during init) because `backend`'s
-        // `eventHandler` setter may be queue-confined, as `FakePeripheralManager`'s is.
-        // Strong self-capture forms the deliberate cycle documented above.
+        // `queue.sync` is safe here: nothing else runs on `queue` during init. Strong
+        // self-capture forms the deliberate cycle documented above.
         queue.sync {
             backend.eventHandler = { event in
                 self.assumeIsolated { $0.handle(event) }
@@ -422,9 +392,8 @@ public actor PeripheralHost {
     ///
     /// Mirrors the central-side back-pressure pattern (``Peripheral``'s
     /// `writeWithoutResponse` awaiting `canSendWriteWithoutResponse`): CoreBluetooth's
-    /// `updateValue` returns `false` when its transmit queue is full, and this method then
-    /// suspends until `peripheralManagerIsReady(toUpdateSubscribers:)` and retries — so the
-    /// call returns only once the update has actually been queued for transmission.
+    /// `updateValue` returns `false` when its transmit queue is full; this method then
+    /// suspends until `peripheralManagerIsReady(toUpdateSubscribers:)` and retries.
     ///
     /// - Parameters:
     ///   - value: The bytes to notify. Values longer than a subscriber's
@@ -453,16 +422,9 @@ public actor PeripheralHost {
     // MARK: - Public surface: background restoration
 
     #if os(iOS)
-    /// Returns a stream of every ``PeripheralRestorationEvent`` — **replaying every event
-    /// buffered since this `PeripheralHost` was created** to the first consumer, in order.
-    ///
-    /// Peripheral-role restoration happens during app launch, usually before any consumer task
-    /// has had a chance to start; the replay guarantees nothing is lost as long as the consumer
-    /// subscribes *eventually*. Consumers subscribing after the first see only events from
-    /// their subscription onward. Mirrors ``Central/restorationEvents()``.
-    ///
-    /// Events appear here only when ``Configuration/peripheralRestoration`` was set; without it
-    /// the stream stays silent forever.
+    /// Returns a stream of every ``PeripheralRestorationEvent`` — replaying every event
+    /// buffered since this `PeripheralHost` was created to the first consumer, in order.
+    /// Events appear here only when ``Configuration/peripheralRestoration`` was set.
     public func restorationEvents() -> AsyncStream<PeripheralRestorationEvent> {
         restorationBroadcaster.stream()
     }
@@ -517,24 +479,10 @@ public actor PeripheralHost {
             resumeReadyWaiters()
 
         case .willRestoreState(let restored):
-            // Peripheral-role restoration is simpler than the central side: CoreBluetooth
-            // itself re-publishes the preserved GATT database and resumes the preserved
-            // advertisement on the app's behalf, so there is no `.poweredOn`-gated routing to
-            // stage (contrast `Central.handle(_:)`'s `.willRestoreState`, which holds a
-            // `pendingRestoration` until the radio powers on to re-drive connections). BLESwift
-            // only reflects that restored state and surfaces it:
-            //
-            //  - Advertising: a non-`nil` restored advertisement means the peripheral WAS
-            //    advertising when terminated, and CoreBluetooth resumes it across the relaunch,
-            //    so the `isAdvertising` snapshot is brought back in line. BLESwift does not
-            //    itself re-issue `startAdvertising` — CoreBluetooth already did.
-            //  - Services: the restored services surface on the event; the iOS proxy separately
-            //    re-registers the live `CBMutableCharacteristic` handles from the restored
-            //    services so `updateValue(_:for:onSubscribed:)` works post-restoration (see
-            //    `PeripheralManagerDelegateProxy.peripheralManager(_:willRestoreState:)`).
-            //
-            // Delivered (buffered/replayed by `restorationBroadcaster`) before the first
-            // `.didUpdateState`, exactly as the central side is — see the proxy's buffering.
+            // CoreBluetooth itself re-publishes the GATT database and resumes advertising on
+            // the app's behalf; BLESwift only reflects that and surfaces it. `updateValue`
+            // post-restoration is handled separately, by the proxy re-registering the live
+            // `CBMutableCharacteristic` handles (see `peripheralManager(_:willRestoreState:)`).
             if restored.advertisement != nil {
                 isAdvertisingBox.withLock { $0 = true }
             }

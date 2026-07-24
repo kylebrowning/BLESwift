@@ -17,11 +17,6 @@ public struct Discovery: Sendable {
     public let rssi: Int
 
     /// Creates a `Discovery`.
-    ///
-    /// - Parameters:
-    ///   - peripheral: The identity of the discovered peripheral.
-    ///   - advertisement: The peripheral's parsed advertisement data.
-    ///   - rssi: The received signal strength indicator, in dBm.
     public init(peripheral: PeripheralIdentifier, advertisement: AdvertisementData, rssi: Int) {
         self.peripheral = peripheral
         self.advertisement = advertisement

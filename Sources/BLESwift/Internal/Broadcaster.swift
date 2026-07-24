@@ -20,22 +20,16 @@ enum ReplayMode: Sendable {
     /// The first subscriber (and only the first — ever) is sent every element yielded so
     /// far, in order, before seeing anything yielded after that live. The moment that
     /// first subscriber registers, the replay buffer is cleared and buffering stops for
-    /// good: subsequent subscribers — including one arriving after every previous
-    /// consumer has terminated — see only elements yielded after they subscribe, as with
-    /// ``none``. (The clearing also bounds memory: without it the buffer would grow for
-    /// the broadcaster's whole lifetime.) Intended for buffered-replay event streams
-    /// (e.g. background restoration) where exactly one consumer is expected to drain the
-    /// backlog.
+    /// good — later subscribers see only elements yielded after they subscribe, as with
+    /// ``none`` (this also bounds memory). Intended for buffered-replay event streams
+    /// (e.g. background restoration) where exactly one consumer drains the backlog.
     case allUntilFirstConsumer
 }
 
 /// A multicast primitive: fans out each ``yield(_:)``ed `Element` to every currently
 /// subscribed `AsyncStream`, with configurable replay semantics for late subscribers.
-///
-/// `AsyncStream` itself supports only one consumer; `Broadcaster` is
-/// BLESwift's own multicast layer built on top of it (swift-async-algorithms' channel type
-/// *distributes* — each element reaches exactly one consumer — and is not a multicast
-/// primitive regardless of it not being a dependency).
+/// `AsyncStream` itself supports only one consumer; this is BLESwift's own multicast layer
+/// built on top of it.
 ///
 /// State is `Mutex`-guarded rather than actor-confined: `AsyncStream.Continuation`'s
 /// `onTermination` handler fires on an arbitrary thread and must be able to unregister its
@@ -152,13 +146,9 @@ final class Broadcaster<Element: Sendable>: Sendable {
     /// Finishes every currently subscribed stream. Every stream created after this call
     /// finishes immediately without yielding anything. Idempotent.
     func finish() {
-        // `AsyncStream.Continuation.finish()` synchronously invokes that continuation's
-        // `onTermination` handler on the calling thread — which, for a continuation this
-        // broadcaster handed out, re-enters `box.withLock` (see `stream(policy:)`). Since
-        // `Mutex` is not a reentrant lock, calling `continuation.finish()` from inside a
-        // `box.withLock { ... }` closure would deadlock/abort. So: pull the continuations
-        // out (and mark `finished` / clear the dictionary) under the lock, then finish
-        // each one only after the lock has been released.
+        // `continuation.finish()` synchronously re-enters `box.withLock` via `onTermination`
+        // (see `stream(policy:)`), and `Mutex` isn't reentrant — so pull continuations out
+        // under the lock, then finish each one after it's released.
         let continuationsToFinish: [AsyncStream<Element>.Continuation] = box.withLock { state in
             guard !state.finished else { return [] }
             state.finished = true

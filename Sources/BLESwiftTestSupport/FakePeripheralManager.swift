@@ -11,21 +11,17 @@ import Synchronization
 /// A scriptable stand-in for `CBPeripheralManager`, conforming to `PeripheralManaging` — the
 /// peripheral-role counterpart to ``FakeCentral``.
 ///
-/// `CBPeripheralManager` cannot be instantiated or scripted in tests, so `FakePeripheralManager`
-/// lets you drive the shim protocol's call sites (`startAdvertising`, `add`, `respond`,
-/// `updateValue`, …) and script the events a real manager would deliver via its delegate,
-/// without any hardware or CoreBluetooth. Because it models requests and responses as **owned
-/// value types**, it imports no CoreBluetooth — so it compiles on every platform, including
-/// ones where a real `CBPeripheralManager` could not advertise. Construct one with
-/// ``init(queue:state:)`` and pass it to `PeripheralHost.init(backend:queue:configuration:)`.
+/// `CBPeripheralManager` cannot be instantiated or scripted in tests; `FakePeripheralManager`
+/// lets you drive the shim protocol's call sites and script the events a real manager would
+/// deliver via its delegate, with no hardware. Requests/responses are modeled as owned value
+/// types, so it imports no CoreBluetooth and compiles on every platform. Construct via
+/// ``init(queue:state:)``.
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
-/// ``FakeCentral``: every stored property is `nonisolated(unsafe)`; every CB-mirroring method
-/// and property accessor asserts `dispatchPrecondition(condition: .onQueue(queue))` at entry;
-/// event delivery is always `queue.async` (never inline); and ``onQueue(_:)`` is the one
-/// sanctioned door for off-queue (test) code to configure or inspect state. The single serial
-/// queue itself *is* the synchronization. `static var bluetoothAuthorization` is the one
-/// exception, backed by a `Mutex`.
+/// ``FakeCentral``: every stored property is `nonisolated(unsafe)`, every accessor asserts
+/// `dispatchPrecondition(condition: .onQueue(queue))`, event delivery is always
+/// `queue.async`, and ``onQueue(_:)`` is the one sanctioned door for off-queue code.
+/// `static var bluetoothAuthorization` is the exception, backed by a `Mutex`.
 public final class FakePeripheralManager: PeripheralManaging, Sendable {
 
     /// A recorded call to ``respond(to:value:error:)``.
@@ -91,14 +87,10 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         self._radioState = state
     }
 
-    /// Hops onto ``queue`` (via `queue.async` + a continuation) to run `body`, then returns
-    /// its result — the one sanctioned way for off-queue code to configure this fake or read
-    /// its recorded calls for assertions. Also flushes every previously-scheduled `.async`
-    /// event delivery first.
-    ///
-    /// This is `async` and **never blocks the calling thread** — it does *not* use
-    /// `queue.sync`, whose cooperative-thread parking under the parallel test runner is the
-    /// deadlock fixed in issue #13 (see ``FakeCentral/onQueue(_:)`` for the full rationale).
+    /// Hops onto ``queue`` to run `body` and returns its result — the one sanctioned way
+    /// for off-queue code to configure this fake or read its recorded calls for assertions.
+    /// Also flushes every previously-scheduled `.async` event delivery first. Never blocks
+    /// (see ``FakeCentral/onQueue(_:)``).
     ///
     /// - Warning: Never `await` from within an ``eventHandler`` callback or other on-queue
     ///   code — a deadlock, like `CBPeripheralManager`'s own queue.
@@ -203,34 +195,27 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         set { dispatchPrecondition(condition: .onQueue(queue)); _scriptedUpdateValueReturns = newValue }
     }
 
-    /// A cross-role **bridge hook** invoked synchronously, on ``queue``, from inside ``add(_:)``
-    /// with the service just published — the seam ``FakeGATTBridge`` uses to mirror this host's
-    /// hosted GATT database into a central-side ``FakePeripheral``'s discovery state, so the
-    /// central discovers exactly what the host published. Fires in addition to (not instead of)
-    /// recording the service in ``addedServices`` and delivering `.didAddService`. `nil` (the
-    /// default) is unchanged behavior. Configure via ``onQueue(_:)``.
+    /// Bridge hook fired synchronously, on ``queue``, from inside ``add(_:)`` with the
+    /// published service — used by ``FakeGATTBridge`` to mirror the host's database into a
+    /// central-side fake. `nil` (default) is unchanged behavior. Configure via ``onQueue(_:)``.
     public var onAddService: ((GATTService) -> Void)? {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _onAddService }
         set { dispatchPrecondition(condition: .onQueue(queue)); _onAddService = newValue }
     }
 
-    /// A cross-role **bridge hook** invoked synchronously, on ``queue``, from inside
-    /// ``respond(to:value:error:)`` with the recorded ``RespondCall`` — the seam
-    /// ``FakeGATTBridge`` uses to route this host's answer back to the central as a read result
-    /// (the response `value`) or a write acknowledgement (`error`, or success). Fires in
-    /// addition to recording the call in ``respondCalls``. `nil` (the default) is unchanged
-    /// behavior. Configure via ``onQueue(_:)``.
+    /// Bridge hook fired synchronously, on ``queue``, from inside
+    /// ``respond(to:value:error:)`` with the recorded ``RespondCall`` — used by
+    /// ``FakeGATTBridge`` to route the answer back to the central. `nil` (default) is
+    /// unchanged behavior. Configure via ``onQueue(_:)``.
     public var onRespond: ((RespondCall) -> Void)? {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _onRespond }
         set { dispatchPrecondition(condition: .onQueue(queue)); _onRespond = newValue }
     }
 
-    /// A cross-role **bridge hook** invoked synchronously, on ``queue``, from inside
-    /// ``updateValue(_:for:onSubscribed:)`` with the recorded ``UpdateValueCall`` (including the
-    /// back-pressure `returned` flag) — the seam ``FakeGATTBridge`` uses to surface this host's
-    /// notification as a central-side notification. Fires in addition to recording the call in
-    /// ``updateValueCalls``. `nil` (the default) is unchanged behavior. Configure via
-    /// ``onQueue(_:)``.
+    /// Bridge hook fired synchronously, on ``queue``, from inside
+    /// ``updateValue(_:for:onSubscribed:)`` with the recorded ``UpdateValueCall`` — used by
+    /// ``FakeGATTBridge`` to surface the notification to the central. `nil` (default) is
+    /// unchanged behavior. Configure via ``onQueue(_:)``.
     public var onUpdateValue: ((UpdateValueCall) -> Void)? {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _onUpdateValue }
         set { dispatchPrecondition(condition: .onQueue(queue)); _onUpdateValue = newValue }

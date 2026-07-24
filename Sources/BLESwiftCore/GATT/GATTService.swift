@@ -21,11 +21,6 @@ public struct GATTService: Sendable, Hashable {
     public let characteristics: [GATTCharacteristic]
 
     /// Creates a service definition.
-    ///
-    /// - Parameters:
-    ///   - identifier: The service's identifier.
-    ///   - isPrimary: Whether this is a primary service. Defaults to `true`.
-    ///   - characteristics: The characteristics this service hosts. Defaults to `[]`.
     public init(
         identifier: ServiceIdentifier,
         isPrimary: Bool = true,

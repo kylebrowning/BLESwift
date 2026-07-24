@@ -13,29 +13,20 @@ import Synchronization
 /// `eventHandler` for `CBPeripheralManager`. The peripheral-role counterpart to
 /// ``CentralDelegateProxy``.
 ///
-/// Every callback forwards **synchronously** to ``handler`` (the closure `PeripheralHost`
-/// installs calls `assumeIsolated`): sound because CoreBluetooth only ever calls back on the
-/// queue the manager was created with, which is exactly the `DispatchSerialQueue` backing
-/// `PeripheralHost`'s custom `SerialExecutor`. **No `Task {}`.**
+/// Every callback forwards **synchronously** to ``handler``, no `Task {}`: sound because
+/// CoreBluetooth only ever calls back on the queue the manager was created with, exactly
+/// the `DispatchSerialQueue` backing `PeripheralHost`'s custom `SerialExecutor`.
 ///
-/// Beyond forwarding, this proxy also owns three CoreBluetooth-object registries that the
-/// `CBPeripheralManager` conformance (`CBPeripheralManager+PeripheralManaging.swift`) reaches
-/// via the shared associated object — so the raw CoreBluetooth objects never cross into
-/// BLESwift-owned code:
-/// - the ``RequestToken`` → `[CBATTRequest]` map, so an app can answer a request against its
-///   value-type token;
-/// - the ``CharacteristicIdentifier`` → `CBMutableCharacteristic` map, so `updateValue`/
-///   static reads can resolve the live characteristic handle;
-/// - the subscribed-central map (`UUID` → `CBCentral`), so a value-type ``Subscriber`` can be
-///   resolved back to the `CBCentral` `updateValue(_:for:onSubscribedCentrals:)` needs.
+/// Beyond forwarding, this proxy owns three CoreBluetooth-object registries the
+/// `CBPeripheralManager` conformance reaches via the shared associated object, so raw
+/// CoreBluetooth objects never cross into BLESwift-owned code: a ``RequestToken`` →
+/// `[CBATTRequest]` map, a ``CharacteristicIdentifier`` → `CBMutableCharacteristic` map, and
+/// a subscribed-central map (`UUID` → `CBCentral`).
 ///
-/// **Concurrency.** ``handler`` is `Mutex`-guarded, like ``CentralDelegateProxy``'s, because
-/// it is assigned off-queue during manager construction and (on iOS) `willRestoreState` can
-/// arrive during `CBPeripheralManager.init` itself. The three object registries below are
-/// `nonisolated(unsafe)` and **queue-confined**: they are only ever touched from a delegate
-/// callback (on the CB queue) or from a `PeripheralManaging` conformance method (called by
-/// the queue-isolated `PeripheralHost` actor) — the single serial queue *is* their
-/// synchronization, exactly as for `FakeCentral`'s state. They are never touched off-queue.
+/// **Concurrency.** ``handler`` is `Mutex`-guarded, like ``CentralDelegateProxy``'s. The
+/// three registries below are `nonisolated(unsafe)` and **queue-confined** — touched only
+/// from a delegate callback or a `PeripheralManaging` conformance method, both on the same
+/// serial queue, never off-queue.
 final class PeripheralManagerDelegateProxy: NSObject, CBPeripheralManagerDelegate {
 
     /// Receives every ``PeripheralHostEvent`` this proxy converts from a real CoreBluetooth
@@ -133,11 +124,8 @@ final class PeripheralManagerDelegateProxy: NSObject, CBPeripheralManagerDelegat
         let serviceIdentifiers = services.map { ServiceIdentifier(cbuuid: $0.uuid) }
 
         // Re-register the live characteristic handles CoreBluetooth restored, so
-        // `updateValue(_:for:onSubscribed:)` can resolve them after a background relaunch — the
-        // restored `CBMutableService` tree already carries the app's own
-        // `CBMutableCharacteristic`s (the objects it added before termination). Queue-confined,
-        // like every other touch of `characteristicHandles` (this is a delegate callback on the
-        // CB queue). Idempotent with a later `add(_:)`.
+        // `updateValue(_:for:onSubscribed:)` can resolve them after a background relaunch.
+        // Idempotent with a later `add(_:)`.
         for service in services {
             let serviceIdentifier = ServiceIdentifier(cbuuid: service.uuid)
             for characteristic in service.characteristics ?? [] {

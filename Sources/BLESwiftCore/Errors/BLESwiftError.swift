@@ -5,15 +5,7 @@
 
 import Foundation
 
-/// Errors thrown by BLESwift.
-///
-/// `BLESwiftError`'s cases cover connection, GATT, and scanning failures. Cases whose
-/// subsystem was deleted in BLESwift's redesign (background-task mode, indefinite flush,
-/// multiple-listen trap/replace policy, queued disconnection, the single-scan-specific
-/// error superseded by ``alreadyScanning``, and the single-connection-specific error
-/// superseded by ``duplicateConnect(_:)`` once `Central` gained multi-peripheral connection
-/// support) were dropped; new cases were added where BLESwift's async/await and
-/// `AsyncSequence`-based API introduces situations a callback-based API wouldn't have.
+/// Errors thrown by BLESwift, covering connection, GATT, and scanning failures.
 /// ``duplicateConnect(_:)`` only fires for a second `connect` to the same already-tracked
 /// peripheral — connecting to a *different* peripheral never conflicts.
 public enum BLESwiftError: Error, Sendable, Equatable {
@@ -75,40 +67,29 @@ public enum BLESwiftError: Error, Sendable, Equatable {
 
     // MARK: - New in BLESwift
 
-    /// A BLESwift operation timed out. Distinct from ``connectionTimedOut`` and
-    /// ``listenTimedOut``, which are specific timeout cases; this case covers other
-    /// timeout-bounded operations (e.g. GATT read/write/RSSI) introduced by BLESwift's
-    /// `timeout:` parameters.
+    /// A BLESwift operation timed out (e.g. GATT read/write/RSSI), distinct from
+    /// ``connectionTimedOut``/``listenTimedOut``.
     case timedOut
-    /// A BLESwift operation was cancelled via Swift's structured concurrency (task
-    /// cancellation). Bridges naturally to `CancellationError` — call sites that catch
-    /// `CancellationError` from a cancelled `Task` should treat it equivalently to this
-    /// case.
+    /// A BLESwift operation was cancelled via structured concurrency task cancellation.
+    /// Equivalent to a caught `CancellationError`.
     case operationCancelled
     /// Data received over Bluetooth could not be decoded using the expected string
-    /// encoding. A force-unwrapped `String(bluetoothData:)` would crash on invalid UTF-8;
-    /// BLESwift throws this error instead.
+    /// encoding.
     case invalidStringEncoding
-    /// BLESwift does not support starting another scan while one is already active. CoreBluetooth
-    /// exposes a single physical scanner, so BLESwift enforces single-scan discipline.
+    /// BLESwift does not support starting another scan while one is already active.
     case alreadyScanning
-    /// A read was requested on a characteristic that is currently notifying.
-    /// CoreBluetooth's `didUpdateValueFor` callback can't disambiguate a read completion
-    /// from a notification delivery while a characteristic is actively notifying, so a
-    /// concurrent read is rejected instead.
+    /// A read was requested on a characteristic that is currently notifying — CoreBluetooth
+    /// can't disambiguate a read completion from a notification delivery otherwise.
     case readConflictsWithNotification
     /// A BLESwift API was called with an invalid argument; the payload describes which
     /// argument and why (e.g. a non-positive flush timeout). BLESwift throws instead of
     /// crashing on argument validation failures.
     case invalidArgument(String)
     /// An L2CAP channel-open completed reporting neither an opened channel nor an error — a
-    /// malformed `peripheral(_:didOpen:error:)` callback. `Peripheral.openL2CAPChannel`
-    /// surfaces this rather than hanging on an outcome that never arrives.
+    /// malformed `peripheral(_:didOpen:error:)` callback.
     case l2capOpenFailed
-    /// An operation on an L2CAP channel failed because the channel is closed — torn down by
-    /// a disconnect, an explicit `close()`, or a transport error. A pending or subsequent
-    /// `write(_:)`, and the inbound stream, end with this (or the underlying transport
-    /// error, when there is one).
+    /// An operation on an L2CAP channel failed because the channel is closed (disconnect,
+    /// explicit `close()`, or a transport error).
     case l2capChannelClosed
 }
 

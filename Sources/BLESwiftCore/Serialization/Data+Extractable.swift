@@ -21,9 +21,7 @@ extension Data {
     /// - Throws: ``BLESwiftError/dataOutOfBounds(start:length:count:)`` if `start` is
     ///   negative, `length` is not positive, `length` does not equal
     ///   `MemoryLayout<T>.size`, or the range `[start, start + length)` falls outside
-    ///   `self`'s bounds. The bounds check is overflow-safe: it never computes
-    ///   `start + length` when comparing against `count`, so a pathological `start` or
-    ///   `length` cannot wrap around and defeat the check.
+    ///   `self`'s bounds. The check is overflow-safe: it never computes `start + length`.
     /// - Returns: The bytes at `[start, start + length)`, reinterpreted as `T`.
     public func extract<T: BitwiseCopyable>(start: Int, length: Int) throws -> T {
         guard
