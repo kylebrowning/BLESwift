@@ -11,7 +11,7 @@ import BLESwift
 
 /// Covers a few small, previously-untested gaps:
 ///
-/// - `Peripheral.disconnect(immediate:)` — a public API with 0% prior coverage.
+/// - `Peripheral.disconnect()` — a public API with 0% prior coverage.
 /// - `Peripheral.resolveCentral()`'s `.notConnected` throw once the owning `Central` actor
 ///   has deallocated (exercised through the public `disconnect()` call site, since
 ///   `resolveCentral()` itself is `internal`).
@@ -19,10 +19,10 @@ import BLESwift
 @Suite("Peripheral disconnect")
 struct PeripheralDisconnectTests {
 
-    // MARK: - Peripheral.disconnect(immediate:)
+    // MARK: - Peripheral.disconnect()
 
-    @Test("Peripheral.disconnect() (default immediate: false) resolves and leaves the peripheral disconnected")
-    func disconnectDefaultResolves() async throws {
+    @Test("Peripheral.disconnect() resolves and leaves the peripheral disconnected")
+    func disconnectResolves() async throws {
         let (central, fakeCentral, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
 
         let disconnectTask = Task { try await peripheral.disconnect() }
@@ -32,27 +32,6 @@ struct PeripheralDisconnectTests {
 
         guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected after peripheral.disconnect()")
-            return
-        }
-    }
-
-    @Test("Peripheral.disconnect(immediate: true) also resolves and leaves the peripheral disconnected")
-    func disconnectImmediateResolves() async throws {
-        // `Central.disconnect(_:immediate:)`'s `immediate` flag isn't threaded into any
-        // fake-observable difference along the current disconnect path (both call sites
-        // route through the same `beginDisconnecting`, which already fails pending GATT
-        // operations unconditionally before waiting on CoreBluetooth's confirmation) — so
-        // this can only confirm `disconnect(immediate: true)` compiles and resolves the
-        // same way as the default, not that its behavior differs observably.
-        let (central, fakeCentral, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-
-        let disconnectTask = Task { try await peripheral.disconnect(immediate: true) }
-        await waitFor { await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
-        fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
-        try await disconnectTask.value
-
-        guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
-            Issue.record("expected .disconnected after peripheral.disconnect(immediate: true)")
             return
         }
     }

@@ -39,17 +39,15 @@ public struct Peripheral: Sendable {
         return central
     }
 
-    /// Disconnects this peripheral — the ergonomic call-site for
-    /// `Central.disconnect(_:immediate:)`.
+    /// Disconnects this peripheral — the ergonomic call-site for `Central.disconnect(_:)`.
     ///
-    /// - Parameter immediate: If `true`, fails pending operations with
-    ///   ``BLESwiftError/explicitDisconnect`` rather than waiting for them to finish.
-    ///   Defaults to `false`.
+    /// Pending operations are failed with ``BLESwiftError/explicitDisconnect``.
+    ///
     /// - Throws: ``BLESwiftError/notConnected`` if the owning `Central` has already been
-    ///   deallocated, or as documented on `Central.disconnect(_:immediate:)`.
-    public func disconnect(immediate: Bool = false) async throws {
+    ///   deallocated, or as documented on `Central.disconnect(_:)`.
+    public func disconnect() async throws {
         let central = try resolveCentral()
-        try await central.disconnect(id, immediate: immediate)
+        try await central.disconnect(id)
     }
 }
 

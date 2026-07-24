@@ -85,7 +85,7 @@ try await central.connect(identifier, reconnect: .custom { attempt, error in
 
 A ``ReconnectPolicy`` only ever triggers after a connection is lost (or fails, times out, or is
 cancelled) some way *other than* an explicit ``Central/disconnect(_:)``/
-``Central/disconnect(_:immediate:)``/``Central/disconnectAll()``/
+``Central/disconnectAll()``/
 ``Central/cancelAllOperations(error:)`` call — those are always treated as intentional and
 never trigger a retry for the peripheral(s) they affect, regardless of the policy in effect. A
 new `connect` call to a given identifier also cancels any reconnect loop already in flight for
@@ -144,12 +144,10 @@ for await event in await central.connectionEvents() {
 
 Every disconnect verb is per-peripheral except ``Central/disconnectAll()``:
 
-- ``Peripheral/disconnect(immediate:)`` — the ergonomic call-site: disconnects the peripheral
+- ``Peripheral/disconnect()`` — the ergonomic call-site: disconnects the peripheral
   the handle refers to. Prefer this when you already have a `Peripheral`.
-- ``Central/disconnect(_:)`` — gracefully disconnects one peripheral by identifier; equivalent
-  to `disconnect(id, immediate: false)`.
-- ``Central/disconnect(_:immediate:)`` — same, with explicit control over whether pending
-  operations are failed immediately or drained first.
+- ``Central/disconnect(_:)`` — disconnects one peripheral by identifier, failing any pending
+  operations with ``BLESwiftError/explicitDisconnect``.
 - ``Central/disconnectAll()`` — best-effort teardown of every tracked peripheral at once: cancels
   every reconnect loop, then disconnects every tracked entry. Never throws — individual outcomes
   are observable on ``Central/connectionEvents()``. Idempotent, and a no-op with nothing tracked.
@@ -162,7 +160,7 @@ explicit disconnect is always treated as intentional.
 An auto-reconnect loop spends most of its time asleep between attempts — during that backoff
 window, ``Central/connectionState(of:)`` reports ``ConnectionState/disconnected`` for that
 peripheral, even though a reconnect attempt is still pending. Calling
-``Central/disconnect(_:)``/``Central/disconnect(_:immediate:)`` for that identifier during that
+``Central/disconnect(_:)`` for that identifier during that
 window is honored as "stop trying to reconnect": it cancels the pending reconnect attempt and
 returns normally, rather than throwing ``BLESwiftError/notConnected`` as it would if there were
 truly nothing in flight for that peripheral. ``Central/cancelAllOperations(error:)`` does the

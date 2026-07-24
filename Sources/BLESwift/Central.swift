@@ -538,27 +538,18 @@ public actor Central {
         )
     }
 
-    /// Gracefully disconnects `id`: equivalent to `disconnect(id, immediate: false)`.
-    ///
-    /// - Throws: ``BLESwiftError/notConnected`` if `id` has no connection or connection
-    ///   attempt in progress; ``BLESwiftError/multipleDisconnectNotSupported`` if `id` is
-    ///   already disconnecting.
-    public func disconnect(_ id: PeripheralIdentifier) async throws {
-        try await disconnect(id, immediate: false)
-    }
-
     /// Disconnects a connected peripheral, or cancels a connection attempt in progress, for
     /// `id`. Never triggers a ``ReconnectPolicy`` retry — an explicit `disconnect` is always
     /// treated as intentional. Other peripherals are unaffected.
     ///
-    /// - Parameters:
-    ///   - id: The peripheral to disconnect.
-    ///   - immediate: If `true`, fails pending operations with
-    ///     ``BLESwiftError/explicitDisconnect`` rather than waiting for them to finish.
+    /// Any operations still in flight on the outgoing connection (reads, writes, notification
+    /// streams, L2CAP channels) are failed with ``BLESwiftError/explicitDisconnect``.
+    ///
+    /// - Parameter id: The peripheral to disconnect.
     /// - Throws: ``BLESwiftError/notConnected`` if `id` has no connection, connection attempt,
     ///   or in-flight auto-reconnect loop; ``BLESwiftError/multipleDisconnectNotSupported`` if
     ///   `id` is already disconnecting.
-    public func disconnect(_ id: PeripheralIdentifier, immediate: Bool) async throws {
+    public func disconnect(_ id: PeripheralIdentifier) async throws {
         switch connections[id] {
         case .none:
             // No tracked entry doesn't mean nothing to stop: an auto-reconnect loop runs
@@ -619,7 +610,7 @@ public actor Central {
         }
 
         for id in Array(connections.keys) {
-            try? await disconnect(id, immediate: true)
+            try? await disconnect(id)
         }
     }
 
@@ -3403,7 +3394,7 @@ private enum PeripheralPhase {
     case connecting(Connecting)
     /// Connected.
     case connected(Session)
-    /// Disconnecting — either an explicit `disconnect(_:)`/`disconnect(_:immediate:)` is in
+    /// Disconnecting — either an explicit `disconnect(_:)` is in
     /// flight, or `cancelAllOperations` cancelled a pending connection attempt.
     case disconnecting(Disconnecting)
 }
@@ -3608,7 +3599,7 @@ private final class SequentialAccessIterator<Element: Sendable>: Sendable {
 private struct Disconnecting {
     let identifier: PeripheralIdentifier
     let peripheral: any PeripheralRemote
-    /// The `disconnect()`/`disconnect(immediate:)` call's own continuation, if this
+    /// The `disconnect()` call's own continuation, if this
     /// `Disconnecting` was entered that way.
     var continuation: CheckedContinuation<Void, Error>?
     /// A connect attempt's continuation, carried over if `disconnect`/`cancelAllOperations`
