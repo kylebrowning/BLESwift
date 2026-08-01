@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Strict build & test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (warnings as errors)
+        run: BLESWIFT_STRICT=1 swift build
+      - name: Test
+        run: BLESWIFT_STRICT=1 swift test
+      - name: Consumer simulation (issue #20 regression guard)
+        # Xcode compiles package dependencies with -suppress-warnings, which
+        # hard-conflicts with -warnings-as-errors. This step fails if strict
+        # warnings ever leak back into the default (consumer-facing) settings.
+        run: swift build -Xswiftc -suppress-warnings

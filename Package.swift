@@ -1,12 +1,16 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
+// Strict warnings only when explicitly requested (CI / local dev). Xcode compiles package
+// dependencies with -suppress-warnings, which hard-conflicts with -warnings-as-errors and
+// makes the package unbuildable for consumers. Build strict with: BLESWIFT_STRICT=1 swift build
+let strict = Context.environment["BLESWIFT_STRICT"] != nil
+
 let sharedSwiftSettings: [SwiftSetting] = [
     .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
     .enableUpcomingFeature("InferIsolatedConformances"),
     .enableUpcomingFeature("MemberImportVisibility"),
-    .treatAllWarnings(as: .error),
-]
+] + (strict ? [.treatAllWarnings(as: .error)] : [])
 
 let package = Package(
     name: "BLESwift",
