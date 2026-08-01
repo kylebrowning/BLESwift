@@ -751,7 +751,7 @@ public actor Central {
         warningOptions: WarningOptions
     ) async throws -> Peripheral {
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Peripheral, Error>) in
+            let attach = { [self] (continuation: CheckedContinuation<Peripheral, Error>) in
                 // Attach to the slot the caller reserved synchronously via
                 // `reserveConnectingSlot` — do NOT create it here. A reserved slot is
                 // `.connecting` with a `nil` continuation (and no CoreBluetooth attempt
@@ -782,6 +782,12 @@ public actor Central {
                 log("Connecting to \(id)", level: .info, category: "connection")
                 manager?.connect(connecting.peripheral, options: warningOptions)
             }
+            // Explicit isolation pin on Swift ≤6.3 — see withCancellableGATTContinuation.
+            #if compiler(>=6.4)
+            return try await withCheckedThrowingContinuation(attach)
+            #else
+            return try await withCheckedThrowingContinuation(isolation: self, attach)
+            #endif
         } onCancel: {
             self.queue.async {
                 self.assumeIsolated { central in
@@ -2731,8 +2737,17 @@ public actor Central {
         register: (CheckedContinuation<T, Error>) -> Void,
         onCancelled: @escaping @Sendable () -> Void
     ) async throws -> T {
+        // On Swift ≤6.3 the compiler loses the inferred #isolation through the
+        // cancellation-handler closure and runs `register` off the actor's executor —
+        // silently breaking queue confinement for backend calls — so isolation is pinned
+        // explicitly. 6.4 deprecates that overload for a nonisolated(nonsending) one that
+        // inherits the actor correctly on its own.
         try await withTaskCancellationHandler {
+            #if compiler(>=6.4)
             try await withCheckedThrowingContinuation(register)
+            #else
+            try await withCheckedThrowingContinuation(isolation: self, register)
+            #endif
         } onCancel: {
             onCancelled()
         }

@@ -589,8 +589,13 @@ public actor PeripheralHost {
         register: (CheckedContinuation<T, Error>) -> Void,
         onCancelled: @escaping @Sendable () -> Void
     ) async throws -> T {
+        // Explicit isolation pin on Swift ≤6.3 — see Central.withCancellableGATTContinuation.
         try await withTaskCancellationHandler {
+            #if compiler(>=6.4)
             try await withCheckedThrowingContinuation(register)
+            #else
+            try await withCheckedThrowingContinuation(isolation: self, register)
+            #endif
         } onCancel: {
             onCancelled()
         }
