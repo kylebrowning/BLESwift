@@ -3437,6 +3437,22 @@ private struct Session {
     let timeout: Duration?
     let warningOptions: WarningOptions
 
+    // Explicit because the synthesized memberwise init is private (nextWaiterTokenValue is
+    // a private stored property), which makes it inaccessible at the file-scope call site.
+    init(
+        identifier: PeripheralIdentifier,
+        peripheral: any PeripheralRemote,
+        policy: ReconnectPolicy,
+        timeout: Duration?,
+        warningOptions: WarningOptions
+    ) {
+        self.identifier = identifier
+        self.peripheral = peripheral
+        self.policy = policy
+        self.timeout = timeout
+        self.warningOptions = warningOptions
+    }
+
     // MARK: - GATT
 
     /// Per-characteristic FIFO tail-chain — see `Central.runOnFIFO(identifier:characteristic:operation:)`.
