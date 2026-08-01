@@ -77,17 +77,20 @@ struct CrossRoleEndToEndTests {
         try await rig.host.add(service)
 
         // Subscribe to the request streams BEFORE advertising — they do not replay.
+        // The tasks capture `host` alone: referencing `rig.host` inside would capture the
+        // whole non-Sendable Rig, which Swift 6.3 rejects when sending the closure.
+        let host = rig.host
         let readResponder = Task {
-            for await request in await rig.host.readRequests() {
-                await rig.host.respond(to: request, with: .success(hostedValue.withLock { $0 }))
+            for await request in await host.readRequests() {
+                await host.respond(to: request, with: .success(hostedValue.withLock { $0 }))
             }
         }
         let writeResponder = Task {
-            for await request in await rig.host.writeRequests() {
+            for await request in await host.writeRequests() {
                 for entry in request.entries {
                     hostedValue.withLock { $0 = entry.value }
                 }
-                await rig.host.respond(to: request, with: .success(()))
+                await host.respond(to: request, with: .success(()))
             }
         }
 
