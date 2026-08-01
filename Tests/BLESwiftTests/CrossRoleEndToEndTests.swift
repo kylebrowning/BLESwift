@@ -80,12 +80,12 @@ struct CrossRoleEndToEndTests {
         // The tasks capture `host` alone: referencing `rig.host` inside would capture the
         // whole non-Sendable Rig, which Swift 6.3 rejects when sending the closure.
         let host = rig.host
-        let readResponder = Task {
+        let readResponder = Task { @Sendable in
             for await request in await host.readRequests() {
                 await host.respond(to: request, with: .success(hostedValue.withLock { $0 }))
             }
         }
-        let writeResponder = Task {
+        let writeResponder = Task { @Sendable in
             for await request in await host.writeRequests() {
                 for entry in request.entries {
                     hostedValue.withLock { $0 = entry.value }
