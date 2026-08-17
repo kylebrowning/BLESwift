@@ -3,6 +3,12 @@
 //  BLESwift
 //
 
+// The peripheral role compiles only for iOS and macOS: `CBPeripheralManager`'s designated
+// initializer is `API_UNAVAILABLE` on watchOS/tvOS, and `CBMutableService`/
+// `CBMutableCharacteristic` construction is unavailable on visionOS, so the role cannot
+// function on any of those platforms (issue #22). The central role is unaffected.
+#if os(iOS) || os(macOS)
+
 // `@preconcurrency`: `CBPeripheralManager` predates Sendable and is not `Sendable`.
 // `stopAndExtractState()` hands it back to a caller outside this actor's isolation domain —
 // a legitimate one-time ownership transfer — which only type-checks under `@preconcurrency`.
@@ -23,9 +29,9 @@ import Synchronization
 /// callbacks on (see ``unownedExecutor``), so every proxy callback already runs on the
 /// actor's own executor with no thread hop.
 ///
-/// - Important: The peripheral role is not usable at runtime on every Apple platform — tvOS
-///   and watchOS restrict or disallow BLE advertising, surfaced through ``state`` and
-///   ``startAdvertising(_:)``'s completion rather than a compile-time restriction.
+/// - Important: The peripheral role is available only on iOS and macOS. CoreBluetooth does
+///   not support constructing a `CBPeripheralManager` on watchOS or tvOS, or building a
+///   GATT database on visionOS, so `PeripheralHost` does not exist on those platforms.
 ///
 /// - Note: Subscribe to ``readRequests()`` / ``writeRequests()`` / ``subscriptionEvents()``
 ///   **before** you ``startAdvertising(_:)``. Those streams do not replay.
@@ -607,3 +613,5 @@ public actor PeripheralHost {
         configuration.logger.log(level: level, message(), metadata: ["category": .string(category)])
     }
 }
+
+#endif

@@ -12,11 +12,11 @@ its manager delivers delegate callbacks on, exactly like ``Central``. You build 
 from value types, advertise it, and respond to remote centrals through `async`/`AsyncSequence`
 APIs — no delegate, no callbacks.
 
-- Important: The peripheral role is not usable at runtime on every platform. tvOS and watchOS
-  restrict or disallow BLE advertising; the radio may report ``CentralState/unsupported`` there.
-  The API compiles everywhere (its CoreBluetooth types are available on all five platforms) —
-  whether advertising actually starts is a runtime property surfaced through ``PeripheralHost/state``
-  and ``PeripheralHost/startAdvertising(_:)``.
+- Important: The peripheral role is available only on iOS and macOS. CoreBluetooth does not
+  support constructing a `CBPeripheralManager` on watchOS or tvOS, or building a GATT database
+  on visionOS, so ``PeripheralHost`` and its backend do not exist on those platforms — the
+  role is excluded at compile time. The central role (``Central``) is available on all five
+  platforms.
 
 ## Building a GATT database
 

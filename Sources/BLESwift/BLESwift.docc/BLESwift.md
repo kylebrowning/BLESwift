@@ -13,7 +13,9 @@ subscriber sees independently.
 
 BLESwift targets every platform CoreBluetooth ships on — iOS, macOS, watchOS, tvOS, and visionOS —
 at each platform's floor needed for Swift 6.2's custom-executor isolation checking (SE-0424):
-iOS 18, macOS 15, watchOS 11, tvOS 18, visionOS 2.
+iOS 18, macOS 15, watchOS 11, tvOS 18, visionOS 2. The central role is available everywhere;
+the peripheral role (``PeripheralHost``) is iOS/macOS-only because CoreBluetooth does not
+support it on the other platforms — see <doc:PeripheralRole>.
 
 BLESwift is built around Swift's structured concurrency from the ground up — see the articles
 below for the resulting flows.

@@ -20,3 +20,19 @@ jobs:
         # hard-conflicts with -warnings-as-errors. This step fails if strict
         # warnings ever leak back into the default (consumer-facing) settings.
         run: swift build -Xswiftc -suppress-warnings
+
+  platform-build:
+    # The manifest declares watchOS/tvOS/visionOS; the peripheral role's CoreBluetooth
+    # APIs are unavailable there and must stay fenced out (issue #22 regression guard).
+    name: Build (${{ matrix.platform }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [watchOS, tvOS, visionOS]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build BLESwift
+        run: xcodebuild build -scheme BLESwift -destination 'generic/platform=${{ matrix.platform }}'
+      - name: Build BLESwiftTestSupport
+        run: xcodebuild build -scheme BLESwiftTestSupport -destination 'generic/platform=${{ matrix.platform }}'
