@@ -3,6 +3,10 @@
 //  BLESwift
 //
 
+// iOS/macOS-only, like `PeripheralHost` and the `CBPeripheralManager` conformance it
+// serves (issue #22).
+#if os(iOS) || os(macOS)
+
 import BLESwiftCore
 import CoreBluetooth
 import Foundation
@@ -227,3 +231,5 @@ extension Subscriber {
         self.init(id: central.identifier, maximumUpdateValueLength: central.maximumUpdateValueLength)
     }
 }
+
+#endif

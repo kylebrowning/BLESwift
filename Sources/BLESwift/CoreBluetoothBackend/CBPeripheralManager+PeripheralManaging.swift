@@ -3,6 +3,11 @@
 //  BLESwift
 //
 
+// iOS/macOS-only, like `PeripheralHost`: `CBMutableService`/`CBMutableCharacteristic`
+// construction (needed by `add(_:)` below) is unavailable on visionOS, and
+// `CBPeripheralManager` cannot be constructed on watchOS/tvOS (issue #22).
+#if os(iOS) || os(macOS)
+
 import BLESwiftCore
 import CoreBluetooth
 import Foundation
@@ -155,3 +160,5 @@ extension CBPeripheralManager: PeripheralManaging {
         return updateValue(value, for: cbCharacteristic, onSubscribedCentrals: cbCentrals)
     }
 }
+
+#endif
