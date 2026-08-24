@@ -18,3 +18,6 @@ docs/
 # Internal planning documents (local only)
 plans/
 Examples/*/.build/
+
+# Swift 6.3 release-toolchain verification scratch (consumer-toolchain check)
+/.build-6.3/
