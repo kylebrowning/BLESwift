@@ -451,6 +451,22 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
+    /// Simulates CoreBluetooth dropping this peripheral's cached service graph — as
+    /// happens on a real disconnect — clearing every discovered service, characteristic,
+    /// and descriptor along with the notifying set. ``availableServices``,
+    /// ``availableDescriptors``, and every scripted value are untouched, so a subsequent
+    /// re-discovery behaves per the same scripts. Use it to model a peripheral whose GATT
+    /// graph must be re-discovered (or has changed) across a reconnect.
+    public func simulateGATTCacheReset() {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            _discoveredServices.removeAll()
+            _discoveredCharacteristics.removeAll()
+            _discoveredDescriptors.removeAll()
+            _notifyingCharacteristics.removeAll()
+        }
+    }
+
     /// Simulates a connection-state change, asynchronously. Does not itself deliver an
     /// event — connection events are delivered by `FakeCentral`, which owns the
     /// connect/disconnect flow.

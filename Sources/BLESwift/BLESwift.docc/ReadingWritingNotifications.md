@@ -92,9 +92,9 @@ struct Command: Transmittable {
 
 ### Notification streams
 
-``Peripheral/notifications(for:policy:)`` supports any number of concurrent subscribers.
-BLESwift's notification streams are **multicast**: each subscriber independently receives
-every value.
+``Peripheral/notifications(for:policy:survivesReconnect:)`` supports any number of concurrent
+subscribers. BLESwift's notification streams are **multicast**: each subscriber independently
+receives every value.
 
 ```swift
 let readings: AsyncThrowingStream<HeartRateMeasurement, Error> =
@@ -112,9 +112,20 @@ delivered mid-handshake is ever lost), and only the last subscriber to stop cons
 them again (and only while still connected with the radio powered on).
 
 There is no explicit "stop listening" call: stop consuming (`break`, or cancel the consuming
-`Task`) to unsubscribe. A stream ends by **throwing** when the connection ends — see
-<doc:ConnectionsAndReconnection> for why streams don't survive reconnection and how to
-resubscribe.
+`Task`) to unsubscribe. By default a stream ends by **throwing** when the connection ends;
+pass `survivesReconnect: true` to instead keep the stream parked across an unexpected
+disconnect that an active ``ReconnectPolicy`` will retry, resuming delivery on the same
+stream once the reconnect re-arms the subscription:
+
+```swift
+let readings: AsyncThrowingStream<HeartRateMeasurement, Error> =
+    peripheral.notifications(for: heartRateMeasurement, survivesReconnect: true)
+```
+
+See <doc:ConnectionsAndReconnection> for the full survival semantics — the
+``ConnectionEvent/notificationsRestored(_:restored:failed:)`` event, what happens when the
+reconnect never succeeds or a characteristic can't be re-armed — and for how to resubscribe
+manually in the default mode.
 
 ``BufferingPolicy`` (BLESwift's own mirror of `AsyncStream.Continuation.BufferingPolicy`, since the
 stdlib one is generic over the stream's element and so can't appear in `notifications`'s own
@@ -124,7 +135,8 @@ newest or oldest value respectively once full.
 
 #### Decode isolation
 
-`notifications(for:policy:)` decodes each raw value into `Value` **per subscriber** — every
+`notifications(for:policy:survivesReconnect:)` decodes each raw value into `Value` **per
+subscriber** — every
 subscriber has its own decode layer over one shared raw-`Data` multicast. If `Value`'s
 ``Receivable`` decoding throws for a particular value, only *that* subscriber's stream finishes
 with the decode error; sibling subscribers (and the underlying subscription) are unaffected,

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Peripheral.notifications(for:policy:survivesReconnect:)`: an optional
+  `survivesReconnect` parameter (default `false`, preserving existing behavior) that keeps a
+  notification stream parked across an unexpected disconnect an active `ReconnectPolicy`
+  will retry, resuming delivery on the same stream once the reconnect re-arms the
+  subscription.
+- `ConnectionEvent.notificationsRestored(_:restored:failed:)`: emitted once after a
+  reconnect re-arms surviving notification subscriptions, listing the characteristics
+  restored and mapping any that failed to re-arm to their errors.
+- `FakePeripheral.simulateGATTCacheReset()` (BLESwiftTestSupport): clears the fake's
+  discovered service graph as a real disconnect would, for testing re-discovery across
+  reconnects.
+
 ### Changed
 
 ### Fixed

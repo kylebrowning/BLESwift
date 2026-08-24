@@ -9,9 +9,12 @@
 /// Set per `connect(_:timeout:reconnect:warningOptions:)` call, independently for each
 /// peripheral. Observe retry progress via ``ConnectionEvent/reconnecting(_:attempt:)``.
 ///
-/// - Note: Reconnection never re-arms any previously-active notification streams — those
-///   finish (with an error) at disconnect time. Re-subscribe in response to a
-///   ``ConnectionEvent/connected(_:)`` event.
+/// - Note: By default, reconnection does not re-arm previously-active notification streams —
+///   those finish (with an error) at disconnect time; re-subscribe in response to a
+///   ``ConnectionEvent/connected(_:)`` event. Subscribers that opted into
+///   ``Peripheral/notifications(for:policy:survivesReconnect:)``'s `survivesReconnect: true`
+///   are the exception: their streams park across the gap and resume once the reconnect
+///   succeeds (see ``ConnectionEvent/notificationsRestored(_:restored:failed:)``).
 public struct ReconnectPolicy: Sendable {
 
     /// The concrete retry behavior this policy encodes. `internal` — callers only ever see

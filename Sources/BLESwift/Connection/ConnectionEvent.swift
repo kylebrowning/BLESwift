@@ -31,4 +31,14 @@ public enum ConnectionEvent: Sendable {
     /// ``Central`` is attempting reconnect attempt number `attempt` (1-indexed) to
     /// `PeripheralIdentifier`, per an active ``ReconnectPolicy``.
     case reconnecting(PeripheralIdentifier, attempt: Int)
+
+    /// After an automatic reconnect to `PeripheralIdentifier`, BLESwift re-armed the
+    /// notification subscriptions whose subscribers opted into `survivesReconnect` (see
+    /// ``Peripheral/notifications(for:policy:survivesReconnect:)``). `restored` lists the
+    /// characteristics notifying again on their original streams, sorted by UUID string for
+    /// determinism; `failed` maps each characteristic that could not be re-armed (missing
+    /// after a GATT change, enable error) to the error its surviving streams finished with.
+    /// Emitted once per successful reconnect that had at least one surviving subscription;
+    /// never emitted otherwise.
+    case notificationsRestored(PeripheralIdentifier, restored: [CharacteristicIdentifier], failed: [CharacteristicIdentifier: any Error])
 }

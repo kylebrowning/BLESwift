@@ -80,6 +80,13 @@ public actor Central {
     /// `disconnectAll()`, or `deinit`.
     private var reconnectLoops: [PeripheralIdentifier: ReconnectLoop] = [:]
 
+    /// Surviving notification subscriptions parked between an unexpected disconnect and a
+    /// successful auto-reconnect, keyed by peripheral — see
+    /// ``finishNotificationStreams(for:error:retainSurvivors:)`` (entry),
+    /// ``rearmDormantNotifications(_:)`` (exit via reconnect), and
+    /// ``finishDormantNotifications(for:error:)`` (exit without one).
+    private var dormantNotifications: [PeripheralIdentifier: DormantNotifications] = [:]
+
     /// Actor-wide monotonic generation allocator, incremented whenever
     /// ``scheduleReconnect(identifier:policy:timeout:warningOptions:)`` starts a new loop.
     /// Each ``ReconnectLoop`` stores its generation; see ``clearReconnectLoopIfCurrent(id:generation:)``.
@@ -395,6 +402,9 @@ public actor Central {
         endStartupBackgroundTask()
         failAllSessionsPendingGATTContinuations(error: .stopped)
         finishAllSessionsNotificationStreams(error: BLESwiftError.stopped)
+        for identifier in Array(dormantNotifications.keys) {
+            finishDormantNotifications(for: identifier, error: BLESwiftError.stopped)
+        }
         closeAllSessionsL2CAPChannels(error: BLESwiftError.stopped)
         connections.removeAll()
 
@@ -526,9 +536,12 @@ public actor Central {
 
         // Cancel an in-flight reconnect loop for THIS peripheral only. Safe after
         // reserving: a mid-flight reconnect *attempt* would already own the slot, so the
-        // reservation above would have thrown first.
+        // reservation above would have thrown first. A user re-connect supersedes the loop,
+        // so any notification subscriptions parked awaiting it finish now, with
+        // `.explicitDisconnect` — the new connection starts with a clean slate.
         reconnectLoops[id]?.task.cancel()
         reconnectLoops.removeValue(forKey: id)
+        finishDormantNotifications(for: id, error: BLESwiftError.explicitDisconnect)
 
         return try await establishConnection(
             identifier: id,
@@ -559,6 +572,7 @@ public actor Central {
                 reconnectLoops[id]?.task.cancel()
                 reconnectLoops.removeValue(forKey: id)
                 reconnectGeneration += 1
+                finishDormantNotifications(for: id, error: BLESwiftError.explicitDisconnect)
                 log("disconnect(\(id)) cancelled an in-flight auto-reconnect loop", level: .info, category: "connection")
                 return
             }
@@ -609,6 +623,13 @@ public actor Central {
             log("disconnectAll() cancelled every in-flight auto-reconnect loop", level: .info, category: "connection")
         }
 
+        // Mid-backoff peripherals have no `connections` entry, so the disconnect loop below
+        // never reaches their parked notification survivors — finish those here. Connected
+        // peripherals' records are finished by `handleTermination`'s `.disconnecting` branch.
+        for id in Array(dormantNotifications.keys) where connections[id] == nil {
+            finishDormantNotifications(for: id, error: BLESwiftError.explicitDisconnect)
+        }
+
         for id in Array(connections.keys) {
             try? await disconnect(id)
         }
@@ -635,6 +656,12 @@ public actor Central {
             reconnectLoops.removeAll()
             reconnectGeneration += 1
             log("cancelAllOperations() cancelled every in-flight auto-reconnect loop", level: .info, category: "connection")
+        }
+
+        // A parked notification survivor is a pending operation too — finish every dormant
+        // record with the resolved error, across every peripheral.
+        for identifier in Array(dormantNotifications.keys) {
+            finishDormantNotifications(for: identifier, error: resolvedError)
         }
 
         for identifier in Array(connections.keys) {
@@ -900,6 +927,9 @@ public actor Central {
             closeL2CAPChannels(for: identifier, error: resolvedError)
 
             let willReconnect = !policy.isNever
+            if !willReconnect {
+                finishDormantNotifications(for: identifier, error: resolvedError)
+            }
             connectionBroadcaster.yield(.disconnected(identifier, error: resolvedError, willReconnect: willReconnect))
 
             continuation?.resume(throwing: resolvedError)
@@ -915,19 +945,23 @@ public actor Central {
             let policy = session.policy
             let timeout = session.timeout
             let warningOptions = session.warningOptions
+            let willReconnect = !policy.isNever
 
             // Fail GATT ops and finish notification streams before removing the entry —
-            // see `beginDisconnecting`.
+            // see `beginDisconnecting`. When a reconnect will follow, subscriptions whose
+            // subscribers opted into `survivesReconnect` are parked dormant instead of dying.
             let resolvedError = error ?? BLESwiftError.unexpectedDisconnect
             failPendingGATTContinuations(for: identifier, error: .unexpectedDisconnect)
-            finishNotificationStreams(for: identifier, error: resolvedError)
+            finishNotificationStreams(for: identifier, error: resolvedError, retainSurvivors: willReconnect)
             closeL2CAPChannels(for: identifier, error: resolvedError)
             connections.removeValue(forKey: identifier)
 
             // Detach event delivery; a reconnect attempt re-attaches on initiation.
             session.peripheral.eventHandler = nil
 
-            let willReconnect = !policy.isNever
+            if !willReconnect {
+                finishDormantNotifications(for: identifier, error: resolvedError)
+            }
             connectionBroadcaster.yield(.disconnected(identifier, error: error, willReconnect: willReconnect))
 
             // Same don't-double-spawn guard as the `.connecting` branch above.
@@ -946,6 +980,7 @@ public actor Central {
             failPendingGATTContinuations(for: identifier, error: .explicitDisconnect)
             finishNotificationStreams(for: identifier, error: BLESwiftError.explicitDisconnect)
             closeL2CAPChannels(for: identifier, error: BLESwiftError.explicitDisconnect)
+            finishDormantNotifications(for: identifier, error: BLESwiftError.explicitDisconnect)
 
             connectionBroadcaster.yield(.disconnected(identifier, error: error, willReconnect: false))
 
@@ -999,6 +1034,8 @@ public actor Central {
         session.fifoTails.removeAll()
         session.rssiTail?.cancel()
         session.rssiTail = nil
+        session.rearmTask?.cancel()
+        session.rearmTask = nil
 
         for continuation in session.pendingReads.values {
             continuation.resume(throwing: error)
@@ -1070,7 +1107,15 @@ public actor Central {
     /// Pump tasks are deliberately NOT cancelled here — each ends on its own when its raw
     /// stream finishes, forwarding `error` to its subscriber; cancelling instead could race
     /// that delivery and hide the disconnect error.
-    func finishNotificationStreams(for identifier: PeripheralIdentifier, error: Error) {
+    ///
+    /// With `retainSurvivors` (the reconnect-will-follow termination path only): tokens
+    /// registered with `survivesReconnect: true` are parked in ``dormantNotifications``
+    /// instead of dying — the raw broadcaster still finishes with `error` for everyone
+    /// (non-survivors and composite helpers end exactly as before), but a survivor's pump
+    /// catches that error, finds itself dormant, and suspends in
+    /// ``awaitResubscription(identifier:characteristic:token:)`` until the reconnect re-arms
+    /// it or the loop gives up.
+    func finishNotificationStreams(for identifier: PeripheralIdentifier, error: Error, retainSurvivors: Bool = false) {
         guard case .connected(var session) = connections[identifier] else {
             log("No connected session for \(identifier) — no notification streams to finish", level: .debug, category: "gatt")
             return
@@ -1081,14 +1126,60 @@ public actor Central {
 
         let subscriptions = session.notificationSubscriptions
         session.notificationSubscriptions.removeAll()
+
+        var dormantCharacteristics: [CharacteristicIdentifier: DormantSubscription] = [:]
+        var survivorPumps: [UUID: Task<Void, Never>] = [:]
+        if retainSurvivors {
+            for (characteristic, subscription) in subscriptions {
+                let survivors = subscription.subscriberTokens.intersection(session.notificationSurvivorTokens)
+                guard !survivors.isEmpty else { continue }
+                dormantCharacteristics[characteristic] = DormantSubscription(tokens: survivors)
+                for token in survivors {
+                    if let pump = session.notificationPumps[token] {
+                        survivorPumps[token] = pump
+                    }
+                }
+            }
+        }
         session.notificationPumps.removeAll()
         connections[identifier] = .connected(session)
+
+        if !dormantCharacteristics.isEmpty {
+            if dormantNotifications[identifier] != nil {
+                // Should not happen: a stale record means a previous gap never resolved.
+                log("Stale dormant notification record for \(identifier) — finishing it before parking new survivors", level: .warning, category: "gatt")
+                finishDormantNotifications(for: identifier, error: error)
+            }
+            log("Parking \(dormantCharacteristics.count) notification subscription(s) for \(identifier) across the reconnect", level: .debug, category: "gatt")
+            dormantNotifications[identifier] = DormantNotifications(
+                disconnectError: error,
+                characteristics: dormantCharacteristics,
+                pumps: survivorPumps
+            )
+        }
 
         for subscription in subscriptions.values {
             for waiter in subscription.enableWaiters.values {
                 waiter.resume(throwing: error)
             }
             subscription.broadcaster.finish(throwing: error)
+        }
+    }
+
+    /// Finishes `identifier`'s parked notification survivors with `error`, removing the
+    /// dormant record — the exit for every gap that does NOT end in a successful reconnect
+    /// (policy exhausted, loop cancelled, explicit disconnect, `stopAndExtractState`).
+    /// Take-then-resumes every parked pump's waiter; each pump then finishes its typed
+    /// stream with `error` and exits on its own. Idempotent; a no-op with no record.
+    func finishDormantNotifications(for identifier: PeripheralIdentifier, error: Error) {
+        guard let record = dormantNotifications.removeValue(forKey: identifier) else { return }
+
+        log("Finishing \(record.characteristics.count) dormant notification subscription(s) for \(identifier): \(error)", level: .debug, category: "gatt")
+
+        for subscription in record.characteristics.values {
+            for waiter in subscription.waiters.values {
+                waiter.resume(throwing: error)
+            }
         }
     }
 
@@ -1145,6 +1236,9 @@ public actor Central {
 
         while !Task.isCancelled {
             guard let delay = await policy.nextDelay(attempt: attempt, error: lastError) else {
+                // Policy exhausted: any parked notification survivors finish with the
+                // original disconnect error — exactly what the caller would see today.
+                finishDormantNotificationsWithRecordedError(for: identifier)
                 clearReconnectLoopIfCurrent(id: identifier, generation: generation)
                 return
             }
@@ -1152,11 +1246,18 @@ public actor Central {
             do {
                 try await Task.sleep(for: delay)
             } catch {
+                // Cancelled mid-backoff: the canceller (disconnect/connect/disconnectAll/
+                // cancelAllOperations) usually finished the dormant record already with its
+                // own error; this is the belt-and-braces for any other cancellation.
+                finishDormantNotificationsWithRecordedError(for: identifier)
                 clearReconnectLoopIfCurrent(id: identifier, generation: generation)
                 return
             }
 
             guard !Task.isCancelled, connections[identifier] == nil else {
+                if connections[identifier] == nil {
+                    finishDormantNotificationsWithRecordedError(for: identifier)
+                }
                 clearReconnectLoopIfCurrent(id: identifier, generation: generation)
                 return
             }
@@ -1187,7 +1288,20 @@ public actor Central {
             }
         }
 
+        // Cancelled between iterations — same belt-and-braces as the mid-backoff exit.
+        if connections[identifier] == nil {
+            finishDormantNotificationsWithRecordedError(for: identifier)
+        }
         clearReconnectLoopIfCurrent(id: identifier, generation: generation)
+    }
+
+    /// ``finishDormantNotifications(for:error:)`` with the record's own stored disconnect
+    /// error — the reconnect loop's exits don't carry one of their own. Never touches a
+    /// record while `identifier` has a live entry (a reconnect that already succeeded owns
+    /// it). A no-op with no record.
+    private func finishDormantNotificationsWithRecordedError(for identifier: PeripheralIdentifier) {
+        guard connections[identifier] == nil, let record = dormantNotifications[identifier] else { return }
+        finishDormantNotifications(for: identifier, error: record.disconnectError)
     }
 
     // MARK: - Event handling
@@ -1233,6 +1347,16 @@ public actor Central {
             log("Connected to \(identifier)", level: .info, category: "connection")
             connectionBroadcaster.yield(.connected(identifier))
             continuation?.resume(returning: Peripheral(id: identifier, central: self))
+
+            // A reconnect with parked notification survivors: re-arm them. A ledgered
+            // `Task` site — stored on the session, cancelled by `failPendingGATTContinuations`.
+            if dormantNotifications[identifier] != nil,
+               case .connected(var connectedSession) = connections[identifier] {
+                connectedSession.rearmTask = Task { [weak self] in
+                    await self?.rearmDormantNotifications(identifier)
+                }
+                connections[identifier] = .connected(connectedSession)
+            }
 
         case .didFailToConnect(let identifier, let error):
             // Funnels into the same cleanup path as `didDisconnect`.
@@ -2276,6 +2400,8 @@ public actor Central {
     /// `Session.notificationPumps` keyed by `token`, cancelled by that method.
     ///
     /// - Parameters:
+    ///   - survivesReconnect: Whether this subscriber's stream is parked (rather than
+    ///     finished) across an unexpected disconnect that a ``ReconnectPolicy`` will retry.
     ///   - deliver: Decodes and yields one raw value; returns `nil` on success or the decode
     ///     error, which finishes only that subscriber's stream.
     ///   - finish: Finishes the subscriber's typed stream, throwing if non-`nil`.
@@ -2283,12 +2409,16 @@ public actor Central {
         peripheral identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
         token: UUID,
+        survivesReconnect: Bool,
         deliver: @escaping @Sendable (Data) -> Error?,
         finish: @escaping @Sendable (Error?) -> Void
     ) {
         guard case .connected(var session) = connections[identifier] else {
             finish(BLESwiftError.notConnected)
             return
+        }
+        if survivesReconnect {
+            session.notificationSurvivorTokens.insert(token)
         }
 
         let pump = Task { [weak self] in
@@ -2300,6 +2430,7 @@ public actor Central {
                 identifier: identifier,
                 characteristic: characteristic,
                 token: token,
+                survivesReconnect: survivesReconnect,
                 deliver: deliver,
                 finish: finish
             )
@@ -2311,14 +2442,22 @@ public actor Central {
     /// The body of one subscriber's pump task: subscribes to the raw multicast (enabling
     /// notifications if first), forwards values through `deliver`, and finishes the typed
     /// stream when the raw stream ends.
+    ///
+    /// A `survivesReconnect` pump loops instead of finishing when its raw stream fails at a
+    /// disconnect a ``ReconnectPolicy`` will retry: it finds its token parked in
+    /// ``dormantNotifications`` (a decode error, thrown while connected, never is — so a
+    /// decode failure still finishes the stream exactly as before), suspends in
+    /// ``awaitResubscription(identifier:characteristic:token:)``, and resumes forwarding on
+    /// the re-armed raw stream the reconnect hands back.
     private func runNotificationPump(
         identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
         token: UUID,
+        survivesReconnect: Bool,
         deliver: @Sendable (Data) -> Error?,
         finish: @Sendable (Error?) -> Void
     ) async {
-        let raw: AsyncThrowingStream<Data, Error>
+        var raw: AsyncThrowingStream<Data, Error>
         do {
             raw = try await subscribeToNotifications(peripheral: identifier, characteristic: characteristic, token: token)
         } catch {
@@ -2326,15 +2465,30 @@ public actor Central {
             return
         }
 
-        do {
-            for try await data in raw {
-                if let decodeError = deliver(data) {
-                    throw decodeError
+        while true {
+            do {
+                for try await data in raw {
+                    if let decodeError = deliver(data) {
+                        throw decodeError
+                    }
                 }
+                finish(nil)
+                break
+            } catch {
+                if survivesReconnect,
+                   !(error is CancellationError),
+                   isDormantNotificationToken(token, identifier: identifier, characteristic: characteristic) {
+                    do {
+                        raw = try await awaitResubscription(identifier: identifier, characteristic: characteristic, token: token)
+                        continue
+                    } catch let resubscriptionError {
+                        finish(resubscriptionError)
+                        break
+                    }
+                }
+                finish(error)
+                break
             }
-            finish(nil)
-        } catch {
-            finish(error)
         }
 
         // Belt-and-braces release (idempotent by token): the primary release path is the
@@ -2343,8 +2497,71 @@ public actor Central {
         releaseNotificationSubscriber(peripheral: identifier, characteristic: characteristic, token: token)
     }
 
+    /// Whether `token` is parked in `identifier`'s dormant record for `characteristic` —
+    /// how a surviving pump distinguishes a reconnect-pending disconnect (park and wait)
+    /// from every other raw-stream failure (finish, as before).
+    private func isDormantNotificationToken(_ token: UUID, identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) -> Bool {
+        dormantNotifications[identifier]?.characteristics[characteristic]?.tokens.contains(token) ?? false
+    }
+
+    /// Suspends a surviving pump until the reconnect re-arms its characteristic (resumed
+    /// with the fresh raw stream), the re-arm fails, or the gap ends without a reconnect
+    /// (resumed throwing). Same isolation-pinned continuation + cancellation-hop pattern as
+    /// ``withCancellableGATTContinuation(register:onCancelled:)``.
+    private func awaitResubscription(
+        identifier: PeripheralIdentifier,
+        characteristic: CharacteristicIdentifier,
+        token: UUID
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        try await withTaskCancellationHandler {
+            let attach = { [self] (continuation: CheckedContinuation<AsyncThrowingStream<Data, Error>, Error>) in
+                // Re-check dormancy under the same actor turn as registration: the gap may
+                // already have ended between the pump's `isDormantNotificationToken` check
+                // and this attach.
+                guard var record = dormantNotifications[identifier],
+                      var subscription = record.characteristics[characteristic],
+                      subscription.tokens.contains(token) else {
+                    continuation.resume(throwing: dormantNotifications[identifier]?.disconnectError ?? BLESwiftError.notConnected)
+                    return
+                }
+                subscription.waiters[token] = continuation
+                record.characteristics[characteristic] = subscription
+                dormantNotifications[identifier] = record
+            }
+            // Explicit isolation pin on Swift ≤6.3 — see withCancellableGATTContinuation.
+            #if compiler(>=6.4)
+            return try await withCheckedThrowingContinuation(attach)
+            #else
+            return try await withCheckedThrowingContinuation(isolation: self, attach)
+            #endif
+        } onCancel: {
+            self.queue.async {
+                self.assumeIsolated { central in
+                    central.cancelResubscriptionWaiter(identifier: identifier, characteristic: characteristic, token: token)
+                }
+            }
+        }
+    }
+
+    /// Take-then-resumes a single parked resubscription waiter by token — the reaction to
+    /// its pump being cancelled, not a real re-arm outcome. Leaves the token's dormancy
+    /// bookkeeping to ``handleNotificationStreamTermination(peripheral:characteristic:token:)``.
+    private func cancelResubscriptionWaiter(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, token: UUID) {
+        guard var record = dormantNotifications[identifier],
+              var subscription = record.characteristics[characteristic],
+              let continuation = subscription.waiters.removeValue(forKey: token) else { return }
+        record.characteristics[characteristic] = subscription
+        dormantNotifications[identifier] = record
+        continuation.resume(throwing: BLESwiftError.operationCancelled)
+    }
+
     /// Reacts to a subscriber's typed stream terminating: cancels and forgets its pump task,
     /// then releases its refcount.
+    ///
+    /// A token whose pump isn't in the session's ledger may be parked in
+    /// ``dormantNotifications`` (its consumer broke during a reconnect gap, or mid-re-arm):
+    /// its dormancy bookkeeping is removed here too, so a characteristic no one waits on
+    /// anymore is never re-armed.
     func handleNotificationStreamTermination(
         peripheral identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -2354,6 +2571,23 @@ public actor Central {
            let pump = session.notificationPumps.removeValue(forKey: token) {
             connections[identifier] = .connected(session)
             pump.cancel()
+        } else if var record = dormantNotifications[identifier],
+                  var dormantSubscription = record.characteristics[characteristic],
+                  dormantSubscription.tokens.remove(token) != nil {
+            let waiter = dormantSubscription.waiters.removeValue(forKey: token)
+            let pump = record.pumps.removeValue(forKey: token)
+            if dormantSubscription.tokens.isEmpty {
+                record.characteristics.removeValue(forKey: characteristic)
+            } else {
+                record.characteristics[characteristic] = dormantSubscription
+            }
+            if record.characteristics.isEmpty {
+                dormantNotifications.removeValue(forKey: identifier)
+            } else {
+                dormantNotifications[identifier] = record
+            }
+            waiter?.resume(throwing: BLESwiftError.operationCancelled)
+            pump?.cancel()
         }
         releaseNotificationSubscriber(peripheral: identifier, characteristic: characteristic, token: token)
     }
@@ -2408,27 +2642,7 @@ public actor Central {
 
         do {
             try await ensureDiscovered(characteristic, on: peripheral, identifier: identifier)
-            // The confirmation's `isNotifying` payload is deliberately ignored — a stale
-            // disable-confirmation from a released subscription must not fail a fresh enable
-            // whose own confirmation is still in flight.
-            _ = try await withCancellableGATTContinuation(
-                register: { (continuation: CheckedContinuation<Bool, Error>) in
-                    guard case .connected(var session) = connections[identifier] else {
-                        continuation.resume(throwing: BLESwiftError.notConnected)
-                        return
-                    }
-                    session.pendingNotifyStateChanges[characteristic] = continuation
-                    connections[identifier] = .connected(session)
-                    peripheral.setNotifyValue(true, for: characteristic)
-                },
-                onCancelled: {
-                    self.queue.async {
-                        self.assumeIsolated { central in
-                            central.cancelPendingNotifyStateChange(identifier: identifier, characteristic: characteristic)
-                        }
-                    }
-                }
-            )
+            try await enableNotifications(identifier: identifier, characteristic: characteristic, peripheral: peripheral)
             confirmNotificationEnablement(identifier: identifier, characteristic: characteristic)
         } catch {
             failNotificationSubscription(identifier: identifier, characteristic: characteristic, error: error)
@@ -2436,6 +2650,167 @@ public actor Central {
         }
 
         return stream
+    }
+
+    /// The `setNotifyValue(true)` enable handshake shared by
+    /// ``subscribeToNotifications(peripheral:characteristic:token:)`` (first subscriber)
+    /// and ``rearmDormantNotifications(_:)`` (reconnect re-arm) — issues the enable and
+    /// awaits its `didUpdateNotificationState` confirmation.
+    ///
+    /// The confirmation's `isNotifying` payload is deliberately ignored — a stale
+    /// disable-confirmation from a released subscription must not fail a fresh enable
+    /// whose own confirmation is still in flight.
+    private func enableNotifications(
+        identifier: PeripheralIdentifier,
+        characteristic: CharacteristicIdentifier,
+        peripheral: any PeripheralRemote
+    ) async throws {
+        _ = try await withCancellableGATTContinuation(
+            register: { (continuation: CheckedContinuation<Bool, Error>) in
+                guard case .connected(var session) = connections[identifier] else {
+                    continuation.resume(throwing: BLESwiftError.notConnected)
+                    return
+                }
+                session.pendingNotifyStateChanges[characteristic] = continuation
+                connections[identifier] = .connected(session)
+                peripheral.setNotifyValue(true, for: characteristic)
+            },
+            onCancelled: {
+                self.queue.async {
+                    self.assumeIsolated { central in
+                        central.cancelPendingNotifyStateChange(identifier: identifier, characteristic: characteristic)
+                    }
+                }
+            }
+        )
+    }
+
+    /// Re-arms `identifier`'s parked notification survivors after a successful reconnect:
+    /// for each dormant characteristic (in UUID order, for determinism), registers a fresh
+    /// subscription in the CURRENT session, creates one raw stream per parked pump BEFORE
+    /// enabling (no loss window), re-runs discovery and the enable handshake, and hands each
+    /// parked pump its stream. A characteristic that fails to re-arm (missing after a GATT
+    /// change, enable error) fails only its own streams. Ends by yielding
+    /// ``ConnectionEvent/notificationsRestored(_:restored:failed:)`` — unless every survivor
+    /// left during the gap, or the session vanished mid-re-arm (a new disconnect), in which
+    /// case untouched characteristics stay dormant for the next reconnect (or are finished
+    /// by the next termination's cleanup).
+    private func rearmDormantNotifications(_ identifier: PeripheralIdentifier) async {
+        guard let record = dormantNotifications[identifier] else { return }
+        let characteristics = record.characteristics.keys.sorted { $0.uuidString < $1.uuidString }
+        var restored: [CharacteristicIdentifier] = []
+        var failed: [CharacteristicIdentifier: any Error] = [:]
+
+        log("Re-arming \(characteristics.count) notification subscription(s) for \(identifier) after reconnect", level: .debug, category: "gatt")
+
+        for characteristic in characteristics {
+            guard case .connected(var session) = connections[identifier] else { return }
+            // A consumer that broke during the gap may have emptied this characteristic
+            // (or the whole record) — nothing left to re-arm here.
+            guard let dormantSubscription = dormantNotifications[identifier]?.characteristics[characteristic],
+                  !dormantSubscription.tokens.isEmpty else { continue }
+            let peripheral = session.peripheral
+
+            // Fresh subscription registered BEFORE enabling — the same no-loss-window
+            // discipline as `subscribeToNotifications`.
+            var subscription = NotificationSubscription()
+            subscription.subscriberTokens = dormantSubscription.tokens
+            let broadcaster = subscription.broadcaster
+            session.notificationSubscriptions[characteristic] = subscription
+            connections[identifier] = .connected(session)
+
+            // One raw stream per surviving token, created before the enable so a value
+            // arriving mid-handshake is buffered rather than lost.
+            var streams: [UUID: AsyncThrowingStream<Data, Error>] = [:]
+            for token in dormantSubscription.tokens {
+                streams[token] = broadcaster.stream()
+            }
+
+            do {
+                try await ensureDiscovered(characteristic, on: peripheral, identifier: identifier)
+                try await enableNotifications(identifier: identifier, characteristic: characteristic, peripheral: peripheral)
+                confirmNotificationEnablement(identifier: identifier, characteristic: characteristic)
+                completeRearm(identifier: identifier, characteristic: characteristic, streams: streams)
+                restored.append(characteristic)
+            } catch {
+                guard case .connected = connections[identifier] else {
+                    // The session vanished mid-re-arm (another disconnect): stop here and
+                    // leave this characteristic (and any untouched ones) dormant — the new
+                    // termination either re-parks or finishes them.
+                    return
+                }
+                log("Failed to re-arm notifications on \(characteristic): \(error)", level: .warning, category: "gatt")
+                failNotificationSubscription(identifier: identifier, characteristic: characteristic, error: error)
+                failRearm(identifier: identifier, characteristic: characteristic, error: error)
+                failed[characteristic] = error
+            }
+        }
+
+        dormantNotifications.removeValue(forKey: identifier)
+        if case .connected(var session) = connections[identifier] {
+            session.rearmTask = nil
+            connections[identifier] = .connected(session)
+        }
+
+        if !restored.isEmpty || !failed.isEmpty {
+            connectionBroadcaster.yield(.notificationsRestored(identifier, restored: restored, failed: failed))
+        }
+    }
+
+    /// The synchronous success tail of one characteristic's re-arm: takes its dormant entry,
+    /// moves the surviving pumps back into the session's ledger (marking their tokens
+    /// survivors again), and resumes each parked pump with its pre-created raw stream.
+    private func completeRearm(
+        identifier: PeripheralIdentifier,
+        characteristic: CharacteristicIdentifier,
+        streams: [UUID: AsyncThrowingStream<Data, Error>]
+    ) {
+        guard var record = dormantNotifications[identifier],
+              var dormantSubscription = record.characteristics.removeValue(forKey: characteristic) else { return }
+        let waiters = dormantSubscription.waiters
+        dormantSubscription.waiters = [:]
+        let tokens = dormantSubscription.tokens
+        var pumps: [UUID: Task<Void, Never>] = [:]
+        for token in tokens {
+            if let pump = record.pumps.removeValue(forKey: token) {
+                pumps[token] = pump
+            }
+        }
+        dormantNotifications[identifier] = record
+
+        if case .connected(var session) = connections[identifier] {
+            for (token, pump) in pumps {
+                session.notificationPumps[token] = pump
+            }
+            session.notificationSurvivorTokens.formUnion(tokens)
+            connections[identifier] = .connected(session)
+        }
+
+        for (token, continuation) in waiters {
+            if let stream = streams[token] {
+                continuation.resume(returning: stream)
+            } else {
+                continuation.resume(throwing: BLESwiftError.notConnected)
+            }
+        }
+    }
+
+    /// The synchronous failure tail of one characteristic's re-arm: takes its dormant entry
+    /// and resumes each parked pump throwing `error` — failing only this characteristic's
+    /// surviving streams.
+    private func failRearm(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, error: Error) {
+        guard var record = dormantNotifications[identifier],
+              var dormantSubscription = record.characteristics.removeValue(forKey: characteristic) else { return }
+        let waiters = dormantSubscription.waiters
+        dormantSubscription.waiters = [:]
+        for token in dormantSubscription.tokens {
+            record.pumps.removeValue(forKey: token)
+        }
+        dormantNotifications[identifier] = record
+
+        for continuation in waiters.values {
+            continuation.resume(throwing: error)
+        }
     }
 
     /// Suspends a joiner until `characteristic`'s in-flight enable handshake confirms or
@@ -2520,8 +2895,15 @@ public actor Central {
     /// is not awaited.
     func releaseNotificationSubscriber(peripheral identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, token: UUID) {
         guard case .connected(var session) = connections[identifier] else { return }
-        guard var subscription = session.notificationSubscriptions[characteristic] else { return }
-        guard subscription.subscriberTokens.remove(token) != nil else { return }
+        session.notificationSurvivorTokens.remove(token)
+        guard var subscription = session.notificationSubscriptions[characteristic] else {
+            connections[identifier] = .connected(session)
+            return
+        }
+        guard subscription.subscriberTokens.remove(token) != nil else {
+            connections[identifier] = .connected(session)
+            return
+        }
 
         // Take-then-resume this token's own enablement waiter, if it still has one (a
         // release can arrive while the joiner is still suspended awaiting confirmation).
@@ -2551,6 +2933,15 @@ public actor Central {
     func notificationSubscriberCount(for characteristic: CharacteristicIdentifier, on id: PeripheralIdentifier) -> Int {
         guard case .connected(let session) = connections[id] else { return 0 }
         return session.notificationSubscriptions[characteristic]?.subscriberTokens.count ?? 0
+    }
+
+    /// The number of surviving pumps parked in ``awaitResubscription(identifier:characteristic:token:)``
+    /// for `characteristic` on `id`'s dormant record — a test-visibility hook (`@testable`),
+    /// the dormant counterpart of ``notificationSubscriberCount(for:on:)``: a pump's park is
+    /// asynchronous relative to the disconnect, so gap-behavior tests await this count
+    /// before acting on the gap. Not part of the public API.
+    func dormantNotificationWaiterCount(for characteristic: CharacteristicIdentifier, on id: PeripheralIdentifier) -> Int {
+        dormantNotifications[id]?.characteristics[characteristic]?.waiters.count ?? 0
     }
 
     /// Take-then-resumes the single pending notify-state-change continuation for
@@ -3541,9 +3932,19 @@ private struct Session {
     /// listened to. Lives inside `Session` so disconnect cleanup drops it structurally.
     var notificationSubscriptions: [CharacteristicIdentifier: NotificationSubscription] = [:]
 
-    /// The per-subscriber pump task for each `Peripheral.notifications(for:policy:)`
-    /// subscriber — a ledgered `Task { }` site (see `Central.startNotificationPump(peripheral:characteristic:token:deliver:finish:)`).
+    /// The per-subscriber pump task for each `Peripheral.notifications(for:policy:survivesReconnect:)`
+    /// subscriber — a ledgered `Task { }` site (see `Central.startNotificationPump(peripheral:characteristic:token:survivesReconnect:deliver:finish:)`).
     var notificationPumps: [UUID: Task<Void, Never>] = [:]
+
+    /// Tokens registered with `survivesReconnect: true` — intersected with each
+    /// subscription's `subscriberTokens` at disconnect time to decide who parks in
+    /// `Central.dormantNotifications` rather than finishing.
+    var notificationSurvivorTokens: Set<UUID> = []
+
+    /// The in-flight re-arm task for this session's reconnect, if any — a ledgered `Task`
+    /// site (see `Central.rearmDormantNotifications(_:)`); cancelled by
+    /// `Central.failPendingGATTContinuations(for:error:)`.
+    var rearmTask: Task<Void, Never>?
 
     // MARK: - L2CAP
 
@@ -3601,6 +4002,29 @@ private struct NotificationSubscription {
     /// Joiners suspended waiting for ``enableConfirmed``, keyed by subscriber token.
     /// Take-then-resume.
     var enableWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+}
+
+/// One peripheral's notification subscriptions parked between an unexpected disconnect
+/// and a successful auto-reconnect — see `Central.dormantNotifications`.
+private struct DormantNotifications {
+    /// The error the disconnect carried; surviving streams finish with it if the reconnect
+    /// never succeeds.
+    let disconnectError: Error
+    /// Per characteristic, the surviving subscriber tokens and each token's parked pump
+    /// continuation.
+    var characteristics: [CharacteristicIdentifier: DormantSubscription]
+    /// Surviving pump tasks by token, so a typed-stream termination during the gap can
+    /// cancel one; moved back into `Session.notificationPumps` on re-arm.
+    var pumps: [UUID: Task<Void, Never>]
+}
+
+/// One characteristic's parked survivors — see ``DormantNotifications``.
+private struct DormantSubscription {
+    /// The surviving subscriber tokens.
+    var tokens: Set<UUID>
+    /// Continuations of pumps parked in `Central.awaitResubscription(identifier:characteristic:token:)`,
+    /// keyed by token. Take-then-resume.
+    var waiters: [UUID: CheckedContinuation<AsyncThrowingStream<Data, Error>, Error>] = [:]
 }
 
 /// A single-consumer box around an `AsyncThrowingStream` iterator, letting

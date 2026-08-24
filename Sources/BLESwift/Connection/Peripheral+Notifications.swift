@@ -17,9 +17,17 @@ extension Peripheral {
     /// enables notifications, and only the last subscriber to go away disables them again.
     ///
     /// Stop consuming (`break`, or cancel the task) to unsubscribe; there is no explicit
-    /// "stop listening" call. The stream ends by **throwing** when the connection does, and
-    /// does **not** re-arm on reconnect: resubscribe after observing
-    /// ``ConnectionEvent/connected(_:)``.
+    /// "stop listening" call. By default the stream ends by **throwing** when the connection
+    /// does, and does not re-arm on reconnect: resubscribe after observing
+    /// ``ConnectionEvent/connected(_:)``. Pass `survivesReconnect: true` to instead park the
+    /// stream across an unexpected disconnect that an active ``ReconnectPolicy`` will retry:
+    /// it emits nothing during the gap, and once the reconnect succeeds BLESwift re-runs
+    /// discovery, re-enables notifications (one CCCD write per characteristic, however many
+    /// survivors share it), and resumes delivering on the **same** stream —
+    /// ``ConnectionEvent/notificationsRestored(_:restored:failed:)`` reports the outcome. If
+    /// the reconnect never succeeds (policy exhausted, explicit disconnect, cancellation),
+    /// or the characteristic can't be re-armed (e.g. the GATT table changed), the stream
+    /// finishes by throwing exactly as it would have at the disconnect.
     ///
     /// A value that fails `Value`'s `Receivable` decoding finishes **this subscriber's**
     /// stream only — other concurrent subscribers of the same characteristic are unaffected.
@@ -29,6 +37,14 @@ extension Peripheral {
     ///   - characteristic: The characteristic to receive notifications from.
     ///   - policy: How values are buffered when this subscriber consumes more slowly than
     ///     the peripheral notifies. Defaults to ``BufferingPolicy/unbounded``.
+    ///   - survivesReconnect: Whether this subscriber's stream survives an automatic
+    ///     reconnect instead of finishing at the disconnect. Defaults to `false` (today's
+    ///     behavior). Only meaningful with a ``ReconnectPolicy`` other than
+    ///     ``ReconnectPolicy/never`` — an explicit disconnect always finishes the stream.
+    ///     A separate parameter rather than a ``BufferingPolicy`` case: `BufferingPolicy`
+    ///     mirrors `AsyncStream`'s buffering policy one-to-one and stays that way; reconnect
+    ///     survival is a lifecycle choice, not a buffering choice. Values buffered before
+    ///     the disconnect are retained per `policy`.
     /// - Returns: A stream of decoded notification values. If this peripheral is not (or
     ///   no longer) connected, the stream immediately throws ``BLESwiftError/notConnected``.
     ///
@@ -37,7 +53,8 @@ extension Peripheral {
     ///   into the owning actor, which Swift 6's region isolation requires.
     public func notifications<Value: Receivable & SendableMetatype>(
         for characteristic: CharacteristicIdentifier,
-        policy: BufferingPolicy = .unbounded
+        policy: BufferingPolicy = .unbounded,
+        survivesReconnect: Bool = false
     ) -> AsyncThrowingStream<Value, Error> {
         let (stream, continuation) = AsyncThrowingStream.makeStream(
             of: Value.self,
@@ -78,6 +95,7 @@ extension Peripheral {
                     peripheral: id,
                     characteristic: characteristic,
                     token: token,
+                    survivesReconnect: survivesReconnect,
                     deliver: deliver,
                     finish: finish
                 )

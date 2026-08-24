@@ -116,6 +116,11 @@ queue delegate callbacks arrive on. Both fakes enforce this structurally:
   temporarily unable to accept a `.withoutResponse` write;
   ``FakePeripheral/simulateReadyToSendWriteWithoutResponse()`` clears it and delivers the
   corresponding event.
+- ``FakePeripheral/simulateGATTCacheReset()``: clears every discovered service,
+  characteristic, and descriptor (and the notifying set), as CoreBluetooth drops a
+  peripheral's cached service graph on disconnect — while leaving ``FakePeripheral/availableServices``
+  and every scripted value intact. Pair it with an updated `availableServices` to model a
+  peripheral whose GATT table changed across a reconnect.
 - **Restoration (iOS only)**: `FakeCentral.simulateRestoration(_:)` delivers a
   `willRestoreState` event built from a `RestoredState` value you construct directly (Core's
   public memberwise inits) — call it before the `.poweredOn` state change, mirroring

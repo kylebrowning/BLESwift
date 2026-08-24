@@ -120,14 +120,14 @@ Task {
 
 ### Notification streams end on disconnect — resubscribe on `.connected`
 
-Every ``Peripheral/notifications(for:policy:)`` stream (see <doc:ReadingWritingNotifications>)
-finishes — by throwing — the moment its connection ends, for any reason. Reconnection, whether
-manual or via a ``ReconnectPolicy``, **does not** re-arm any previously active notification
-stream: BLESwift deliberately does not try to remember and silently re-establish subscriptions
-behind your back.
+By default, every ``Peripheral/notifications(for:policy:survivesReconnect:)`` stream (see
+<doc:ReadingWritingNotifications>) finishes — by throwing — the moment its connection ends,
+for any reason. Reconnection, whether manual or via a ``ReconnectPolicy``, then **does not**
+re-arm the previously active stream: BLESwift does not silently re-establish subscriptions
+you didn't ask it to keep.
 
-Instead, resubscribe explicitly in response to ``ConnectionEvent/connected(_:)``, using the
-identifier it carries to look up that peripheral's handle:
+With the default, resubscribe explicitly in response to ``ConnectionEvent/connected(_:)``,
+using the identifier it carries to look up that peripheral's handle:
 
 ```swift
 for await event in await central.connectionEvents() {
@@ -139,6 +139,46 @@ for await event in await central.connectionEvents() {
     }
 }
 ```
+
+### Notification streams across reconnects
+
+Subscribing with `survivesReconnect: true` opts one stream out of the finish-at-disconnect
+default, for exactly the disconnects an active ``ReconnectPolicy`` will retry:
+
+```swift
+let readings: AsyncThrowingStream<HeartRateMeasurement, Error> =
+    peripheral.notifications(for: heartRateMeasurement, survivesReconnect: true)
+```
+
+On an unexpected disconnect the stream emits nothing (values buffered before the disconnect
+are retained per its ``BufferingPolicy``); once the reconnect succeeds, BLESwift re-runs
+service and characteristic discovery for each surviving characteristic, re-enables
+notifications — one CCCD write per characteristic, however many surviving subscribers share
+it — and resumes delivering on the **same** stream. One
+``ConnectionEvent/notificationsRestored(_:restored:failed:)`` event then reports the outcome:
+`restored` lists the characteristics notifying again, and `failed` maps each characteristic
+that could not be re-armed to the error its streams finished with.
+
+A surviving stream still finishes — with the same error the default mode would have thrown —
+whenever the gap ends without a restored subscription:
+
+- **Reconnect policy exhausted** (or the loop cancelled): the stream throws the original
+  disconnect error, typically ``BLESwiftError/unexpectedDisconnect``.
+- **Explicit teardown** — ``Central/disconnect(_:)`` (including mid-backoff),
+  ``Central/disconnectAll()``, a new ``Central/connect(_:timeout:reconnect:warningOptions:)``
+  call superseding the reconnect loop, ``Central/cancelAllOperations(error:)``, or
+  ``Central/stopAndExtractState()``: the stream throws
+  ``BLESwiftError/explicitDisconnect`` (or the cancel call's own error).
+- **Re-arm failure** — the characteristic vanished from the GATT table across the gap, or
+  the enable itself failed: only the affected characteristic's streams finish, with that
+  failure (e.g. ``BLESwiftError/missingCharacteristic(_:)``); every other surviving stream
+  is unaffected, and the event's `failed` names the casualty.
+
+The composite helpers
+(``Peripheral/writeAndAwaitNotification(write:to:awaitOn:timeout:)``,
+``Peripheral/writeAndAssemble(write:to:assembleFrom:expectedLength:timeout:)``,
+``Peripheral/flush(_:quietPeriod:)``) never survive: an in-flight helper fails at the
+disconnect exactly as before, regardless of any reconnect policy.
 
 ### Disconnecting
 
