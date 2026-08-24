@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [1.1.0] - 2026-08-24
+
+### Added
+
 - `Central.connectionEventRegistration(services:peripherals:)` and `SystemConnectionEvent`
   (BLESwiftCore): a multicast stream of system-level connection events
   (`registerForConnectionEvents(options:)`) — delivered when a matching peripheral connects
@@ -80,6 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Battery Level, Device Information, Current Time, Body Sensor Location, CSC Measurement,
   Cycling Power Measurement, and Temperature Measurement, plus
   `Peripheral.readDeviceInformation()` / `readBatteryLevel()`.
+- `BLESwiftExplorer` (Examples): a SwiftUI sample app for exploring the central role —
+  scanning, connecting, and browsing a peripheral's GATT database interactively.
 
 ### Changed
 
@@ -184,7 +194,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed a deadlock when connecting to the same peripheral concurrently.
 - Restoring multiple peripherals now happens concurrently.
 
-[Unreleased]: https://github.com/kylebrowning/BLESwift/compare/1.0.2...HEAD
+[Unreleased]: https://github.com/kylebrowning/BLESwift/compare/1.1.0...HEAD
+[1.1.0]: https://github.com/kylebrowning/BLESwift/compare/1.0.2...1.1.0
 [1.0.2]: https://github.com/kylebrowning/BLESwift/compare/1.0.1...1.0.2
 [1.0.1]: https://github.com/kylebrowning/BLESwift/compare/1.0.0...1.0.1
 [1.0.0]: https://github.com/kylebrowning/BLESwift/compare/0.2.0...1.0.0
