@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ScanFilter` (BLESwiftCore): declarative scan match criteria — `services` (radio-level),
+  `namePrefix`/`nameExact`, `manufacturerID`/`manufacturerDataPrefix`, per-service
+  `serviceData` presence/prefix requirements, `minimumRSSI`, `connectableOnly`, and a
+  `custom` closure escape hatch — with a public `matches(_:)`.
+- `Central.scan(filter:allowDuplicates:rssiThreshold:lossTimeout:timeout:)`: scanning with a
+  `ScanFilter`; non-matching sightings are dropped before any recording. The existing
+  `scan(services:)` is now a thin wrapper over it, behaving exactly as before.
+- `Central.findFirst(matching:timeout:)`: returns the first `Discovery` matching a
+  `ScanFilter` and stops the scan, torn down on every exit path (success, timeout, error,
+  cancellation).
+- `Central.connect(identifier:fallbackScan:reconnect:timeout:)`: the saved-device flow —
+  resolves a persisted `UUID` via `knownPeripherals(withIdentifiers:)`, falling back to a
+  `findFirst` scan (whose result may carry a different UUID) when given a `fallbackScan`.
+- `FakeCentral.lastScanServices` (BLESwiftTestSupport): records the `services` passed to the
+  most recent `scanForPeripherals(withServices:options:)` call.
+
 - `Peripheral.notifications(for:policy:survivesReconnect:)`: an optional
   `survivesReconnect` parameter (default `false`, preserving existing behavior) that keeps a
   notification stream parked across an unexpected disconnect an active `ReconnectPolicy`

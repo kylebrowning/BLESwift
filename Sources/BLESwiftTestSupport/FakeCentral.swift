@@ -53,6 +53,7 @@ public final class FakeCentral: CentralManaging, Sendable {
     nonisolated(unsafe) private var _cancelCallCounts: [UUID: Int] = [:]
     nonisolated(unsafe) private var _scanCallCount = 0
     nonisolated(unsafe) private var _lastScanOptions: ScanOptions?
+    nonisolated(unsafe) private var _lastScanServices: [ServiceIdentifier]??
     nonisolated(unsafe) private var _stopScanCallCount = 0
     nonisolated(unsafe) private var _retrievablePeripherals: [UUID: FakePeripheral] = [:]
     nonisolated(unsafe) private var _systemConnectedPeripherals: [(peripheral: FakePeripheral, services: [ServiceIdentifier])] = []
@@ -201,6 +202,15 @@ public final class FakeCentral: CentralManaging, Sendable {
         return _lastScanOptions
     }
 
+    /// The `services` passed to the most recent ``scanForPeripherals(withServices:options:)``
+    /// call, double-optional: the outer `nil` means no scan has been started yet, an inner
+    /// `nil` means the last scan was unscoped (`services: nil`). Lets you assert that
+    /// `ScanFilter.services` reaches the radio seam.
+    public var lastScanServices: [ServiceIdentifier]?? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _lastScanServices
+    }
+
     /// The number of times ``stopScan()`` has been called.
     public var stopScanCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -301,6 +311,7 @@ public final class FakeCentral: CentralManaging, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         _scanCallCount += 1
         _lastScanOptions = options
+        _lastScanServices = services
     }
 
     /// Records the call.

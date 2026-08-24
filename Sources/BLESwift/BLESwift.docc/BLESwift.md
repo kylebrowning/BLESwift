@@ -52,8 +52,11 @@ everything below, so every type on this page is available without a separate imp
 
 - <doc:Scanning>
 - ``ScanEvent``
+- ``ScanFilter``
 - ``Discovery``
 - ``AdvertisementData``
+- ``Central/findFirst(matching:timeout:)``
+- ``Central/connect(identifier:fallbackScan:reconnect:timeout:)``
 
 ### Connecting
 

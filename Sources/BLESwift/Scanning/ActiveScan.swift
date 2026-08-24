@@ -32,6 +32,10 @@ final class ActiveScan {
     /// ``ScanEvent/lost(_:)``. Only meaningful when ``allowDuplicates`` is `true`.
     let lossTimeout: Duration
 
+    /// The actor-side match criteria for this scan, applied to every sighting before any
+    /// recording or event. `nil` matches everything.
+    let filter: ScanFilter?
+
     /// Every peripheral sighted so far in this scan session, keyed by identifier.
     var discoveries: [UUID: Discovery] = [:]
 
@@ -58,11 +62,13 @@ final class ActiveScan {
         continuation: AsyncThrowingStream<ScanEvent, Error>.Continuation,
         allowDuplicates: Bool,
         rssiThreshold: Int?,
-        lossTimeout: Duration
+        lossTimeout: Duration,
+        filter: ScanFilter? = nil
     ) {
         self.continuation = continuation
         self.allowDuplicates = allowDuplicates
         self.rssiThreshold = rssiThreshold
         self.lossTimeout = lossTimeout
+        self.filter = filter
     }
 }

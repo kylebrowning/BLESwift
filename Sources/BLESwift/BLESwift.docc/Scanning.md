@@ -73,6 +73,61 @@ for try await event in await central.scan(services: [heartRateService]) {
 
 Connecting while a scan is live does not stop or otherwise affect that scan.
 
+### Declarative filtering
+
+Instead of filtering the stream by hand, pass a ``ScanFilter`` to
+``Central/scan(filter:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``. Only
+``ScanFilter/services`` reaches the radio; every other field is applied per sighting before
+anything is reported — a non-matching sighting is dropped entirely (not recorded, not
+loss-tracked, no event). All set fields must hold, and ``ScanFilter/custom`` is an arbitrary
+escape hatch:
+
+```swift
+let filter = ScanFilter(
+    services: [heartRateService],
+    namePrefix: "Kettle",
+    manufacturerID: 0x004C,
+    custom: { $0.rssi > -70 }
+)
+
+for try await event in await central.scan(filter: filter) {
+    // only sightings passing every field arrive here
+}
+```
+
+When all you want is one device, ``Central/findFirst(matching:timeout:)`` runs the scan for
+you, returns the first matching ``Discovery``, and stops the scan — on every exit path,
+including timeout and cancellation. `timeout` defaults to `nil` (wait indefinitely), but
+passing one is recommended:
+
+```swift
+let discovery = try await central.findFirst(matching: filter, timeout: .seconds(10))
+let peripheral = try await central.connect(discovery.peripheral)
+```
+
+### The saved-device pattern
+
+If you persist a peripheral's ``PeripheralIdentifier/uuid`` across launches,
+``Central/connect(identifier:fallbackScan:reconnect:timeout:)`` reconnects to it in one
+call: it tries ``Central/knownPeripherals(withIdentifiers:)`` first (no radio), and only if
+CoreBluetooth no longer knows the identifier does it run the `fallbackScan` and connect to
+whatever that finds:
+
+```swift
+let peripheral = try await central.connect(
+    identifier: savedUUID,
+    fallbackScan: ScanFilter(services: [heartRateService], namePrefix: "Kettle")
+)
+savedUUID = peripheral.id.uuid // re-persist: the fallback may find a NEW uuid
+```
+
+Two things to know: a fallback-found peripheral may have a *different* UUID than the saved
+one (CoreBluetooth reassigns UUIDs; rescuing a stale UUID by name/service is the point), so
+re-persist ``Peripheral/id`` after connecting — and `timeout` applies to each phase
+separately (the fallback scan gets `timeout`, then the connect attempt gets `timeout`
+again); it is not a shared budget. Without a `fallbackScan`, an unknown identifier throws
+``BLESwiftError/unexpectedPeripheral(_:)``.
+
 ### Duplicate sightings and loss tracking
 
 By default (`allowDuplicates: false`), CoreBluetooth reports each peripheral only once per scan

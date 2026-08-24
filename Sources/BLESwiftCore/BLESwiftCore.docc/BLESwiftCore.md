@@ -86,6 +86,7 @@ func describe(_ service: ServiceIdentifier, characteristics: [CharacteristicIden
 
 - ``AdvertisementData``
 - ``Discovery``
+- ``ScanFilter``
 
 ### Configuration
 

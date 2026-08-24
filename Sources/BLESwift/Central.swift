@@ -3477,6 +3477,47 @@ public actor Central {
         lossTimeout: Duration = .seconds(15),
         timeout: Duration? = nil
     ) -> AsyncThrowingStream<ScanEvent, Error> {
+        scan(
+            filter: ScanFilter(services: services),
+            allowDuplicates: allowDuplicates,
+            rssiThreshold: rssiThreshold,
+            lossTimeout: lossTimeout,
+            timeout: timeout
+        )
+    }
+
+    /// Scans for nearby peripherals matching `filter`, yielding a ``ScanEvent`` for every
+    /// matching sighting. ``ScanFilter/services`` is passed to the radio; every other
+    /// filter field is applied on the actor, per sighting, before any recording — a
+    /// non-matching sighting is dropped entirely (not stored, not loss-tracked, no event).
+    ///
+    /// Everything else behaves exactly like
+    /// ``scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)`` — which is a
+    /// thin wrapper over this method: single-scan discipline
+    /// (``BLESwiftError/alreadyScanning``), stop-by-ceasing-to-consume, `timeout`, and the
+    /// iOS backgrounding guards.
+    ///
+    /// - Parameters:
+    ///   - filter: The match criteria. Only ``ScanFilter/services`` reaches the radio.
+    ///   - allowDuplicates: Whether to keep reporting an already-discovered peripheral's
+    ///     further sightings as ``ScanEvent/updated(_:)`` (and track its loss via
+    ///     `lossTimeout`). Defaults to `false`.
+    ///   - rssiThreshold: The minimum absolute RSSI delta (in dBm) required for a repeat
+    ///     sighting to be reported as ``ScanEvent/updated(_:)``. `nil` (the default) disables
+    ///     throttling.
+    ///   - lossTimeout: How long a sighted peripheral may go unseen before it's reported as
+    ///     ``ScanEvent/lost(_:)``. Only meaningful when `allowDuplicates` is `true`. Defaults
+    ///     to 15 seconds.
+    ///   - timeout: The maximum duration of the scan. `nil` (the default) scans until the
+    ///     consumer stops it; on elapsing, the stream finishes cleanly.
+    /// - Returns: A single-consumer stream of ``ScanEvent``s.
+    public func scan(
+        filter: ScanFilter,
+        allowDuplicates: Bool = false,
+        rssiThreshold: Int? = nil,
+        lossTimeout: Duration = .seconds(15),
+        timeout: Duration? = nil
+    ) -> AsyncThrowingStream<ScanEvent, Error> {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: ScanEvent.self)
 
         guard activeScan == nil else {
@@ -3484,6 +3525,7 @@ public actor Central {
             return stream
         }
 
+        let services = filter.services
         let missingServices = services?.isEmpty ?? true
         if missingServices {
             let warning = "scan(services:) called with nil/empty services — Apple discourages this: it "
@@ -3495,7 +3537,8 @@ public actor Central {
             continuation: continuation,
             allowDuplicates: allowDuplicates,
             rssiThreshold: rssiThreshold,
-            lossTimeout: lossTimeout
+            lossTimeout: lossTimeout,
+            filter: filter
         )
         activeScan = scan
         isScanningBox.withLock { $0 = true }
@@ -3529,12 +3572,19 @@ public actor Central {
     }
 
     /// Routes a `CentralEvent/didDiscover` event to the active scan, if any — a discovery
-    /// delivered after the scan ended is silently dropped. Emits exactly one ``ScanEvent``
-    /// per call.
+    /// delivered after the scan ended is silently dropped. Emits at most one ``ScanEvent``
+    /// per call (none when the scan's filter rejects the sighting or throttling suppresses
+    /// it).
     private func handleDiscovery(peripheral: PeripheralIdentifier, advertisement: AdvertisementData, rssi: Int) {
         guard let scan = activeScan else { return }
 
         let newDiscovery = Discovery(peripheral: peripheral, advertisement: advertisement, rssi: rssi)
+
+        // A non-matching sighting is dropped entirely — not stored, not loss-tracked, no
+        // event. Loss timers only ever exist for sightings that passed the filter.
+        if let filter = scan.filter, !filter.matches(newDiscovery) {
+            return
+        }
 
         // Only allowDuplicates scans track loss — refreshed even if throttled below, since a
         // throttled sighting is still evidence the peripheral hasn't gone silent.
@@ -3630,6 +3680,103 @@ public actor Central {
         }
 
         log("Scan stopped", level: .info, category: "scan")
+    }
+
+    /// Scans with `filter` and returns the first matching ``Discovery``, stopping the scan.
+    ///
+    /// The scan is fully torn down — `isScanning` is `false` — before this returns or
+    /// throws, on every exit path: success, timeout, error, and task cancellation.
+    ///
+    /// - Parameters:
+    ///   - filter: The match criteria — see ``scan(filter:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``.
+    ///   - timeout: How long to wait for a match before throwing
+    ///     ``BLESwiftError/timedOut``. `nil` (the default) waits indefinitely —
+    ///     passing a value is recommended: an unfiltered radio left scanning is exactly
+    ///     what Apple discourages.
+    /// - Returns: The first ``Discovery`` matching `filter`.
+    /// - Throws: ``BLESwiftError/timedOut`` when `timeout` elapses (or the scan's stream
+    ///   ends without a match), ``BLESwiftError/alreadyScanning`` if a scan is already
+    ///   active, `CancellationError` on task cancellation, or whatever error ends the scan
+    ///   (e.g. ``BLESwiftError/bluetoothUnavailable``).
+    public func findFirst(matching filter: ScanFilter, timeout: Duration? = nil) async throws -> Discovery {
+        // `scan` claims `activeScan` synchronously on success and leaves it untouched when
+        // it refuses (`.alreadyScanning`) — so `activeScan` changing across the call
+        // identifies the scan that is OURS to tear down (`nil` when the refusal path ran:
+        // someone else's scan must survive the error path below).
+        let previous = activeScan
+        let stream = scan(filter: filter)
+        let ourScan = activeScan !== previous ? activeScan : nil
+
+        do {
+            let discovery = try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+                for try await event in stream {
+                    if case .discovered(let discovery) = event {
+                        return discovery
+                    }
+                }
+                // The stream ended (e.g. an inner timeout) without a match.
+                throw BLESwiftError.timedOut
+            }
+            teardownScanNow(ourScan)
+            return discovery
+        } catch {
+            teardownScanNow(ourScan)
+            throw error
+        }
+    }
+
+    /// Synchronously tears down `scan` if it is still the active one — the deterministic
+    /// counterpart to the `onTermination`-driven ``finishActiveScan()`` hop, which runs via
+    /// `queue.async` and can land *after* a `findFirst` caller has already resumed.
+    /// Finishing the continuation first makes the pending hop's `finishActiveScan()` a
+    /// guarded no-op. Idempotent; a `nil` or superseded `scan` is ignored.
+    private func teardownScanNow(_ scan: ActiveScan?) {
+        guard let scan, activeScan === scan else { return }
+        scan.continuation.finish()
+        finishActiveScan()
+    }
+
+    /// Connects to a peripheral by bare `UUID`, optionally falling back to a scan — the
+    /// "saved device" flow: persist a peripheral's ``PeripheralIdentifier/uuid``, then
+    /// reconnect to it on a later launch in one call.
+    ///
+    /// Tries ``knownPeripherals(withIdentifiers:)`` first (no radio). If CoreBluetooth no
+    /// longer knows `identifier` and `fallbackScan` is non-`nil`, runs
+    /// ``findFirst(matching:timeout:)`` and connects to whatever it finds — which may be a
+    /// peripheral with a *different* UUID than `identifier` (CoreBluetooth reassigns UUIDs;
+    /// matching by name/service when the saved UUID has gone stale is the point of the
+    /// fallback). Read the returned ``Peripheral/id`` for the current identity.
+    ///
+    /// - Parameters:
+    ///   - identifier: The saved peripheral `UUID` to resolve.
+    ///   - fallbackScan: Match criteria for a rescue scan when `identifier` is no longer
+    ///     known. `nil` (the default) disables the fallback.
+    ///   - reconnect: What to do if this connection is later lost unexpectedly. Defaults to
+    ///     ``ReconnectPolicy/never``.
+    ///   - timeout: Applied to EACH phase separately — the fallback scan gets `timeout`,
+    ///     then the connect attempt gets `timeout` again; it is not a shared budget.
+    ///     Defaults to 15 seconds; `nil` waits indefinitely.
+    /// - Returns: A ``Peripheral`` handle once connected.
+    /// - Throws: ``BLESwiftError/unexpectedPeripheral(_:)`` when `identifier` is unknown
+    ///   and `fallbackScan` is `nil`; ``BLESwiftError/timedOut`` when the fallback scan
+    ///   finds no match in time; otherwise whatever
+    ///   ``connect(_:timeout:reconnect:warningOptions:)`` throws.
+    public func connect(
+        identifier: UUID,
+        fallbackScan: ScanFilter? = nil,
+        reconnect: ReconnectPolicy = .never,
+        timeout: Duration? = .seconds(15)
+    ) async throws -> Peripheral {
+        if let known = try knownPeripherals(withIdentifiers: [identifier]).first {
+            return try await connect(known, timeout: timeout, reconnect: reconnect)
+        }
+
+        guard let fallbackScan else {
+            throw BLESwiftError.unexpectedPeripheral(PeripheralIdentifier(uuid: identifier, name: nil))
+        }
+
+        let discovery = try await findFirst(matching: fallbackScan, timeout: timeout)
+        return try await connect(discovery.peripheral, timeout: timeout, reconnect: reconnect)
     }
 
     #if os(iOS)
