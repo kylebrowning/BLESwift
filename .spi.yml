@@ -1,4 +1,4 @@
 version: 1
 builder:
   configs:
-    - documentation_targets: [BLESwift, BLESwiftCore, BLESwiftTestSupport]
+    - documentation_targets: [BLESwift, BLESwiftCore, BLESwiftProfiles, BLESwiftTestSupport]

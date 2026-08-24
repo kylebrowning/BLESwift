@@ -18,6 +18,7 @@ let package = Package(
     products: [
         .library(name: "BLESwift", targets: ["BLESwift"]),
         .library(name: "BLESwiftCore", targets: ["BLESwiftCore"]),
+        .library(name: "BLESwiftProfiles", targets: ["BLESwiftProfiles"]),
         .library(name: "BLESwiftTestSupport", targets: ["BLESwiftTestSupport"]),
     ],
     dependencies: [
@@ -40,6 +41,12 @@ let package = Package(
             swiftSettings: sharedSwiftSettings
         ),
         .target(
+            name: "BLESwiftProfiles",
+            dependencies: ["BLESwift"],
+            resources: [.copy("BLESwiftProfiles.docc")],
+            swiftSettings: sharedSwiftSettings
+        ),
+        .target(
             name: "BLESwiftTestSupport",
             dependencies: ["BLESwiftCore"],
             resources: [.copy("BLESwiftTestSupport.docc")],
@@ -47,7 +54,7 @@ let package = Package(
         ),
         .testTarget(
             name: "BLESwiftTests",
-            dependencies: ["BLESwift", "BLESwiftCore", "BLESwiftTestSupport"]
+            dependencies: ["BLESwift", "BLESwiftCore", "BLESwiftProfiles", "BLESwiftTestSupport"]
         )
     ]
 )

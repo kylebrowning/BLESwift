@@ -59,6 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BLESwiftError.unsupportedCharacteristicOperation(_:required:)`: thrown when a GATT
   operation targets a characteristic whose advertised properties lack the required
   capability.
+- `BLESwiftProfiles` product: typed `Receivable` decoders for Heart Rate Measurement,
+  Battery Level, Device Information, Current Time, Body Sensor Location, CSC Measurement,
+  Cycling Power Measurement, and Temperature Measurement, plus
+  `Peripheral.readDeviceInformation()` / `readBatteryLevel()`.
 
 ### Changed
 
@@ -75,6 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.writeWithoutResponse` (it is `[.read, .write, .writeWithoutResponse, .notify]`), so
   unscripted characteristics keep accepting `.withoutResponse` writes under the new
   enforcement.
+- `Examples/HeartRateMonitor` now imports `BLESwiftProfiles` instead of defining its own
+  decoder.
 
 ### Fixed
 

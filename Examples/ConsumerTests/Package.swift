@@ -29,6 +29,7 @@ let package = Package(
             dependencies: [
                 .product(name: "BLESwift", package: "blei"),
                 .product(name: "BLESwiftCore", package: "blei"),
+                .product(name: "BLESwiftProfiles", package: "blei"),
                 .product(name: "BLESwiftTestSupport", package: "blei"),
             ],
             swiftSettings: sharedSwiftSettings

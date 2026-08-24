@@ -13,34 +13,12 @@
 //
 
 import BLESwift
+import BLESwiftProfiles
 import Foundation
 
-/// The Bluetooth SIG-assigned identifiers for the standard Heart Rate service and its
-/// Heart Rate Measurement characteristic.
-enum HeartRateGATT {
-    static let service = ServiceIdentifier(uuid: "180D")
-    static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
-}
-
-/// Decodes the Bluetooth SIG "Heart Rate Measurement" characteristic (`2A37`) wire
-/// format: a one-byte flags field, followed by either an 8-bit or 16-bit heart-rate
-/// value depending on flags bit 0 (0 = `UInt8`, 1 = `UInt16`, little-endian).
-struct HeartRateMeasurement: Receivable {
-    let beatsPerMinute: Int
-
-    init(bluetoothData data: Data) throws {
-        let flags: UInt8 = try data.extract(start: 0, length: 1)
-        let valueIs16Bit = (flags & 0x01) != 0
-
-        if valueIs16Bit {
-            let value: UInt16 = try data.extract(start: 1, length: 2)
-            beatsPerMinute = Int(value)
-        } else {
-            let value: UInt8 = try data.extract(start: 1, length: 1)
-            beatsPerMinute = Int(value)
-        }
-    }
-}
+// `HeartRateMeasurement` and its Heart Rate service/characteristic identifiers now ship in
+// the `BLESwiftProfiles` product — see `HeartRateMeasurement.characteristic` /
+// `HeartRateMeasurement.service` below.
 
 /// Drives the scan → connect → subscribe flow against the first heart-rate monitor found.
 enum HeartRateMonitor {
@@ -60,7 +38,7 @@ enum HeartRateMonitor {
         // Scan until a peripheral advertising the Heart Rate service turns up, then stop
         // (breaking out of the loop ends the scan — see the "Scanning" article).
         var found: PeripheralIdentifier?
-        for try await event in await central.scan(services: [HeartRateGATT.service]) {
+        for try await event in await central.scan(services: [HeartRateMeasurement.service]) {
             if case .discovered(let discovery) = event {
                 found = discovery.peripheral
                 break
@@ -89,13 +67,15 @@ enum HeartRateMonitor {
                     print("Disconnected from \(id): \(String(describing: error)); willReconnect: \(willReconnect)")
                 case .reconnecting(let id, let attempt):
                     print("Reconnect attempt \(attempt) for \(id)...")
+                case .notificationsRestored(let id, let restored, let failed):
+                    print("Notifications restored for \(id): \(restored.count) ok, \(failed.count) failed")
                 }
             }
         }
         defer { connectionWatcher.cancel() }
 
         let readings: AsyncThrowingStream<HeartRateMeasurement, Error> = peripheral.notifications(
-            for: HeartRateGATT.measurement,
+            for: HeartRateMeasurement.characteristic,
             policy: .bufferingNewest(1)
         )
 

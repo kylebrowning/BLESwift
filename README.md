@@ -32,6 +32,11 @@ are covered, along with scriptable fakes so you can unit-test your BLE code with
   or fully custom backoff logic) replaces manual retry bookkeeping.
 - **Timeouts everywhere.** Connect, read, write, descriptor operations, RSSI reads, and L2CAP
   channel opens all take an optional `Duration` and throw on expiry instead of hanging.
+- **Typed SIG profile decoders.** The optional `BLESwiftProfiles` product decodes standard
+  Bluetooth SIG characteristics — Heart Rate Measurement, Battery Level, Device Information,
+  Current Time, Body Sensor Location, CSC Measurement, Cycling Power Measurement, and
+  Temperature Measurement (IEEE 11073 float) — into typed values, plus
+  `Peripheral.readDeviceInformation()` / `readBatteryLevel()` conveniences.
 - **GATT enumeration and introspection.** `discoverServices()`,
   `discoverCharacteristics(for:)`, `discoverDescriptors(for:)`, and `properties(of:)` let you
   walk an unknown peripheral's attribute graph.
@@ -96,6 +101,7 @@ are covered, along with scriptable fakes so you can unit-test your BLE code with
 
 ```swift
 import BLESwift
+import BLESwiftProfiles
 
 let central = Central()
 
@@ -105,9 +111,8 @@ for await state in await central.stateEvents() {
 }
 
 // Scan for a peripheral advertising the Heart Rate service, then stop.
-let heartRateService = ServiceIdentifier(uuid: "180D")
 var target: PeripheralIdentifier?
-for try await event in await central.scan(services: [heartRateService]) {
+for try await event in await central.scan(services: [HeartRateMeasurement.service]) {
     if case .discovered(let discovery) = event {
         target = discovery.peripheral
         break
@@ -119,10 +124,9 @@ guard let identifier = target else { return }
 // Connect, with automatic reconnection on unexpected disconnects.
 let peripheral = try await central.connect(identifier, reconnect: .always())
 
-// Subscribe to heart-rate notifications.
-let heartRateMeasurement = CharacteristicIdentifier(uuid: "2A37", service: heartRateService)
+// Subscribe to heart-rate notifications (decoder from BLESwiftProfiles).
 let readings: AsyncThrowingStream<HeartRateMeasurement, Error> =
-    peripheral.notifications(for: heartRateMeasurement)
+    peripheral.notifications(for: HeartRateMeasurement.characteristic)
 
 for try await reading in readings {
     print("\(reading.beatsPerMinute) bpm")
@@ -130,7 +134,7 @@ for try await reading in readings {
 ```
 
 See [`Examples/HeartRateMonitor`](Examples/HeartRateMonitor/HeartRateMonitor.swift) for the full
-worked example (including the `HeartRateMeasurement` decoding), and the DocC catalog for a full
+worked example (using `BLESwiftProfiles`' `HeartRateMeasurement`), and the DocC catalog for a full
 walkthrough: Getting Started, Scanning, Connections & Reconnection, Reading/Writing &
 Notifications, L2CAP Channels, the Peripheral Role, and Background Restoration.
 
@@ -198,6 +202,9 @@ Each module ships a DocC catalog. Hosted on the Swift Package Index:
 - [BLESwiftCore](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswiftcore) —
   the backend-agnostic types, the backend seam, and assigned numbers
   ([in repo](Sources/BLESwiftCore/BLESwiftCore.docc/BLESwiftCore.md))
+- [BLESwiftProfiles](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswiftprofiles) —
+  typed decoders for standard Bluetooth SIG GATT characteristics
+  ([in repo](Sources/BLESwiftProfiles/BLESwiftProfiles.docc/BLESwiftProfiles.md))
 - [BLESwiftTestSupport](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswifttestsupport) —
   the fakes and the testing rig
   ([in repo](Sources/BLESwiftTestSupport/BLESwiftTestSupport.docc/BLESwiftTestSupport.md))
