@@ -110,6 +110,25 @@ public actor Central {
     /// synchronously; ``ServiceChangesRegistry`` is itself `Sendable` and internally `Mutex`-guarded.
     nonisolated let serviceChangesRegistry = ServiceChangesRegistry()
 
+    #if os(iOS)
+    /// Per-peripheral ANCS-authorization broadcasters backing
+    /// ``Peripheral/ancsAuthorizationEvents()`` — same shape and lifetime rules as
+    /// ``serviceChangesRegistry``: keyed by identifier, entries never removed, streams
+    /// deliberately survive disconnect/reconnect.
+    nonisolated let ancsAuthorizationRegistry = ANCSAuthorizationRegistry()
+    #endif
+
+    #if !os(macOS)
+    /// Live ``connectionEventRegistration(services:peripherals:)`` subscribers, keyed by a
+    /// monotonic token — both the multicast fan-out target for
+    /// `CentralEvent.connectionEventDidOccur` and the refcount driving backend
+    /// register/unregister (register on 0→1, unregister on 1→0).
+    private var connectionEventSubscribers: [UInt64: AsyncStream<SystemConnectionEvent>.Continuation] = [:]
+
+    /// The next ``connectionEventSubscribers`` token to hand out.
+    private var nextConnectionEventToken: UInt64 = 0
+    #endif
+
     // MARK: - Background restoration state
 
     /// Multicasts every ``RestorationEvent``. Replay `.allUntilFirstConsumer`: restoration
@@ -490,6 +509,112 @@ public actor Central {
         connectionBroadcaster.stream()
     }
 
+    #if !os(macOS)
+    /// Returns a multicast stream of system-level connection events for peripherals
+    /// matching `services`/`peripherals` (any-of) — delivered when a matching peripheral
+    /// connects to or disconnects from the *system*, by any app or the Bluetooth settings
+    /// pane, not just through this `Central`. Wraps
+    /// `CBCentralManager.registerForConnectionEvents(options:)`.
+    ///
+    /// The underlying CoreBluetooth registration is refcounted: it is issued when the
+    /// first subscriber's stream is created — with that first call's match options — and
+    /// cancelled when the last subscriber's stream terminates. A later call while
+    /// subscribers exist joins the multicast without re-registering, so its `services`/
+    /// `peripherals` are ignored until the registration next drops to zero and restarts.
+    ///
+    /// Not available on macOS (CoreBluetooth does not offer connection-event registration
+    /// there).
+    ///
+    /// - Parameters:
+    ///   - services: Match peripherals exposing any of these services, or `nil` for no
+    ///     service criterion.
+    ///   - peripherals: Match these specific peripherals, or `nil` for no peripheral
+    ///     criterion. Both `nil` registers with no match options, which CoreBluetooth
+    ///     treats as matching nothing.
+    /// - Returns: An `AsyncStream` of ``SystemConnectionEvent``; no replay — subscribers
+    ///   only see events delivered after they subscribe.
+    public func connectionEventRegistration(
+        services: [ServiceIdentifier]? = nil,
+        peripherals: [PeripheralIdentifier]? = nil
+    ) -> AsyncStream<SystemConnectionEvent> {
+        let (stream, continuation) = AsyncStream.makeStream(of: SystemConnectionEvent.self)
+        let token = nextConnectionEventToken
+        nextConnectionEventToken += 1
+        connectionEventSubscribers[token] = continuation
+        if connectionEventSubscribers.count == 1 {
+            manager?.registerForConnectionEvents(services: services, peripherals: peripherals?.map(\.uuid))
+        }
+        continuation.onTermination = { [weak self] _ in
+            guard let self else { return }
+            self.queue.async {
+                self.assumeIsolated { central in
+                    central.removeConnectionEventSubscriber(token)
+                }
+            }
+        }
+        return stream
+    }
+
+    /// Drops one ``connectionEventSubscribers`` entry; unregisters from the backend when
+    /// the last one goes. Idempotent per token.
+    private func removeConnectionEventSubscriber(_ token: UInt64) {
+        guard connectionEventSubscribers.removeValue(forKey: token) != nil else { return }
+        if connectionEventSubscribers.isEmpty {
+            manager?.unregisterForConnectionEvents()
+        }
+    }
+    #endif
+
+    #if os(iOS)
+    /// `Peripheral.ancsAuthorized`'s resolution path: the live session's backend value, or
+    /// `false` when `id` isn't currently connected.
+    func ancsAuthorized(for id: PeripheralIdentifier) -> Bool {
+        guard case .connected(let session) = connections[id] else { return false }
+        return session.peripheral.ancsAuthorized
+    }
+    #endif
+
+    #if os(iOS)
+    /// Connects to a known peripheral.
+    ///
+    /// BLESwift supports N concurrent peripheral connections — connecting to any peripheral
+    /// other than `id` never conflicts. Fails immediately with
+    /// ``BLESwiftError/duplicateConnect(_:)`` only if `id` itself already has a tracked
+    /// entry. A new `connect` call to `id` cancels any in-flight auto-reconnect loop for
+    /// `id` and resets its ``ReconnectPolicy`` to whatever `reconnect` specifies.
+    ///
+    /// - Parameters:
+    ///   - id: The peripheral to connect to.
+    ///   - timeout: How long to wait before throwing ``BLESwiftError/connectionTimedOut``.
+    ///     Defaults to 15 seconds; `nil` waits indefinitely. On timeout, the pending
+    ///     CoreBluetooth attempt is cancelled and its confirmation awaited before throwing.
+    ///   - reconnect: What to do if this connection is later lost unexpectedly. Defaults to
+    ///     ``ReconnectPolicy/never``.
+    ///   - warningOptions: Per-connection override for iOS system alerts on suspended-app
+    ///     connection events. Defaults to ``Configuration``'s `warningOptions`.
+    ///   - compatibility: Accommodations for peripherals that misreport their GATT
+    ///     database — see ``GATTCompatibility``. Defaults to ``GATTCompatibility/strict``;
+    ///     applies to this connection only.
+    ///   - requiresANCS: iOS only — requires ANCS (Apple Notification Center Service)
+    ///     authorization for this connection (`CBConnectPeripheralOptionRequiresANCS`).
+    ///     Track the resulting authorization via ``Peripheral/ancsAuthorized`` and
+    ///     ``Peripheral/ancsAuthorizationEvents()``; reused by auto-reconnect attempts.
+    /// - Returns: A ``Peripheral`` handle once connected.
+    /// - Throws: ``BLESwiftError/duplicateConnect(_:)``, ``BLESwiftError/unexpectedPeripheral(_:)``
+    ///   if `id` is not known to CoreBluetooth, ``BLESwiftError/connectionTimedOut``,
+    ///   ``BLESwiftError/operationCancelled`` on task cancellation, or whatever error
+    ///   CoreBluetooth reports.
+    public func connect(
+        _ id: PeripheralIdentifier,
+        timeout: Duration? = .seconds(15),
+        reconnect: ReconnectPolicy = .never,
+        warningOptions: WarningOptions? = nil,
+        compatibility: GATTCompatibility = .strict,
+        requiresANCS: Bool = false
+    ) async throws -> Peripheral {
+        try await connectImpl(id, timeout: timeout, reconnect: reconnect, warningOptions: warningOptions, compatibility: compatibility, requiresANCS: requiresANCS)
+    }
+    #else
     /// Connects to a known peripheral.
     ///
     /// BLESwift supports N concurrent peripheral connections — connecting to any peripheral
@@ -522,6 +647,20 @@ public actor Central {
         warningOptions: WarningOptions? = nil,
         compatibility: GATTCompatibility = .strict
     ) async throws -> Peripheral {
+        try await connectImpl(id, timeout: timeout, reconnect: reconnect, warningOptions: warningOptions, compatibility: compatibility, requiresANCS: false)
+    }
+    #endif
+
+    /// The shared body behind the fenced `connect(_:...)` pair — `requiresANCS` exists as
+    /// a public parameter on iOS only, but flows through here (always `false` elsewhere).
+    private func connectImpl(
+        _ id: PeripheralIdentifier,
+        timeout: Duration?,
+        reconnect: ReconnectPolicy,
+        warningOptions: WarningOptions?,
+        compatibility: GATTCompatibility,
+        requiresANCS: Bool
+    ) async throws -> Peripheral {
         guard manager != nil else { throw BLESwiftError.stopped }
 
         // Restoration owns the connection slot until its routing has run — BLESwift rejects
@@ -541,7 +680,8 @@ public actor Central {
             policy: reconnect,
             timeout: timeout,
             warningOptions: resolvedWarningOptions,
-            compatibility: compatibility
+            compatibility: compatibility,
+            requiresANCS: requiresANCS
         )
 
         // Cancel an in-flight reconnect loop for THIS peripheral only. Safe after
@@ -745,7 +885,8 @@ public actor Central {
         policy: ReconnectPolicy,
         timeout: Duration?,
         warningOptions: WarningOptions,
-        compatibility: GATTCompatibility
+        compatibility: GATTCompatibility,
+        requiresANCS: Bool = false
     ) throws {
         guard connections[identifier] == nil else {
             throw BLESwiftError.duplicateConnect(identifier)
@@ -769,6 +910,7 @@ public actor Central {
             timeout: timeout,
             warningOptions: warningOptions,
             compatibility: compatibility,
+            requiresANCS: requiresANCS,
             continuation: nil,
             stopping: nil
         ))
@@ -819,7 +961,7 @@ public actor Central {
                 connections[id] = .connecting(connecting)
                 connectionBroadcaster.yield(.connecting(id))
                 log("Connecting to \(id)", level: .info, category: "connection")
-                manager?.connect(connecting.peripheral, options: warningOptions)
+                manager?.connect(connecting.peripheral, options: warningOptions, requiresANCS: connecting.requiresANCS)
             }
             // Explicit isolation pin on Swift ≤6.3 — see withCancellableGATTContinuation.
             #if compiler(>=6.4)
@@ -927,6 +1069,7 @@ public actor Central {
             let timeout = connecting.timeout
             let warningOptions = connecting.warningOptions
             let compatibility = connecting.compatibility
+            let requiresANCS = connecting.requiresANCS
             let continuation = connecting.continuation
             connecting.continuation = nil
             connections.removeValue(forKey: identifier)
@@ -951,7 +1094,7 @@ public actor Central {
             // running (its own catch block continues retrying) — only a fresh top-level
             // failure starts one here.
             if willReconnect, reconnectLoops[identifier] == nil {
-                scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility)
+                scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility, requiresANCS: requiresANCS)
             }
 
         case .connected(let session):
@@ -959,6 +1102,7 @@ public actor Central {
             let timeout = session.timeout
             let warningOptions = session.warningOptions
             let compatibility = session.compatibility
+            let requiresANCS = session.requiresANCS
             let willReconnect = !policy.isNever
 
             // Fail GATT ops and finish notification streams before removing the entry —
@@ -980,7 +1124,7 @@ public actor Central {
 
             // Same don't-double-spawn guard as the `.connecting` branch above.
             if willReconnect, reconnectLoops[identifier] == nil {
-                scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility)
+                scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility, requiresANCS: requiresANCS)
             }
 
         case .disconnecting(var disconnecting):
@@ -1217,12 +1361,13 @@ public actor Central {
         policy: ReconnectPolicy,
         timeout: Duration?,
         warningOptions: WarningOptions,
-        compatibility: GATTCompatibility
+        compatibility: GATTCompatibility,
+        requiresANCS: Bool = false
     ) {
         reconnectGeneration += 1
         let generation = reconnectGeneration
         let task = Task<Void, Never> { [weak self] in
-            await self?.runReconnectLoop(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility, generation: generation)
+            await self?.runReconnectLoop(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility, requiresANCS: requiresANCS, generation: generation)
         }
         reconnectLoops[identifier] = ReconnectLoop(task: task, generation: generation)
     }
@@ -1245,6 +1390,7 @@ public actor Central {
         timeout: Duration?,
         warningOptions: WarningOptions,
         compatibility: GATTCompatibility,
+        requiresANCS: Bool,
         generation: UInt64
     ) async {
         var attempt = 1
@@ -1289,7 +1435,8 @@ public actor Central {
                     policy: policy,
                     timeout: timeout,
                     warningOptions: warningOptions,
-                    compatibility: compatibility
+                    compatibility: compatibility,
+                    requiresANCS: requiresANCS
                 )
                 _ = try await establishConnection(
                     identifier: identifier,
@@ -1359,7 +1506,7 @@ public actor Central {
             let warningOptions = connecting.warningOptions
             let target = connecting.peripheral
 
-            connections[identifier] = .connected(Session(identifier: identifier, peripheral: target, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: connecting.compatibility))
+            connections[identifier] = .connected(Session(identifier: identifier, peripheral: target, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: connecting.compatibility, requiresANCS: connecting.requiresANCS))
 
             log("Connected to \(identifier)", level: .info, category: "connection")
             connectionBroadcaster.yield(.connected(identifier))
@@ -1381,6 +1528,30 @@ public actor Central {
 
         case .didDisconnect(let identifier, let error):
             handleTermination(identifier: identifier, error: error)
+
+        #if !os(macOS)
+        case .connectionEventDidOccur(let peripheralUUID, let kind):
+            let event = SystemConnectionEvent(
+                peripheral: PeripheralIdentifier(uuid: peripheralUUID, name: nil),
+                kind: kind
+            )
+            for continuation in connectionEventSubscribers.values {
+                continuation.yield(event)
+            }
+        #else
+        case .connectionEventDidOccur:
+            break
+        #endif
+
+        #if os(iOS)
+        case .didUpdateANCSAuthorization(let peripheralUUID, let authorized):
+            ancsAuthorizationRegistry
+                .broadcaster(for: PeripheralIdentifier(uuid: peripheralUUID, name: nil))
+                .yield(authorized)
+        #else
+        case .didUpdateANCSAuthorization:
+            break
+        #endif
 
         case .willRestoreState(let restored):
             // Wire each restored peripheral's event delivery now, before `.poweredOn`
@@ -4163,6 +4334,9 @@ private struct Connecting {
     let timeout: Duration?
     let warningOptions: WarningOptions
     let compatibility: GATTCompatibility
+    /// Whether the connect was requested with ANCS required (iOS-only effect; always
+    /// `false` elsewhere). Carried so reconnect attempts reuse it.
+    let requiresANCS: Bool
     /// The pending connect continuation. `nil` when reserved-but-unattached (between
     /// `reserveConnectingSlot` writing this entry and `awaitConnect` attaching its
     /// continuation) or once taken (resumed and cleared). Resumed exactly once, by
@@ -4185,6 +4359,9 @@ private struct Session {
     let timeout: Duration?
     let warningOptions: WarningOptions
     let compatibility: GATTCompatibility
+    /// See `Connecting.requiresANCS` — carried onto the session so an unexpected
+    /// disconnect's reconnect loop reuses it.
+    let requiresANCS: Bool
 
     // Explicit because the synthesized memberwise init is private (nextWaiterTokenValue is
     // a private stored property), which makes it inaccessible at the file-scope call site.
@@ -4194,7 +4371,8 @@ private struct Session {
         policy: ReconnectPolicy,
         timeout: Duration?,
         warningOptions: WarningOptions,
-        compatibility: GATTCompatibility
+        compatibility: GATTCompatibility,
+        requiresANCS: Bool = false
     ) {
         self.identifier = identifier
         self.peripheral = peripheral
@@ -4202,6 +4380,7 @@ private struct Session {
         self.timeout = timeout
         self.warningOptions = warningOptions
         self.compatibility = compatibility
+        self.requiresANCS = requiresANCS
     }
 
     // MARK: - GATT

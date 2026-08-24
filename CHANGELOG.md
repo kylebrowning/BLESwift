@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Central.connectionEventRegistration(services:peripherals:)` and `SystemConnectionEvent`
+  (BLESwiftCore): a multicast stream of system-level connection events
+  (`registerForConnectionEvents(options:)`) — delivered when a matching peripheral connects
+  to or disconnects from the system by any app. The CoreBluetooth registration is
+  refcounted: registered on the first subscriber, deregistered when the last cancels.
+  iOS/tvOS/watchOS/visionOS (not macOS, matching the SDK).
+- ANCS support (iOS only): a `requiresANCS: Bool = false` parameter on
+  `Central.connect(_:timeout:reconnect:warningOptions:compatibility:requiresANCS:)`
+  (`CBConnectPeripheralOptionRequiresANCS`, reused by auto-reconnect attempts), plus
+  `Peripheral.ancsAuthorized` and `Peripheral.ancsAuthorizationEvents()` mirroring
+  `CBPeripheral.ancsAuthorized`/`didUpdateANCSAuthorizationFor`.
+- `FakeCentral.simulateConnectionEvent(_:for:)`/`simulateANCSAuthorization(_:for:)`
+  (BLESwiftTestSupport), with `connectionEventRegistrationCount`,
+  `connectionEventUnregistrationCount`, `lastConnectionEventServices`,
+  `lastConnectionEventPeripherals`, and `lastConnectRequiresANCS` recorders;
+  `FakePeripheral.ancsAuthorized` is scriptable. Available on every platform.
+
 - `ScanFilter` (BLESwiftCore): declarative scan match criteria — `services` (radio-level),
   `namePrefix`/`nameExact`, `manufacturerID`/`manufacturerDataPrefix`, per-service
   `serviceData` presence/prefix requirements, `minimumRSSI`, `connectableOnly`, and a

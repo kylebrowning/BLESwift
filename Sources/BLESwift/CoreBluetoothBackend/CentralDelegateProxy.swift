@@ -115,6 +115,27 @@ final class CentralDelegateProxy: NSObject, CBCentralManagerDelegate {
         forward(.didDisconnect(identifier(for: peripheral), error: error as NSError?))
     }
 
+    #if !os(macOS)
+    func centralManager(_ central: CBCentralManager, connectionEventDidOccur event: CBConnectionEvent, for peripheral: CBPeripheral) {
+        let kind: SystemConnectionEvent.Kind
+        switch event {
+        case .peerConnected:
+            kind = .peerConnected
+        case .peerDisconnected:
+            kind = .peerDisconnected
+        @unknown default:
+            return
+        }
+        forward(.connectionEventDidOccur(peripheral: peripheral.identifier, event: kind))
+    }
+    #endif
+
+    #if os(iOS)
+    func centralManager(_ central: CBCentralManager, didUpdateANCSAuthorizationFor peripheral: CBPeripheral) {
+        forward(.didUpdateANCSAuthorization(peripheral: peripheral.identifier, authorized: peripheral.ancsAuthorized))
+    }
+    #endif
+
     // MARK: - Forwarding
 
     private func identifier(for peripheral: CBPeripheral) -> PeripheralIdentifier {

@@ -31,6 +31,15 @@ public enum CentralEvent: Sendable {
     /// `centralManager(_:didDisconnectPeripheral:error:)`.
     case didDisconnect(PeripheralIdentifier, error: NSError?)
 
+    /// A system-level connection event occurred for a peripheral matched by a prior
+    /// `registerForConnectionEvents(services:peripherals:)` call. Mirrors
+    /// `centralManager(_:connectionEventDidOccur:for:)`. Never produced on macOS.
+    case connectionEventDidOccur(peripheral: UUID, event: SystemConnectionEvent.Kind)
+
+    /// A connected peripheral's ANCS authorization status changed. Mirrors
+    /// `centralManager(_:didUpdateANCSAuthorizationFor:)`. Only produced on iOS.
+    case didUpdateANCSAuthorization(peripheral: UUID, authorized: Bool)
+
     /// CoreBluetooth restored preserved state after a background relaunch (iOS). Mirrors
     /// `centralManager(_:willRestoreState:)`, with the raw dictionary already converted to
     /// the `Sendable` ``RestoredState`` by the proxy.

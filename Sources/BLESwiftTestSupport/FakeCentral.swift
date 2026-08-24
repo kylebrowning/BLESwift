@@ -49,6 +49,11 @@ public final class FakeCentral: CentralManaging, Sendable {
     nonisolated(unsafe) private var _connectCallCount = 0
     nonisolated(unsafe) private var _connectCallCounts: [UUID: Int] = [:]
     nonisolated(unsafe) private var _lastConnectOptions: WarningOptions?
+    nonisolated(unsafe) private var _lastConnectRequiresANCS: Bool?
+    nonisolated(unsafe) private var _connectionEventRegistrationCount = 0
+    nonisolated(unsafe) private var _connectionEventUnregistrationCount = 0
+    nonisolated(unsafe) private var _lastConnectionEventServices: [ServiceIdentifier]?
+    nonisolated(unsafe) private var _lastConnectionEventPeripherals: [UUID]?
     nonisolated(unsafe) private var _cancelCallCount = 0
     nonisolated(unsafe) private var _cancelCallCounts: [UUID: Int] = [:]
     nonisolated(unsafe) private var _scanCallCount = 0
@@ -174,6 +179,43 @@ public final class FakeCentral: CentralManaging, Sendable {
         return _lastConnectOptions
     }
 
+    /// The `requiresANCS` flag passed to the most recent
+    /// ``connect(_:options:requiresANCS:)`` call, or `nil` before any connect. Lets you
+    /// assert that `requiresANCS:` plumbing reaches the backend seam.
+    public var lastConnectRequiresANCS: Bool? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _lastConnectRequiresANCS
+    }
+
+    /// The number of times ``registerForConnectionEvents(services:peripherals:)`` has been
+    /// called.
+    public var connectionEventRegistrationCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _connectionEventRegistrationCount
+    }
+
+    /// The number of times ``unregisterForConnectionEvents()`` has been called.
+    public var connectionEventUnregistrationCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _connectionEventUnregistrationCount
+    }
+
+    /// The `services` passed to the most recent
+    /// ``registerForConnectionEvents(services:peripherals:)`` call (`nil` before any, or
+    /// when the caller passed `nil`).
+    public var lastConnectionEventServices: [ServiceIdentifier]? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _lastConnectionEventServices
+    }
+
+    /// The peripheral UUIDs passed to the most recent
+    /// ``registerForConnectionEvents(services:peripherals:)`` call (`nil` before any, or
+    /// when the caller passed `nil`).
+    public var lastConnectionEventPeripherals: [UUID]? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _lastConnectionEventPeripherals
+    }
+
     /// The number of times ``cancelPeripheralConnection(_:)`` has been called, across every
     /// peripheral.
     public var cancelCallCount: Int {
@@ -278,6 +320,26 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
+    /// Simulates a system-level connection event for `peripheral` and, asynchronously,
+    /// delivers `CentralEvent.connectionEventDidOccur(peripheral:event:)` on ``queue``.
+    public func simulateConnectionEvent(_ kind: SystemConnectionEvent.Kind, for peripheral: PeripheralIdentifier) {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            deliver(.connectionEventDidOccur(peripheral: peripheral.uuid, event: kind))
+        }
+    }
+
+    /// Simulates an ANCS authorization change for `peripheral` and, asynchronously,
+    /// delivers `CentralEvent.didUpdateANCSAuthorization(peripheral:authorized:)` on
+    /// ``queue``. Pair with setting `FakePeripheral.ancsAuthorized`, as a real
+    /// `CBPeripheral` would reflect the new value by the time the callback lands.
+    public func simulateANCSAuthorization(_ authorized: Bool, for peripheral: PeripheralIdentifier) {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            deliver(.didUpdateANCSAuthorization(peripheral: peripheral.uuid, authorized: authorized))
+        }
+    }
+
     #if os(iOS)
     /// Simulates CoreBluetooth restoring preserved state after a background relaunch and,
     /// asynchronously, delivers `CentralEvent.willRestoreState(_:)` on ``queue``.
@@ -324,10 +386,11 @@ public final class FakeCentral: CentralManaging, Sendable {
     /// asynchronously delivers `.didConnect`, `.didFailToConnect`, or nothing (`.hang`) on
     /// ``queue``. A no-op beyond the call count if `peripheral` isn't a `FakePeripheral` —
     /// not a trap.
-    public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?) {
+    public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectCallCount += 1
         _lastConnectOptions = options
+        _lastConnectRequiresANCS = requiresANCS
 
         guard let fakePeripheral = peripheral as? FakePeripheral else { return }
 
@@ -371,6 +434,21 @@ public final class FakeCentral: CentralManaging, Sendable {
         return _systemConnectedPeripherals
             .filter { !query.isDisjoint(with: $0.services) }
             .map(\.peripheral)
+    }
+
+    /// Records the call and its match options. Does not itself deliver events — use
+    /// ``simulateConnectionEvent(_:for:)`` to script them.
+    public func registerForConnectionEvents(services: [ServiceIdentifier]?, peripherals: [UUID]?) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _connectionEventRegistrationCount += 1
+        _lastConnectionEventServices = services
+        _lastConnectionEventPeripherals = peripherals
+    }
+
+    /// Records the call.
+    public func unregisterForConnectionEvents() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _connectionEventUnregistrationCount += 1
     }
 
     private func deliver(_ event: CentralEvent) {

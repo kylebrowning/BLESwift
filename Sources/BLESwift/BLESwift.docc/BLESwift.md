@@ -73,6 +73,16 @@ BLESwift supports any number of concurrent peripheral connections — see
 - ``GATTCompatibility``
 - ``GATTCompatibility/DiscoveryMode``
 
+### System Connection Events & ANCS
+
+Platform-fenced exactly as CoreBluetooth is: connection-event registration exists
+everywhere but macOS; the ANCS members (`requiresANCS:` on `connect`,
+`Peripheral/ancsAuthorized`, `Peripheral/ancsAuthorizationEvents()`) are iOS-only.
+
+- <doc:SystemEvents>
+- ``SystemConnectionEvent``
+- ``Central/connectionEventRegistration(services:peripherals:)``
+
 ### Reading, Writing, and Notifications
 
 - <doc:ReadingWritingNotifications>

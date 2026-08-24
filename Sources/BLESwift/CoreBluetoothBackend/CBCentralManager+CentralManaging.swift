@@ -83,11 +83,19 @@ extension CBCentralManager: CentralManaging {
         scanForPeripherals(withServices: services?.map(\.cbuuid), options: cbOptions)
     }
 
-    /// Downcasts `peripheral` to `CBPeripheral` and delegates to
-    /// `connect(_:options:)`. A no-op if `peripheral` is not a `CBPeripheral`.
-    public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?) {
+    /// Downcasts `peripheral` to `CBPeripheral`, merges `requiresANCS` into the options
+    /// dictionary (`CBConnectPeripheralOptionRequiresANCS`, iOS only — ignored elsewhere),
+    /// and delegates to `connect(_:options:)`. A no-op if `peripheral` is not a
+    /// `CBPeripheral`.
+    public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         guard let cbPeripheral = peripheral as? CBPeripheral else { return }
-        connect(cbPeripheral, options: options?.cbConnectOptions)
+        var cbOptions: [String: Any] = options?.cbConnectOptions ?? [:]
+        #if os(iOS)
+        if requiresANCS {
+            cbOptions[CBConnectPeripheralOptionRequiresANCS] = true
+        }
+        #endif
+        connect(cbPeripheral, options: cbOptions.isEmpty ? nil : cbOptions)
     }
 
     /// Downcasts `peripheral` to `CBPeripheral` and delegates to
@@ -112,5 +120,29 @@ extension CBCentralManager: CentralManaging {
     public func retrieveConnectedPeripherals(withServices services: [ServiceIdentifier]) -> [any PeripheralRemote] {
         let cbPeripherals: [CBPeripheral] = retrieveConnectedPeripherals(withServices: services.map(\.cbuuid))
         return cbPeripherals
+    }
+
+    /// Builds the `[CBConnectionEventMatchingOption: Any]` CoreBluetooth's real
+    /// `registerForConnectionEvents(options:)` expects and delegates to it. A no-op on
+    /// macOS, where the underlying API does not exist.
+    public func registerForConnectionEvents(services: [ServiceIdentifier]?, peripherals: [UUID]?) {
+        #if !os(macOS)
+        var options: [CBConnectionEventMatchingOption: Any] = [:]
+        if let services {
+            options[.serviceUUIDs] = services.map(\.cbuuid)
+        }
+        if let peripherals {
+            options[.peripheralUUIDs] = peripherals
+        }
+        registerForConnectionEvents(options: options)
+        #endif
+    }
+
+    /// Delegates to the real `registerForConnectionEvents(options:)` with `nil` — how
+    /// CoreBluetooth expresses deregistration. A no-op on macOS.
+    public func unregisterForConnectionEvents() {
+        #if !os(macOS)
+        registerForConnectionEvents(options: nil)
+        #endif
     }
 }

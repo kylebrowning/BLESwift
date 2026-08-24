@@ -34,6 +34,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
 
     nonisolated(unsafe) private var _connectionState: PeripheralConnectionState
     nonisolated(unsafe) private var _canSendWriteWithoutResponse: Bool
+    nonisolated(unsafe) private var _ancsAuthorized = false
     nonisolated(unsafe) private var _eventHandler: ((PeripheralEvent) -> Void)?
     nonisolated(unsafe) private var _discoveredServices: Set<ServiceIdentifier> = []
     nonisolated(unsafe) private var _discoveredCharacteristics: Set<CharacteristicIdentifier> = []
@@ -635,6 +636,21 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     public var canSendWriteWithoutResponse: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _canSendWriteWithoutResponse
+    }
+
+    /// The scripted ANCS authorization value this fake reports. Defaults to `false`.
+    /// Settable via ``onQueue(_:)`` — set it before (or alongside) scripting
+    /// `FakeCentral.simulateANCSAuthorization(_:for:)`, as a real `CBPeripheral` would
+    /// reflect the new value by the time the callback lands.
+    public var ancsAuthorized: Bool {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _ancsAuthorized
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _ancsAuthorized = newValue
+        }
     }
 
     /// Records the call and asynchronously delivers `didDiscoverServices` on ``queue``. Per

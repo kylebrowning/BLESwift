@@ -86,6 +86,13 @@ extension CBPeripheral {
 /// but the same SPM package — SE-0364's retroactive-conformance check is package-scoped.
 extension CBPeripheral: PeripheralRemote {
 
+    #if !os(iOS)
+    /// `PeripheralRemote.ancsAuthorized`'s witness off iOS, where `CBPeripheral` has no
+    /// `ancsAuthorized` property — ANCS is iOS-only, so this is always `false`. On iOS the
+    /// native property is the witness directly.
+    public var ancsAuthorized: Bool { false }
+    #endif
+
     /// Maps the native `state` (`CBPeripheralState`) to ``PeripheralConnectionState``.
     public var connectionState: PeripheralConnectionState {
         PeripheralConnectionState(state)

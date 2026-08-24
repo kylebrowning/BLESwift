@@ -30,6 +30,11 @@ public protocol PeripheralRemote: AnyObject {
     /// The peripheral's current connection state. Mirrors `CBPeripheral.state`.
     var connectionState: PeripheralConnectionState { get }
 
+    /// Whether the peripheral's connection was made with ANCS required and the user has
+    /// authorized ANCS data sharing. Mirrors `CBPeripheral.ancsAuthorized` (iOS-only in
+    /// CoreBluetooth; conformances return `false` on other platforms).
+    var ancsAuthorized: Bool { get }
+
     /// Whether the peripheral is currently able to accept a
     /// `.withoutResponse` write without CoreBluetooth dropping it. Mirrors
     /// `CBPeripheral.canSendWriteWithoutResponse`; used to await
