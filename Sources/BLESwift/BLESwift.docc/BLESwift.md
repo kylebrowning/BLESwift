@@ -82,6 +82,10 @@ BLESwift supports any number of concurrent peripheral connections — see
 ### Background Restoration
 
 - <doc:BackgroundRestoration>
+- ``RestorationConfiguration``
+- ``RestorationEvent``
+- ``PeripheralRestorationConfiguration``
+- ``PeripheralRestorationEvent``
 
 ### Peripheral Role (GATT server)
 
@@ -102,12 +106,14 @@ Host a GATT database and advertise it — the peripheral half of CoreBluetooth. 
 - ``ATTError``
 - ``Subscriber``
 - ``SubscriptionEvent``
+- ``PeripheralHostEvent``
 
 ### Identifiers
 
 - ``PeripheralIdentifier``
 - ``ServiceIdentifier``
 - ``CharacteristicIdentifier``
+- ``DescriptorIdentifier``
 
 ### Serialization
 

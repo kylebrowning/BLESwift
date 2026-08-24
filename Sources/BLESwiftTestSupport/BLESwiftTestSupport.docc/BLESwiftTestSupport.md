@@ -30,4 +30,7 @@ carries no CoreBluetooth-backed code into your test target at all.
 
 - ``FakeCentral``
 - ``FakePeripheral``
+- ``FakePeripheralManager``
+- ``FakeL2CAPChannel``
+- ``FakeGATTBridge``
 - ``FakeStartupBackgroundTask``

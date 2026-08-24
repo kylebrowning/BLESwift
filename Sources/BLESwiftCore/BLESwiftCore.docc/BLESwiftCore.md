@@ -57,6 +57,8 @@ func describe(_ service: ServiceIdentifier, characteristics: [CharacteristicIden
 
 - ``CentralManaging``
 - ``PeripheralRemote``
+- ``PeripheralManaging``
+- ``L2CAPChannelRemote``
 - ``CentralEvent``
 - ``PeripheralEvent``
 - ``StartupBackgroundTaskRunning``
@@ -74,6 +76,7 @@ func describe(_ service: ServiceIdentifier, characteristics: [CharacteristicIden
 - ``PeripheralIdentifier``
 - ``ServiceIdentifier``
 - ``CharacteristicIdentifier``
+- ``DescriptorIdentifier``
 
 ### Assigned Numbers
 
@@ -92,6 +95,7 @@ func describe(_ service: ServiceIdentifier, characteristics: [CharacteristicIden
 
 - ``RestoredState``
 - ``RestoredPeripheral``
+- ``RestoredPeripheralState``
 - ``RestoredScanOptions``
 
 ### Serialization
