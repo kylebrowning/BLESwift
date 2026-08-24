@@ -13,7 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-## [1.1.0] - 2026-08-24
+## [2.0.0] - 2026-08-24
+
+> **Breaking:** GATT read/write/notify now validate a characteristic's advertised
+> `CharacteristicProperties` by default and throw `unsupportedCharacteristicOperation` when
+> the operation is not advertised. Peripherals that misreport their properties need
+> `compatibility: .lenient` (or a targeted `GATTCompatibility` flag) on `connect`. See
+> **Changed** below. This is the reason for the major version bump; every other change is additive.
 
 ### Added
 
@@ -194,8 +200,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed a deadlock when connecting to the same peripheral concurrently.
 - Restoring multiple peripherals now happens concurrently.
 
-[Unreleased]: https://github.com/kylebrowning/BLESwift/compare/1.1.0...HEAD
-[1.1.0]: https://github.com/kylebrowning/BLESwift/compare/1.0.2...1.1.0
+[Unreleased]: https://github.com/kylebrowning/BLESwift/compare/2.0.0...HEAD
+[2.0.0]: https://github.com/kylebrowning/BLESwift/compare/1.0.2...2.0.0
 [1.0.2]: https://github.com/kylebrowning/BLESwift/compare/1.0.1...1.0.2
 [1.0.1]: https://github.com/kylebrowning/BLESwift/compare/1.0.0...1.0.1
 [1.0.0]: https://github.com/kylebrowning/BLESwift/compare/0.2.0...1.0.0
