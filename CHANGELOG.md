@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FakePeripheral.simulateGATTCacheReset()` (BLESwiftTestSupport): clears the fake's
   discovered service graph as a real disconnect would, for testing re-discovery across
   reconnects.
+- `Peripheral.writeChunked(_:to:type:chunkSize:timeout:)`: the outbound counterpart to
+  `writeAndAssemble`, splitting a payload into `chunkSize`-byte chunks and sending each only
+  after the previous completes, holding the characteristic's serialization lane for the whole
+  sequence. Comes in two overloads distinguished by return type: a plain `async throws` one
+  that awaits full completion, and an `AsyncThrowingStream<WriteProgress, Error>` one that
+  reports per-chunk progress (for firmware-update UIs). `timeout` applies per chunk;
+  cancelling between chunks throws `operationCancelled`.
+- `WriteProgress`: the per-chunk progress value (`bytesSent`, `totalBytes`, `isComplete`)
+  emitted by the streaming `writeChunked` overload.
 
 ### Changed
 

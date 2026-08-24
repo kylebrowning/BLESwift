@@ -1845,6 +1845,49 @@ public actor Central {
         }
     }
 
+    /// Backs `Peripheral.writeChunked(...)`. Holds `characteristic`'s FIFO lane for the
+    /// entire `chunks` sequence (one ``runOnFIFO(identifier:characteristic:operation:)`` job)
+    /// so no other write can interleave between chunks, and loops the same inner
+    /// ``performWriteNow(identifier:characteristic:data:type:)`` primitive a single
+    /// ``performWrite(peripheral:characteristic:data:type:timeout:)`` uses — so each chunk's
+    /// behaviour (`.withoutResponse` back-pressure, `.withResponse` `didWriteValueFor` await)
+    /// is byte-identical to a normal write. `timeout` applies **per chunk**. `progress` is
+    /// invoked after each chunk completes with the cumulative `bytesSent`; an empty `chunks`
+    /// performs no writes and reports a single terminal `(0, totalBytes)`.
+    func performChunkedWrite(
+        peripheral identifier: PeripheralIdentifier,
+        characteristic: CharacteristicIdentifier,
+        chunks: [Data],
+        totalBytes: Int,
+        type: WriteType,
+        timeout: Duration?,
+        progress: @Sendable (WriteProgress) -> Void
+    ) async throws {
+        guard !chunks.isEmpty else {
+            progress(WriteProgress(bytesSent: 0, totalBytes: totalBytes))
+            return
+        }
+
+        try await runOnFIFO(identifier: identifier, characteristic: characteristic) {
+            var bytesSent = 0
+            for chunk in chunks {
+                // A cancel between chunks stops the sequence; because we hold the FIFO lane,
+                // no further chunk is sent. A partially-sent payload is the caller's problem.
+                if Task.isCancelled { throw BLESwiftError.operationCancelled }
+                try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+                    try await self.performWriteNow(
+                        identifier: identifier,
+                        characteristic: characteristic,
+                        data: chunk,
+                        type: type
+                    )
+                }
+                bytesSent += chunk.count
+                progress(WriteProgress(bytesSent: bytesSent, totalBytes: totalBytes))
+            }
+        }
+    }
+
     /// The actual discovery-then-write sequence for ``performWrite(peripheral:characteristic:data:type:timeout:)``.
     ///
     /// `.withoutResponse` synthesizes completion immediately — CoreBluetooth delivers no

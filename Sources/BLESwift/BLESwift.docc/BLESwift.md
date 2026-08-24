@@ -72,6 +72,7 @@ BLESwift supports any number of concurrent peripheral connections — see
 
 - <doc:ReadingWritingNotifications>
 - ``BufferingPolicy``
+- ``WriteProgress``
 
 ### L2CAP Channels
 

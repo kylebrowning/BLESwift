@@ -22,6 +22,45 @@ try await peripheral.write(someTransmittableValue, to: characteristic, type: .wi
 (`canSendWriteWithoutResponse`) before writing, if needed, avoiding a payload that CoreBluetooth
 silently drops.
 
+### Chunked writes
+
+A payload larger than a single ATT write must be split into chunks.
+`Peripheral.writeChunked(_:to:type:chunkSize:timeout:)` does this — the outbound
+counterpart to `writeAndAssemble` — sending each chunk only after the previous one completes and
+holding the characteristic's serialization lane for the whole sequence, so no other write can
+interleave between chunks:
+
+```swift
+try await peripheral.writeChunked(firmwareImage, to: dataCharacteristic, chunkSize: 244)
+```
+
+`chunkSize` defaults to ``Peripheral/maximumWriteValueLength(for:)`` for the chosen write type;
+a `chunkSize` that is not positive or that exceeds that maximum throws
+``BLESwiftError/invalidArgument(_:)``. Each chunk goes through the same path as a plain
+``Peripheral/write(_:to:type:timeout:)``, so `.withResponse` chunks await their confirmation and
+`.withoutResponse` chunks await back-pressure.
+
+A second overload returns an `AsyncThrowingStream` of ``WriteProgress`` for driving a
+firmware-update UI — same work, one progress value emitted per chunk, ending at the total:
+
+```swift
+let stream: AsyncThrowingStream<WriteProgress, Error> =
+    peripheral.writeChunked(firmwareImage, to: dataCharacteristic, chunkSize: 244)
+for try await progress in stream {
+    updateProgressBar(progress.bytesSent, of: progress.totalBytes)
+}
+```
+
+Three caveats:
+
+- **`timeout` applies per chunk**, not to the whole payload — a chunk that stalls times out
+  independently of the others.
+- **Cancellation between chunks** stops sending and throws ``BLESwiftError/operationCancelled``.
+  A partially-sent payload is yours to reconcile at the protocol level.
+- **There is no framing hook.** BLESwift sends the raw payload bytes sliced on `chunkSize`
+  boundaries; any per-chunk headers or sequence numbers are your responsibility — encode them
+  into the value you pass.
+
 ### Introspecting a characteristic's capabilities
 
 ``Peripheral/properties(of:)`` reports the set of operations a characteristic advertises —
