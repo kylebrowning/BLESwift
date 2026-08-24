@@ -21,6 +21,18 @@ jobs:
         # warnings ever leak back into the default (consumer-facing) settings.
         run: swift build -Xswiftc -suppress-warnings
 
+  ios-simulator-test:
+    # The connection-event and ANCS suites are fenced (#if !os(macOS) / #if os(iOS)),
+    # so `swift test` on the macOS host skips them. Run the full suite on an iOS
+    # simulator so those tests — and the connection-event subscriber-refcount
+    # concurrency code they cover — actually execute.
+    name: Test (iOS Simulator)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test on iOS Simulator
+        run: xcodebuild test -scheme BLESwift-Package -destination 'platform=iOS Simulator,name=iPhone 16'
+
   platform-build:
     # The manifest declares watchOS/tvOS/visionOS; the peripheral role's CoreBluetooth
     # APIs are unavailable there and must stay fenced out (issue #22 regression guard).

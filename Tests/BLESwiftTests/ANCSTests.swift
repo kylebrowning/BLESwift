@@ -60,7 +60,13 @@ struct ANCSTests {
         await fakeCentral.onQueue { fakePeripheral.ancsAuthorized = true }
         #expect(await peripheral.ancsAuthorized == true)
 
-        try await peripheral.disconnect()
+        // Explicit disconnect is two-phase — it awaits CoreBluetooth's confirmation, which
+        // the fake must script (same shape as PeripheralDisconnectTests.disconnectResolves).
+        let disconnectTask = Task { try await peripheral.disconnect() }
+        await waitFor { await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
+        fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
+        try await disconnectTask.value
+
         #expect(await peripheral.ancsAuthorized == false)
     }
 

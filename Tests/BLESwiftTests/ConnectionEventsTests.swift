@@ -72,26 +72,37 @@ struct ConnectionEventsTests {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         let id = fakePeripheral.peripheralIdentifier
 
-        // Continuations are registered synchronously when each stream is created, so an
-        // event simulated before the consuming tasks start iterating is buffered, not lost.
-        let first = await central.connectionEventRegistration()
-        let second = await central.connectionEventRegistration()
+        // Consume each stream inside its own task WITHOUT retaining the stream value in
+        // this scope: dropping an AsyncStream's iterator (as `first(where:)` does) never
+        // terminates a stream that is still retained — termination fires only when the
+        // stream value itself is released, here at each task's completion. Continuations
+        // are registered synchronously when each stream is created, so an event simulated
+        // before the tasks start iterating is buffered, not lost.
+        func consumeFirst(_ stream: AsyncStream<SystemConnectionEvent>) -> Task<SystemConnectionEvent?, Never> {
+            Task {
+                for await event in stream { return event }
+                return nil
+            }
+        }
+        let first = consumeFirst(await central.connectionEventRegistration())
+        let second = consumeFirst(await central.connectionEventRegistration())
 
         let registrations = await fakeCentral.onQueue { fakeCentral.connectionEventRegistrationCount }
         #expect(registrations == 1)
 
         fakeCentral.simulateConnectionEvent(.peerDisconnected, for: id)
 
-        let firstEvent = await Task { await first.first { _ in true } }.value
-        let secondEvent = await Task { await second.first { _ in true } }.value
         let expected = SystemConnectionEvent(peripheral: id, kind: .peerDisconnected)
-        #expect(firstEvent == expected)
-        #expect(secondEvent == expected)
+        #expect(await first.value == expected)
+        #expect(await second.value == expected)
 
-        // `first(where:)` ended both iterations, terminating both streams — exactly one
-        // backend unregistration follows the second termination.
+        // Both tasks completed, releasing both streams — exactly one backend
+        // unregistration follows the second termination, and no re-registration.
         await waitFor { await fakeCentral.onQueue { fakeCentral.connectionEventUnregistrationCount == 1 } }
-        let unregistrations = await fakeCentral.onQueue { fakeCentral.connectionEventUnregistrationCount }
+        let (finalRegistrations, unregistrations) = await fakeCentral.onQueue {
+            (fakeCentral.connectionEventRegistrationCount, fakeCentral.connectionEventUnregistrationCount)
+        }
+        #expect(finalRegistrations == 1)
         #expect(unregistrations == 1)
     }
 }
