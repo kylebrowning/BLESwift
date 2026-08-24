@@ -130,11 +130,27 @@ struct ChunkedWriteTests {
 
         let payload = Data(repeating: 0x03, count: 40)
 
-        await #expect(throws: BLESwiftError.self) {
+        do {
             try await peripheral.writeChunked(payload, to: Self.characteristic, chunkSize: 21)
+            Issue.record("expected .invalidArgument")
+        } catch let error as BLESwiftError {
+            guard case .invalidArgument = error else {
+                Issue.record("expected .invalidArgument, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("expected a BLESwiftError, got \(error)")
         }
-        await #expect(throws: BLESwiftError.self) {
+        do {
             try await peripheral.writeChunked(payload, to: Self.characteristic, chunkSize: 0)
+            Issue.record("expected .invalidArgument")
+        } catch let error as BLESwiftError {
+            guard case .invalidArgument = error else {
+                Issue.record("expected .invalidArgument, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("expected a BLESwiftError, got \(error)")
         }
         // No write should have been issued for either rejected call.
         #expect(await fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.characteristic] } == nil)

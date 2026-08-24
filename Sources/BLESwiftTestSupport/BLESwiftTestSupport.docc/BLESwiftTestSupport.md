@@ -12,7 +12,7 @@ same way a real `CBCentralManager`/`CBPeripheral` does, plus ``FakeStartupBackgr
 scripting the iOS background-task seam that protects state restoration.
 
 Wired into a real `Central` (from the `BLESwift` module) via its public
-`Central.init(backend:queue:configuration:startupBackgroundTask:connectedPeripheral:)`, these
+`Central.init(backend:queue:configuration:startupBackgroundTask:connectedPeripherals:)`, these
 fakes let you exercise your app's actual BLE code — scan handling, connection logic, GATT
 reads/writes, notification subscriptions — end to end, deterministically, with no hardware and
 no third-party mocking library. See <doc:TestingYourBLECode> for the full pattern.

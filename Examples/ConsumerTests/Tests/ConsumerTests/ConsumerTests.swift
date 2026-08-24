@@ -26,7 +26,7 @@ struct ConsumerTests {
     // MARK: - Rig construction
 
     @Test("The documented 4-line rig: a shared queue, a FakeCentral/FakePeripheral pair, and Central(backend:queue:)")
-    func rigConstruction() {
+    func rigConstruction() async {
         // 1. One serial queue, shared by every fake and by `Central` itself — this is the
         //    queue-confined contract's foundation (see `FakeCentral`'s doc comment).
         let queue = DispatchSerialQueue(label: "ConsumerTests.rigConstruction")
@@ -36,7 +36,7 @@ struct ConsumerTests {
         // 3. `Central`'s public backend initializer — no hardware, no special test access.
         let central = Central(backend: fakeCentral, queue: queue)
 
-        #expect(fakeCentral.onQueue { fakeCentral.radioState } == .unknown)
+        await #expect(fakeCentral.onQueue { fakeCentral.radioState } == .unknown)
         _ = central
         _ = fakePeripheral
     }
@@ -59,7 +59,7 @@ struct ConsumerTests {
 
         // The fake stands in for "CoreBluetooth already knows about this peripheral" —
         // register it as retrievable, and script the connect to succeed.
-        fakeCentral.onQueue {
+        await fakeCentral.onQueue {
             fakeCentral.retrievablePeripherals[fakePeripheral.identifier] = fakePeripheral
             fakeCentral.connectBehavior = .succeed
         }
@@ -67,7 +67,7 @@ struct ConsumerTests {
 
         // Script the value the device would report for a read, then read-decode it through
         // the same `Receivable` path a real characteristic read uses.
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.scriptedReadValues[HeartRateGATT.measurement] =
                 HeartRateMeasurement.wireData(beatsPerMinute: 72)
         }
@@ -91,7 +91,7 @@ struct ConsumerTests {
         // synchronously on that same serial queue — waits for every job already queued
         // ahead of it, which by FIFO ordering includes that registration. Only after that
         // is it safe to simulate a notification and be sure this stream is listening for it.
-        fakePeripheral.onQueue {}
+        await fakePeripheral.onQueue {}
         fakePeripheral.simulateNotification(
             for: HeartRateGATT.measurement,
             value: HeartRateMeasurement.wireData(beatsPerMinute: 81)
@@ -117,7 +117,7 @@ struct ConsumerTests {
         }
 
         let expectedError = NSError(domain: "ConsumerTests", code: 99)
-        fakeCentral.onQueue {
+        await fakeCentral.onQueue {
             fakeCentral.retrievablePeripherals[fakePeripheral.identifier] = fakePeripheral
             fakeCentral.connectBehavior = .fail(expectedError)
         }
@@ -141,7 +141,7 @@ struct ConsumerTests {
         // The service is real, but its scripted GATT table doesn't actually contain the
         // heart rate measurement characteristic — only a different one under it, exactly
         // like a real peripheral whose GATT table simply doesn't have what was asked for.
-        fakePeripheral.onQueue {
+        await fakePeripheral.onQueue {
             fakePeripheral.availableServices = [HeartRateGATT.service: [HeartRateGATT.bodySensorLocation]]
         }
 
@@ -170,7 +170,7 @@ struct ConsumerTests {
             if state == .poweredOn { break }
         }
 
-        fakeCentral.onQueue {
+        await fakeCentral.onQueue {
             fakeCentral.retrievablePeripherals[fakePeripheral.identifier] = fakePeripheral
             fakeCentral.connectBehavior = .succeed
         }

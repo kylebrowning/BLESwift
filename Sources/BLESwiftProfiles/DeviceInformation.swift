@@ -9,7 +9,7 @@ import Foundation
 
 /// The strings exposed by the Bluetooth SIG "Device Information" service (`0x180A`).
 ///
-/// This is an *aggregate* of up to seven independent UTF-8 String characteristics, each of
+/// This is an *aggregate* of up to six independent UTF-8 String characteristics, each of
 /// which is optional on a given peripheral — so `DeviceInformation` is not itself
 /// ``Receivable``. Read it with ``BLESwift/Peripheral/readDeviceInformation(timeout:)``,
 /// which reads whichever characteristics the peripheral exposes and leaves the rest `nil`.

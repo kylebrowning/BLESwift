@@ -3914,9 +3914,10 @@ public actor Central {
     /// task, removes the backgrounding observer (iOS), stops the hardware scan (only if
     /// still `.poweredOn`), and clears ``activeScan``/``isScanning``.
     ///
-    /// The only caller is the `onTermination` handler installed by
-    /// ``scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``. Idempotent
-    /// (guards on ``activeScan`` non-`nil`).
+    /// Called from two places: the `onTermination` handler installed by
+    /// ``scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``, and
+    /// `teardownScanNow`, which `findFirst` uses to tear down its scan deterministically.
+    /// Idempotent (guards on ``activeScan`` non-`nil`).
     private func finishActiveScan() {
         guard let scan = activeScan else { return }
         activeScan = nil

@@ -308,6 +308,7 @@ final class ExplorerModel {
             @unknown default: verb = "unknown"
             }
             systemEventLog.append(LogEntry(text: "\(event.peripheral.name): \(verb)"))
+            if systemEventLog.count > 200 { systemEventLog.removeFirst(systemEventLog.count - 200) }
         }
     }
     #endif
@@ -331,6 +332,7 @@ final class ExplorerModel {
                 text = "unknown restoration event"
             }
             restorationLog.append(LogEntry(text: text))
+            if restorationLog.count > 200 { restorationLog.removeFirst(restorationLog.count - 200) }
         }
     }
     #endif

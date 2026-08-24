@@ -219,7 +219,11 @@ Every read, write, and notification subscription validates the characteristic's 
 write requires `.write`, a `.withoutResponse` write requires `.writeWithoutResponse`, and a
 subscription requires `.notify` or `.indicate` — throwing
 ``BLESwiftError/unsupportedCharacteristicOperation(_:required:)`` when the property is
-missing.
+missing. This check runs on a fresh call to ``Peripheral/notifications(for:policy:survivesReconnect:)``,
+but not when a `survivesReconnect: true` subscription is re-armed after a reconnect — re-arming
+re-enables notify directly, so if the peripheral's GATT table changed such that the
+characteristic lost `.notify`/`.indicate` in the meantime, the stream instead surfaces
+CoreBluetooth's enable error rather than the fast ``BLESwiftError/unsupportedCharacteristicOperation(_:required:)``.
 
 Cheap modules routinely misreport: notifying on characteristics that never advertise
 `.notify`, or only populating their GATT table under unfiltered service discovery. For those,

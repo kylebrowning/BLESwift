@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Central.findFirst(matching:timeout:)`: returns the first `Discovery` matching a
   `ScanFilter` and stops the scan, torn down on every exit path (success, timeout, error,
   cancellation).
-- `Central.connect(identifier:fallbackScan:reconnect:timeout:)`: the saved-device flow —
+- `Central.connect(identifier:fallbackScan:reconnect:timeout:compatibility:)`: the saved-device flow —
   resolves a persisted `UUID` via `knownPeripherals(withIdentifiers:)`, falling back to a
   `findFirst` scan (whose result may carry a different UUID) when given a `fallbackScan`.
 - `FakeCentral.lastScanServices` (BLESwiftTestSupport): records the `services` passed to the
