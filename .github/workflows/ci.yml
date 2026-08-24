@@ -50,3 +50,23 @@ jobs:
         run: xcodebuild build -scheme BLESwiftProfiles -destination 'generic/platform=${{ matrix.platform }}'
       - name: Build BLESwiftTestSupport
         run: xcodebuild build -scheme BLESwiftTestSupport -destination 'generic/platform=${{ matrix.platform }}'
+
+  sample-app:
+    # Build (only) the BLESwiftExplorer SwiftUI sample for iOS and macOS on every commit,
+    # so it stays compiling against the package. It depends on the package by path and
+    # ships a committed .xcodeproj (via a .gitignore negation), so CI needs no xcodegen.
+    name: Build sample app (${{ matrix.platform }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [iOS, macOS]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build BLESwiftExplorer
+        run: >
+          xcodebuild build
+          -project Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj
+          -scheme BLESwiftExplorer
+          -destination 'generic/platform=${{ matrix.platform }}'
+          -skipPackagePluginValidation -skipMacroValidation

@@ -21,3 +21,17 @@ Examples/*/.build/
 
 # Swift 6.3 release-toolchain verification scratch (consumer-toolchain check)
 /.build-6.3/
+
+# BLESwiftExplorer sample app: the global `*.xcodeproj` rule above ignores this generated
+# project too. Re-include the project directory, ignore everything inside it, then
+# un-ignore ONLY project.pbxproj — the single file CI needs to build without xcodegen.
+# xcuserdata and project.xcworkspace stay ignored (caught by the wildcard below).
+!Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/
+Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/*
+!Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/project.pbxproj
+# Also track the shared scheme so CI can build by name (xcuserdata schemes stay ignored).
+!Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/
+Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/*
+!Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/xcschemes/
+Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/xcschemes/*
+!Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/xcschemes/BLESwiftExplorer.xcscheme

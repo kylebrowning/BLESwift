@@ -1,0 +1,46 @@
+name: BLESwiftExplorer
+
+options:
+  bundleIdPrefix: com.bleswift
+  deploymentTarget:
+    iOS: "18.0"
+    macOS: "15.0"
+  createIntermediateGroups: true
+
+packages:
+  BLESwift:
+    path: ../..
+
+targets:
+  BLESwiftExplorer:
+    type: application
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - Sources
+    dependencies:
+      - package: BLESwift
+        product: BLESwift
+      - package: BLESwift
+        product: BLESwiftProfiles
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bleswift.explorer
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: "BLESwiftExplorer scans for and connects to nearby Bluetooth Low Energy peripherals."
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.developer-tools"
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+        SWIFT_STRICT_CONCURRENCY: complete
+
+schemes:
+  # A shared scheme so CI (a fresh checkout with only project.pbxproj) can build by name
+  # without relying on xcodebuild's implicit scheme autogeneration.
+  BLESwiftExplorer:
+    build:
+      targets:
+        BLESwiftExplorer: [run, build, profile, archive, analyze]

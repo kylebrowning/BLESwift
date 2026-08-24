@@ -214,6 +214,10 @@ in the repository or build them locally with `swift package generate-documentati
 
 Examples:
 
+- [`Examples/BLESwiftExplorer`](Examples/BLESwiftExplorer) — a SwiftUI sample app for iOS and
+  macOS that exercises the full public surface: filtered scanning, connecting, GATT browsing,
+  reads/writes (single and chunked), notifications, RSSI polling, connection logging, saved-device
+  reconnect, system connection events, ANCS, and background restoration.
 - [`Examples/HeartRateMonitor`](Examples/HeartRateMonitor) — an end-to-end central-role app flow.
 - [`Examples/ConsumerTests`](Examples/ConsumerTests) — a standalone package unit-testing BLE
   code against the fakes, from outside BLESwift.
