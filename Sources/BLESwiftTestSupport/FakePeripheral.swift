@@ -44,6 +44,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _readCallCount = 0
     nonisolated(unsafe) private var _writeCallCounts: [CharacteristicIdentifier: Int] = [:]
     nonisolated(unsafe) private var _discoverServicesCallCount = 0
+    nonisolated(unsafe) private var _discoverServicesAllCallCount = 0
     nonisolated(unsafe) private var _discoverCharacteristicsCallCount = 0
     nonisolated(unsafe) private var _holdServiceDiscoveryCompletions = false
     nonisolated(unsafe) private var _heldServiceDiscoveryCount = 0
@@ -238,7 +239,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
 
     /// The default ``properties(of:)`` reports for a characteristic with no entry in
     /// ``scriptedProperties``.
-    public static let defaultProperties: CharacteristicProperties = [.read, .write, .notify]
+    public static let defaultProperties: CharacteristicProperties = [.read, .write, .writeWithoutResponse, .notify]
 
     /// The ``CharacteristicProperties`` ``properties(of:)`` reports back, keyed by
     /// characteristic. A characteristic with no entry reports ``defaultProperties``.
@@ -299,6 +300,13 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     public var discoverServicesCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoverServicesCallCount
+    }
+
+    /// The number of times ``discoverServices(_:)`` has been called with `nil` (discover
+    /// all). A subset of ``discoverServicesCallCount``.
+    public var discoverServicesAllCallCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _discoverServicesAllCallCount
     }
 
     /// Whether ``discoverServices(_:)`` withholds its `didDiscoverServices` completion
@@ -635,6 +643,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     public func discoverServices(_ services: [ServiceIdentifier]?) {
         dispatchPrecondition(condition: .onQueue(queue))
         _discoverServicesCallCount += 1
+        if services == nil {
+            _discoverServicesAllCallCount += 1
+        }
         if let available = _availableServices {
             let requested = services ?? Array(available.keys)
             _discoveredServices.formUnion(requested.filter { available.keys.contains($0) })

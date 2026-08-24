@@ -45,8 +45,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancelling between chunks throws `operationCancelled`.
 - `WriteProgress`: the per-chunk progress value (`bytesSent`, `totalBytes`, `isComplete`)
   emitted by the streaming `writeChunked` overload.
+- `GATTCompatibility` (BLESwiftCore): per-connection accommodations for peripherals that
+  misreport their GATT database — `allowNotifyWithoutProperty`/`allowReadWithoutProperty`/
+  `allowWriteWithoutProperty` bypass the corresponding property check, and
+  `discovery: .all` replaces targeted service discovery with a single cached
+  `discoverServices(nil)` per connection. `.strict` (the default) enforces everything;
+  `.lenient` bypasses everything.
+- `Central.connect(...)`: a `compatibility: GATTCompatibility = .strict` parameter on both
+  `connect(_:timeout:reconnect:warningOptions:compatibility:)` and
+  `connect(identifier:fallbackScan:reconnect:timeout:compatibility:)`. Carried per
+  connection (and across that connection's auto-reconnects); one peripheral's setting never
+  affects another.
+- `BLESwiftError.unsupportedCharacteristicOperation(_:required:)`: thrown when a GATT
+  operation targets a characteristic whose advertised properties lack the required
+  capability.
 
 ### Changed
+
+- GATT reads, writes, and notification subscriptions now validate the characteristic's
+  advertised `CharacteristicProperties` by default — after lazy discovery, before issuing
+  the operation — and throw `BLESwiftError.unsupportedCharacteristicOperation(_:required:)`
+  when the property is missing (`.read` for reads, `.write` for `.withResponse` writes,
+  `.writeWithoutResponse` for `.withoutResponse` writes, `.notify`/`.indicate` for
+  notification subscriptions). Previously no property enforcement existed. Pass a
+  `compatibility:` to `connect` to bypass per connection for non-compliant peripherals;
+  when a bypass skips a check that would have failed, BLESwift logs a warning once per
+  (peripheral, characteristic, operation). Descriptor reads/writes are unaffected.
+- `FakePeripheral.defaultProperties` (BLESwiftTestSupport) now includes
+  `.writeWithoutResponse` (it is `[.read, .write, .writeWithoutResponse, .notify]`), so
+  unscripted characteristics keep accepting `.withoutResponse` writes under the new
+  enforcement.
 
 ### Fixed
 

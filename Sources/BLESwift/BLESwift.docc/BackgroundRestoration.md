@@ -112,7 +112,7 @@ it isn't available — you can get most of the same practical benefit with
 ``Central/knownPeripherals(withIdentifiers:)``: persist the `uuid`s of the peripherals you
 care about yourself (e.g. in `UserDefaults` or your own storage), then on your next ordinary
 launch re-resolve them with `knownPeripherals(withIdentifiers:)` and call
-``Central/connect(_:timeout:reconnect:warningOptions:)`` on each result. CoreBluetooth can
+``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` on each result. CoreBluetooth can
 still resolve a previously-seen peripheral's identifier back to a connectable object without a
 fresh scan, so this works even though it isn't triggered by a background relaunch the way
 restoration is — it simply requires your app to actually be launched (by the user, or some

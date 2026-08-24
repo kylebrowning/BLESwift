@@ -56,7 +56,7 @@ everything below, so every type on this page is available without a separate imp
 - ``Discovery``
 - ``AdvertisementData``
 - ``Central/findFirst(matching:timeout:)``
-- ``Central/connect(identifier:fallbackScan:reconnect:timeout:)``
+- ``Central/connect(identifier:fallbackScan:reconnect:timeout:compatibility:)``
 
 ### Connecting
 
@@ -70,6 +70,8 @@ BLESwift supports any number of concurrent peripheral connections — see
 - ``Central/systemConnectedPeripherals(withServices:)``
 - ``ConnectionEvent``
 - ``ReconnectPolicy``
+- ``GATTCompatibility``
+- ``GATTCompatibility/DiscoveryMode``
 
 ### Reading, Writing, and Notifications
 

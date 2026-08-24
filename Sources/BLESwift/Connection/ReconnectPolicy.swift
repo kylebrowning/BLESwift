@@ -6,7 +6,7 @@
 /// Declares whether, and how, ``Central`` should automatically retry connecting to a
 /// peripheral after an unexpected disconnect (or a failed/timed-out/cancelled attempt).
 ///
-/// Set per `connect(_:timeout:reconnect:warningOptions:)` call, independently for each
+/// Set per `connect(_:timeout:reconnect:warningOptions:compatibility:)` call, independently for each
 /// peripheral. Observe retry progress via ``ConnectionEvent/reconnecting(_:attempt:)``.
 ///
 /// - Note: By default, reconnection does not re-arm previously-active notification streams —
@@ -31,7 +31,7 @@ public struct ReconnectPolicy: Sendable {
         self.kind = kind
     }
 
-    /// Never automatically reconnect. The default for every `connect(_:timeout:reconnect:warningOptions:)`
+    /// Never automatically reconnect. The default for every `connect(_:timeout:reconnect:warningOptions:compatibility:)`
     /// call.
     public static let never = ReconnectPolicy(kind: .never)
 

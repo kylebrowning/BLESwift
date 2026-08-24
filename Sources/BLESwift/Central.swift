@@ -87,8 +87,13 @@ public actor Central {
     /// ``finishDormantNotifications(for:error:)`` (exit without one).
     private var dormantNotifications: [PeripheralIdentifier: DormantNotifications] = [:]
 
+    /// The (peripheral, characteristic, operation) triples a ``GATTCompatibility`` bypass
+    /// has already warned about — a bypass that skips a check that WOULD have failed logs
+    /// at `.warning` once per triple; compliant hardware under a bypass stays silent.
+    private var warnedCompatBypass: Set<CompatWarnKey> = []
+
     /// Actor-wide monotonic generation allocator, incremented whenever
-    /// ``scheduleReconnect(identifier:policy:timeout:warningOptions:)`` starts a new loop.
+    /// ``scheduleReconnect(identifier:policy:timeout:warningOptions:compatibility:)`` starts a new loop.
     /// Each ``ReconnectLoop`` stores its generation; see ``clearReconnectLoopIfCurrent(id:generation:)``.
     private var reconnectGeneration: UInt64 = 0
 
@@ -502,6 +507,9 @@ public actor Central {
     ///     ``ReconnectPolicy/never``.
     ///   - warningOptions: Per-connection override for iOS system alerts on suspended-app
     ///     connection events. Defaults to ``Configuration``'s `warningOptions`.
+    ///   - compatibility: Accommodations for peripherals that misreport their GATT
+    ///     database — see ``GATTCompatibility``. Defaults to ``GATTCompatibility/strict``;
+    ///     applies to this connection only.
     /// - Returns: A ``Peripheral`` handle once connected.
     /// - Throws: ``BLESwiftError/duplicateConnect(_:)``, ``BLESwiftError/unexpectedPeripheral(_:)``
     ///   if `id` is not known to CoreBluetooth, ``BLESwiftError/connectionTimedOut``,
@@ -511,7 +519,8 @@ public actor Central {
         _ id: PeripheralIdentifier,
         timeout: Duration? = .seconds(15),
         reconnect: ReconnectPolicy = .never,
-        warningOptions: WarningOptions? = nil
+        warningOptions: WarningOptions? = nil,
+        compatibility: GATTCompatibility = .strict
     ) async throws -> Peripheral {
         guard manager != nil else { throw BLESwiftError.stopped }
 
@@ -531,7 +540,8 @@ public actor Central {
             identifier: id,
             policy: reconnect,
             timeout: timeout,
-            warningOptions: resolvedWarningOptions
+            warningOptions: resolvedWarningOptions,
+            compatibility: compatibility
         )
 
         // Cancel an in-flight reconnect loop for THIS peripheral only. Safe after
@@ -702,7 +712,7 @@ public actor Central {
     ///
     /// Takes only `identifier`, not the resolved peripheral — `any PeripheralRemote` isn't
     /// `Sendable`, so it can't cross into `withTimeout`'s `@Sendable` closure; the peripheral
-    /// was already resolved by ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:)``,
+    /// was already resolved by ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:compatibility:)``,
     /// which every caller must invoke first, synchronously, in the same actor turn.
     private func establishConnection(
         identifier: PeripheralIdentifier,
@@ -734,7 +744,8 @@ public actor Central {
         identifier: PeripheralIdentifier,
         policy: ReconnectPolicy,
         timeout: Duration?,
-        warningOptions: WarningOptions
+        warningOptions: WarningOptions,
+        compatibility: GATTCompatibility
     ) throws {
         guard connections[identifier] == nil else {
             throw BLESwiftError.duplicateConnect(identifier)
@@ -757,12 +768,13 @@ public actor Central {
             policy: policy,
             timeout: timeout,
             warningOptions: warningOptions,
+            compatibility: compatibility,
             continuation: nil,
             stopping: nil
         ))
     }
 
-    /// Attaches a pending connect continuation to the slot ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:)``
+    /// Attaches a pending connect continuation to the slot ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:compatibility:)``
     /// already reserved, starts the CoreBluetooth connection attempt, and suspends until
     /// ``handle(_:)`` resolves it — never directly from here. Does not create the
     /// ``connections`` entry itself; the reservation already did, synchronously.
@@ -914,6 +926,7 @@ public actor Central {
             let policy = connecting.policy
             let timeout = connecting.timeout
             let warningOptions = connecting.warningOptions
+            let compatibility = connecting.compatibility
             let continuation = connecting.continuation
             connecting.continuation = nil
             connections.removeValue(forKey: identifier)
@@ -938,13 +951,14 @@ public actor Central {
             // running (its own catch block continues retrying) — only a fresh top-level
             // failure starts one here.
             if willReconnect, reconnectLoops[identifier] == nil {
-                scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions)
+                scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility)
             }
 
         case .connected(let session):
             let policy = session.policy
             let timeout = session.timeout
             let warningOptions = session.warningOptions
+            let compatibility = session.compatibility
             let willReconnect = !policy.isNever
 
             // Fail GATT ops and finish notification streams before removing the entry —
@@ -966,7 +980,7 @@ public actor Central {
 
             // Same don't-double-spawn guard as the `.connecting` branch above.
             if willReconnect, reconnectLoops[identifier] == nil {
-                scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions)
+                scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility)
             }
 
         case .disconnecting(var disconnecting):
@@ -1195,25 +1209,26 @@ public actor Central {
 
     /// Starts (or restarts) the auto-reconnect loop for `identifier`, per `policy`. Tags the
     /// spawned task with the current ``reconnectGeneration`` (incremented here) so
-    /// ``runReconnectLoop(identifier:policy:timeout:warningOptions:generation:)`` clears
+    /// ``runReconnectLoop(identifier:policy:timeout:warningOptions:compatibility:generation:)`` clears
     /// `identifier`'s entry on exit only if it's still this generation's loop — otherwise a
     /// superseded loop's belated cleanup could race a newer loop already scheduled.
     private func scheduleReconnect(
         identifier: PeripheralIdentifier,
         policy: ReconnectPolicy,
         timeout: Duration?,
-        warningOptions: WarningOptions
+        warningOptions: WarningOptions,
+        compatibility: GATTCompatibility
     ) {
         reconnectGeneration += 1
         let generation = reconnectGeneration
         let task = Task<Void, Never> { [weak self] in
-            await self?.runReconnectLoop(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, generation: generation)
+            await self?.runReconnectLoop(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility, generation: generation)
         }
         reconnectLoops[identifier] = ReconnectLoop(task: task, generation: generation)
     }
 
     /// Removes `identifier`'s ``reconnectLoops`` entry only if `generation` still matches —
-    /// see ``scheduleReconnect(identifier:policy:timeout:warningOptions:)``.
+    /// see ``scheduleReconnect(identifier:policy:timeout:warningOptions:compatibility:)``.
     private func clearReconnectLoopIfCurrent(id identifier: PeripheralIdentifier, generation: UInt64) {
         if reconnectLoops[identifier]?.generation == generation {
             reconnectLoops.removeValue(forKey: identifier)
@@ -1229,6 +1244,7 @@ public actor Central {
         policy: ReconnectPolicy,
         timeout: Duration?,
         warningOptions: WarningOptions,
+        compatibility: GATTCompatibility,
         generation: UInt64
     ) async {
         var attempt = 1
@@ -1272,7 +1288,8 @@ public actor Central {
                     identifier: identifier,
                     policy: policy,
                     timeout: timeout,
-                    warningOptions: warningOptions
+                    warningOptions: warningOptions,
+                    compatibility: compatibility
                 )
                 _ = try await establishConnection(
                     identifier: identifier,
@@ -1342,7 +1359,7 @@ public actor Central {
             let warningOptions = connecting.warningOptions
             let target = connecting.peripheral
 
-            connections[identifier] = .connected(Session(identifier: identifier, peripheral: target, policy: policy, timeout: timeout, warningOptions: warningOptions))
+            connections[identifier] = .connected(Session(identifier: identifier, peripheral: target, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: connecting.compatibility))
 
             log("Connected to \(identifier)", level: .info, category: "connection")
             connectionBroadcaster.yield(.connected(identifier))
@@ -1785,6 +1802,14 @@ public actor Central {
         }
 
         try await ensureDiscovered(characteristic, on: peripheral, identifier: identifier)
+        try requireProperty(
+            [.read],
+            operation: .read,
+            on: characteristic,
+            peripheral: peripheral,
+            identifier: identifier,
+            bypass: session.compatibility.allowReadWithoutProperty
+        )
 
         return try await withCancellableGATTContinuation(
             register: { continuation in
@@ -1905,6 +1930,14 @@ public actor Central {
         let peripheral = session.peripheral
 
         try await ensureDiscovered(characteristic, on: peripheral, identifier: identifier)
+        try requireProperty(
+            type == .withoutResponse ? [.writeWithoutResponse] : [.write],
+            operation: .write,
+            on: characteristic,
+            peripheral: peripheral,
+            identifier: identifier,
+            bypass: session.compatibility.allowWriteWithoutProperty
+        )
 
         if type == .withoutResponse {
             try await awaitWriteWithoutResponseReadiness(peripheral: peripheral, identifier: identifier)
@@ -2102,6 +2135,33 @@ public actor Central {
     /// ATT_MTU-3 default (23-byte default ATT_MTU minus the 3-byte write-request header).
     static let defaultMaximumWriteValueLength = 20
 
+    // MARK: - Property enforcement
+
+    /// Throws ``BLESwiftError/unsupportedCharacteristicOperation(_:required:)`` when
+    /// `characteristic`'s advertised properties include none of `required` — unless
+    /// `bypass` (from the session's ``GATTCompatibility``) is set, in which case the
+    /// genuinely-failing check is skipped with a once-per-(peripheral, characteristic,
+    /// operation) warning. Must run AFTER lazy discovery: properties are only known
+    /// post-discovery.
+    private func requireProperty(
+        _ required: CharacteristicProperties,
+        operation: CompatOperation,
+        on characteristic: CharacteristicIdentifier,
+        peripheral: any PeripheralRemote,
+        identifier: PeripheralIdentifier,
+        bypass: Bool
+    ) throws {
+        let properties = peripheral.properties(of: characteristic)
+        guard properties.isDisjoint(with: required) else { return }
+        guard bypass else {
+            throw BLESwiftError.unsupportedCharacteristicOperation(characteristic, required: required)
+        }
+        let key = CompatWarnKey(peripheral: identifier, characteristic: characteristic, operation: operation)
+        if warnedCompatBypass.insert(key).inserted {
+            log("Compatibility bypass: \(operation) on \(characteristic) despite missing \(required) property", level: .warning, category: "gatt")
+        }
+    }
+
     // MARK: - Lazy discovery
 
     /// Ensures `characteristic` (and its owning service) has been discovered on `peripheral`,
@@ -2120,6 +2180,25 @@ public actor Central {
     /// discovered. See ``ensureDiscovered(_:on:identifier:)``.
     private func ensureServiceDiscovered(_ service: ServiceIdentifier, on peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
         guard !peripheral.isDiscovered(service) else { return }
+
+        // `.all` discovery replaces the targeted call with ONE `discoverServices(nil)` per
+        // connection, cached on the session (`didDiscoverAllServices`) — for modules that
+        // only populate their GATT table under unfiltered discovery.
+        if case .connected(let session) = connections[identifier], session.compatibility.discovery == .all {
+            if !session.didDiscoverAllServices {
+                try await awaitDiscoverAllServices(on: peripheral, identifier: identifier)
+                // Re-read the entry: the await above suspended — don't write back a stale copy.
+                guard case .connected(var refreshed) = connections[identifier] else {
+                    throw BLESwiftError.notConnected
+                }
+                refreshed.didDiscoverAllServices = true
+                connections[identifier] = .connected(refreshed)
+            }
+            guard peripheral.isDiscovered(service) else {
+                throw BLESwiftError.missingService(service)
+            }
+            return
+        }
 
         // See `awaitWriteWithoutResponseReadiness`'s matching declaration for why this is
         // `Mutex`-boxed rather than a plain `var`.
@@ -2685,6 +2764,14 @@ public actor Central {
 
         do {
             try await ensureDiscovered(characteristic, on: peripheral, identifier: identifier)
+            try requireProperty(
+                [.notify, .indicate],
+                operation: .notify,
+                on: characteristic,
+                peripheral: peripheral,
+                identifier: identifier,
+                bypass: session.compatibility.allowNotifyWithoutProperty
+            )
             try await enableNotifications(identifier: identifier, characteristic: characteristic, peripheral: peripheral)
             confirmNotificationEnablement(identifier: identifier, characteristic: characteristic)
         } catch {
@@ -3756,19 +3843,23 @@ public actor Central {
     ///   - timeout: Applied to EACH phase separately — the fallback scan gets `timeout`,
     ///     then the connect attempt gets `timeout` again; it is not a shared budget.
     ///     Defaults to 15 seconds; `nil` waits indefinitely.
+    ///   - compatibility: Accommodations for peripherals that misreport their GATT
+    ///     database — see ``GATTCompatibility``. Defaults to ``GATTCompatibility/strict``;
+    ///     applies to this connection only.
     /// - Returns: A ``Peripheral`` handle once connected.
     /// - Throws: ``BLESwiftError/unexpectedPeripheral(_:)`` when `identifier` is unknown
     ///   and `fallbackScan` is `nil`; ``BLESwiftError/timedOut`` when the fallback scan
     ///   finds no match in time; otherwise whatever
-    ///   ``connect(_:timeout:reconnect:warningOptions:)`` throws.
+    ///   ``connect(_:timeout:reconnect:warningOptions:compatibility:)`` throws.
     public func connect(
         identifier: UUID,
         fallbackScan: ScanFilter? = nil,
         reconnect: ReconnectPolicy = .never,
-        timeout: Duration? = .seconds(15)
+        timeout: Duration? = .seconds(15),
+        compatibility: GATTCompatibility = .strict
     ) async throws -> Peripheral {
         if let known = try knownPeripherals(withIdentifiers: [identifier]).first {
-            return try await connect(known, timeout: timeout, reconnect: reconnect)
+            return try await connect(known, timeout: timeout, reconnect: reconnect, compatibility: compatibility)
         }
 
         guard let fallbackScan else {
@@ -3776,7 +3867,7 @@ public actor Central {
         }
 
         let discovery = try await findFirst(matching: fallbackScan, timeout: timeout)
-        return try await connect(discovery.peripheral, timeout: timeout, reconnect: reconnect)
+        return try await connect(discovery.peripheral, timeout: timeout, reconnect: reconnect, compatibility: compatibility)
     }
 
     #if os(iOS)
@@ -3953,7 +4044,8 @@ public actor Central {
                 identifier: identifier,
                 policy: .never,
                 timeout: timeout,
-                warningOptions: configuration.warningOptions
+                warningOptions: configuration.warningOptions,
+                compatibility: .strict
             )
             _ = try await establishConnection(
                 identifier: identifier,
@@ -4046,6 +4138,22 @@ private struct ReconnectLoop {
     var generation: UInt64
 }
 
+/// The GATT operation a ``GATTCompatibility`` bypass skipped a property check for — one
+/// third of a ``CompatWarnKey``.
+private enum CompatOperation: Hashable {
+    case read
+    case write
+    case notify
+}
+
+/// One (peripheral, characteristic, operation) triple `Central.warnedCompatBypass` tracks
+/// for the once-per-triple compatibility-bypass warning.
+private struct CompatWarnKey: Hashable {
+    let peripheral: PeripheralIdentifier
+    let characteristic: CharacteristicIdentifier
+    let operation: CompatOperation
+}
+
 /// State for a connection attempt in progress. Holds the single pending connect
 /// continuation for this peripheral and the two-phase cancel's `stopping` flag.
 private struct Connecting {
@@ -4054,6 +4162,7 @@ private struct Connecting {
     let policy: ReconnectPolicy
     let timeout: Duration?
     let warningOptions: WarningOptions
+    let compatibility: GATTCompatibility
     /// The pending connect continuation. `nil` when reserved-but-unattached (between
     /// `reserveConnectingSlot` writing this entry and `awaitConnect` attaching its
     /// continuation) or once taken (resumed and cleared). Resumed exactly once, by
@@ -4075,6 +4184,7 @@ private struct Session {
     let policy: ReconnectPolicy
     let timeout: Duration?
     let warningOptions: WarningOptions
+    let compatibility: GATTCompatibility
 
     // Explicit because the synthesized memberwise init is private (nextWaiterTokenValue is
     // a private stored property), which makes it inaccessible at the file-scope call site.
@@ -4083,13 +4193,15 @@ private struct Session {
         peripheral: any PeripheralRemote,
         policy: ReconnectPolicy,
         timeout: Duration?,
-        warningOptions: WarningOptions
+        warningOptions: WarningOptions,
+        compatibility: GATTCompatibility
     ) {
         self.identifier = identifier
         self.peripheral = peripheral
         self.policy = policy
         self.timeout = timeout
         self.warningOptions = warningOptions
+        self.compatibility = compatibility
     }
 
     // MARK: - GATT
@@ -4152,6 +4264,11 @@ private struct Session {
     /// flag serves as the cache. Reset to `false` on `didModifyServices`.
     var didEnumerateServices = false
 
+    /// Whether ``GATTCompatibility/DiscoveryMode/all``'s one-time `discoverServices(nil)`
+    /// has run for this connection — the cache keeping `.all` at exactly one unfiltered
+    /// discovery per connection.
+    var didDiscoverAllServices = false
+
     /// Services whose characteristics have been fully enumerated for this connection.
     /// Invalidated entries removed on `didModifyServices`.
     var enumeratedCharacteristicServices: Set<ServiceIdentifier> = []
@@ -4202,7 +4319,8 @@ private struct Session {
             peripheral: peripheral,
             policy: .never,
             timeout: nil,
-            warningOptions: warningOptions
+            warningOptions: warningOptions,
+            compatibility: .strict
         )
     }
 

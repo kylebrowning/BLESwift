@@ -59,7 +59,7 @@ for try await event in filtered {
 ### Connecting from a scan
 
 BLESwift has no dedicated "connect" scan action — just call
-``Central/connect(_:timeout:reconnect:warningOptions:)`` with a sighted peripheral's identifier:
+``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` with a sighted peripheral's identifier:
 
 ```swift
 for try await event in await central.scan(services: [heartRateService]) {
@@ -108,7 +108,7 @@ let peripheral = try await central.connect(discovery.peripheral)
 ### The saved-device pattern
 
 If you persist a peripheral's ``PeripheralIdentifier/uuid`` across launches,
-``Central/connect(identifier:fallbackScan:reconnect:timeout:)`` reconnects to it in one
+``Central/connect(identifier:fallbackScan:reconnect:timeout:compatibility:)`` reconnects to it in one
 call: it tries ``Central/knownPeripherals(withIdentifiers:)`` first (no radio), and only if
 CoreBluetooth no longer knows the identifier does it run the `fallbackScan` and connect to
 whatever that finds:
@@ -185,7 +185,7 @@ scan at all, synchronously against CoreBluetooth's local cache. And
 already holding a connection to (by any app on the device, not just yours), by service —
 useful when a peripheral never actually disconnected and re-scanning for it would be wasted
 radio time. Both hand back a ``PeripheralIdentifier`` you feed straight to
-``Central/connect(_:timeout:reconnect:warningOptions:)``, the same as a scan result.
+``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)``, the same as a scan result.
 
 ## See Also
 

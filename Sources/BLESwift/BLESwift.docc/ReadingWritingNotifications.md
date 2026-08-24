@@ -5,7 +5,7 @@ GATT reads, writes, multicast notification streams, and the composite request/re
 ## Overview
 
 Every operation in this article is a method on ``Peripheral`` — the handle
-``Central/connect(_:timeout:reconnect:warningOptions:)`` returns. Each lazily discovers the
+``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` returns. Each lazily discovers the
 service and characteristic it needs the first time it's used (cached thereafter), and each
 serializes against other operations on the *same* characteristic (a different characteristic
 proceeds concurrently, unaffected).
@@ -211,6 +211,41 @@ its clock on every partial packet.
 characteristic, returning once a full `quietPeriod` passes with no data (every packet that
 arrives resets the window) — useful immediately before a request/response exchange, so a
 leftover notification from an earlier, abandoned exchange can't be mistaken for the fresh reply.
+
+### Non-compliant peripherals
+
+Every read, write, and notification subscription validates the characteristic's advertised
+``CharacteristicProperties`` after discovery — a read requires `.read`, a `.withResponse`
+write requires `.write`, a `.withoutResponse` write requires `.writeWithoutResponse`, and a
+subscription requires `.notify` or `.indicate` — throwing
+``BLESwiftError/unsupportedCharacteristicOperation(_:required:)`` when the property is
+missing.
+
+Cheap modules routinely misreport: notifying on characteristics that never advertise
+`.notify`, or only populating their GATT table under unfiltered service discovery. For those,
+pass a ``GATTCompatibility`` to
+``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` — it applies to that
+connection only, so one non-compliant device never loosens another's checks:
+
+```swift
+// Known-noncompliant module: bypass every property check, discover all services.
+let peripheral = try await central.connect(id, compatibility: .lenient)
+
+// Targeted: only this device's phantom notifications are tolerated.
+let peripheral = try await central.connect(
+    id,
+    compatibility: GATTCompatibility(allowNotifyWithoutProperty: true)
+)
+```
+
+``GATTCompatibility/DiscoveryMode/all`` replaces targeted service discovery with a single
+`discoverServices(nil)` per connection, cached, for modules that only behave under unfiltered
+discovery. When a bypass actually skips a check that would have failed, BLESwift logs a
+warning once per characteristic and operation; a bypass on compliant hardware stays silent.
+
+> Important: Keep the ``GATTCompatibility/strict`` default for compliant hardware — the
+> property checks catch real protocol errors (wrong characteristic, wrong write type) at the
+> call site instead of as an opaque CoreBluetooth failure.
 
 ## See Also
 

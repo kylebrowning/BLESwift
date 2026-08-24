@@ -16,7 +16,7 @@ extension Central {
     ///
     /// - Parameter identifiers: The bare `UUID`s to resolve (not ``PeripheralIdentifier``s).
     /// - Returns: A ``PeripheralIdentifier`` per recognized `UUID`; unrecognized ones are
-    ///   omitted, not errors. Feed a result to ``connect(_:timeout:reconnect:warningOptions:)``.
+    ///   omitted, not errors. Feed a result to ``connect(_:timeout:reconnect:warningOptions:compatibility:)``.
     /// - Throws: ``BLESwiftError/stopped`` if this `Central` has been stopped.
     public func knownPeripherals(withIdentifiers identifiers: [UUID]) throws -> [PeripheralIdentifier] {
         guard let shim else { throw BLESwiftError.stopped }
@@ -31,7 +31,7 @@ extension Central {
     ///
     /// - Parameter services: The services to filter by (any-of match).
     /// - Returns: A ``PeripheralIdentifier`` per matching peripheral. Feed a result to
-    ///   ``connect(_:timeout:reconnect:warningOptions:)``.
+    ///   ``connect(_:timeout:reconnect:warningOptions:compatibility:)``.
     /// - Throws: ``BLESwiftError/stopped`` if this `Central` has been stopped.
     public func systemConnectedPeripherals(withServices services: [ServiceIdentifier]) throws -> [PeripheralIdentifier] {
         guard let shim else { throw BLESwiftError.stopped }

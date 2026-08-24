@@ -59,7 +59,7 @@ you don't need to separately check ``Central/state`` first.
 ### Connecting
 
 Once you have a ``PeripheralIdentifier`` — typically from a scan (see <doc:Scanning>), or one
-you already know about — connect with ``Central/connect(_:timeout:reconnect:warningOptions:)``:
+you already know about — connect with ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)``:
 
 ```swift
 let peripheral = try await central.connect(identifier, timeout: .seconds(10))

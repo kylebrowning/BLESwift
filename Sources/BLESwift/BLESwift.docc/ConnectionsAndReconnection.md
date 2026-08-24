@@ -12,7 +12,7 @@ its own connection/disconnection lifecycle, its own auto-reconnect loop and
 ``ReconnectPolicy``, and its own GATT/notification state. Connecting to peripheral B while
 peripheral A is connecting (or connected, or disconnecting) never conflicts.
 
-``Central/connect(_:timeout:reconnect:warningOptions:)`` only ever throws
+``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` only ever throws
 ``BLESwiftError/duplicateConnect(_:)`` when the *same* `PeripheralIdentifier` is targeted while
 it already has a tracked entry (connecting, connected, or disconnecting) — connecting to a
 different peripheral concurrently is always fine.
@@ -165,7 +165,7 @@ whenever the gap ends without a restored subscription:
 - **Reconnect policy exhausted** (or the loop cancelled): the stream throws the original
   disconnect error, typically ``BLESwiftError/unexpectedDisconnect``.
 - **Explicit teardown** — ``Central/disconnect(_:)`` (including mid-backoff),
-  ``Central/disconnectAll()``, a new ``Central/connect(_:timeout:reconnect:warningOptions:)``
+  ``Central/disconnectAll()``, a new ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)``
   call superseding the reconnect loop, ``Central/cancelAllOperations(error:)``, or
   ``Central/stopAndExtractState()``: the stream throws
   ``BLESwiftError/explicitDisconnect`` (or the cancel call's own error).

@@ -91,6 +91,11 @@ public enum BLESwiftError: Error, Sendable, Equatable {
     /// An operation on an L2CAP channel failed because the channel is closed (disconnect,
     /// explicit `close()`, or a transport error).
     case l2capChannelClosed
+    /// A GATT operation was attempted on a characteristic whose advertised
+    /// `CharacteristicProperties` do not include the required capability (e.g. notifying a
+    /// characteristic without `.notify`/`.indicate`). Bypass per-connection with
+    /// `GATTCompatibility` if the peripheral misreports its properties.
+    case unsupportedCharacteristicOperation(CharacteristicIdentifier, required: CharacteristicProperties)
 }
 
 extension BLESwiftError: LocalizedError {
@@ -159,6 +164,8 @@ extension BLESwiftError: LocalizedError {
             return "Opening the L2CAP channel failed"
         case .l2capChannelClosed:
             return "The L2CAP channel is closed"
+        case let .unsupportedCharacteristicOperation(characteristic, required):
+            return "Characteristic \(characteristic.uuidString) does not advertise the required properties: \(required)"
         }
     }
 }

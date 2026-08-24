@@ -76,7 +76,7 @@ struct CharacteristicPropertiesTests {
 
         let properties = try await peripheral.properties(of: Self.heartRateMeasurement)
         #expect(properties == FakePeripheral.defaultProperties)
-        #expect(properties == [.read, .write, .notify])
+        #expect(properties == [.read, .write, .writeWithoutResponse, .notify])
     }
 
     // MARK: - Lazy discovery

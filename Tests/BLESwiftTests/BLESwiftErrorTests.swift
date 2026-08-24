@@ -113,5 +113,14 @@ struct BLESwiftErrorTests {
         #expect(description(.l2capOpenFailed).contains("L2CAP channel failed"))
 
         #expect(description(.l2capChannelClosed).contains("L2CAP channel is closed"))
+
+        #expect(
+            description(.unsupportedCharacteristicOperation(Self.characteristic, required: [.notify, .indicate]))
+                .contains(Self.characteristic.uuidString)
+        )
+        #expect(
+            description(.unsupportedCharacteristicOperation(Self.characteristic, required: [.read]))
+                .contains("does not advertise the required properties")
+        )
     }
 }

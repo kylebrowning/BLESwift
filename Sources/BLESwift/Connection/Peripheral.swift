@@ -5,7 +5,7 @@
 
 import BLESwiftCore
 
-/// A handle to a connected peripheral, returned by `Central.connect(_:timeout:reconnect:warningOptions:)`
+/// A handle to a connected peripheral, returned by `Central.connect(_:timeout:reconnect:warningOptions:compatibility:)`
 /// and carried by ``ConnectionState/connected(_:)``.
 ///
 /// `Peripheral` is a lightweight, `Sendable` façade: it holds only ``id`` and an internal
