@@ -2689,12 +2689,16 @@ public actor Central {
     /// for each dormant characteristic (in UUID order, for determinism), registers a fresh
     /// subscription in the CURRENT session, creates one raw stream per parked pump BEFORE
     /// enabling (no loss window), re-runs discovery and the enable handshake, and hands each
-    /// parked pump its stream. A characteristic that fails to re-arm (missing after a GATT
-    /// change, enable error) fails only its own streams. Ends by yielding
+    /// parked pump its stream. A characteristic that ALREADY has a live subscription — a
+    /// subscriber raced in after `.connected`, exactly as the docs advise — is merged into
+    /// instead: the survivors join that subscription (awaiting its in-flight enable
+    /// handshake if needed) and NO second CCCD write is issued, preserving the one-enable-
+    /// per-characteristic invariant. A characteristic that fails to re-arm (missing after a
+    /// GATT change, enable error) fails only its own streams. Ends by yielding
     /// ``ConnectionEvent/notificationsRestored(_:restored:failed:)`` — unless every survivor
-    /// left during the gap, or the session vanished mid-re-arm (a new disconnect), in which
-    /// case untouched characteristics stay dormant for the next reconnect (or are finished
-    /// by the next termination's cleanup).
+    /// left during the gap, or the session vanished mid-re-arm / this task was cancelled (a
+    /// new disconnect or cancelAllOperations), in which case untouched characteristics stay
+    /// dormant for the next reconnect (or are finished by the next termination's cleanup).
     private func rearmDormantNotifications(_ identifier: PeripheralIdentifier) async {
         guard let record = dormantNotifications[identifier] else { return }
         let characteristics = record.characteristics.keys.sorted { $0.uuidString < $1.uuidString }
@@ -2704,12 +2708,50 @@ public actor Central {
         log("Re-arming \(characteristics.count) notification subscription(s) for \(identifier) after reconnect", level: .debug, category: "gatt")
 
         for characteristic in characteristics {
+            // A cancelled re-arm (a second disconnect, cancelAllOperations) must never keep
+            // acting — a starved-executor resumption could otherwise race the NEW session's
+            // own re-arm.
+            if Task.isCancelled { return }
             guard case .connected(var session) = connections[identifier] else { return }
             // A consumer that broke during the gap may have emptied this characteristic
             // (or the whole record) — nothing left to re-arm here.
             guard let dormantSubscription = dormantNotifications[identifier]?.characteristics[characteristic],
                   !dormantSubscription.tokens.isEmpty else { continue }
             let peripheral = session.peripheral
+
+            if var existing = session.notificationSubscriptions[characteristic] {
+                // Merge: a new subscriber already registered this characteristic (and owns,
+                // or is completing, its enable handshake). Never overwrite it — that would
+                // orphan its broadcaster and drop its single-slot enable continuation — and
+                // never issue a second CCCD write: join it, exactly as
+                // `subscribeToNotifications`' joiner path does.
+                existing.subscriberTokens.formUnion(dormantSubscription.tokens)
+                let broadcaster = existing.broadcaster
+                let confirmed = existing.enableConfirmed
+                session.notificationSubscriptions[characteristic] = existing
+                connections[identifier] = .connected(session)
+
+                var streams: [UUID: AsyncThrowingStream<Data, Error>] = [:]
+                for token in dormantSubscription.tokens {
+                    streams[token] = broadcaster.stream()
+                }
+
+                do {
+                    if !confirmed, let waiterToken = dormantSubscription.tokens.first {
+                        try await awaitNotificationEnablement(identifier: identifier, characteristic: characteristic, token: waiterToken)
+                    }
+                    completeRearm(identifier: identifier, characteristic: characteristic, streams: streams)
+                    restored.append(characteristic)
+                } catch {
+                    guard !Task.isCancelled, case .connected = connections[identifier] else { return }
+                    log("Failed to re-arm notifications on \(characteristic) (merge): \(error)", level: .warning, category: "gatt")
+                    // The owning subscriber's own failure path already tore the subscription
+                    // down (or only this waiter was cancelled) — fail just the survivors.
+                    failRearm(identifier: identifier, characteristic: characteristic, error: error)
+                    failed[characteristic] = error
+                }
+                continue
+            }
 
             // Fresh subscription registered BEFORE enabling — the same no-loss-window
             // discipline as `subscribeToNotifications`.
@@ -2733,10 +2775,10 @@ public actor Central {
                 completeRearm(identifier: identifier, characteristic: characteristic, streams: streams)
                 restored.append(characteristic)
             } catch {
-                guard case .connected = connections[identifier] else {
-                    // The session vanished mid-re-arm (another disconnect): stop here and
-                    // leave this characteristic (and any untouched ones) dormant — the new
-                    // termination either re-parks or finishes them.
+                guard !Task.isCancelled, case .connected = connections[identifier] else {
+                    // The session vanished mid-re-arm (another disconnect), or this task was
+                    // cancelled: stop here and leave this characteristic (and any untouched
+                    // ones) dormant — the new termination either re-parks or finishes them.
                     return
                 }
                 log("Failed to re-arm notifications on \(characteristic): \(error)", level: .warning, category: "gatt")
@@ -2746,6 +2788,7 @@ public actor Central {
             }
         }
 
+        if Task.isCancelled { return }
         dormantNotifications.removeValue(forKey: identifier)
         if case .connected(var session) = connections[identifier] {
             session.rearmTask = nil
