@@ -1,0 +1,123 @@
+//
+//  LinkListener.swift
+//  BLESwiftLink
+//
+
+import Dispatch
+import Foundation
+import Network
+import Synchronization
+
+/// TCP parameters shared by ``LinkConnection`` and ``LinkListener``.
+enum LinkTransportParameters {
+    /// TCP with Nagle disabled — a link carries small, latency-sensitive notifications.
+    static func tcp() -> NWParameters {
+        let parameters = NWParameters.tcp
+        if let options = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            options.noDelay = true
+        }
+        return parameters
+    }
+
+    /// `true` when `host` names the loopback interface, in which case a listener binds only there.
+    static func isLoopback(_ host: String) -> Bool {
+        host == "127.0.0.1" || host == "localhost"
+    }
+}
+
+/// Accepts framed message connections on a TCP port.
+///
+/// Each accepted connection is wrapped in a ``LinkConnection``, started, and handed to
+/// ``onConnection`` on the `queue` supplied at initialization. Binding to `127.0.0.1` or
+/// `localhost` restricts the listener to the loopback interface; any other host binds every
+/// interface on the port.
+public final class LinkListener: Sendable {
+
+    /// Everything mutable, guarded by one lock.
+    private struct Storage {
+        var onConnection: (@Sendable (LinkConnection) -> Void)?
+        var port: UInt16 = 0
+        var startContinuation: CheckedContinuation<Void, any Error>?
+    }
+
+    private let listener: NWListener
+    private let codec: LinkCodec
+    private let queue: DispatchQueue
+    private let storage = Mutex(Storage())
+
+    /// Creates a listener for `endpoint`. Use port `0` to have the system pick a free port, then
+    /// read ``port`` after ``start()`` returns. Throws if the parameters or port are rejected.
+    public init(endpoint: LinkEndpoint, codec: LinkCodec, queue: DispatchQueue) throws {
+        let parameters = LinkTransportParameters.tcp()
+        let port = NWEndpoint.Port(rawValue: endpoint.port) ?? .any
+        if LinkTransportParameters.isLoopback(endpoint.host) {
+            parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port)
+        }
+        self.listener = try NWListener(using: parameters, on: port)
+        self.codec = codec
+        self.queue = queue
+    }
+
+    /// Called on `queue` with each accepted connection, already started.
+    public var onConnection: (@Sendable (LinkConnection) -> Void)? {
+        get { storage.withLock { $0.onConnection } }
+        set { storage.withLock { $0.onConnection = newValue } }
+    }
+
+    /// The port the listener is bound to. Valid only after ``start()`` has returned; `0` before
+    /// that.
+    public var port: UInt16 { storage.withLock { $0.port } }
+
+    /// Starts listening and returns once the port is bound, so ``port`` is valid on return.
+    ///
+    /// - Throws: The `NWError` reported by the listener if binding fails.
+    public func start() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            storage.withLock { $0.startContinuation = continuation }
+            listener.newConnectionHandler = { [weak self] nwConnection in
+                guard let self else {
+                    nwConnection.cancel()
+                    return
+                }
+                let connection = LinkConnection(connection: nwConnection, codec: self.codec, queue: self.queue)
+                let handler = self.storage.withLock { $0.onConnection }
+                connection.start()
+                handler?(connection)
+            }
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    let boundPort = self.listener.port?.rawValue ?? 0
+                    self.storage.withLock { storage -> CheckedContinuation<Void, any Error>? in
+                        storage.port = boundPort
+                        defer { storage.startContinuation = nil }
+                        return storage.startContinuation
+                    }?.resume()
+                case .failed(let error):
+                    self.resumeStart(throwing: error)
+                case .cancelled:
+                    self.resumeStart(throwing: NWError.posix(.ECANCELED))
+                default:
+                    break
+                }
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    /// Stops listening. Already-accepted connections are unaffected. Idempotent.
+    public func cancel() {
+        listener.cancel()
+    }
+
+    // MARK: - Internals
+
+    /// Fails a pending ``start()``, if one is still waiting.
+    private func resumeStart(throwing error: some Error) {
+        storage.withLock { storage -> CheckedContinuation<Void, any Error>? in
+            defer { storage.startContinuation = nil }
+            return storage.startContinuation
+        }?.resume(throwing: error)
+    }
+}
