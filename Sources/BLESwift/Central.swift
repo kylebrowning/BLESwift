@@ -167,6 +167,25 @@ public actor Central {
         self.queue = queue
         self.configuration = configuration
 
+        // A registered backend (see `BackendRegistry`) replaces CoreBluetooth wholesale.
+        // Restoration is CoreBluetooth-specific, so the startup window never opens here.
+        if let factory = BackendRegistry.centralFactory {
+            let backend = factory(queue)
+            self.manager = backend
+            self.proxy = nil
+            self.startupBackgroundTask = NoOpStartupBackgroundTask()
+            self.startupWindowOpen = false
+            // Hopped onto `queue` because the backend's `eventHandler` setter may be
+            // queue-confined; `[weak self]` like the CoreBluetooth path — no retain cycle.
+            queue.sync {
+                backend.eventHandler = { [weak self] event in
+                    guard let self else { return }
+                    self.assumeIsolated { $0.handle(event) }
+                }
+            }
+            return
+        }
+
         let proxy = CentralDelegateProxy()
         self.proxy = proxy
 
