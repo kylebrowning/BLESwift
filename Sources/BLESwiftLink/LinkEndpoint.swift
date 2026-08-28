@@ -14,9 +14,12 @@ public struct LinkEndpoint: Sendable, Hashable, Codable, CustomStringConvertible
     /// `127.0.0.1:45541`.
     public static let `default` = LinkEndpoint(host: "127.0.0.1", port: 45541)
 
+    /// The hostname or IP address to connect to.
     public var host: String
+    /// The TCP port to connect to.
     public var port: UInt16
 
+    /// Creates an endpoint from a host and port.
     public init(host: String, port: UInt16) {
         self.host = host
         self.port = port
@@ -35,5 +38,6 @@ public struct LinkEndpoint: Sendable, Hashable, Codable, CustomStringConvertible
         environment[environmentKey].flatMap(LinkEndpoint.init(string:))
     }
 
+    /// `"host:port"`.
     public var description: String { "\(host):\(port)" }
 }

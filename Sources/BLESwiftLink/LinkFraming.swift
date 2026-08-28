@@ -8,7 +8,9 @@ import Foundation
 /// Errors from ``LinkFraming/decodeFrames(from:)``. Either one means the stream is corrupt;
 /// the connection must be closed.
 public enum LinkFramingError: Error, Equatable {
+    /// The codec byte at the front of a frame did not match any ``LinkCodec`` case.
     case unknownCodec(UInt8)
+    /// The frame's declared payload length exceeded ``LinkFraming/maximumPayloadLength``.
     case payloadTooLarge(Int)
 }
 

@@ -30,6 +30,7 @@ public enum LinkError: Error, Equatable, Sendable {
     /// The provider speaks a different ``LinkProtocol/version``.
     case protocolVersionMismatch(remote: Int)
 
+    /// The `NSError` domain used for every ``LinkError``.
     public static let domain = "BLESwiftLink"
 
     /// The `NSError` code used for this case.
