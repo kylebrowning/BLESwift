@@ -120,6 +120,35 @@ struct VirtualPeripheralManagerTests {
         writeResponder.cancel()
     }
 
+    @Test("A read with no event handler attached fails promptly instead of parking forever")
+    func readWithNoHandlerAttached() async throws {
+        let radio = VirtualRadio()
+        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.OrphanHost")
+        let identifier = UUID()
+        let backend = VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier)
+        let host = PeripheralHost(backend: backend, queue: hostQueue)
+        try await host.add(Self.service)
+
+        // Drop the handler *without* removing the device — the one state in which a request
+        // would otherwise be parked with nothing left to answer it.
+        await backend.detachEventHandlerForTesting()
+
+        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.OrphanCentral")
+        let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
+        await waitFor { central.state == .poweredOn }
+
+        // The device is registered but never advertised, so connect by identifier.
+        let peripheral = try await central.connect(PeripheralIdentifier(uuid: identifier, name: nil))
+        do {
+            let value: Data = try await peripheral.read(from: Self.measurement)
+            Issue.record("Expected the read to fail, got \(value as NSData)")
+        } catch {
+            let nsError = error as NSError
+            #expect(nsError.domain == "CBATTErrorDomain")
+            #expect(nsError.code == ATTError.unlikelyError.rawValue)
+        }
+    }
+
     @Test("A host's ATT failure surfaces to the central as a CBATTErrorDomain error")
     func readFailure() async throws {
         let radio = VirtualRadio()

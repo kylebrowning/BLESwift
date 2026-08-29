@@ -60,6 +60,16 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
     nonisolated(unsafe) private var _isAdvertising = false
     nonisolated(unsafe) private var _services: [GATTService] = []
 
+    /// An off-queue-readable mirror of `_eventHandler != nil`. The device handler consults it
+    /// before parking a request: with no handler attached, nothing would ever answer, so the
+    /// request is refused with ``BLESwiftCore/ATTError/unlikelyError`` instead of hanging.
+    private let handlerAttached = Mutex<Bool>(false)
+
+    /// Whether an ``eventHandler`` is currently attached. Readable from any context.
+    private var isHandlerAttached: Bool {
+        handlerAttached.withLock { $0 }
+    }
+
     /// Backs ``bluetoothAuthorization``; a `static var` isn't scoped to any one backend's
     /// queue, so it is `Mutex`-protected rather than queue-confined.
     private static let authorizationBox = Mutex<BluetoothAuthorization>(.allowedAlways)
@@ -103,10 +113,13 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
             handler: handler
         )
         // Weak, so the radio's registration never keeps this backend alive; the strong
-        // reference the hop takes lasts only as long as the delivery itself.
-        let sink: @Sendable (PeripheralHostEvent) -> Void = { [weak self] event in
-            guard let self else { return }
+        // reference the hop takes lasts only as long as the delivery itself. The `Bool`
+        // reports whether the event reached an attached handler — a request nobody is
+        // listening for is refused rather than parked forever.
+        let sink: @Sendable (PeripheralHostEvent) -> Bool = { [weak self] event in
+            guard let self, self.isHandlerAttached else { return false }
             self.queue.async { self.deliver(event) }
+            return true
         }
         // Attaching the sink *before* registering is what guarantees no request can reach
         // the handler before it knows where to forward it.
@@ -122,7 +135,11 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
     /// gone, and every queued delivery holds one.
     deinit {
         let work = _work
-        Task { await work?.value?.remove() }
+        let handler = self.handler
+        Task {
+            await handler.failPendingRequests()
+            await work?.value?.remove()
+        }
     }
 
     // MARK: - Internals
@@ -133,14 +150,29 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
         _eventHandler?(event)
     }
 
+    /// Delivers `event` on ``queue`` from any context.
+    private func deliverOffQueue(_ event: PeripheralHostEvent) {
+        queue.async { [self] in deliver(event) }
+    }
+
     /// Appends `body` to the serial chain of radio work, so it runs after the device's
-    /// registration and after every operation queued before it. A no-op once the device has
-    /// been removed. Must be called on ``queue``.
-    private func enqueue(_ body: @escaping @Sendable (VirtualDeviceHandle) async -> Void) {
+    /// registration and after every operation queued before it. Must be called on ``queue``.
+    ///
+    /// - Parameters:
+    ///   - body: The radio work to run, given the registered device's handle.
+    ///   - ifRemoved: Run instead of `body` when the hosted device is already gone, so an
+    ///     operation awaiting a completion event is failed rather than left waiting forever.
+    private func enqueue(
+        _ body: @escaping @Sendable (VirtualDeviceHandle) async -> Void,
+        ifRemoved: (@Sendable () -> Void)? = nil
+    ) {
         dispatchPrecondition(condition: .onQueue(queue))
         let previous = _work
         _work = Task {
-            guard let handle = await previous?.value else { return nil }
+            guard let handle = await previous?.value else {
+                ifRemoved?()
+                return nil
+            }
             await body(handle)
             return handle
         }
@@ -173,6 +205,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
         set {
             dispatchPrecondition(condition: .onQueue(queue))
             _eventHandler = newValue
+            handlerAttached.withLock { $0 = newValue != nil }
             guard newValue != nil else {
                 removeDevice()
                 return
@@ -206,7 +239,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
             serviceUUIDs: advertisement.serviceUUIDs,
             isConnectable: true
         )
-        enqueue { [weak self] handle in
+        enqueue({ [weak self] handle in
             await handle.setAdvertisement(data)
             await handle.setAdvertising(true)
             guard let self else { return }
@@ -214,7 +247,9 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
                 self._isAdvertising = true
                 self.deliver(.didStartAdvertising(error: nil))
             }
-        }
+        }, ifRemoved: { [weak self] in
+            self?.deliverOffQueue(.didStartAdvertising(error: Self.removedError))
+        })
     }
 
     /// Stops advertising. Idempotent, and reports no completion of its own — exactly like
@@ -239,11 +274,12 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
         }
         _services.append(service)
         let services = _services
-        enqueue { [weak self] handle in
+        enqueue({ [weak self] handle in
             await handle.setServices(services)
-            guard let self else { return }
-            self.queue.async { self.deliver(.didAddService(service.identifier, error: nil)) }
-        }
+            self?.deliverOffQueue(.didAddService(service.identifier, error: nil))
+        }, ifRemoved: { [weak self] in
+            self?.deliverOffQueue(.didAddService(service.identifier, error: Self.removedError))
+        })
     }
 
     /// Empties the hosted device's GATT database.
@@ -277,6 +313,30 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
         return true
     }
 
+    /// Detaches ``eventHandler`` **without** removing the hosted device — the one state the
+    /// public setter cannot produce, and the one a request must be refused in rather than
+    /// parked. Test-only; production code sets `eventHandler = nil`, which also removes the
+    /// device.
+    package func detachEventHandlerForTesting() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { [self] in
+                _eventHandler = nil
+                handlerAttached.withLock { $0 = false }
+                continuation.resume()
+            }
+        }
+    }
+
+    /// The error an operation queued after the hosted device was removed reports, instead of
+    /// leaving its caller waiting for a completion that can never arrive.
+    private static var removedError: NSError {
+        NSError(
+            domain: "BLESwiftProvider",
+            code: 5,
+            userInfo: [NSLocalizedDescriptionKey: "The backend's hosted device has been removed."]
+        )
+    }
+
     /// The error a repeat ``add(_:)`` of an already-published service reports.
     private static var duplicateServiceError: NSError {
         NSError(
@@ -296,14 +356,15 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
 /// recovered from which map the token is in, never from the response's shape.
 actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
 
-    /// Delivers events to the owning backend's `eventHandler`, hopping onto its queue.
-    private var sink: (@Sendable (PeripheralHostEvent) -> Void)?
+    /// Delivers events to the owning backend's `eventHandler`, hopping onto its queue, and
+    /// reports whether a handler was attached to receive them.
+    private var sink: (@Sendable (PeripheralHostEvent) -> Bool)?
 
     private var pendingReads: [RequestToken: CheckedContinuation<Result<Data, ATTError>, Never>] = [:]
     private var pendingWrites: [RequestToken: CheckedContinuation<Result<Void, ATTError>, Never>] = [:]
 
     /// Attaches the event sink, before the device is registered.
-    func attach(_ sink: @escaping @Sendable (PeripheralHostEvent) -> Void) {
+    func attach(_ sink: @escaping @Sendable (PeripheralHostEvent) -> Bool) {
         self.sink = sink
     }
 
@@ -339,7 +400,10 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         let token = RequestToken()
         return await withCheckedContinuation { continuation in
             pendingReads[token] = continuation
-            sink(.didReceiveRead(ReadRequest(token: token, central: central, characteristic: characteristic, offset: offset)))
+            let event = PeripheralHostEvent.didReceiveRead(
+                ReadRequest(token: token, central: central, characteristic: characteristic, offset: offset)
+            )
+            if !sink(event) { fail(token) }
         }
     }
 
@@ -350,7 +414,18 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         let token = RequestToken()
         return await withCheckedContinuation { continuation in
             pendingWrites[token] = continuation
-            sink(.didReceiveWrite(WriteRequest(token: token, entries: entries)))
+            if !sink(.didReceiveWrite(WriteRequest(token: token, entries: entries))) { fail(token) }
+        }
+    }
+
+    /// Refuses the parked request `token` identifies with
+    /// ``BLESwiftCore/ATTError/unlikelyError`` — the answer for a request no attached handler
+    /// ever saw.
+    private func fail(_ token: RequestToken) {
+        if let continuation = pendingReads.removeValue(forKey: token) {
+            continuation.resume(returning: .failure(.unlikelyError))
+        } else if let continuation = pendingWrites.removeValue(forKey: token) {
+            continuation.resume(returning: .failure(.unlikelyError))
         }
     }
 
@@ -361,7 +436,7 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         central: Subscriber,
         isSubscribed: Bool
     ) async {
-        sink?(isSubscribed
+        _ = sink?(isSubscribed
             ? .didSubscribe(central: central, characteristic: characteristic)
             : .didUnsubscribe(central: central, characteristic: characteristic))
     }
