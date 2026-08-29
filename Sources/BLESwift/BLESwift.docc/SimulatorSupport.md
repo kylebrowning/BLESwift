@@ -268,10 +268,11 @@ is broken.
   `willRestore`. Relatedly, ``Central/stopAndExtractState()`` and
   ``PeripheralHost/stopAndExtractState()`` throw ``BLESwiftError/stopped`` on a link backend —
   there is no `CBCentralManager` underneath to hand back.
-- **ANCS.** The `requiresANCS:` argument to `Central.connect(_:)` is forwarded to the Mac's
-  real radio under `--passthrough`, and `Peripheral.ancsAuthorized` mirrors whatever the
-  provider reports for that connection. The virtual radio has no ANCS, so a virtual device
-  always reports `false`.
+- **No ANCS.** ANCS is an iOS-only feature of CoreBluetooth and the provider is a macOS
+  process, so it is unavailable over the link in *both* modes: the `requiresANCS:` argument to
+  `Central.connect(_:)` has no effect — the passthrough backend drops the flag on macOS, and
+  the virtual radio has no ANCS to require — and `Peripheral.ancsAuthorized` is always `false`
+  for a linked peripheral.
 - **System connection events.** `Central.connectionEventRegistration(services:peripherals:)`
   is a no-op against the Mac's real radio: CoreBluetooth has no
   `registerForConnectionEvents(options:)` on macOS, so there is nothing for the provider to
