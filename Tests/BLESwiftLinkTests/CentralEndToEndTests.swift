@@ -502,6 +502,79 @@ struct CentralEndToEndTests {
         await provider.stop()
     }
 
+    @Test("A connection holding a megabyte behind its own handshake is dropped")
+    func backlogByteCapDropsTheConnection() async throws {
+        // A session's backend is built inside the handshake, on the actor, so a factory that
+        // waits holds the handshake open — and that is the only window in which a connection's
+        // messages are held rather than served. Nothing else can keep it open on demand.
+        //
+        // The wait is short and independently released: it occupies a cooperative thread while
+        // it lasts, and a test that held one until *another* async assertion completed could
+        // starve the very pool that assertion needs.
+        let gate = DispatchSemaphore(value: 0)
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.centralBackendFactory = { queue in
+            _ = gate.wait(timeout: .now() + 2)
+            return FakeCentral(queue: queue, state: .poweredOn)
+        }
+        let log = Mutex<[String]>([])
+        configuration.log = { line in log.withLock { $0.append(line) } }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let connection = LinkConnection.connect(
+            to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "e2e.backlog")
+        )
+        let ready = Mutex(false)
+        let ended = Mutex(false)
+        connection.onStateChange = { state in
+            switch state {
+            case .ready: ready.withLock { $0 = true }
+            case .failed, .cancelled: ended.withLock { $0 = true }
+            case .idle, .connecting: break
+            }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { ready.withLock { $0 } }
+        #expect(ready.withLock { $0 })
+
+        // Released on a timer of its own, well after the burst below has crossed a loopback
+        // socket, so the handshake is never held on an assertion that has to run to free it.
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(750)) { gate.signal() }
+
+        connection.send(.clientHello(ClientHello(
+            protocolVersion: LinkProtocol.version,
+            role: .central,
+            clientName: "backlog"
+        )))
+        // A megabyte and a quarter behind a handshake that cannot complete — past the cap, and
+        // well under the count cap, so only the byte cap can answer it.
+        let value = Data(repeating: 0x5A, count: 128 * 1024)
+        for sequence in 0..<10 {
+            connection.send(.centralRequest(.writeValue(
+                peripheral: Self.deviceID,
+                characteristic: WireCharacteristicRef(Self.control),
+                value: value,
+                type: .withoutResponse,
+                sequence: UInt64(sequence)
+            )))
+        }
+
+        await waitFor(timeout: .seconds(15)) { ended.withLock { $0 } }
+        #expect(ended.withLock { $0 })
+        #expect(log.withLock { $0 }.contains { $0.contains("behind its handshake") })
+
+        gate.signal()
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+        await provider.stop()
+    }
+
     /// The name on the first peripheral `central` sights, or `nil` if the scan ends first.
     private static func firstSighting(of central: Central) async -> String? {
         do {

@@ -148,6 +148,12 @@ public actor Provider {
                 switch self.pending.withLock({ $0.route(message, from: connection) }) {
                 case .drop:
                     break
+                case .exceededBacklog:
+                    self.configuration.log?(
+                        "dropping a connection holding more than "
+                            + "\(PendingConnections.maximumQueuedBytes) bytes behind its handshake"
+                    )
+                    connection.cancel()
                 case .handshake:
                     Task { await self.handle(message, from: connection) }
                 case .deliver(let handler):
@@ -431,6 +437,9 @@ struct PendingConnections {
         /// Nowhere: the link has ended, the connection is unknown, or the message was held
         /// for a session that has not installed its handler yet.
         case drop
+        /// Nowhere, and the connection goes with it: holding this message would put the
+        /// entry's backlog past ``PendingConnections/maximumQueuedBytes``.
+        case exceededBacklog
         /// To ``Provider/handle(_:from:)`` — the connection's first message, its hello.
         case handshake
         /// To the session that owns this connection.
@@ -459,6 +468,9 @@ struct PendingConnections {
         /// Messages that arrived behind the hello — or during the replay — held in order
         /// until ``handler`` has been given them.
         var queued: [LinkMessage] = []
+        /// What ``queued`` costs, by ``BLESwiftLink/LinkMessage/heldByteCount``, so the
+        /// backlog is bounded by size and not only by count.
+        var queuedBytes = 0
     }
 
     /// How many messages one entry holds before it starts dropping them. Only a connection
@@ -466,6 +478,16 @@ struct PendingConnections {
     /// ever queues at all, so this is a ceiling on a misbehaving client, not a flow-control
     /// window.
     private static let maximumQueued = 256
+
+    /// How many bytes of held messages one entry accumulates before its connection is dropped.
+    ///
+    /// A count alone does not bound this backlog: a frame carries up to
+    /// ``BLESwiftLink/LinkFraming`` allows, so a couple of hundred of them is gigabytes. A
+    /// client with a megabyte outstanding behind its own hello is not one whose session is
+    /// merely slow to open — it is filling the provider's memory before it has been served at
+    /// all — and unlike an over-count it is not answered by dropping the message: the
+    /// connection goes.
+    static let maximumQueuedBytes = 1024 * 1024
 
     private var entries: [ObjectIdentifier: Entry] = [:]
 
@@ -496,7 +518,18 @@ struct PendingConnections {
             entry.didRouteHello = true
             return .handshake
         }
-        if entry.queued.count < Self.maximumQueued { entry.queued.append(message) }
+        guard entry.queued.count < Self.maximumQueued else { return .drop }
+        let cost = message.heldByteCount
+        guard entry.queuedBytes + cost <= Self.maximumQueuedBytes else {
+            // Released here rather than at the termination that follows: the caller cancels the
+            // connection the moment this returns, and nothing is served from a backlog whose
+            // connection is on its way out.
+            entry.queued = []
+            entry.queuedBytes = 0
+            return .exceededBacklog
+        }
+        entry.queued.append(message)
+        entry.queuedBytes += cost
         return .drop
     }
 
@@ -519,6 +552,7 @@ struct PendingConnections {
         entry.isReplaying = true
         let queued = entry.queued
         entry.queued = []
+        entry.queuedBytes = 0
         entries[key] = entry
         return queued
     }
@@ -539,6 +573,7 @@ struct PendingConnections {
         }
         let queued = entry.queued
         entry.queued = []
+        entry.queuedBytes = 0
         entries[key] = entry
         return queued
     }
@@ -576,6 +611,7 @@ struct PendingConnections {
         entries[key]?.isTerminated = true
         entries[key]?.handler = nil
         entries[key]?.queued = []
+        entries[key]?.queuedBytes = 0
     }
 
     /// Drops `connection` from the table, releasing the strong reference it was held by.
