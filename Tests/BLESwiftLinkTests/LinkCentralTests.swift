@@ -543,6 +543,36 @@ struct LinkCentralTests {
         #expect(survived == false)
     }
 
+    @Test("A table full of busy mirrors cannot make the cap evict the mirror it is minting")
+    func peripheralCapNeverEvictsTheMirrorItJustCreated() async throws {
+        let queue = DispatchSerialQueue(label: "LinkCentralTests.reserve")
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: try closedPort()),
+            queue: queue,
+            clientName: "test",
+            retryInterval: .seconds(60),
+            maximumPeripherals: 1
+        )
+        defer { link.shutdown() }
+
+        let busy = UUID()
+        let fresh = UUID()
+        let filed = await onQueue(queue) { () -> Bool in
+            // The one slot the cap allows, occupied by a connect in flight — a mirror the cap
+            // is never allowed to drop.
+            if let held = link.retrievePeripherals(withIdentifiers: [busy]).first as? LinkPeripheral {
+                link.connect(held, options: nil, requiresANCS: false)
+            }
+            // Retrieving a second identifier overflows a table with nothing evictable in it.
+            // The mirror minted here must still be the one filed under `fresh`, or its owner
+            // holds an object the provider's events can never reach.
+            let created = link.retrievePeripherals(withIdentifiers: [fresh]).first as? LinkPeripheral
+            let again = link.retrievePeripherals(withIdentifiers: [fresh]).first as? LinkPeripheral
+            return created != nil && created === again
+        }
+        #expect(filed)
+    }
+
     @Test("A connect to a peripheral the cap evicted re-files it instead of dropping the request")
     func connectRefilesAnEvictedPeripheral() async throws {
         let provider = try ScriptedProvider()

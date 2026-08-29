@@ -237,7 +237,7 @@ public final class LinkCentral: CentralManaging, Sendable {
             // Marked connecting *before* the cap runs, so the eviction this insert may trigger
             // cannot pick the very peripheral being connected.
             target.markConnecting()
-            evictStalePeripherals()
+            evictStalePeripherals(reserving: 0)
             send(.connect(peripheral: target.identifier, options: options.map(WireConnectOptions.init), requiresANCS: requiresANCS))
             return
         }
@@ -383,10 +383,16 @@ public final class LinkCentral: CentralManaging, Sendable {
             touch(identifier)
             return existing
         }
+        // Evicted *before* the insert, never after: a mirror this central has only just
+        // minted is `.disconnected`, which is exactly what the cap calls stale, so a table
+        // whose other entries are all busy would otherwise answer the overflow by dropping
+        // the very mirror being handed to the caller — leaving that caller holding an
+        // unfiled object the provider's events could never reach. A slot is reserved for the
+        // insert, so the table still settles at ``maximumPeripherals`` whenever it can.
+        evictStalePeripherals(reserving: 1)
         let created = LinkPeripheral(identifier: identifier, name: name, central: self, queue: queue)
         _peripherals[identifier] = created
         touch(identifier)
-        evictStalePeripherals()
         return created
     }
 
@@ -405,10 +411,14 @@ public final class LinkCentral: CentralManaging, Sendable {
     /// alone: a connect, a live connection, or a cancellation in flight still refers to it,
     /// and the provider's events for it must reach the instance its owner is holding. Must be
     /// called on ``queue``.
-    private func evictStalePeripherals() {
+    ///
+    /// - Parameter reserving: How many slots the caller is about to fill, kept free on top of
+    ///   the entries already in the table.
+    private func evictStalePeripherals(reserving: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard _peripherals.count > maximumPeripherals else { return }
-        var overflow = _peripherals.count - maximumPeripherals
+        let limit = maximumPeripherals - reserving
+        guard _peripherals.count > limit else { return }
+        var overflow = _peripherals.count - limit
         var kept: [UUID] = []
         kept.reserveCapacity(_sightingOrder.count)
         for identifier in _sightingOrder {
