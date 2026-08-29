@@ -63,15 +63,21 @@ Task {
     }
 }
 
-signal(SIGINT, SIG_IGN)
-let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-signalSource.setEventHandler {
-    Task {
-        await provider.stop()
-        exit(0)
+// SIGINT for a terminal Ctrl-C, SIGTERM for a plain `kill` from a script; both run
+// `provider.stop()` so every client's link is closed before the process goes away.
+let signalSources = [SIGINT, SIGTERM].map { signal -> DispatchSourceSignal in
+    Foundation.signal(signal, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: signal, queue: .main)
+    source.setEventHandler {
+        Task {
+            await provider.stop()
+            exit(0)
+        }
     }
+    source.resume()
+    return source
 }
-signalSource.resume()
+_ = signalSources
 
 RunLoop.main.run()
 #else

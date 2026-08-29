@@ -61,7 +61,14 @@ cleanup() {
         xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true
     done
     if [[ -n "$PROVIDER_PID" ]] && kill -0 "$PROVIDER_PID" 2>/dev/null; then
+        # TERM first, so the provider's own handler runs `stop()` and closes its sessions;
+        # SIGKILL only if it is still there three seconds later.
         kill "$PROVIDER_PID" 2>/dev/null || true
+        for _ in 1 2 3 4 5 6; do
+            kill -0 "$PROVIDER_PID" 2>/dev/null || break
+            sleep 0.5
+        done
+        kill -9 "$PROVIDER_PID" 2>/dev/null || true
     fi
     exit "$status"
 }
