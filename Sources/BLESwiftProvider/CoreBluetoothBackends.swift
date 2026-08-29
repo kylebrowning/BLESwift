@@ -58,12 +58,22 @@ public enum CoreBluetoothBackends {
     /// A real `CBPeripheralManager` confined to `queue`, as a
     /// `PeripheralManaging`.
     ///
+    /// The system power alert is suppressed (`CBPeripheralManagerOptionShowPowerAlertKey`),
+    /// for the reason ``makeCentral(queue:)`` gives: a host session that starts advertising
+    /// with Bluetooth off would otherwise raise a modal "Turn on Bluetooth" panel on a
+    /// background tool with no one to answer it. The composite carries on with the virtual
+    /// half, and picks the Mac's radio up when the user turns it on.
+    ///
     /// - Parameter queue: The serial queue CoreBluetooth delivers on and the returned
     ///   backend is confined to. Must be the queue this call is made from.
     /// - Returns: The manager, with no delegate installed yet — set `eventHandler` on
     ///   `queue` before yielding it.
     public static func makePeripheralManager(queue: DispatchSerialQueue) -> any PeripheralManaging {
-        CBPeripheralManager(delegate: nil, queue: queue, options: nil)
+        CBPeripheralManager(
+            delegate: nil,
+            queue: queue,
+            options: [CBPeripheralManagerOptionShowPowerAlertKey: false]
+        )
     }
 }
 #endif
