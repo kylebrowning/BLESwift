@@ -67,7 +67,11 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _notifying: Set<CharacteristicIdentifier> = []
     nonisolated(unsafe) private var _maximumWriteWithResponse = 512
     nonisolated(unsafe) private var _maximumWriteWithoutResponse = 20
-    nonisolated(unsafe) private var _outstandingWithoutResponse = 0
+    /// The sequences of the `.withoutResponse` writes this peripheral has sent and not yet
+    /// been acknowledged for, oldest first. An array rather than a `Set`: it never holds more
+    /// than a window's worth in practice, order makes a stale acknowledgement obvious in a
+    /// debugger, and a linear scan of that many elements is cheaper than hashing.
+    nonisolated(unsafe) private var _outstandingWithoutResponse: [UInt64] = []
     nonisolated(unsafe) private var _nextWriteSequence: UInt64 = 0
 
     /// Creates a peripheral mirror. `LinkCentral` is the only caller.
@@ -109,7 +113,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     /// (`LinkFlowControl.writeWithoutResponseWindow`).
     public var canSendWriteWithoutResponse: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
-        return _outstandingWithoutResponse < LinkFlowControl.writeWithoutResponseWindow
+        return _outstandingWithoutResponse.count < LinkFlowControl.writeWithoutResponseWindow
     }
 
     /// Receives every `PeripheralEvent` translated from this peripheral's wire events.
@@ -161,7 +165,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         let sequence = _nextWriteSequence
         _nextWriteSequence &+= 1
         if type == .withoutResponse {
-            _outstandingWithoutResponse += 1
+            _outstandingWithoutResponse.append(sequence)
         }
         central.send(.writeValue(
             peripheral: identifier,
@@ -323,7 +327,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         _characteristics = [:]
         _descriptors = [:]
         _notifying = []
-        _outstandingWithoutResponse = 0
+        _outstandingWithoutResponse = []
         _maximumWriteWithResponse = 512
         _maximumWriteWithoutResponse = 20
         _ancsAuthorized = false
@@ -372,16 +376,25 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Records the provider's acknowledgement of one `.withoutResponse` write.
+    /// Records the provider's acknowledgement of the `.withoutResponse` write tagged
+    /// `sequence`.
     ///
+    /// An acknowledgement is only honored for a write this peripheral still has outstanding.
+    /// A sequence that was never sent, one already acknowledged, or one from before a
+    /// disconnect — ``markDisconnected()`` empties the set, and the provider's own
+    /// acknowledgement may still be in flight when it does — is ignored, rather than
+    /// crediting the window a later connection is filling.
+    ///
+    /// - Parameter sequence: The sequence the provider echoed back.
     /// - Returns: `true` when this acknowledgement reopened a window that was full, meaning
     ///   `PeripheralEvent.isReadyToSendWriteWithoutResponse` is now owed to the consumer.
-    func acknowledgeWriteWithoutResponse() -> Bool {
+    func acknowledgeWriteWithoutResponse(sequence: UInt64) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard let index = _outstandingWithoutResponse.firstIndex(of: sequence) else { return false }
         let window = LinkFlowControl.writeWithoutResponseWindow
-        let wasFull = _outstandingWithoutResponse >= window
-        _outstandingWithoutResponse = max(0, _outstandingWithoutResponse - 1)
-        return wasFull && _outstandingWithoutResponse < window
+        let wasFull = _outstandingWithoutResponse.count >= window
+        _outstandingWithoutResponse.remove(at: index)
+        return wasFull && _outstandingWithoutResponse.count < window
     }
 
     /// Records an ANCS authorization change reported by the provider.

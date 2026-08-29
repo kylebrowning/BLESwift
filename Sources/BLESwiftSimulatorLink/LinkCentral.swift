@@ -465,9 +465,9 @@ public final class LinkCentral: CentralManaging, Sendable {
         case .didWriteValue(let uuid, let characteristic, let error):
             peripheral(for: uuid).deliver(.didWriteValue(characteristic: try characteristic.identifier, error: error?.nsError))
 
-        case .writeWithoutResponseAccepted(let uuid, _):
+        case .writeWithoutResponseAccepted(let uuid, let sequence):
             let target = peripheral(for: uuid)
-            if target.acknowledgeWriteWithoutResponse() {
+            if target.acknowledgeWriteWithoutResponse(sequence: sequence) {
                 target.deliver(.isReadyToSendWriteWithoutResponse)
             }
 

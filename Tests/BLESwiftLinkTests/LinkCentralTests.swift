@@ -233,6 +233,87 @@ struct LinkCentralTests {
         #expect(peripheral?.name == "Named")
     }
 
+    @Test("A stale write acknowledgement cannot open the next connection's window")
+    func staleWriteAcknowledgementIsIgnored() async throws {
+        let (central, link, provider) = try await makeRig()
+        defer { provider.stop(); link.shutdown() }
+        let queue = link.queue
+        let id = UUID()
+        let window = LinkFlowControl.writeWithoutResponseWindow
+
+        // Connect, then fill the flow-control window from the mirror itself: `Central` honors
+        // the window, so only driving the peripheral directly gets it to the brim.
+        let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: nil)) }
+        await waitFor { !provider.requests.withLock { $0 }.isEmpty }
+        provider.emit(.didConnect(peripheral: id, name: nil, maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
+        _ = try await bounded { try await connectTask.value }
+
+        let peripheral = try #require(await onQueue(queue) {
+            link.retrievePeripherals(withIdentifiers: [id]).first as? LinkPeripheral
+        })
+        await Self.fillWindow(peripheral, on: queue, count: window)
+        #expect(await onQueue(queue) { !peripheral.canSendWriteWithoutResponse })
+        await waitFor { Self.writeSequences(provider, for: id).count == window }
+        let stale = Self.writeSequences(provider, for: id)
+        #expect(stale.count == window)
+
+        // The connection resets. Its outstanding writes go with it — but the provider's
+        // acknowledgements for them may already be on the wire.
+        provider.emit(.didDisconnect(peripheral: id, error: nil))
+        await waitFor { await onQueue(queue) { peripheral.connectionState == .disconnected } }
+
+        // A second connection fills the window again, with fresh sequences.
+        let reconnectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: nil)) }
+        provider.emit(.didConnect(peripheral: id, name: nil, maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
+        _ = try await bounded { try await reconnectTask.value }
+        await Self.fillWindow(peripheral, on: queue, count: window)
+        #expect(await onQueue(queue) { !peripheral.canSendWriteWithoutResponse })
+        await waitFor { Self.writeSequences(provider, for: id).count == 2 * window }
+        let live = Self.writeSequences(provider, for: id).filter { !stale.contains($0) }
+        #expect(live.count == window)
+
+        // Every acknowledgement from the first connection now lands. None of those sequences
+        // is outstanding any more, so none of them may credit this connection's window.
+        for sequence in stale {
+            provider.emit(.writeWithoutResponseAccepted(peripheral: id, sequence: sequence))
+        }
+        // And one for a sequence that was never sent at all, for good measure.
+        provider.emit(.writeWithoutResponseAccepted(peripheral: id, sequence: .max))
+
+        // A barrier: the link is ordered, so an event behind those acknowledgements cannot be
+        // observed until every one of them has been handled. The window must still be shut.
+        provider.emit(.didUpdateANCSAuthorization(peripheral: id, authorized: true))
+        await waitFor { await onQueue(queue) { peripheral.ancsAuthorized } }
+        #expect(await onQueue(queue) { !peripheral.canSendWriteWithoutResponse })
+
+        // An acknowledgement this connection did earn opens it, and nothing else does.
+        provider.emit(.writeWithoutResponseAccepted(peripheral: id, sequence: try #require(live.first)))
+        await waitFor { await onQueue(queue) { peripheral.canSendWriteWithoutResponse } }
+        #expect(await onQueue(queue) { peripheral.canSendWriteWithoutResponse })
+    }
+
+    /// Issues `count` `.withoutResponse` writes straight at `peripheral`, filling the link's
+    /// flow-control window.
+    private static func fillWindow(_ peripheral: LinkPeripheral, on queue: DispatchSerialQueue, count: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async {
+                for _ in 0..<count {
+                    peripheral.writeValue(Data([1]), for: Self.measurement, type: .withoutResponse)
+                }
+                continuation.resume()
+            }
+        }
+    }
+
+    /// The sequences of every `.withoutResponse` write `provider` has received for
+    /// `peripheral`, in the order they arrived.
+    private static func writeSequences(_ provider: ScriptedProvider, for peripheral: UUID) -> [UInt64] {
+        provider.requests.withLock { $0 }.compactMap { request in
+            guard case .writeValue(peripheral, _, _, .withoutResponse, let sequence) = request else { return nil }
+            return sequence
+        }
+    }
+
     @Test("The peripheral table is capped, keeping the ones a connect still refers to")
     func peripheralTableIsCapped() async throws {
         let queue = DispatchSerialQueue(label: "LinkCentralTests.cap")

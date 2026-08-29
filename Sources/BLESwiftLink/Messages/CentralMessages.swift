@@ -111,6 +111,12 @@ public enum CentralWireEvent: Codable, Sendable, Equatable {
 
     /// The peripheral is ready to accept another write without response, tagged with the
     /// `sequence` from the originating `writeValue` request.
+    ///
+    /// The client matches `sequence` against the writes it still has outstanding for
+    /// `peripheral` and reopens the window only for one it recognizes: a sequence it never
+    /// sent, one it has already been acknowledged for, or one belonging to a connection that
+    /// has since been reset is ignored, so a late or duplicated acknowledgement cannot open
+    /// the *next* connection's window early.
     case writeWithoutResponseAccepted(peripheral: UUID, sequence: UInt64)
 
     /// `characteristic` on `peripheral` was read, or a notification delivered a new
