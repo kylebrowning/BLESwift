@@ -74,6 +74,36 @@ struct LinkFramingTests {
         #expect(buffer.count == 5)
     }
 
+    @Test("Ten thousand tiny frames in one buffer all decode, and quickly")
+    func manySmallFramesInOneBuffer() throws {
+        // The shape a busy link produces: one read carrying thousands of small frames.
+        // Compacting the buffer per frame made this quadratic — every removal shifts the whole
+        // remainder down — so the bound is on the work, not just the answer.
+        let count = 10_000
+        var buffer = Data()
+        for index in 0..<count {
+            buffer += LinkFraming.encodeFrame(
+                codec: index.isMultiple(of: 2) ? .json : .binaryPropertyList,
+                payload: Data([UInt8(index & 0xFF), UInt8((index >> 8) & 0xFF)])
+            )
+        }
+        let trailing = LinkFraming.encodeFrame(codec: .json, payload: Data([1, 2, 3]))
+        buffer += trailing.prefix(4)
+
+        let started = ContinuousClock.now
+        let frames = try LinkFraming.decodeFrames(from: &buffer)
+        let elapsed = ContinuousClock.now - started
+
+        #expect(frames.count == count)
+        for (index, frame) in frames.enumerated() {
+            #expect(frame.codec == (index.isMultiple(of: 2) ? .json : .binaryPropertyList), "frame \(index)")
+            #expect(Array(frame.payload) == [UInt8(index & 0xFF), UInt8((index >> 8) & 0xFF)], "frame \(index)")
+        }
+        // The partial frame at the end is kept, and it is *all* that is kept.
+        #expect(buffer == trailing.prefix(4))
+        #expect(elapsed < .seconds(1), "decoding took \(elapsed)")
+    }
+
     @Test("A header shorter than 5 bytes yields nothing and keeps the bytes")
     func shortHeader() throws {
         var buffer = Data([1, 0, 0])

@@ -38,10 +38,17 @@ public enum LinkFraming {
 
     /// Removes and returns every complete frame at the front of `buffer`; a trailing
     /// partial frame stays in `buffer` for the next call.
+    ///
+    /// **One compaction, not one per frame.** The frames are read through a cursor and the
+    /// bytes they consumed are dropped once, at the end. Removing each frame as it was
+    /// decoded made a full read quadratic in the number of frames it carried: every removal
+    /// shifts the whole remainder of the buffer down, and one 64 KiB read off a busy link can
+    /// hold thousands of small frames.
     public static func decodeFrames(from buffer: inout Data) throws -> [(codec: LinkCodec, payload: Data)] {
         var frames: [(codec: LinkCodec, payload: Data)] = []
-        while buffer.count >= headerLength {
-            let start = buffer.startIndex
+        var cursor = buffer.startIndex
+        while buffer.endIndex - cursor >= headerLength {
+            let start = cursor
             let codecByte = buffer[start]
             guard let codec = LinkCodec(rawValue: codecByte) else { throw LinkFramingError.unknownCodec(codecByte) }
             let lengthBytes = buffer[start + 1 ..< start + 5]
@@ -53,10 +60,16 @@ public enum LinkFraming {
                 throw LinkFramingError.payloadTooLarge(declared)
             }
             let length = Int(declared)
-            guard buffer.count >= headerLength + length else { break }
+            guard buffer.endIndex - start >= headerLength + length else { break }
             let payload = Data(buffer[start + headerLength ..< start + headerLength + length])
             frames.append((codec, payload))
-            buffer.removeSubrange(start ..< start + headerLength + length)
+            cursor = start + headerLength + length
+        }
+        // A throw above leaves `buffer` untouched, which the length checks rely on: the stream
+        // is corrupt and the connection is about to close, and the caller's own tests read the
+        // bytes back to prove nothing was consumed.
+        if cursor > buffer.startIndex {
+            buffer.removeSubrange(buffer.startIndex ..< cursor)
         }
         return frames
     }
