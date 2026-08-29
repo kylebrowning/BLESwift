@@ -378,6 +378,66 @@ struct HostEndToEndTests {
         await second.stop()
     }
 
+    @Test("A window filled before the first provider connection is cleared by that connection")
+    func windowFilledBeforeFirstConnectionClearsOnConnect() async throws {
+        // A port nothing is listening on, so the link's first dial has nowhere to land.
+        let port = try await Self.freePort()
+        let queue = DispatchSerialQueue(label: "host.e2e.prefill")
+        let link = LinkPeripheralManager(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
+            queue: queue,
+            clientName: "prefill-e2e",
+            retryInterval: .milliseconds(50)
+        )
+
+        let states = Mutex<[CentralState]>([])
+        let readyCount = Mutex<Int>(0)
+        await Self.onQueue(queue) {
+            link.eventHandler = { event in
+                switch event {
+                case .didUpdateState(let state): states.withLock { $0.append(state) }
+                case .readyToUpdateSubscribers: readyCount.withLock { $0 += 1 }
+                default: break
+                }
+            }
+        }
+
+        // ---- Fill the window before a provider has ever answered: every push is dropped
+        // unsent, and no acknowledgement can ever arrive for one. ----
+        let results = await Self.onQueue(queue) {
+            (0..<33).map { _ in link.updateValue(Data([0, 99]), for: Self.measurement, onSubscribed: nil) }
+        }
+        #expect(results.prefix(LinkFlowControl.updateValueWindow).allSatisfy { $0 })
+        #expect(results[LinkFlowControl.updateValueWindow] == false)
+        #expect(readyCount.withLock { $0 } == 0)
+
+        // ---- The first provider connection clears them and releases the blocked host ----
+        let provider = try await Self.rebind(port: port) { try await self.makeProvider(port: port) }
+        await waitFor(timeout: .seconds(10)) { states.withLock { $0.last == .poweredOn } }
+        #expect(states.withLock { $0.last } == .poweredOn)
+        await waitFor(timeout: .seconds(5)) { readyCount.withLock { $0 } == 1 }
+        #expect(readyCount.withLock { $0 } == 1)
+        #expect(await Self.onQueue(queue) { link.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil) })
+
+        link.shutdown()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
+    }
+
+    /// A loopback port nothing is bound to: taken by a listener on port 0, read back, and
+    /// released again.
+    static func freePort() async throws -> UInt16 {
+        let listener = try LinkListener(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: 0),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "host.e2e.freeport")
+        )
+        try await listener.start()
+        let port = listener.port
+        listener.cancel()
+        return port
+    }
+
     /// Runs `make` until the port the previous provider released can be bound again — a
     /// just-closed listener may hold it for a moment.
     private static func rebind(port: UInt16, _ make: () async throws -> Provider) async throws -> Provider {

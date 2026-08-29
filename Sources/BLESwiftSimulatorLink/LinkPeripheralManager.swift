@@ -71,9 +71,15 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// never produce. Cleared by the reconnect that answers it.
     nonisolated(unsafe) private var _wasBlockedAtDrop = false
 
-    /// Whether a link that had been established has since dropped, so the next provider state
-    /// is a *reconnect* and must clear the window rather than trust it.
-    nonisolated(unsafe) private var _isAwaitingReconnect = false
+    /// Whether the next provider state is a *reconnect* and must clear the window rather than
+    /// trust it.
+    ///
+    /// Starts `true`, so the *first* provider connection is treated as a reconnect too: a host
+    /// that filled the window before the link ever came up parked its pushes against no
+    /// provider at all, and nothing will ever acknowledge them. That is the same
+    /// unacknowledgeable state a drop leaves behind, and it is cleared the same way — by the
+    /// connection that answers it.
+    nonisolated(unsafe) private var _isAwaitingReconnect = true
 
     /// Creates a peripheral manager that drives the provider at `endpoint`, and starts
     /// dialing it immediately. Reconnection is automatic, at `retryInterval`.
