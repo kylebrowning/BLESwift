@@ -346,7 +346,19 @@ final class CentralSession: Sendable {
             remote.readRSSI()
 
         case .openL2CAPChannel(let peripheral, let psm, let channel):
-            guard let remote = self.remote(peripheral, for: "openL2CAPChannel") else { return }
+            guard let remote = self.remote(peripheral, for: "openL2CAPChannel") else {
+                // Answered rather than ignored, exactly as `.connect` is: the client's open
+                // is waiting on a completion, and a peripheral this session has no remote for
+                // will never produce one — silence would cost the caller its whole open
+                // timeout and leave the client's half-channel filed until then.
+                send(.didOpenL2CAPChannel(
+                    peripheral: peripheral,
+                    channel: channel,
+                    psm: psm,
+                    error: WireError(VirtualRadio.unknownDeviceError)
+                ))
+                return
+            }
             // Every open is answered by exactly one completion, so a client with more than
             // this many outstanding on one peripheral has stopped consuming them; the link
             // goes rather than this session's memory.

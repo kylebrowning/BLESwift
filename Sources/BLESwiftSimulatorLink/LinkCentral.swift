@@ -332,6 +332,16 @@ public final class LinkCentral: CentralManaging, Sendable {
         return channel
     }
 
+    /// How many L2CAP channels this central currently has filed — the client halves of
+    /// opens that are either live or still awaiting their completion.
+    ///
+    /// A test hook: a failed open must leave nothing behind in the table. Must be called on
+    /// ``queue``.
+    package var openChannelCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _channels.count
+    }
+
     /// Tears down every channel `predicate` selects, reporting `error` on each inbound
     /// stream, and drops them from the table. Must be called on ``queue``.
     private func closeChannels(matching predicate: (ChannelEntry) -> Bool, error: Error?) {

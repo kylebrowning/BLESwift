@@ -416,6 +416,48 @@ struct L2CAPLinkTests {
 
     // MARK: - Open failure
 
+    @Test("An open for a peripheral the session never connected fails promptly")
+    func openForAnUnknownPeripheralIsAnswered() async throws {
+        let (rig, _) = try await makeRig(label: "l2cap.unknownPeripheral")
+        let unknown = UUID(uuidString: "4C9E1B7A-3D5F-4E80-91A2-6B3C8D0E5F17")!
+        let events = Mutex<[PeripheralEvent]>([])
+
+        // Opened through the mirror directly: a peripheral this client never connected has no
+        // `Peripheral` over it, and never connecting it is the point.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            rig.link.queue.async {
+                guard let remote = rig.link.retrievePeripherals(withIdentifiers: [unknown]).first else {
+                    continuation.resume()
+                    return
+                }
+                remote.eventHandler = { event in events.withLock { $0.append(event) } }
+                remote.openL2CAPChannel(Self.psm)
+                continuation.resume()
+            }
+        }
+
+        // Promptly: the completion is the provider's answer, not an expiring timeout.
+        await waitFor(timeout: .seconds(5)) { !events.withLock { $0 }.isEmpty }
+        let event = try #require(events.withLock { $0 }.first)
+        guard case .didOpenL2CAPChannel(let channel, let error) = event else {
+            Issue.record("expected a didOpenL2CAPChannel, got \(event)")
+            await tearDown(rig)
+            return
+        }
+        #expect(channel == nil)
+        let nsError = try #require(error as NSError?)
+        #expect(nsError.domain == "BLESwiftProvider")
+        #expect(nsError.code == 1)
+
+        // And the half-channel the open filed is gone.
+        let filed = await withCheckedContinuation { (continuation: CheckedContinuation<Int, Never>) in
+            rig.link.queue.async { continuation.resume(returning: rig.link.openChannelCount) }
+        }
+        #expect(filed == 0)
+
+        await tearDown(rig)
+    }
+
     @Test("A failed open on the provider throws from the client's openL2CAPChannel")
     func openFailurePropagates() async throws {
         let (rig, peripheral) = try await makeRig(label: "l2cap.openFailure")
