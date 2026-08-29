@@ -37,7 +37,7 @@ import Foundation
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``CompositeCentral``, including the requirement that **every child be confined to the
-/// same `queue`** and that ``init(backends:queue:)`` not be called from that queue.
+/// same `queue`** and that ``init(backends:queue:log:)`` not be called from that queue.
 public final class CompositePeripheralManager: PeripheralManaging, Sendable {
 
     /// One outstanding fan-out awaiting its children's completions.
@@ -96,15 +96,24 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// answer to give.
     public static var bluetoothAuthorization: BluetoothAuthorization { .allowedAlways }
 
+    /// Where this composite reports a child falling a whole window behind, if anywhere.
+    private let log: (@Sendable (String) -> Void)?
+
     /// Creates a composite over `backends`, confined to `queue`.
     ///
     /// - Parameters:
     ///   - backends: The children, in priority order. Must all be confined to `queue`.
     ///   - queue: The shared queue — the same one the owning `PeripheralHost` is
     ///     constructed with.
-    public init(backends: [any PeripheralManaging], queue: DispatchSerialQueue) {
+    ///   - log: Where to report a child whose FIFO has filled, if anywhere.
+    public init(
+        backends: [any PeripheralManaging],
+        queue: DispatchSerialQueue,
+        log: (@Sendable (String) -> Void)? = nil
+    ) {
         self.backends = backends
         self.queue = queue
+        self.log = log
         self._queues = Array(repeating: [], count: backends.count)
         queue.sync { attachChildren() }
     }
@@ -117,10 +126,16 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// - Parameters:
     ///   - backends: The children, in priority order. Must all be confined to `queue`.
     ///   - queue: The shared queue, which this call must already be running on.
-    package init(backends: [any PeripheralManaging], onQueue queue: DispatchSerialQueue) {
+    ///   - log: Where to report a child whose FIFO has filled, if anywhere.
+    package init(
+        backends: [any PeripheralManaging],
+        onQueue queue: DispatchSerialQueue,
+        log: (@Sendable (String) -> Void)? = nil
+    ) {
         dispatchPrecondition(condition: .onQueue(queue))
         self.backends = backends
         self.queue = queue
+        self.log = log
         self._queues = Array(repeating: [], count: backends.count)
         attachChildren()
     }
@@ -368,6 +383,13 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
                 continue
             }
             _queues[index].append(pending)
+            // Reported on the transition only: the push that fills a FIFO is the last one
+            // this composite accepts until that child drains, so a child that never comes
+            // back — the one case worth diagnosing — costs exactly one line, not one per
+            // push. Which child, and on what, is the whole diagnosis.
+            if _queues[index].count == Self.queueLimit {
+                log?("composite child \(index) is \(Self.queueLimit) update(s) behind on \(characteristic); closing the window")
+            }
         }
         return true
     }

@@ -433,6 +433,40 @@ struct CompositeBackendTests {
         })
     }
 
+    @Test("A child whose FIFO fills is logged once, by index and characteristic")
+    func afullChildQueueIsLoggedOnce() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.windowLog")
+        let accepting = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let refusing = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let lines = Mutex<[String]>([])
+        let composite = CompositePeripheralManager(
+            backends: [accepting, refusing],
+            queue: queue,
+            log: { line in lines.withLock { $0.append(line) } }
+        )
+
+        // The second child refuses everything, permanently: nothing drains its FIFO.
+        let window = LinkFlowControl.updateValueWindow
+        await onQueue(queue) { refusing.scriptedUpdateValueReturns = Array(repeating: false, count: window + 8) }
+        for index in 0..<window {
+            #expect(await onQueue(queue) {
+                composite.updateValue(Data([UInt8(index % 256)]), for: Self.measurement, onSubscribed: nil)
+            }, "push \(index) should have been queued")
+        }
+        // Pushes past the full FIFO are refused, and earn no further lines.
+        for _ in 0..<3 {
+            #expect(await onQueue(queue) {
+                composite.updateValue(Data([0xFF]), for: Self.measurement, onSubscribed: nil)
+            } == false)
+        }
+
+        let logged = lines.withLock { $0 }
+        #expect(logged.count == 1)
+        let line = logged.first ?? ""
+        #expect(line.contains("child 1"))
+        #expect(line.contains(Self.measurement.uuidString))
+    }
+
     @Test("Concurrent pushes reach every child exactly once, in per-child order")
     func concurrentPushesAreDeliveredOncePerChild() async {
         let queue = DispatchSerialQueue(label: "CompositeBackendTests.concurrent")

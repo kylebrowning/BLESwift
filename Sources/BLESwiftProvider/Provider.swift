@@ -356,7 +356,7 @@ public actor Provider {
                 radio: radio, queue: queue, identifier: UUID(), name: clientName
             )
             let real = factory(queue)
-            return CompositePeripheralManager(backends: [virtual, real], onQueue: queue)
+            return CompositePeripheralManager(backends: [virtual, real], onQueue: queue, log: configuration.log)
         }
     }
 }
