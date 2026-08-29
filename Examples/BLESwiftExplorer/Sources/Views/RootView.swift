@@ -36,6 +36,11 @@ struct RootView: View {
             .tabItem { Label("System", systemImage: "antenna.radiowaves.left.and.right") }
 
             NavigationStack {
+                AdvertiseView()
+            }
+            .tabItem { Label("Advertise", systemImage: "antenna.radiowaves.left.and.right.circle") }
+
+            NavigationStack {
                 RestorationDemoView()
             }
             .tabItem { Label("Restore", systemImage: "arrow.clockwise.circle") }

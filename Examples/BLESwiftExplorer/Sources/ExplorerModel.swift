@@ -9,6 +9,7 @@
 
 import BLESwift
 import BLESwiftProfiles
+import BLESwiftSimulatorLink
 import Foundation
 import Observation
 
@@ -78,6 +79,12 @@ final class ExplorerModel {
     private let savedDevicesKey = "BLESwiftExplorer.savedDeviceIDs"
 
     init() {
+        #if targetEnvironment(simulator)
+        // The Simulator has no Bluetooth; route Central/PeripheralHost to a host-side
+        // bleswift-provider (BLESWIFT_LINK overrides the endpoint).
+        SimulatorLink.install()
+        #endif
+
         // Restoration is iOS-only; on macOS the plain `Configuration` initializer is used.
         #if os(iOS)
         let configuration = Configuration(

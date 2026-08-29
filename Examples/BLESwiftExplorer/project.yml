@@ -22,6 +22,8 @@ targets:
         product: BLESwift
       - package: BLESwift
         product: BLESwiftProfiles
+      - package: BLESwift
+        product: BLESwiftSimulatorLink
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bleswift.explorer
