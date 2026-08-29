@@ -299,7 +299,10 @@ struct BackendRegistrySerializedTests {
             }
             // Gate on the listener actually accepting: the probe has reached `.ready` and sent its
             // hello, so the cancellation lands mid-dial rather than before the probe started.
-            await waitFor(timeout: .seconds(5)) { accepted.withLock { !$0.isEmpty } }
+            // This is setup, not the property under test: under load the probe's loopback dial
+            // can sit in its retry schedule for several seconds, so the gate is generous. The
+            // sub-second bound below is what the test actually asserts.
+            await waitFor(timeout: .seconds(30)) { accepted.withLock { !$0.isEmpty } }
             #expect(accepted.withLock { !$0.isEmpty })
 
             let start = ContinuousClock.now
