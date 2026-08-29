@@ -86,11 +86,67 @@ struct ParityTests {
         data.map { String(format: "%02x", $0) }.joined()
     }
 
+    /// A scenario step that could not be completed — reported as a test failure rather than
+    /// left to hang.
+    private struct ParityFailure: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    /// Where a bounded step parks its result, so the waiter never has to `await` a task it
+    /// cannot cancel.
+    private final class Outcome<T: Sendable>: Sendable {
+        private let storage = Mutex<(value: T?, failure: String?)>((nil, nil))
+
+        var settled: (value: T?, failure: String?)? {
+            storage.withLock { $0.value == nil && $0.failure == nil ? nil : $0 }
+        }
+
+        func succeed(_ value: T) { storage.withLock { $0 = (value, nil) } }
+
+        func fail(_ description: String) { storage.withLock { $0 = (nil, description) } }
+    }
+
+    /// Runs `operation` and gives up after ten seconds with a recorded failure instead of
+    /// hanging the suite.
+    ///
+    /// Every step of this scenario simulates its stimulus exactly once, so a link that
+    /// dropped or reordered that one message must surface as a timeout here — never as a
+    /// silent retry that papers over the loss. The result is parked in an ``Outcome`` and
+    /// polled rather than awaited: `await task.value` is not cancellable, so racing it
+    /// against a sleep would hang forever on exactly the failure this bound exists to catch.
+    private static func bounded<T: Sendable>(
+        _ step: String,
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T? {
+        let outcome = Outcome<T>()
+        let work = Task {
+            do {
+                outcome.succeed(try await operation())
+            } catch {
+                outcome.fail(String(describing: error))
+            }
+        }
+        await waitFor(timeout: .seconds(10)) { outcome.settled != nil }
+        work.cancel()
+        guard let settled = outcome.settled else {
+            Issue.record("\(step) did not complete within 10 s")
+            return nil
+        }
+        if let failure = settled.failure { throw ParityFailure(description: "\(step): \(failure)") }
+        return settled.value
+    }
+
     // MARK: - The scenario
 
     /// Drives one `Central` through the full scenario, returning a log of everything it
     /// observed. Every entry is a value the API handed back — never a duration, a call
     /// count, or anything else that could differ legitimately between the two runs.
+    ///
+    /// Each simulated stimulus fires **exactly once**, gated on the fake's own record that
+    /// the corresponding request actually arrived (`scanCallCount`,
+    /// `notifyingCharacteristics`, `cancelCallCounts`). That gate is what gives the suite
+    /// its teeth: a link that dropped the first sighting, the first notification, or the
+    /// disconnect would hang and be reported, not quietly retried into a pass.
     private static func runScenario(
         central: Central,
         peripheralID: UUID,
@@ -103,24 +159,21 @@ struct ParityTests {
         await waitFor(timeout: .seconds(10)) { central.state == .poweredOn }
         log.append("state:\(central.state)")
 
-        // Scan. The fake only advertises when told to, and a sighting delivered before the
-        // scan request has crossed the socket would be dropped in run B — so sight it
-        // repeatedly, identically in both runs, until the client's stream yields.
-        let sightings = Task {
-            while !Task.isCancelled {
-                fake.simulateDiscovery(peripheral: identifier, advertisement: advertisement, rssi: scriptedRSSI)
-                try? await Task.sleep(for: .milliseconds(25))
+        // Scan. The consumer is started first, then the scan request is awaited on the fake
+        // — in run B that means it has crossed the socket — and only then is the single
+        // sighting delivered.
+        let events = await central.scan(services: [heartRate], timeout: .seconds(10))
+        let discovering = Task { () async throws -> Discovery in
+            for try await event in events {
+                if case .discovered(let discovery) = event, discovery.peripheral.uuid == peripheralID {
+                    return discovery
+                }
             }
+            throw ParityFailure(description: "the scan finished without sighting \(peripheralID)")
         }
-        var found: Discovery?
-        for try await event in await central.scan(services: [heartRate], timeout: .seconds(10)) {
-            if case .discovered(let discovery) = event, discovery.peripheral.uuid == peripheralID {
-                found = discovery
-                break
-            }
-        }
-        sightings.cancel()
-        let discovery = try #require(found)
+        await waitFor(timeout: .seconds(10)) { await fake.onQueue { fake.scanCallCount == 1 } }
+        fake.simulateDiscovery(peripheral: identifier, advertisement: advertisement, rssi: scriptedRSSI)
+        let discovery = try #require(try await bounded("discovery") { try await discovering.value })
         log.append("discovered:\(discovery.peripheral.name):\(discovery.peripheral.uuid)")
 
         // Connect.
@@ -136,39 +189,36 @@ struct ParityTests {
         try await peripheral.write(controlWrite, to: control, type: .withResponse)
         log.append("wrote:\(control.uuidString)")
 
-        // Subscribe, then notify. `Peripheral` exposes no "subscription is armed" signal,
-        // so the notification is re-simulated until the stream yields — the same shape as
-        // the sighting pump, and equally deterministic in both runs.
+        // Subscribe, then notify once. `notifyingCharacteristics` is the fake's own record
+        // that the subscribe landed, so it stands in for the "armed" signal `Peripheral`
+        // does not expose.
         let notifications: AsyncThrowingStream<Data, Error> = peripheral.notifications(for: measurement)
-        let notified = Task { () -> Data? in
+        let notified = Task { () async throws -> Data in
             for try await packet in notifications { return packet }
-            return nil
+            throw ParityFailure(description: "the notification stream finished without a packet")
         }
-        let pump = Task {
-            while !Task.isCancelled {
-                fakePeripheral.simulateNotification(for: measurement, value: notificationValue)
-                try? await Task.sleep(for: .milliseconds(25))
-            }
+        await waitFor(timeout: .seconds(10)) {
+            await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(measurement) }
         }
-        let packet = try await notified.value
-        pump.cancel()
-        log.append("notified:\(hex(try #require(packet)))")
+        fakePeripheral.simulateNotification(for: measurement, value: notificationValue)
+        let packet = try #require(try await bounded("notification") { try await notified.value })
+        log.append("notified:\(hex(packet))")
 
         // RSSI.
         log.append("rssi:\(try await peripheral.readRSSI())")
 
         // Disconnect. `FakeCentral.cancelPeripheralConnection` records the call but never
-        // delivers `didDisconnect`, so the disconnect is completed by simulating one —
-        // identically in both runs. The pump sleeps first so the cancel has been issued
-        // before the first simulated event lands.
-        let disconnects = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(25))
-                fake.simulateDisconnect(identifier, error: nil)
-            }
+        // delivers `didDisconnect`, so the one disconnect event is simulated — after the
+        // fake has recorded the cancel, so the ordering is the same in both runs.
+        let disconnecting = Task { () async throws -> Bool in
+            try await central.disconnect(peripheral.id)
+            return true
         }
-        try await central.disconnect(peripheral.id)
-        disconnects.cancel()
+        await waitFor(timeout: .seconds(10)) {
+            await fake.onQueue { fake.cancelCallCounts[peripheralID] == 1 }
+        }
+        fake.simulateDisconnect(identifier, error: nil)
+        #expect(try await bounded("disconnect") { try await disconnecting.value } == true)
         log.append("disconnected:\(peripheral.id.uuid)")
 
         return log
