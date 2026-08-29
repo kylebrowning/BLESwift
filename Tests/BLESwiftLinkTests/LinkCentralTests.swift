@@ -78,6 +78,27 @@ struct LinkCentralTests {
         link.shutdown()
     }
 
+    @Test("A handler attaching after the provider's state has landed still sees it")
+    func stateDeliveredWhenHandlerAttachesLate() async throws {
+        let provider = try ScriptedProvider()
+        try await provider.start()
+        let queue = DispatchSerialQueue(label: "late")
+        let link = LinkCentral(endpoint: provider.endpoint, queue: queue, clientName: "late", retryInterval: .milliseconds(50))
+        defer { provider.stop(); link.shutdown() }
+
+        // Let the handshake complete AND the provider's `didUpdateState(.poweredOn)` land
+        // before any handler exists. `radioState` is queue-confined and cannot be read from
+        // here, so the settle is a short sleep after the link reports itself connected.
+        await waitFor { link.isProviderConnected }
+        #expect(link.isProviderConnected)
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Only now does a `Central` attach its handler: it must still observe `.poweredOn`.
+        let central = Central(backend: link, queue: queue)
+        await waitFor { central.state == .poweredOn }
+        #expect(central.state == .poweredOn)
+    }
+
     @Test("Scan requests reach the provider and discoveries come back")
     func scan() async throws {
         let (central, link, provider) = try await makeRig()

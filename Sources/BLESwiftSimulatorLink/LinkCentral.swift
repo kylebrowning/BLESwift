@@ -263,8 +263,12 @@ public final class LinkCentral: CentralManaging, Sendable {
         switch event {
 
         case .didUpdateState(let state):
+            // Deliberately does NOT set `_didDeliverInitialState`: a provider state that
+            // lands before a handler is attached would otherwise suppress the setter's
+            // once-only delivery, leaving `Central.state` stuck at `.unknown` against a
+            // perfectly healthy provider. The attach always delivers `_radioState`, which
+            // this assignment has already brought up to date.
             _radioState = state.state
-            _didDeliverInitialState = true
             deliver(.didUpdateState(state.state))
 
         case .didDiscover(let uuid, let name, let advertisement, let rssi):

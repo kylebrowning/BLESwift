@@ -37,6 +37,8 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     /// The central that owns this peripheral and carries its requests. `unowned` because the
     /// central owns the table this peripheral lives in — it cannot outlive its central.
+    /// `Central` retains the backend (its `manager`) for at least as long as any
+    /// `PeripheralRemote` that backend hands out, so this reference can never dangle.
     private unowned let central: LinkCentral
 
     /// The queue every mirroring method, property accessor, and event delivery is confined
