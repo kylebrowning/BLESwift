@@ -14,9 +14,11 @@
 #   ADVERTISER_READY_TIMEOUT
 #                    seconds to wait for the advertiser flow to pass (default 900)
 #
-# The port is fixed at 45541, `LinkEndpoint.default`. Nothing can set
-# `BLESWIFT_LINK` on an app driven by the UI runner, so both simulators dial the
-# default and a provider listening anywhere else would simply never be found.
+# The provider binds an ephemeral port (`--listen 127.0.0.1:0`); the bound port is
+# read back from its listening line and handed to both apps as
+# `--env BLESWIFT_LINK=127.0.0.1:<port>`, which `SimulatorLink.install()` resolves
+# through `LinkEndpoint.fromEnvironment()`. Nothing is pinned, so a port already in
+# use on the machine cannot collide with this run.
 #
 # See Scripts/e2e/README.md.
 
@@ -24,8 +26,6 @@ set -euo pipefail
 
 ADVERTISER_SIM="${ADVERTISER_SIM:-iPhone 17 Pro}"
 SCANNER_SIM="${SCANNER_SIM:-iPhone 17}"
-# `LinkEndpoint.default`, and not overridable — see the header.
-readonly PORT=45541
 # Generous by default: on a cold runner grantiva builds its agent (5-10 minutes by its own
 # log) and a WebDriverAgent runner before the flow's first step ever runs, and that build is
 # paid inside this wait. The CI job's own 25-minute cap is the real backstop.
@@ -40,6 +40,7 @@ ADVERTISER_REPORT="$REPORT_ROOT/advertiser"
 SCANNER_REPORT="$REPORT_ROOT/scanner"
 PROVIDER_LOG="$REPORT_ROOT/provider.log"
 ADVERTISER_LOG="$REPORT_ROOT/advertiser-session.log"
+ADVERTISER_READY_FILE="$REPORT_ROOT/advertiser.ready"
 
 PROVIDER_PID=""
 ADVERTISER_PID=""
@@ -60,16 +61,14 @@ cleanup() {
         sleep 3
         kill -9 "$ADVERTISER_PID" 2>/dev/null || true
     fi
-    # `grantiva run` does NOT take its children down with it: killing it strands a
-    # `grantiva-runner` and the WebDriverAgent `xcodebuild test-without-building`,
-    # and the stranded pair keeps the simulator "owned by another Grantiva run".
-    # Reap them explicitly, scoped to the simulators this script drove.
-    grantiva runner stop >/dev/null 2>&1 || true
+    # Killing `grantiva run` can strand its `grantiva-runner` child, the WebDriverAgent
+    # `xcodebuild test-without-building` and a `simctl diagnose` log collection, and the
+    # strays keep the simulator "owned by another Grantiva run". `teardown --udid --force`
+    # reclaims one device by live process inspection: it kills exactly that trio, breaks
+    # the lease and reconciles the session registry.
     for udid in "$ADVERTISER_UDID" "$SCANNER_UDID"; do
         [[ -n "$udid" ]] || continue
-        pkill -f "grantiva-runner .*--device $udid" >/dev/null 2>&1 || true
-        pkill -f "test-without-building .*-destination id=$udid" >/dev/null 2>&1 || true
-        pkill -f "simctl diagnose .*--udid=$udid" >/dev/null 2>&1 || true
+        grantiva simulator teardown --udid "$udid" --force >/dev/null 2>&1 || true
         xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true
     done
     if [[ -n "$PROVIDER_PID" ]] && kill -0 "$PROVIDER_PID" 2>/dev/null; then
@@ -87,64 +86,26 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Simulators -------------------------------------------------------------
-# Idempotent: look the simulator up by name, create + boot it only if there really is none.
+# `grantiva simulator ensure --name <name>` is find-or-create: it reuses a simulator of that
+# name if one exists, and otherwise creates it from the device type read out of the name and
+# the newest installed iOS runtime. It boots by default and reports the UDID, which is what
+# every downstream command takes — so a machine that happens to have two simulators sharing a
+# name can never make this run ambiguous.
 #
-# The lookup deliberately does NOT filter on state or availability. It used to run against
-# `simctl list devices available`, which hides a device whose runtime profile is momentarily
-# missing — so on a runner that already had an "iPhone 17", this created a *second* one, and
-# `grantiva run --simulator "iPhone 17"` then refused with "Multiple simulators are named".
-# Booting is what the state is for, not finding.
-#
-# A duplicate that already exists is not an error either: the first match wins, with a warning,
-# because deleting someone else's simulator is not this script's business. Every downstream
-# command takes the UDID rather than the name, so a duplicate cannot make the run ambiguous.
+# `--json`, not the plain output: without it `ensure` prints a human sentence
+# ("Reused iPhone 17 Pro (<UDID>) — Booted") that would have to be scraped.
 ensure_simulator() {
     local name="$1"
-    local udids
-    udids="$(xcrun simctl list devices -j \
-        | python3 -c '
-import json, sys
-name = sys.argv[1]
-data = json.load(sys.stdin)["devices"]
-available, other = [], []
-for runtime, devices in data.items():
-    if "iOS" not in runtime:
-        continue
-    for device in devices:
-        if device["name"] != name:
-            continue
-        (available if device.get("isAvailable") else other).append(device["udid"])
-# An available device first: an unavailable one is still worth finding (it is what made a
-# duplicate get created), but it is the last thing to hand back.
-for udid in available + other:
-    print(udid)
-' "$name")"
+    local start=$SECONDS
     local udid
-    udid="$(echo "$udids" | sed -n '1p')"
-    local count
-    count="$(echo "$udids" | grep -c . || true)"
-    if (( count > 1 )); then
-        log "WARNING: $count simulators are named \"$name\"; using $udid"
-    fi
-    if [[ -z "$udid" ]]; then
-        log "Creating simulator \"$name\""
-        local runtime
-        runtime="$(xcrun simctl list runtimes -j \
-            | python3 -c '
-import json, sys
-runtimes = [r for r in json.load(sys.stdin)["runtimes"]
-            if r["isAvailable"] and r["platform"] == "iOS"]
-print(runtimes[-1]["identifier"] if runtimes else "")
-')"
-        [[ -n "$runtime" ]] || { echo "no available iOS runtime" >&2; exit 1; }
-        udid="$(xcrun simctl create "$name" "$name" "$runtime")"
-    fi
-    # `bootstatus -b` boots the device if it is down and blocks until it reports itself fully
-    # booted, so nothing downstream races a half-started simulator. The elapsed line is what
-    # makes a cold CI runner's boot cost visible: it is minutes there and near-zero locally.
-    local boot_start=$SECONDS
+    udid="$(grantiva simulator ensure --name "$name" --json \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin).get("udid", ""))')"
+    [[ -n "$udid" ]] || { echo "grantiva simulator ensure --name \"$name\" returned no UDID" >&2; exit 1; }
+    # Belt and braces on top of `ensure`'s own boot: `bootstatus -b` blocks until the device
+    # reports itself fully booted, so nothing downstream races a half-started simulator. The
+    # elapsed line is what makes a cold CI runner's boot cost visible.
     xcrun simctl bootstatus "$udid" -b >/dev/null 2>&1 || xcrun simctl boot "$udid" >/dev/null 2>&1 || true
-    log "\"$name\" ready after $((SECONDS - boot_start))s"
+    log "\"$name\" ready after $((SECONDS - start))s"
     echo "$udid"
 }
 
@@ -161,8 +122,10 @@ mkdir -p "$ADVERTISER_REPORT" "$SCANNER_REPORT"
 log "Building bleswift-provider"
 swift build --product bleswift-provider
 
-log "Starting bleswift-provider on 127.0.0.1:$PORT"
-.build/debug/bleswift-provider --listen "127.0.0.1:$PORT" >"$PROVIDER_LOG" 2>&1 &
+log "Starting bleswift-provider on an ephemeral loopback port"
+# Port 0: the system picks. The provider line-buffers stdout and names the *bound* port on
+# its listening line, so the port is read back from the log rather than assumed.
+.build/debug/bleswift-provider --listen "127.0.0.1:0" >"$PROVIDER_LOG" 2>&1 &
 PROVIDER_PID=$!
 
 for _ in $(seq 1 30); do
@@ -172,6 +135,11 @@ for _ in $(seq 1 30); do
 done
 grep -q "listening on" "$PROVIDER_LOG" || { echo "provider never reported listening:" >&2; cat "$PROVIDER_LOG" >&2; exit 1; }
 cat "$PROVIDER_LOG"
+
+PORT="$(sed -n 's/.*listening on 127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p' "$PROVIDER_LOG" | head -1)"
+[[ -n "$PORT" ]] || { echo "could not parse the bound port from the provider log:" >&2; cat "$PROVIDER_LOG" >&2; exit 1; }
+LINK_ENDPOINT="127.0.0.1:$PORT"
+echo "provider endpoint: $LINK_ENDPOINT"
 
 # --- App --------------------------------------------------------------------
 log "Building BLESwiftExplorer for the simulator"
@@ -193,7 +161,7 @@ echo "app: $APP"
 # Installed here, before either grantiva session starts. grantiva's own `--app-file` install
 # then finds the app already present, and WebDriverAgent comes up against a simulator that has
 # already paid for its first install — on a cold CI runner that install is part of what pushes
-# WDA past its 90-second startup timeout (friction item #12).
+# WebDriverAgent past its 90-second startup timeout.
 for udid in "$ADVERTISER_UDID" "$SCANNER_UDID"; do
     log "Installing $BUNDLE_ID on $udid"
     install_start=$SECONDS
@@ -211,15 +179,18 @@ grantiva run \
     --bundle-id "$BUNDLE_ID" \
     --flow Scripts/e2e/flows/advertise.yaml \
     --keep-alive \
+    --env "BLESWIFT_LINK=$LINK_ENDPOINT" \
+    --ready-file "$ADVERTISER_READY_FILE" \
     --report-dir "$ADVERTISER_REPORT" \
     >"$ADVERTISER_LOG" 2>&1 &
 ADVERTISER_PID=$!
 
-# grantiva exposes no readiness signal for a keep-alive session, so poll the
-# report it writes when the flow finishes.
-# Bounded by a wall-clock deadline, not by a count of iterations: each pass also
-# pays for a `grep`, a `python3` and a `kill -0`, so counting `sleep 1`s would cut
-# the wait well short of the seconds `ADVERTISER_READY_TIMEOUT` promises.
+# `--ready-file` is written once, atomically, after every flow in the session has reached a
+# terminal state — so unlike report.json (rewritten as the run progresses) its existence *is*
+# the verdict, and the keep-alive session outliving the flows does not confuse the wait.
+# Bounded by a wall-clock deadline, not by a count of iterations: each pass also pays for a
+# `kill -0`, so counting `sleep 1`s would cut the wait short of the seconds
+# `ADVERTISER_READY_TIMEOUT` promises.
 ADVERTISER_READY=0
 ADVERTISER_WAIT_START=$SECONDS
 ADVERTISER_DEADLINE=$((SECONDS + ADVERTISER_READY_TIMEOUT))
@@ -232,36 +203,28 @@ while (( SECONDS < ADVERTISER_DEADLINE )); do
         echo "waiting for the advertiser flow: ${ELAPSED}s of ${ADVERTISER_READY_TIMEOUT}s"
         NEXT_HEARTBEAT=$((ELAPSED + 10))
     fi
-    if [[ -f "$ADVERTISER_REPORT/report.json" ]]; then
-        # report.json is rewritten as the run progresses (see its `updateSeq`),
-        # so a file on disk is not yet a verdict: keep polling while the status
-        # is still running/pending, and bail out on anything but "passed".
-        STATUS="$(python3 -c '
-import json, sys
-try:
-    print(json.load(open(sys.argv[1])).get("status", "pending"))
-except Exception:
-    print("pending")
-' "$ADVERTISER_REPORT/report.json")"
-        case "$STATUS" in
-            passed)
-                ADVERTISER_READY=1
-                break
-                ;;
-            running|pending)
-                ;;
-            *)
-                echo "advertiser flow reported status \"$STATUS\":" >&2
-                cat "$ADVERTISER_REPORT/report.json" >&2
-                cat "$ADVERTISER_LOG" >&2
-                exit 1
-                ;;
-        esac
+    if [[ -f "$ADVERTISER_READY_FILE" ]]; then
+        ADVERTISER_READY=1
+        break
     fi
-    kill -0 "$ADVERTISER_PID" 2>/dev/null || { echo "advertiser session exited before writing a report:" >&2; cat "$ADVERTISER_LOG" >&2; exit 1; }
+    kill -0 "$ADVERTISER_PID" 2>/dev/null || { echo "advertiser session exited before writing its ready file:" >&2; cat "$ADVERTISER_LOG" >&2; exit 1; }
     sleep 1
 done
-[[ "$ADVERTISER_READY" == 1 ]] || { echo "advertiser flow did not pass within ${ADVERTISER_READY_TIMEOUT}s:" >&2; cat "$ADVERTISER_LOG" >&2; exit 1; }
+[[ "$ADVERTISER_READY" == 1 ]] || { echo "advertiser flow did not finish within ${ADVERTISER_READY_TIMEOUT}s:" >&2; cat "$ADVERTISER_LOG" >&2; exit 1; }
+
+ADVERTISER_STATUS="$(python3 -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("status", "unknown"))
+except Exception:
+    print("unreadable")
+' "$ADVERTISER_READY_FILE")"
+if [[ "$ADVERTISER_STATUS" != "passed" ]]; then
+    echo "advertiser flow reported status \"$ADVERTISER_STATUS\":" >&2
+    cat "$ADVERTISER_READY_FILE" >&2
+    cat "$ADVERTISER_LOG" >&2
+    exit 1
+fi
 echo "advertiser flow passed; peripheral is live"
 
 # --- Scanner ----------------------------------------------------------------
@@ -272,6 +235,7 @@ grantiva run \
     --app-file "$APP" \
     --bundle-id "$BUNDLE_ID" \
     --flow Scripts/e2e/flows/scan-finds-advertiser.yaml \
+    --env "BLESWIFT_LINK=$LINK_ENDPOINT" \
     --report-dir "$SCANNER_REPORT"
 SCANNER_STATUS=$?
 set -e
