@@ -217,8 +217,16 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// Asks the radio for `service`'s characteristics and delivers
     /// `didDiscoverCharacteristics` once the answer lands, caching each characteristic's
     /// advertised properties.
+    ///
+    /// A no-op for a service this remote has not discovered, exactly as
+    /// `LinkPeripheral.discoverCharacteristics(_:for:)` and CoreBluetooth are: `CBPeripheral`
+    /// takes a `CBService` it vended, so there is nothing to ask about a service the caller
+    /// cannot name, nothing is sent and no completion arrives. Answered anyway, this backend
+    /// enumerated a service its link-side counterpart would have refused — and the two
+    /// backends behind one seam disagreed about what a caller may ask for.
     public func discoverCharacteristics(_ characteristics: [CharacteristicIdentifier]?, for service: ServiceIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard _discoveredServices.contains(service) else { return }
         enqueue { [radio, identifier, queue] in
             let found = await radio.characteristics(of: identifier, service: service, matching: characteristics)
             queue.async { [self] in

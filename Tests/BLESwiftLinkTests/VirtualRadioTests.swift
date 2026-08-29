@@ -305,10 +305,12 @@ struct VirtualRadioTests {
         // Discovered first: a `PeripheralRemote` no-ops GATT traffic for a characteristic it
         // has not discovered, so a test driving one directly has to enumerate it the way
         // `Central` would.
-        await Self.onQueue(queue) {
-            remote.discoverServices([Self.service])
-            remote.discoverCharacteristics([Self.control], for: Self.service)
-        }
+        // A service at a time: a characteristic discovery for a service the remote has not
+        // discovered yet is a no-op, so the sweep has to land before the one under it is asked
+        // for — exactly the order `Central` issues them in.
+        await Self.onQueue(queue) { remote.discoverServices([Self.service]) }
+        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
+        await Self.onQueue(queue) { remote.discoverCharacteristics([Self.control], for: Self.service) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
 
         // Two writes without response issued in one queue block — the `drainWrites` shape.
@@ -565,10 +567,12 @@ struct VirtualRadioTests {
 
         // Discovery behind it is the barrier: its own completion cannot land before the read's
         // would have, since both run on the same serial chain and the same queue.
-        await Self.onQueue(queue) {
-            remote.discoverServices([Self.service])
-            remote.discoverCharacteristics([Self.control], for: Self.service)
-        }
+        // A service at a time: a characteristic discovery for a service the remote has not
+        // discovered yet is a no-op, so the sweep has to land before the one under it is asked
+        // for — exactly the order `Central` issues them in.
+        await Self.onQueue(queue) { remote.discoverServices([Self.service]) }
+        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
+        await Self.onQueue(queue) { remote.discoverCharacteristics([Self.control], for: Self.service) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
         #expect(values.withLock { $0 }.isEmpty)
 
@@ -576,6 +580,49 @@ struct VirtualRadioTests {
         await Self.onQueue(queue) { remote.readValue(for: Self.control) }
         await waitFor { values.withLock { !$0.isEmpty } }
         #expect(values.withLock { $0.count } == 1)
+    }
+
+    @Test("A characteristic discovery for an undiscovered service is a no-op")
+    func undiscoveredCharacteristicDiscoveryIsANoOp() async throws {
+        let radio = VirtualRadio()
+        let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
+        let (device, handler) = VirtualDevice.fixture(fixture)
+        await handler.attach(await radio.register(device))
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.undiscoveredchars")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+
+        await waitFor { await Self.onQueue(queue) { !backend.retrievePeripherals(withIdentifiers: [id]).isEmpty } }
+        let remote = try #require(await Self.remote(backend, queue, id))
+        let discovered = Mutex<[ServiceIdentifier]>([])
+        await Self.onQueue(queue) {
+            remote.eventHandler = { event in
+                if case .didDiscoverCharacteristics(let service, _) = event {
+                    discovered.withLock { $0.append(service) }
+                }
+            }
+            backend.connect(remote, options: nil, requiresANCS: false)
+        }
+        await waitFor { await Self.onQueue(queue) { remote.connectionState == .connected } }
+        #expect(await Self.onQueue(queue) { !remote.isDiscovered(Self.service) })
+
+        // The service was never discovered, so — as with `LinkPeripheral` and `CBPeripheral`,
+        // which has no `CBService` object to hand its own `discoverCharacteristics(_:for:)` —
+        // the radio is never asked and no completion arrives.
+        await Self.onQueue(queue) { remote.discoverCharacteristics([Self.control], for: Self.service) }
+
+        // The service discovery behind it is the barrier: both run on the same serial chain,
+        // so its own completion cannot land before the refused one would have.
+        await Self.onQueue(queue) { remote.discoverServices([Self.service]) }
+        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
+        #expect(discovered.withLock { $0 }.isEmpty)
+        #expect(await Self.onQueue(queue) { remote.discoveredCharacteristics(for: Self.service).isEmpty })
+
+        // The very same call now answers: the guard is the discovery cache, nothing else.
+        await Self.onQueue(queue) { remote.discoverCharacteristics([Self.control], for: Self.service) }
+        await waitFor { discovered.withLock { !$0.isEmpty } }
+        #expect(discovered.withLock { $0 } == [Self.service])
+        #expect(await Self.onQueue(queue) { remote.isDiscovered(Self.control) })
     }
 
     @Test("A disconnected remote reads nothing and the radio refuses the read outright")
@@ -606,10 +653,12 @@ struct VirtualRadioTests {
             backend.connect(remote, options: nil, requiresANCS: false)
         }
         await waitFor { await Self.onQueue(queue) { remote.connectionState == .connected } }
-        await Self.onQueue(queue) {
-            remote.discoverServices([Self.service])
-            remote.discoverCharacteristics([Self.control], for: Self.service)
-        }
+        // A service at a time: a characteristic discovery for a service the remote has not
+        // discovered yet is a no-op, so the sweep has to land before the one under it is asked
+        // for — exactly the order `Central` issues them in.
+        await Self.onQueue(queue) { remote.discoverServices([Self.service]) }
+        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
+        await Self.onQueue(queue) { remote.discoverCharacteristics([Self.control], for: Self.service) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
 
         await Self.onQueue(queue) { backend.cancelPeripheralConnection(remote) }
@@ -763,10 +812,9 @@ struct VirtualRadioTests {
         let remote = try #require(await remote(backend, queue, identifier))
         await onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
         await waitFor { await onQueue(queue) { remote.connectionState == .connected } }
-        await onQueue(queue) {
-            remote.discoverServices(nil)
-            remote.discoverCharacteristics(nil, for: service)
-        }
+        await onQueue(queue) { remote.discoverServices(nil) }
+        await waitFor { await onQueue(queue) { remote.isDiscovered(service) } }
+        await onQueue(queue) { remote.discoverCharacteristics(nil, for: service) }
         await waitFor { await onQueue(queue) { remote.isDiscovered(measurement) } }
         return remote
     }
@@ -807,10 +855,9 @@ struct VirtualRadioTests {
         #expect(await Self.onQueue(queue) { remote.properties(of: Self.measurement) } == [])
 
         // Narrowing a characteristic discovery replaces that service's entries the same way.
-        await Self.onQueue(queue) {
-            remote.discoverServices(nil)
-            remote.discoverCharacteristics(nil, for: Self.service)
-        }
+        await Self.onQueue(queue) { remote.discoverServices(nil) }
+        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
+        await Self.onQueue(queue) { remote.discoverCharacteristics(nil, for: Self.service) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
         await Self.onQueue(queue) { remote.discoverCharacteristics([Self.measurement], for: Self.service) }
         await waitFor { await Self.onQueue(queue) { !remote.isDiscovered(Self.control) } }

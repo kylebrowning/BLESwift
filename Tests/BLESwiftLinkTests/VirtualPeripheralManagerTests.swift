@@ -248,10 +248,12 @@ struct VirtualPeripheralManagerTests {
             central.connect(remote, options: nil, requiresANCS: false)
         }
         await waitFor { await Self.onQueue(centralQueue) { remote.connectionState == .connected } }
-        await Self.onQueue(centralQueue) {
-            remote.discoverServices([Self.heartRate])
-            remote.discoverCharacteristics([Self.control], for: Self.heartRate)
-        }
+        // A service at a time: a characteristic discovery for a service the remote has not
+        // discovered yet is a no-op, so the sweep has to land first — the order `Central`
+        // issues them in.
+        await Self.onQueue(centralQueue) { remote.discoverServices([Self.heartRate]) }
+        await waitFor { await Self.onQueue(centralQueue) { remote.isDiscovered(Self.heartRate) } }
+        await Self.onQueue(centralQueue) { remote.discoverCharacteristics([Self.control], for: Self.heartRate) }
         await waitFor { await Self.onQueue(centralQueue) { remote.isDiscovered(Self.control) } }
 
         // ---- Fill the window: the slots are taken synchronously, so this is exact ----
@@ -361,8 +363,9 @@ struct VirtualPeripheralManagerTests {
             central.connect(remote, options: nil, requiresANCS: false)
         }
         await waitFor { await Self.onQueue(centralQueue) { remote.connectionState == .connected } }
+        await Self.onQueue(centralQueue) { remote.discoverServices([Self.heartRate]) }
+        await waitFor { await Self.onQueue(centralQueue) { remote.isDiscovered(Self.heartRate) } }
         await Self.onQueue(centralQueue) {
-            remote.discoverServices([Self.heartRate])
             remote.discoverCharacteristics([Self.measurement, Self.control], for: Self.heartRate)
         }
         await waitFor { await Self.onQueue(centralQueue) { remote.isDiscovered(Self.measurement) } }
@@ -472,10 +475,9 @@ struct VirtualPeripheralManagerTests {
         await waitFor { await onQueue(queue) { remote.connectionState == .connected } }
         // Discovered before it is subscribed: a `PeripheralRemote` no-ops a `setNotifyValue`
         // for a characteristic it has not discovered, exactly as CoreBluetooth does.
-        await onQueue(queue) {
-            remote.discoverServices([Self.heartRate])
-            remote.discoverCharacteristics([Self.measurement], for: Self.heartRate)
-        }
+        await onQueue(queue) { remote.discoverServices([Self.heartRate]) }
+        await waitFor { await onQueue(queue) { remote.isDiscovered(Self.heartRate) } }
+        await onQueue(queue) { remote.discoverCharacteristics([Self.measurement], for: Self.heartRate) }
         await waitFor { await onQueue(queue) { remote.isDiscovered(Self.measurement) } }
         await onQueue(queue) { remote.setNotifyValue(true, for: Self.measurement) }
         // Both halves of the arming, each on a bound a starved runner cannot outrun: the
