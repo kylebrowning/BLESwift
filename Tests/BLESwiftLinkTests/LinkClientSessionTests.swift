@@ -76,22 +76,41 @@ struct LinkClientSessionTests {
     @Test("Retries until a provider appears")
     func retries() async throws {
         // A port the system just handed out and released, rather than a fixed number another
-        // process — or another run of this suite — could be sitting on.
-        let port = try await Self.freePort()
-        let queue = DispatchSerialQueue(label: "client")
-        let session = LinkClientSession(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), role: .central, clientName: "unit", queue: queue, retryInterval: .milliseconds(50))
-        session.start()
-        try await Task.sleep(for: .milliseconds(200))
-        #expect(!session.isConnected)
-        let listener = try LinkListener(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), codec: .json, queue: DispatchQueue(label: "srv"))
-        listener.onConnection = { connection in
-            connection.onMessage = { _ in connection.send(.serverHello(ServerHello(protocolVersion: LinkProtocol.version, accepted: true, reason: nil, providerName: "t"))) }
+        // process — or another run of this suite — could be sitting on. Releasing it does mean
+        // something else can take it before this test binds it, so each attempt starts over
+        // with a fresh one.
+        for _ in 0..<5 {
+            let port = try await Self.freePort()
+            let queue = DispatchSerialQueue(label: "client")
+            let session = LinkClientSession(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), role: .central, clientName: "unit", queue: queue, retryInterval: .milliseconds(50))
+            session.start()
+            try await Task.sleep(for: .milliseconds(200))
+            guard !session.isConnected else {
+                // Something else answered on that port; it was never ours to test with.
+                session.stop()
+                continue
+            }
+            guard let listener = try? LinkListener(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), codec: .json, queue: DispatchQueue(label: "srv")) else {
+                session.stop()
+                continue
+            }
+            listener.onConnection = { connection in
+                connection.onMessage = { _ in connection.send(.serverHello(ServerHello(protocolVersion: LinkProtocol.version, accepted: true, reason: nil, providerName: "t"))) }
+            }
+            do {
+                try await listener.start()
+            } catch {
+                listener.cancel()
+                session.stop()
+                continue
+            }
+            defer { listener.cancel() }
+            await waitFor(timeout: .seconds(3)) { session.isConnected }
+            #expect(session.isConnected)
+            session.stop()
+            return
         }
-        try await listener.start()
-        defer { listener.cancel() }
-        await waitFor(timeout: .seconds(3)) { session.isConnected }
-        #expect(session.isConnected)
-        session.stop()
+        Issue.record("could not hold on to a free port for the retry test")
     }
 
     /// A weak handle on one of the connections a session dialled.
