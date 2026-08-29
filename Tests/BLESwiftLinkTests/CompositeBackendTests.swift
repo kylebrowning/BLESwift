@@ -240,6 +240,68 @@ struct CompositeBackendTests {
         #expect(!attached)
     }
 
+    @Test("A child powering on is re-issued the scan and the connection-event registration")
+    func aChildPoweringOnIsReissuedTheScan() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.rescan")
+        let first = FakeCentral(queue: queue, state: .poweredOn)
+        let second = FakeCentral(queue: queue, state: .poweredOff)
+        let skipped = Mutex<[String]>([])
+        let composite = CompositeCentral(backends: [first, second], queue: queue) { line in
+            skipped.withLock { $0.append(line) }
+        }
+        await onQueue(queue) { composite.eventHandler = { _ in } }
+
+        let options = ScanOptions(allowDuplicates: true)
+        await onQueue(queue) {
+            composite.scanForPeripherals(withServices: [Self.heartRate], options: options)
+            composite.registerForConnectionEvents(services: [Self.heartRate], peripherals: nil)
+        }
+
+        // CoreBluetooth would have dropped both on a child that is not powered on, so the
+        // composite does not issue them at all — it holds them.
+        #expect(await onQueue(queue) { first.scanCallCount } == 1)
+        #expect(await onQueue(queue) { second.scanCallCount } == 0)
+        #expect(await onQueue(queue) { second.connectionEventRegistrationCount } == 0)
+
+        second.simulateStateChange(.poweredOn)
+        await waitFor { await self.onQueue(queue) { second.scanCallCount } == 1 }
+
+        #expect(await onQueue(queue) { second.scanCallCount } == 1)
+        #expect(await onQueue(queue) { second.lastScanServices } == [Self.heartRate])
+        #expect(await onQueue(queue) { second.lastScanOptions } == options)
+        #expect(await onQueue(queue) { second.connectionEventRegistrationCount } == 1)
+        // The child that was on all along was issued the scan exactly once.
+        #expect(await onQueue(queue) { first.scanCallCount } == 1)
+        // Logged once for the child, not once per operation it was skipped for.
+        #expect(skipped.withLock { $0.count } == 1)
+        #expect(skipped.withLock { $0.first }?.contains("composite child 1") == true)
+    }
+
+    @Test("A scan stopped before a child powers on is not re-issued to it")
+    func aStoppedScanIsNotReissued() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.rescanStopped")
+        let first = FakeCentral(queue: queue, state: .poweredOn)
+        let second = FakeCentral(queue: queue, state: .poweredOff)
+        let composite = CompositeCentral(backends: [first, second], queue: queue)
+        await onQueue(queue) { composite.eventHandler = { _ in } }
+
+        await onQueue(queue) {
+            composite.scanForPeripherals(withServices: nil, options: ScanOptions())
+            composite.registerForConnectionEvents(services: nil, peripherals: nil)
+            composite.stopScan()
+            composite.unregisterForConnectionEvents()
+        }
+
+        second.simulateStateChange(.poweredOn)
+        // Two flushes: the state change hops onto the queue, and the composite's reconciliation
+        // runs inline on the delivery it schedules.
+        _ = await onQueue(queue) { true }
+        _ = await onQueue(queue) { true }
+
+        #expect(await onQueue(queue) { second.scanCallCount } == 0)
+        #expect(await onQueue(queue) { second.connectionEventRegistrationCount } == 0)
+    }
+
     // MARK: - CompositePeripheralManager
 
     @Test("add emits exactly one didAddService after every child has reported")

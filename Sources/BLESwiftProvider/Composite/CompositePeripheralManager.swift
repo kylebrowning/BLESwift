@@ -160,7 +160,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
 
     /// Creates a composite over `backends` **from `queue` itself**, attaching the children
     /// without hopping — the peripheral-role counterpart to
-    /// `CompositeCentral.init(backends:onQueue:)`, and the one way to build both children
+    /// `CompositeCentral.init(backends:onQueue:log:)`, and the one way to build both children
     /// and the composite over them inside a single `queue.sync`.
     ///
     /// - Parameters:

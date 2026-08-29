@@ -23,6 +23,17 @@ import Foundation
 /// ``cancelPeripheralConnection(_:)`` simply call every child and let the mismatched ones
 /// ignore the call. The composite keeps no peripheral-to-backend map.
 ///
+/// **Only powered-on children are scanned on.** CoreBluetooth drops a
+/// `scanForPeripherals(withServices:options:)` issued to a manager that is not
+/// `CentralState/poweredOn`, and never re-issues it — so a child that was off when the scan
+/// started would stay dark for the rest of the scan even after its radio came back. The
+/// composite therefore *remembers* the current scan and the current connection-event
+/// registration, skips the children that cannot serve them (logging each skipped child once),
+/// and re-issues both to a child the moment it transitions into `poweredOn` — the
+/// central-role counterpart of ``CompositePeripheralManager``'s catch-up republish.
+/// ``stopScan()`` and ``unregisterForConnectionEvents()`` forget what they undo, so a child
+/// powering on after them picks nothing up.
+///
 /// **Concurrency — queue-confined, not lock-protected.** Every stored property is
 /// `nonisolated(unsafe)` and touched only on ``queue``, which every `CentralManaging`
 /// member asserts at entry.
@@ -33,10 +44,10 @@ import Foundation
 ///   contract), so the composite can forward it inline. A child on a different queue trips
 ///   the composite's own `dispatchPrecondition`.
 ///
-/// - Important: ``init(backends:queue:)`` installs the children's event handlers with
+/// - Important: ``init(backends:queue:log:)`` installs the children's event handlers with
 ///   `queue.sync`, so it must not be called from `queue` itself. Code already running on
 ///   `queue` — which is where a real `CBCentralManager` has to be built and wired without
-///   yielding — uses `init(backends:onQueue:)` instead.
+///   yielding — uses `init(backends:onQueue:log:)` instead.
 public final class CompositeCentral: CentralManaging, Sendable {
 
     /// The queue every method, property access, and event delivery is confined to — and
@@ -52,6 +63,37 @@ public final class CompositeCentral: CentralManaging, Sendable {
     nonisolated(unsafe) private var _eventHandler: ((CentralEvent) -> Void)?
     nonisolated(unsafe) private var _announcedState = false
     nonisolated(unsafe) private var _lastEmittedState: CentralState?
+
+    /// Each child's last observed ``BLESwiftCore/CentralState``, indexed like ``backends`` —
+    /// what a `didUpdateState` is compared against to spot a child entering `poweredOn`.
+    nonisolated(unsafe) private var _childStates: [CentralState] = []
+
+    /// One live scan, as the caller asked for it.
+    private struct Scan {
+        let services: [ServiceIdentifier]?
+        let options: ScanOptions
+    }
+
+    /// The scan currently running, or `nil` once ``stopScan()`` has been called — what a child
+    /// coming up to `poweredOn` is re-issued.
+    nonisolated(unsafe) private var _scan: Scan?
+
+    /// One live connection-event registration, as the caller asked for it.
+    private struct ConnectionEventRegistration {
+        let services: [ServiceIdentifier]?
+        let peripherals: [UUID]?
+    }
+
+    /// The connection-event registration currently in force, or `nil` once
+    /// ``unregisterForConnectionEvents()`` has been called.
+    nonisolated(unsafe) private var _connectionEvents: ConnectionEventRegistration?
+
+    /// The children already reported as skipped for being powered off — logged once per child,
+    /// not once per operation.
+    nonisolated(unsafe) private var _loggedOffline: Set<Int> = []
+
+    /// Where this composite reports a child it had to skip, if anywhere.
+    private let log: (@Sendable (String) -> Void)?
 
     /// The authorization status this composite reports: always
     /// `BluetoothAuthorization.allowedAlways`.
@@ -73,9 +115,15 @@ public final class CompositeCentral: CentralManaging, Sendable {
     /// - Parameters:
     ///   - backends: The children, in priority order. Must all be confined to `queue`.
     ///   - queue: The shared queue — the same one the owning `Central` is constructed with.
-    public init(backends: [any CentralManaging], queue: DispatchSerialQueue) {
+    ///   - log: Where to report a child skipped for not being powered on, if anywhere.
+    public init(
+        backends: [any CentralManaging],
+        queue: DispatchSerialQueue,
+        log: (@Sendable (String) -> Void)? = nil
+    ) {
         self.backends = backends
         self.queue = queue
+        self.log = log
         queue.sync { attachChildren() }
     }
 
@@ -90,21 +138,79 @@ public final class CompositeCentral: CentralManaging, Sendable {
     /// - Parameters:
     ///   - backends: The children, in priority order. Must all be confined to `queue`.
     ///   - queue: The shared queue, which this call must already be running on.
-    package init(backends: [any CentralManaging], onQueue queue: DispatchSerialQueue) {
+    ///   - log: Where to report a child skipped for not being powered on, if anywhere.
+    package init(
+        backends: [any CentralManaging],
+        onQueue queue: DispatchSerialQueue,
+        log: (@Sendable (String) -> Void)? = nil
+    ) {
         dispatchPrecondition(condition: .onQueue(queue))
         self.backends = backends
         self.queue = queue
+        self.log = log
         attachChildren()
     }
 
-    /// Installs this composite as every child's event sink. Idempotent; must be called on
-    /// ``queue``.
+    /// Installs this composite as every child's event sink, and records the state each child
+    /// starts from. Idempotent; must be called on ``queue``.
     private func attachChildren() {
         dispatchPrecondition(condition: .onQueue(queue))
-        for backend in backends {
-            backend.eventHandler = { [weak self] event in
-                self?.handle(event)
+        _childStates = backends.map(\.radioState)
+        for index in backends.indices {
+            backends[index].eventHandler = { [weak self] event in
+                self?.handle(event, from: index)
             }
+        }
+    }
+
+    /// Whether child `index` can currently serve a scan. Must be called on ``queue``.
+    private func isOnline(_ index: Int) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return backends[index].radioState == .poweredOn
+    }
+
+    /// The children a fan-out may reach. Must be called on ``queue``.
+    private var onlineIndices: [Int] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return backends.indices.filter { isOnline($0) }
+    }
+
+    /// Reports, once per child, that `index` was skipped for not being powered on. Must be
+    /// called on ``queue``.
+    private func noteOffline(_ index: Int, operation: String) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard _loggedOffline.insert(index).inserted else { return }
+        log?("composite child \(index) is \(backends[index].radioState); skipping \(operation) until it powers on")
+    }
+
+    /// Re-issues whatever is in force to every child that is not powered on. Must be called on
+    /// ``queue``.
+    private func skipOfflineChildren(operation: String) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        for index in backends.indices where !isOnline(index) {
+            noteOffline(index, operation: operation)
+        }
+    }
+
+    /// Reconciles child `index` entering `poweredOn`, catching it up with the scan and the
+    /// connection-event registration it could not have served while it was off. Must be called
+    /// on ``queue``.
+    private func childChangedState(_ index: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let was = _childStates[index]
+        let now = backends[index].radioState
+        guard was != now else { return }
+        _childStates[index] = now
+        guard was != .poweredOn, now == .poweredOn else { return }
+        _loggedOffline.remove(index)
+        if let scan = _scan {
+            backends[index].scanForPeripherals(withServices: scan.services, options: scan.options)
+        }
+        if let registration = _connectionEvents {
+            backends[index].registerForConnectionEvents(
+                services: registration.services,
+                peripherals: registration.peripherals
+            )
         }
     }
 
@@ -130,12 +236,13 @@ public final class CompositeCentral: CentralManaging, Sendable {
 
     /// Fans one child's event in. Must be called on ``queue`` — which it always is, because
     /// every child is confined to that same queue and delivers asynchronously on it.
-    private func handle(_ event: CentralEvent) {
+    private func handle(_ event: CentralEvent, from index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         switch event {
         case .didUpdateState:
             // Never forwarded verbatim: one child powering off says nothing about the
             // composite, which is still served by the others.
+            childChangedState(index)
             emitState()
         case .willRestoreState:
             // Dropped. Restoration is a per-manager, iOS-only concept; replaying one
@@ -181,15 +288,23 @@ public final class CompositeCentral: CentralManaging, Sendable {
         computedState
     }
 
-    /// Starts a scan on every child.
+    /// Starts a scan on every powered-on child, and remembers it: a child that is not powered
+    /// on is skipped — CoreBluetooth would have dropped the scan — and is re-issued it when it
+    /// powers on.
     public func scanForPeripherals(withServices services: [ServiceIdentifier]?, options: ScanOptions) {
         dispatchPrecondition(condition: .onQueue(queue))
-        for backend in backends { backend.scanForPeripherals(withServices: services, options: options) }
+        _scan = Scan(services: services, options: options)
+        skipOfflineChildren(operation: "scanForPeripherals")
+        for index in onlineIndices {
+            backends[index].scanForPeripherals(withServices: services, options: options)
+        }
     }
 
-    /// Stops the scan on every child.
+    /// Stops the scan on every child and forgets it, so a child powering on afterwards does
+    /// not pick a scan the caller has already ended back up.
     public func stopScan() {
         dispatchPrecondition(condition: .onQueue(queue))
+        _scan = nil
         for backend in backends { backend.stopScan() }
     }
 
@@ -235,16 +350,22 @@ public final class CompositeCentral: CentralManaging, Sendable {
         return result
     }
 
-    /// Registers on every child (a no-op on the children for which the underlying API does
-    /// not exist).
+    /// Registers on every powered-on child (a no-op on the children for which the underlying
+    /// API does not exist), and remembers the registration: a child that is not powered on is
+    /// skipped and registered when it powers on.
     public func registerForConnectionEvents(services: [ServiceIdentifier]?, peripherals: [UUID]?) {
         dispatchPrecondition(condition: .onQueue(queue))
-        for backend in backends { backend.registerForConnectionEvents(services: services, peripherals: peripherals) }
+        _connectionEvents = ConnectionEventRegistration(services: services, peripherals: peripherals)
+        skipOfflineChildren(operation: "registerForConnectionEvents")
+        for index in onlineIndices {
+            backends[index].registerForConnectionEvents(services: services, peripherals: peripherals)
+        }
     }
 
-    /// Unregisters on every child.
+    /// Unregisters on every child and forgets the registration.
     public func unregisterForConnectionEvents() {
         dispatchPrecondition(condition: .onQueue(queue))
+        _connectionEvents = nil
         for backend in backends { backend.unregisterForConnectionEvents() }
     }
 }

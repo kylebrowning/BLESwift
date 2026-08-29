@@ -399,7 +399,7 @@ public actor Provider {
         return queue.sync {
             let virtual = VirtualCentralBackend(radio: radio, queue: queue)
             let real = factory(queue)
-            return CompositeCentral(backends: [virtual, real], onQueue: queue)
+            return CompositeCentral(backends: [virtual, real], onQueue: queue, log: configuration.log)
         }
     }
 
