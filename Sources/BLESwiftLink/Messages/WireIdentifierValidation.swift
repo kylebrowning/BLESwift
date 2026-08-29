@@ -16,6 +16,16 @@ public enum WireDecodingError: Error, Equatable, Sendable {
 
     /// A UUID string that is not one BLESwift's identifiers accept, carried verbatim.
     case invalidIdentifier(String)
+
+    /// Two UUID strings in the same keyed collection that name the same identifier once
+    /// normalized — `"180d"` and `"180D"`, say — carried as the normalized form they collide
+    /// on.
+    ///
+    /// A well-formed peer never sends one: the collections this can arise in are keyed by an
+    /// identifier on both sides, so a duplicate means the sender either invented the frame or
+    /// corrupted it. Rejecting is the only safe answer — the alternative, building a
+    /// dictionary from colliding keys, traps.
+    case duplicateIdentifier(String)
 }
 
 /// The wire boundary's copy of the UUID rule BLESwift's identifiers enforce.

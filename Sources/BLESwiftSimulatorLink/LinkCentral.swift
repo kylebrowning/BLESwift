@@ -434,6 +434,10 @@ public final class LinkCentral: CentralManaging, Sendable {
             let target = peripheral(for: uuid)
             let serviceIdentifier = ServiceIdentifier(uuid: try WireIdentifierValidation.validated(service))
             var discovered: [CharacteristicIdentifier: CharacteristicProperties] = [:]
+            // Built by subscript, deliberately: two wire entries whose UUID strings differ
+            // only in case are one `CharacteristicIdentifier`, and the last one reported
+            // wins. Building the dictionary from the pairs instead would trap on the
+            // collision.
             for characteristic in characteristics {
                 let identifier = CharacteristicIdentifier(
                     uuid: try WireIdentifierValidation.validated(characteristic.uuid),

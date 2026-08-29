@@ -111,9 +111,100 @@ struct WireIdentifierValidationTests {
         }
     }
 
+    @Test("Advertisement service data keys that collide once normalized are refused")
+    func duplicateServiceDataKeysThrow() throws {
+        // `"180d"` and `"180D"` are two keys on the wire and one `ServiceIdentifier` here.
+        // Before this was refused, building the converted dictionary trapped.
+        #expect(throws: WireDecodingError.duplicateIdentifier("180D")) {
+            try Self.advertisement(serviceData: ["180d": Data([1]), "180D": Data([2])]).advertisementData
+        }
+
+        // Keys that are genuinely distinct still convert, in either case.
+        let data = try Self.advertisement(serviceData: ["180d": Data([1]), "181A": Data([2])]).advertisementData
+        #expect(data.serviceData?.count == 2)
+        #expect(data.serviceData?[ServiceIdentifier(uuid: "180D")] == Data([1]))
+        #expect(data.serviceData?[ServiceIdentifier(uuid: "181A")] == Data([2]))
+
+        // A malformed key is still the invalid-identifier violation, not the duplicate one.
+        #expect(throws: WireDecodingError.invalidIdentifier("zz")) {
+            try Self.advertisement(serviceData: ["zz": Data()]).advertisementData
+        }
+    }
+
+    /// An otherwise-empty advertisement carrying only `serviceData`.
+    private static func advertisement(serviceData: [String: Data]) -> WireAdvertisement {
+        WireAdvertisement(
+            localName: nil,
+            serviceUUIDs: nil,
+            manufacturerData: nil,
+            serviceData: serviceData,
+            txPowerLevel: nil,
+            isConnectable: nil,
+            overflowServiceUUIDs: nil,
+            solicitedServiceUUIDs: nil
+        )
+    }
+
 #if !targetEnvironment(simulator)
     // Sockets in a CI simulator are unreliable; the simulator-side path is covered by the
     // two-simulator E2E on real simulators.
+
+    @Test("Case-variant duplicates in a discovered-characteristics event collapse to one")
+    func duplicateDiscoveredCharacteristicsCollapse() async throws {
+        let provider = try ScriptedProvider()
+        try await provider.start()
+        let queue = DispatchSerialQueue(label: "wireidvalidation.duplicates")
+        let link = LinkCentral(
+            endpoint: provider.endpoint,
+            queue: queue,
+            clientName: "test",
+            retryInterval: .milliseconds(50)
+        )
+        let central = Central(backend: link, queue: queue)
+        defer { provider.stop(); link.shutdown() }
+        await waitFor { central.state == .poweredOn }
+
+        let identifier = UUID()
+        let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: identifier, name: nil)) }
+        await waitFor { !provider.requests.withLock { $0 }.isEmpty }
+        provider.emit(.didConnect(
+            peripheral: identifier,
+            name: nil,
+            maximumWriteWithResponse: 512,
+            maximumWriteWithoutResponse: 20
+        ))
+        let peripheral = try await bounded { try await connectTask.value }
+
+        let servicesTask = Task { try await peripheral.discoverServices() }
+        await waitFor { provider.requests.withLock { $0 }.contains(.discoverServices(peripheral: identifier, services: nil)) }
+        provider.emit(.didDiscoverServices(peripheral: identifier, services: ["180D"], error: nil))
+        #expect(try await bounded { try await servicesTask.value } == [ServiceIdentifier(uuid: "180D")])
+
+        // The provider reports the same characteristic twice, differing only in case. The
+        // mirror cache is keyed by `CharacteristicIdentifier`, which normalizes both to one:
+        // the client must fold them together rather than trap building the cache.
+        let characteristicsTask = Task { try await peripheral.discoverCharacteristics(for: ServiceIdentifier(uuid: "180D")) }
+        await waitFor {
+            provider.requests.withLock { $0 }.contains(
+                .discoverCharacteristics(peripheral: identifier, service: "180D", characteristics: nil)
+            )
+        }
+        provider.emit(.didDiscoverCharacteristics(
+            peripheral: identifier,
+            service: "180D",
+            characteristics: [
+                WireDiscoveredCharacteristic(uuid: "2a37", properties: CharacteristicProperties([.read]).rawValue),
+                WireDiscoveredCharacteristic(uuid: "2A37", properties: CharacteristicProperties([.read, .notify]).rawValue),
+            ],
+            error: nil
+        ))
+        let characteristics = try await bounded { try await characteristicsTask.value }
+        #expect(characteristics == [CharacteristicIdentifier(uuid: "2A37", service: ServiceIdentifier(uuid: "180D"))])
+
+        // The link is still up: the collision was folded, not fatal, and not a session drop.
+        #expect(central.state == .poweredOn)
+        #expect(provider.helloCount.withLock { $0 } == 1)
+    }
 
     @Test("A provider that sends a malformed identifier loses its client's session")
     func clientDropsAProviderThatSendsAMalformedIdentifier() async throws {

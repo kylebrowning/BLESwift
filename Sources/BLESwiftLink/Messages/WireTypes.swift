@@ -259,26 +259,41 @@ public struct WireAdvertisement: Codable, Sendable, Equatable {
     }
 
     /// Converts back to `AdvertisementData`, rejecting any service UUID string a
-    /// `ServiceIdentifier` could not represent.
+    /// `ServiceIdentifier` could not represent — and any pair of ``serviceData`` keys that
+    /// name the same service once normalized.
+    ///
+    /// ``serviceData`` arrives keyed by string but becomes a dictionary keyed by
+    /// `ServiceIdentifier`, which normalizes case: `"180d"` and `"180D"` are two keys on the
+    /// wire and one key here. Building that dictionary from colliding keys would trap, so a
+    /// collision is refused as the protocol violation it is.
     ///
     /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` — see
-    ///   ``WireIdentifierValidation``.
+    ///   ``WireIdentifierValidation`` — or ``WireDecodingError/duplicateIdentifier(_:)``.
     public var advertisementData: AdvertisementData {
         get throws {
             try serviceUUIDs?.forEach { try WireIdentifierValidation.validated($0) }
-            try serviceData?.keys.forEach { try WireIdentifierValidation.validated($0) }
             try overflowServiceUUIDs?.forEach { try WireIdentifierValidation.validated($0) }
             try solicitedServiceUUIDs?.forEach { try WireIdentifierValidation.validated($0) }
+            var convertedServiceData: [ServiceIdentifier: Data]?
+            if let serviceData {
+                var table: [ServiceIdentifier: Data] = [:]
+                table.reserveCapacity(serviceData.count)
+                for (uuid, value) in serviceData {
+                    let identifier = ServiceIdentifier(uuid: try WireIdentifierValidation.validated(uuid))
+                    guard table.updateValue(value, forKey: identifier) == nil else {
+                        throw WireDecodingError.duplicateIdentifier(identifier.uuidString)
+                    }
+                }
+                convertedServiceData = table
+            }
             return AdvertisementData(
-            localName: localName,
-            serviceUUIDs: serviceUUIDs?.map { ServiceIdentifier(uuid: $0) },
-            manufacturerData: manufacturerData,
-            serviceData: serviceData.map { serviceData in
-                Dictionary(uniqueKeysWithValues: serviceData.map { (ServiceIdentifier(uuid: $0.key), $0.value) })
-            },
-            txPowerLevel: txPowerLevel,
-            isConnectable: isConnectable,
-            overflowServiceUUIDs: overflowServiceUUIDs?.map { ServiceIdentifier(uuid: $0) },
+                localName: localName,
+                serviceUUIDs: serviceUUIDs?.map { ServiceIdentifier(uuid: $0) },
+                manufacturerData: manufacturerData,
+                serviceData: convertedServiceData,
+                txPowerLevel: txPowerLevel,
+                isConnectable: isConnectable,
+                overflowServiceUUIDs: overflowServiceUUIDs?.map { ServiceIdentifier(uuid: $0) },
                 solicitedServiceUUIDs: solicitedServiceUUIDs?.map { ServiceIdentifier(uuid: $0) }
             )
         }
