@@ -62,6 +62,23 @@ final class CentralSession: Sendable {
     /// factor of four is slack for the acknowledgements still in flight, not a second window.
     static let maximumPendingWrites = 4 * LinkFlowControl.writeWithoutResponseWindow
 
+    /// How many `openL2CAPChannel` completions this session waits on for one peripheral before
+    /// it stops believing the client.
+    ///
+    /// A channel open is answered by exactly one completion, and a client with sixteen opens
+    /// outstanding on a single peripheral is not waiting on a Bluetooth stack — it is filling
+    /// this session's memory with tags nothing will ever consume. Sixteen rather than a
+    /// multiple of a window because there is no window here to be slack for: it is simply more
+    /// simultaneous opens than any honest client has.
+    static let maximumPendingOpens = 16
+
+    /// How many peripheral remotes this session keeps.
+    ///
+    /// The same 1024 the client's own mirror table is capped at, for the same reason: a
+    /// long-lived client that connects across a busy room would otherwise grow this table
+    /// without limit, one remote per identifier ever connected.
+    static let maximumRemotes = 1024
+
     /// The error a channel-open completion reports when the backend reported neither a
     /// channel nor an error of its own.
     static var l2capOpenFailed: NSError {
@@ -91,7 +108,22 @@ final class CentralSession: Sendable {
     /// is not `Sendable`; it is immutable and only ever touched on ``queue``.
     nonisolated(unsafe) private let backend: any CentralManaging
 
+    /// Every remote this session has connected, keyed by identifier — the object the client's
+    /// requests are routed to and whose events are routed back.
+    ///
+    /// **Bounded, least-recently-connected first.** Mirrors the cap on the client's own
+    /// `LinkCentral` table: beyond ``maximumRemotes`` entries the least recently connected are
+    /// dropped, and only ones that are `.disconnected` and have nothing of this session's in
+    /// flight for them — no queued writes, no channel open awaiting its completion, no bridged
+    /// L2CAP channel. Anything else is still referenced by a live operation whose events must
+    /// reach the instance the client is talking about, so it is kept however old it is.
+    /// Forgetting a remote costs the client nothing it has not already finished with: the next
+    /// `connect` retrieves it from the backend again.
     nonisolated(unsafe) private var remotes: [UUID: any PeripheralRemote] = [:]
+
+    /// ``remotes``' keys in least-recently-connected order, which is what the cap evicts from.
+    /// Linear to update, over a list bounded by ``maximumRemotes``.
+    nonisolated(unsafe) private var connectOrder: [UUID] = []
     nonisolated(unsafe) private var pendingWrites: [UUID: [PendingWrite]] = [:]
     nonisolated(unsafe) var pendingOpens: [UUID: [PendingOpen]] = [:]
     nonisolated(unsafe) private var isClosed = false
@@ -173,6 +205,7 @@ final class CentralSession: Sendable {
             backend.eventHandler = nil
             closeChannels(matching: { _ in true })
             remotes.removeAll()
+            connectOrder.removeAll()
             pendingWrites.removeAll()
             pendingOpens.removeAll()
             // Nothing to detach on the connection: the provider's table routes its
@@ -214,6 +247,8 @@ final class CentralSession: Sendable {
                 return
             }
             remotes[peripheral] = remote
+            touch(peripheral)
+            evictStaleRemotes()
             attachHandler(to: remote, for: peripheral)
             backend.connect(remote, options: options?.warningOptions, requiresANCS: requiresANCS)
 
@@ -298,6 +333,13 @@ final class CentralSession: Sendable {
 
         case .openL2CAPChannel(let peripheral, let psm, let channel):
             guard let remote = self.remote(peripheral, for: "openL2CAPChannel") else { return }
+            // Every open is answered by exactly one completion, so a client with more than
+            // this many outstanding on one peripheral has stopped consuming them; the link
+            // goes rather than this session's memory.
+            guard pendingOpens[peripheral, default: []].count < Self.maximumPendingOpens else {
+                failProtocol(ProtocolViolation.openWindowExceeded(peripheral: peripheral))
+                return
+            }
             pendingOpens[peripheral, default: []].append(PendingOpen(channel: channel, psm: psm))
             remote.openL2CAPChannel(L2CAPPSM(psm))
 
@@ -318,6 +360,10 @@ final class CentralSession: Sendable {
         /// More `.withoutResponse` writes were queued for one peripheral than
         /// ``maximumPendingWrites`` allows — the client has ignored its flow-control window.
         case writeWindowExceeded(peripheral: UUID)
+
+        /// More `openL2CAPChannel` completions were outstanding for one peripheral than
+        /// ``maximumPendingOpens`` allows — the client has stopped consuming them.
+        case openWindowExceeded(peripheral: UUID)
     }
 
     /// `uuid` as a `ServiceIdentifier`, rejecting a string no `ServiceIdentifier` could
@@ -334,6 +380,56 @@ final class CentralSession: Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         log?("\(label): protocol violation (\(error)); closing the connection")
         connection.cancel()
+    }
+
+    /// Moves `identifier` to the most-recently-connected end of ``connectOrder``. Must be
+    /// called on ``queue``.
+    private func touch(_ identifier: UUID) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        if let index = connectOrder.firstIndex(of: identifier) {
+            connectOrder.remove(at: index)
+        }
+        connectOrder.append(identifier)
+    }
+
+    /// Drops the least recently connected idle remotes until the table is back within
+    /// ``maximumRemotes``, detaching each one's event handler on the way out so a backend that
+    /// still holds it cannot deliver into a session that has forgotten it. A remote is idle
+    /// only when it is `.disconnected` and this session has nothing in flight for it; anything
+    /// else is left alone however old it is. Must be called on ``queue``.
+    private func evictStaleRemotes() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard remotes.count > Self.maximumRemotes else { return }
+        var overflow = remotes.count - Self.maximumRemotes
+        var kept: [UUID] = []
+        kept.reserveCapacity(connectOrder.count)
+        for identifier in connectOrder {
+            guard let candidate = remotes[identifier] else { continue }
+            guard overflow > 0, isIdle(candidate, identifier) else {
+                kept.append(identifier)
+                continue
+            }
+            candidate.eventHandler = nil
+            remotes.removeValue(forKey: identifier)
+            // Both are empty — that is what made the remote idle — but the keys would
+            // otherwise outlive it, so the side tables stay bounded by this one.
+            pendingWrites.removeValue(forKey: identifier)
+            pendingOpens.removeValue(forKey: identifier)
+            overflow -= 1
+        }
+        connectOrder = kept
+    }
+
+    /// Whether `remote` is disconnected and has nothing of this session's in flight — the one
+    /// state in which forgetting it costs the client nothing. Must be called on ``queue``.
+    private func isIdle(_ remote: any PeripheralRemote, _ identifier: UUID) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard remote.connectionState == .disconnected else { return false }
+        // Emptied rather than removed is idle too: a drained queue leaves the key behind.
+        guard pendingWrites[identifier]?.isEmpty ?? true, pendingOpens[identifier]?.isEmpty ?? true else {
+            return false
+        }
+        return !channels.values.contains { $0.peripheral == identifier }
     }
 
     /// The remote for `peripheral`, or `nil` — with a log line — if this session has never
