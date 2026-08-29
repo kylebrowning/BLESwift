@@ -36,6 +36,16 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     nonisolated(unsafe) private var _remotes: [UUID: VirtualPeripheralRemote] = [:]
     nonisolated(unsafe) private var _announcedState = false
 
+    /// The identifiers the radio currently has devices registered for, mirrored from the
+    /// radio's known-devices sink. Only these — and ``_discovered`` — may be vended as
+    /// remotes.
+    nonisolated(unsafe) private var _knownDevices: Set<UUID> = []
+
+    /// Identifiers this backend has reported a sighting for. A device removed from the radio
+    /// after being seen stays retrievable exactly as CoreBluetooth keeps vending a
+    /// `CBPeripheral` for a peer it has scanned; the connect attempt is what then fails.
+    nonisolated(unsafe) private var _discovered: Set<UUID> = []
+
     /// Backs ``bluetoothAuthorization``; a `static var` isn't scoped to any one backend's
     /// queue, so it is `Mutex`-protected rather than queue-confined.
     private static let authorizationBox = Mutex<BluetoothAuthorization>(.allowedAlways)
@@ -68,8 +78,12 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             guard let self else { return }
             self.queue.async { self.deliver(event) }
         }
+        let knownDevices: @Sendable (Set<UUID>) -> Void = { [weak self] devices in
+            guard let self else { return }
+            self.queue.async { self._knownDevices = devices }
+        }
         Task { [radio] in
-            await radio.attach(session: session, centralSink: sink)
+            await radio.attach(session: session, centralSink: sink, knownDevicesSink: knownDevices)
         }
     }
 
@@ -88,6 +102,9 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         if case .didDisconnect(let peripheral, _) = event {
             _remotes[peripheral.uuid]?.setConnectionState(.disconnected)
+        }
+        if case .didDiscover(let peripheral, _, _) = event {
+            _discovered.insert(peripheral.uuid)
         }
         _eventHandler?(event)
     }
@@ -192,13 +209,23 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// Returns one remote per requested identifier, created on first use and reused
-    /// afterwards. Unknown identifiers get a placeholder whose ``connect(_:options:requiresANCS:)``
-    /// fails with ``VirtualRadio/unknownDeviceError``, mirroring CoreBluetooth's willingness
-    /// to vend a `CBPeripheral` for any identifier it has ever seen.
+    /// Returns one remote per requested identifier this backend actually knows — a device
+    /// currently registered on the radio, or one this backend has reported a sighting for.
+    /// **Identifiers it does not know are omitted, not vended as placeholders**, exactly as
+    /// CoreBluetooth omits a `UUID` its stack has never seen.
+    ///
+    /// That omission is what makes this backend safe to compose: a
+    /// ``CompositeCentral`` resolves an identifier against every child and keeps the first
+    /// answer, so a backend that vended a remote for *any* `UUID` would shadow every sibling
+    /// and make a real (or injected) peripheral unreachable.
+    ///
+    /// A remote is created on first use and the same instance is returned for the life of
+    /// this backend, so a `Central` attaching an event handler to a retrieved peripheral is
+    /// attaching it to the object the radio's events are routed to.
     public func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote] {
         dispatchPrecondition(condition: .onQueue(queue))
-        return identifiers.map { identifier in
+        return identifiers.compactMap { identifier in
+            guard _knownDevices.contains(identifier) || _discovered.contains(identifier) else { return nil }
             let created = remote(for: identifier)
             if created.name == nil {
                 Task { [radio, queue] in

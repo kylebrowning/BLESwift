@@ -70,6 +70,7 @@ public actor VirtualRadio {
     /// Everything the radio holds on behalf of one attached backend.
     private struct Session {
         let centralSink: @Sendable (CentralEvent) -> Void
+        let knownDevicesSink: @Sendable (Set<UUID>) -> Void
         var peripheralSinks: [UUID: @Sendable (PeripheralEvent) -> Void] = [:]
         var scanner: Scanner?
         var connections: Set<UUID> = []
@@ -102,6 +103,7 @@ public actor VirtualRadio {
             handler: device.handler,
             isAdvertising: advertising
         )
+        announceKnownDevices()
         if advertising {
             reportSightings(of: identifier)
         }
@@ -143,6 +145,7 @@ public actor VirtualRadio {
     func remove(device: UUID) {
         guard let state = devices.removeValue(forKey: device) else { return }
         subscriptions.removeValue(forKey: device)
+        announceKnownDevices()
         let identifier = PeripheralIdentifier(uuid: device, name: state.descriptor.name)
         for sessionID in Array(sessions.keys) where sessions[sessionID]?.connections.contains(device) == true {
             sessions[sessionID]?.connections.remove(device)
@@ -165,9 +168,27 @@ public actor VirtualRadio {
     // MARK: - Backend attachment
 
     /// Attaches a backend under `session`, routing radio-initiated ``BLESwiftCore/CentralEvent``s
-    /// to `centralSink`. The sink is responsible for hopping onto the backend's queue.
-    func attach(session: UUID, centralSink: @escaping @Sendable (CentralEvent) -> Void) {
-        sessions[session] = Session(centralSink: centralSink)
+    /// to `centralSink` and the set of registered device identifiers to `knownDevicesSink`.
+    /// Both sinks are responsible for hopping onto the backend's queue.
+    ///
+    /// `knownDevicesSink` is called once immediately, with the radio's current devices, and
+    /// again on every registration and removal — it is how a backend knows which identifiers
+    /// it may vend a remote for.
+    func attach(
+        session: UUID,
+        centralSink: @escaping @Sendable (CentralEvent) -> Void,
+        knownDevicesSink: @escaping @Sendable (Set<UUID>) -> Void
+    ) {
+        sessions[session] = Session(centralSink: centralSink, knownDevicesSink: knownDevicesSink)
+        knownDevicesSink(Set(devices.keys))
+    }
+
+    /// Pushes the current registered-device set to every attached backend.
+    private func announceKnownDevices() {
+        let known = Set(devices.keys)
+        for session in sessions.values {
+            session.knownDevicesSink(known)
+        }
     }
 
     /// Detaches a backend, cancelling its scan and dropping its connections and

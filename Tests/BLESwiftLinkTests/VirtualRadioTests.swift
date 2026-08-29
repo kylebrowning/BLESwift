@@ -73,12 +73,35 @@ struct VirtualRadioTests {
         try await central.disconnect(peripheral.id)
     }
 
-    @Test("Connecting to an unknown identifier fails with provider code 1")
+    @Test("Connecting to an unknown identifier throws rather than connecting")
     func unknown() async throws {
         let (central, _, _) = try await makeRig()
         await #expect(throws: (any Error).self) {
             _ = try await central.connect(PeripheralIdentifier(uuid: UUID(), name: nil), timeout: .seconds(2))
         }
+    }
+
+    @Test("The backend vends remotes only for devices the radio knows")
+    func retrievalIsLimitedToKnownDevices() async throws {
+        let (central, _, _) = try await makeRig()
+        let registered = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+
+        #expect(try await central.knownPeripherals(withIdentifiers: [UUID()]).isEmpty)
+        #expect(try await central.knownPeripherals(withIdentifiers: [registered]).map(\.uuid) == [registered])
+    }
+
+    @Test("A device registered after attachment becomes retrievable")
+    func lateRegistrationBecomesRetrievable() async throws {
+        let (central, radio, _) = try await makeRig()
+        let identifier = UUID()
+        let (device, handler) = VirtualDevice.fixture(
+            FixtureDevice(id: identifier, name: "Late", advertisedServices: [], services: [])
+        )
+        let handle = await radio.register(device)
+        await handler.attach(handle)
+
+        await waitFor { (try? await central.knownPeripherals(withIdentifiers: [identifier]))?.isEmpty == false }
+        #expect(try await central.knownPeripherals(withIdentifiers: [identifier]).map(\.uuid) == [identifier])
     }
 
     @Test("Removing a connected device disconnects the central with provider code 2")
