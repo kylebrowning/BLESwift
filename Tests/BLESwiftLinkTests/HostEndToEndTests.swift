@@ -642,6 +642,34 @@ struct HostEndToEndTests {
         await provider.stop()
     }
 
+    @Test("Two fixtures declaring the same id fail the provider's start")
+    func duplicateFixtureIdentifiersAreRejectedAtStart() async throws {
+        let fixtureJSON = """
+        { "devices": [
+          { "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8", "name": "One",
+            "advertisedServices": ["180D"], "services": [] },
+          { "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8", "name": "Two",
+            "advertisedServices": ["180F"], "services": [] } ] }
+        """
+        let duplicate = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.fixtures = try FixtureDocument.parse(Data(fixtureJSON.utf8)).devices
+        let provider = Provider(configuration: configuration)
+
+        await #expect(throws: ProviderFixtureError.duplicateIdentifier(duplicate)) {
+            try await provider.start()
+        }
+        // The message the CLI prints before exiting 66 names the offending id.
+        #expect("\(ProviderFixtureError.duplicateIdentifier(duplicate))".contains(duplicate.uuidString))
+
+        // Nothing was registered and no port was bound: the second declaration would have
+        // replaced the first on the radio and stranded the handle vended for it.
+        #expect(provider.radio.knownDeviceIDs.withLock { $0.isEmpty })
+        #expect(await provider.port == 0)
+        await provider.stop()
+    }
+
     @Test("A redial reaching the provider before its old session was torn down keeps its identity")
     func aRedialBeforeTheOldSessionIsGoneKeepsItsIdentifier() async throws {
         let provider = try await makeProvider()

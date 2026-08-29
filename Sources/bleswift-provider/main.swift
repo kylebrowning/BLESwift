@@ -67,6 +67,11 @@ Task {
                 + "(passthrough: \(options.passthrough ? "on" : "off"), "
                 + "fixtures: \(configuration.fixtures.count) device(s))"
         )
+    } catch let error as ProviderFixtureError {
+        // A fixture the provider cannot host is a bad input, not a failed bind: exits `66`
+        // (`EX_NOINPUT`) with the loaded documents, the way an unreadable one does.
+        FileHandle.standardError.write(Data("bleswift-provider: \(error)\n".utf8))
+        exit(66)
     } catch {
         FileHandle.standardError.write(Data("bleswift-provider: failed to start: \(error)\n".utf8))
         exit(70)

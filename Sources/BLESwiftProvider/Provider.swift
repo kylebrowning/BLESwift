@@ -119,12 +119,21 @@ public actor Provider {
     ///
     /// Returns once the port is bound, so ``port`` is valid on return.
     ///
-    /// - Throws: The `NWError` the listener failed to bind with — a port already in use
-    ///   fails here rather than being retried — or
+    /// - Throws: ``ProviderFixtureError/duplicateIdentifier(_:)`` if two configured fixtures
+    ///   declare the same `id`; the `NWError` the listener failed to bind with — a port already
+    ///   in use fails here rather than being retried — or
     ///   `LinkListenerError.alreadyStarted` if the provider is already
     ///   listening.
     public func start() async throws {
         guard listener == nil else { throw LinkListenerError.alreadyStarted }
+        // Checked before anything is registered, so a document naming one device twice is a
+        // startup failure rather than a silent half-registration: the second registration
+        // replaces the first on the radio and strands the handle ``handle(for:)`` would have
+        // vended for it, leaving the provider hosting a device it can no longer drive.
+        var declared: Set<UUID> = []
+        for fixture in configuration.fixtures where !declared.insert(fixture.id).inserted {
+            throw ProviderFixtureError.duplicateIdentifier(fixture.id)
+        }
         for fixture in configuration.fixtures {
             let (device, handler) = VirtualDevice.fixture(fixture)
             let handle = await radio.register(device)
@@ -465,6 +474,20 @@ public actor Provider {
             )
             let real = factory(queue)
             return CompositePeripheralManager(backends: [virtual, real], onQueue: queue, log: configuration.log)
+        }
+    }
+}
+
+/// What can go wrong with the fixtures ``Provider/start()`` was configured with.
+public enum ProviderFixtureError: Error, Equatable, Sendable, CustomStringConvertible {
+
+    /// Two configured fixtures declare the same `FixtureDevice/id`.
+    case duplicateIdentifier(UUID)
+
+    public var description: String {
+        switch self {
+        case .duplicateIdentifier(let identifier):
+            "two fixture devices declare the same id \(identifier)"
         }
     }
 }
