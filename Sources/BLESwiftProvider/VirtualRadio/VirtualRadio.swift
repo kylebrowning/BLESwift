@@ -31,14 +31,14 @@ public actor VirtualRadio {
     /// Virtual devices have no radio distance, so a single plausible value stands in.
     public static let rssi = -50
 
-    /// The MTU-derived length reported for notifications and `.withResponse` writes. 512 is
-    /// the maximum ATT attribute length, the natural ceiling for a link with no real MTU
-    /// negotiation — and the length a `.withResponse` write really does reach on hardware,
-    /// through ATT long writes.
+    /// The length ceiling for a `.withResponse` write. 512 is the maximum ATT attribute
+    /// length, the natural ceiling for a link with no real MTU negotiation — and the length a
+    /// `.withResponse` write really does reach on hardware, through ATT long writes.
     public static let maximumValueLength = 512
 
-    /// The length a single `.withoutResponse` write may reach: 182, iOS's ATT_MTU of 185 less
-    /// the three bytes of ATT header.
+    /// The length a single ATT packet may carry: 182, iOS's ATT_MTU of 185 less the three
+    /// bytes of ATT header. The ceiling for a `.withoutResponse` write, and the
+    /// `maximumUpdateValueLength` every subscriber of a virtual device reports.
     ///
     /// **The two write types differ sharply on hardware, and a harness that hides it is worse
     /// than useless.** A `.withResponse` write reaches 512 bytes because ATT splits it into
@@ -46,6 +46,12 @@ public actor VirtualRadio {
     /// ATT_MTU − 3, and CoreBluetooth *silently drops* an oversize one. Reporting 512 for both
     /// let a 400-byte `.withoutResponse` write pass here and vanish on device — the single
     /// most common MTU footgun this harness exists to catch.
+    ///
+    /// **A notification is one ATT packet too**, so it is held to this ceiling rather than to
+    /// ``maximumValueLength``: there is no long-write equivalent for a notification, and
+    /// CoreBluetooth truncates one past the subscriber's `maximumUpdateValueLength`. Reporting
+    /// 512 to a device handler had it push a 400-byte update that arrived whole here and
+    /// arrived clipped to 182 on device — the same divergence in the opposite direction.
     public static let maximumWriteWithoutResponseLength = 182
 
     /// How long a GATT request parked for a hosted `PeripheralHost` waits for that host's
@@ -735,8 +741,12 @@ public actor VirtualRadio {
     }
 
     /// The ``BLESwiftCore/Subscriber`` a backend session appears as to device handlers.
+    ///
+    /// Its `maximumUpdateValueLength` is ``maximumWriteWithoutResponseLength``, not
+    /// ``maximumValueLength``: a notification is a single ATT packet, exactly as a
+    /// `.withoutResponse` write is. See that constant.
     private func subscriber(_ session: UUID) -> Subscriber {
-        Subscriber(id: session, maximumUpdateValueLength: Self.maximumValueLength)
+        Subscriber(id: session, maximumUpdateValueLength: Self.maximumWriteWithoutResponseLength)
     }
 }
 

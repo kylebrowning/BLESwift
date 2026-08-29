@@ -264,9 +264,14 @@ final class HostSession: Sendable {
     }
 
     /// The `maximumUpdateValueLength` reported for a subscriber reconstructed from the wire:
-    /// the largest ATT attribute value, so nothing is truncated on the strength of a number
-    /// this session had to invent.
-    private static let maximumUpdateValueLength = 512
+    /// one ATT packet, since that is what a notification is.
+    ///
+    /// The largest ATT attribute value (512) was the obvious number and the wrong one — it
+    /// invited a host to push an update no notification could ever carry, which CoreBluetooth
+    /// truncates to ATT_MTU − 3 on device. Matches
+    /// ``VirtualRadio/maximumWriteWithoutResponseLength``, which the radio reports to a
+    /// device handler for the same reason.
+    private static let maximumUpdateValueLength = VirtualRadio.maximumWriteWithoutResponseLength
 
     /// The `maximumUpdateValueLength` to report for a subscriber whose backend reported one
     /// no caller could divide a payload by: the conservative ATT default, the same number

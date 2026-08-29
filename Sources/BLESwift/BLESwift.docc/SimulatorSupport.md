@@ -313,10 +313,12 @@ is broken.
   ``Peripheral/maximumWriteValueLength(for:)`` is the number to ask rather than a constant to
   assume, and a `--passthrough` connection to real hardware reports that hardware's real
   maximum instead.
-- **Notifications are truncated, not split.** A pushed value longer than the subscriber's
-  `maximumUpdateValueLength` — 512 on the virtual radio — is clipped to it, as CoreBluetooth
-  clips a notification that will not fit the subscriber's MTU. Nothing chunks a large value
-  across several notifications for you, here or on device.
+- **Notifications are truncated, not split.** A notification is a single ATT packet, exactly
+  as a `.withoutResponse` write is, so the virtual radio reports the same 182 bytes as a
+  subscriber's `maximumUpdateValueLength` and clips a longer pushed value to it — as
+  CoreBluetooth clips a notification that will not fit the subscriber's MTU. Nothing chunks a
+  large value across several notifications for you, here or on device: read
+  ``Subscriber/maximumUpdateValueLength`` and fragment.
 - **Initial radio state.** A link-backed ``Central`` reports ``CentralState/unsupported`` until
   the provider answers — the same state the Simulator reports today, so an app that waits for
   `.poweredOn` simply waits — and then reports whatever state the provider does. If the provider

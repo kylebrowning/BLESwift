@@ -821,12 +821,42 @@ struct VirtualRadioTests {
         #expect(await Self.onQueue(queue) { remote.maximumWriteValueLength(for: .withoutResponse) } == 182)
     }
 
-    @Test("A notification longer than the subscriber's maximum is truncated to it")
+    /// Records the `maximumUpdateValueLength` of every subscriber the radio reports a
+    /// subscription change for.
+    private final class SubscriberRecordingHandler: VirtualDeviceHandler, Sendable {
+        private let maxima = Mutex<[Int]>([])
+
+        /// Every reported subscriber's maximum, in order.
+        var reported: [Int] { maxima.withLock { $0 } }
+
+        func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
+            .failure(.unlikelyError)
+        }
+
+        func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> {
+            .failure(.unlikelyError)
+        }
+
+        func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {
+            maxima.withLock { $0.append(central.maximumUpdateValueLength) }
+        }
+    }
+
+    @Test("A subscriber reports one ATT packet, and a longer notification is truncated to it")
     func notificationsAreTruncatedToTheSubscribersMaximum() async throws {
         let radio = VirtualRadio()
         let identifier = UUID()
+        let handler = SubscriberRecordingHandler()
         let handle = await radio.register(
-            Self.device(identifier: identifier, name: "truncating", services: Self.twoServices)
+            VirtualDevice(
+                descriptor: VirtualDeviceDescriptor(
+                    identifier: identifier,
+                    name: "truncating",
+                    advertisement: AdvertisementData(serviceUUIDs: [Self.service], isConnectable: true),
+                    services: Self.twoServices
+                ),
+                handler: handler
+            )
         )
         let session = UUID()
         await radio.attach(session: session, centralSink: { _ in })
@@ -840,15 +870,27 @@ struct VirtualRadioTests {
                 .isNotifying
         )
 
+        // A notification is one ATT packet — there is no long-write equivalent for it — so the
+        // subscriber a device handler is handed reports ATT_MTU − 3, the same ceiling a
+        // `.withoutResponse` write is held to, and not the 512-byte attribute maximum.
+        #expect(handler.reported == [VirtualRadio.maximumWriteWithoutResponseLength])
+        #expect(VirtualRadio.maximumWriteWithoutResponseLength == 182)
+
         // Longer than the subscriber's `maximumUpdateValueLength`: clipped to it, as
         // CoreBluetooth clips a notification that will not fit the subscriber's MTU.
-        await handle.notify(Data(repeating: 0x7F, count: 700), for: Self.measurement, to: nil)
+        await handle.notify(Data(repeating: 0x7F, count: 500), for: Self.measurement, to: nil)
         await waitFor { values.withLock { !$0.isEmpty } }
-        #expect(values.withLock { $0 }.map(\.count) == [VirtualRadio.maximumValueLength])
+        #expect(values.withLock { $0 }.map(\.count) == [VirtualRadio.maximumWriteWithoutResponseLength])
 
-        // A value that fits is delivered whole.
-        await handle.notify(Data(repeating: 0x01, count: 8), for: Self.measurement, to: nil)
+        // Exactly at the maximum: delivered whole.
+        let full = Data(repeating: 0x2A, count: VirtualRadio.maximumWriteWithoutResponseLength)
+        await handle.notify(full, for: Self.measurement, to: nil)
         await waitFor { values.withLock { $0.count } == 2 }
+        #expect(values.withLock { $0 }.last == full)
+
+        // A value that fits is delivered whole too.
+        await handle.notify(Data(repeating: 0x01, count: 8), for: Self.measurement, to: nil)
+        await waitFor { values.withLock { $0.count } == 3 }
         #expect(values.withLock { $0 }.last == Data(repeating: 0x01, count: 8))
     }
 
