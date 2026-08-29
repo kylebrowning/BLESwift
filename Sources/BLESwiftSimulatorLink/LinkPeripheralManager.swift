@@ -36,9 +36,10 @@ import Foundation
 /// exactly as a full CoreBluetooth transmit queue does; the provider acknowledges each push
 /// as its own backend accepts it, and the acknowledgement that reopens the window is
 /// reported as `readyToUpdateSubscribers`. A dropped link empties the window — the
-/// acknowledgements died with the session that owed them — and a host that was blocked at
-/// the drop is released by one `readyToUpdateSubscribers` on the next reconnect, never by
-/// the drop itself.
+/// acknowledgements died with the session that owed them, and pushes made while it is down
+/// are dropped unsent, so neither can ever be acknowledged — and the window is emptied again
+/// at the reconnect, which is also where a host left blocked by either is released by exactly
+/// one `readyToUpdateSubscribers`. Never by the drop itself.
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``LinkCentral``: every stored property is `nonisolated(unsafe)`, safe only because every
@@ -69,6 +70,10 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// waiting on a `readyToUpdateSubscribers` that the dead session's acknowledgements can
     /// never produce. Cleared by the reconnect that answers it.
     nonisolated(unsafe) private var _wasBlockedAtDrop = false
+
+    /// Whether a link that had been established has since dropped, so the next provider state
+    /// is a *reconnect* and must clear the window rather than trust it.
+    nonisolated(unsafe) private var _isAwaitingReconnect = false
 
     /// Creates a peripheral manager that drives the provider at `endpoint`, and starts
     /// dialing it immediately. Reconnection is automatic, at `retryInterval`.
@@ -243,13 +248,17 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     ///
     /// The notification window is emptied here: every unacknowledged push belonged to a
     /// session that no longer exists, so no `updateValueDelivered` can ever arrive for it and
-    /// a surviving count would wedge the window shut. A host that was *blocked* at that
-    /// moment is deliberately **not** released here — it is about to be told the radio is
-    /// `.unsupported`, and a readiness signal against a dead radio would only invite a push
-    /// that goes nowhere. The release is deferred to the reconnect.
+    /// a surviving count would wedge the window shut. Emptying it here also keeps
+    /// ``updateValue(_:for:onSubscribed:)`` answering `true` while the link is down, so a host
+    /// pushing into the dark is not wedged either — those pushes are dropped unsent and are
+    /// cleared again at the reconnect. A host that was *blocked* at that moment is deliberately
+    /// **not** released here: it is about to be told the radio is `.unsupported`, and a
+    /// readiness signal against a dead radio would only invite a push that goes nowhere. The
+    /// release is deferred to the reconnect.
     private func handleLinkDropped() {
         dispatchPrecondition(condition: .onQueue(queue))
         _isAdvertising = false
+        _isAwaitingReconnect = true
         if _outstandingUpdates >= LinkFlowControl.updateValueWindow { _wasBlockedAtDrop = true }
         _outstandingUpdates = 0
         guard _radioState != .unsupported else { return }
@@ -279,12 +288,17 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
             // a provider state landing before a handler exists must not suppress the attach.
             _radioState = state.state
             deliver(.didUpdateState(state.state))
-            if _wasBlockedAtDrop {
-                // The provider is back. Its window starts empty, and so does this one, so the
-                // host blocked when the old link died can push again — but only a
+            if _isAwaitingReconnect {
+                // The provider is back, with a session — and a queue — of its own. Nothing this
+                // client sent to the old one will ever be acknowledged, whether it was in
+                // flight at the drop or dropped unsent afterwards, so the window is emptied
+                // here too. A host blocked by either can push again, but only a
                 // `readyToUpdateSubscribers` will tell it so.
+                _isAwaitingReconnect = false
+                let wasBlocked = _outstandingUpdates >= LinkFlowControl.updateValueWindow || _wasBlockedAtDrop
                 _wasBlockedAtDrop = false
-                deliver(.readyToUpdateSubscribers)
+                _outstandingUpdates = 0
+                if wasBlocked { deliver(.readyToUpdateSubscribers) }
             }
 
         case .didStartAdvertising(let error):

@@ -39,9 +39,9 @@ struct HostEndToEndTests {
 
     /// A provider listening on a system-assigned loopback port, hosting no fixtures — every
     /// device it serves comes from a peripheral-role client.
-    private func makeProvider() async throws -> Provider {
+    private func makeProvider(port: UInt16 = 0) async throws -> Provider {
         var configuration = ProviderConfiguration()
-        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: port)
         let provider = Provider(configuration: configuration)
         try await provider.start()
         return provider
@@ -319,6 +319,56 @@ struct HostEndToEndTests {
         let second = try await Self.rebind(port: port) { try await self.makeStallingProvider(port: port) }
         await waitFor(timeout: .seconds(10)) { states.withLock { $0.last == .poweredOn } }
         #expect(states.withLock { $0.last } == .poweredOn)
+        await waitFor(timeout: .seconds(5)) { readyCount.withLock { $0 } == 1 }
+        #expect(readyCount.withLock { $0 } == 1)
+        #expect(await Self.onQueue(queue) { link.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil) })
+
+        link.shutdown()
+        await waitFor(timeout: .seconds(5)) { await second.sessionCount == 0 }
+        await second.stop()
+    }
+
+    @Test("Pushes made while the link is down are cleared by the reconnect, not left occupying the window")
+    func windowFilledWhileDisconnectedClearsOnReconnect() async throws {
+        let first = try await makeProvider()
+        let port = await first.port
+        let queue = DispatchSerialQueue(label: "host.e2e.downfill")
+        let link = LinkPeripheralManager(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
+            queue: queue,
+            clientName: "downfill-e2e",
+            retryInterval: .milliseconds(50)
+        )
+
+        let states = Mutex<[CentralState]>([])
+        let readyCount = Mutex<Int>(0)
+        await Self.onQueue(queue) {
+            link.eventHandler = { event in
+                switch event {
+                case .didUpdateState(let state): states.withLock { $0.append(state) }
+                case .readyToUpdateSubscribers: readyCount.withLock { $0 += 1 }
+                default: break
+                }
+            }
+        }
+        await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .poweredOn } }
+
+        // ---- Drop the provider with an *empty* window, so nothing is latched at the drop ----
+        await first.stop()
+        await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .unsupported } }
+        #expect(readyCount.withLock { $0 } == 0)
+
+        // ---- Fill the window while there is no link: every push is dropped unsent ----
+        let results = await Self.onQueue(queue) {
+            (0..<33).map { _ in link.updateValue(Data([0, 99]), for: Self.measurement, onSubscribed: nil) }
+        }
+        #expect(results.prefix(LinkFlowControl.updateValueWindow).allSatisfy { $0 })
+        #expect(results[LinkFlowControl.updateValueWindow] == false)
+        #expect(readyCount.withLock { $0 } == 0)
+
+        // ---- The reconnect clears those unacknowledgeable pushes and releases the host ----
+        let second = try await Self.rebind(port: port) { try await self.makeProvider(port: port) }
+        await waitFor(timeout: .seconds(10)) { states.withLock { $0.last == .poweredOn } }
         await waitFor(timeout: .seconds(5)) { readyCount.withLock { $0 } == 1 }
         #expect(readyCount.withLock { $0 } == 1)
         #expect(await Self.onQueue(queue) { link.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil) })
