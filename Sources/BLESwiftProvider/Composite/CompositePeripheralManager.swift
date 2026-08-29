@@ -108,9 +108,13 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     nonisolated(unsafe) private var _advertisement: PeripheralAdvertisement?
 
     /// How many `didAddService`/`didStartAdvertising` completions from each child must be
-    /// swallowed rather than aggregated or forwarded: the ones a child still owed when it
-    /// powered off (already settled without it), plus the ones its catch-up republish will
-    /// produce (never the host's to hear).
+    /// swallowed rather than aggregated or forwarded: exactly the ones the child's catch-up
+    /// republish will produce, which are never the host's to hear.
+    ///
+    /// Bounded by what ``powerUp(child:)`` re-issues, and by nothing else. What a child owed
+    /// when it powered off is *not* counted here — a radio that goes away abandons those, so
+    /// they may never arrive — and is swallowed on the child's state instead. See
+    /// ``powerDown(child:)``.
     nonisolated(unsafe) private var _swallowedAdds: [Int] = []
     nonisolated(unsafe) private var _swallowedAdvertisements: [Int] = []
 
@@ -302,9 +306,6 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
                     remaining.append(batch)
                     continue
                 }
-                // The completion this child owed will still arrive if it was already in
-                // flight; it is no longer anyone's to hear.
-                _swallowedAdds[index] += 1
                 if batch.owing.isEmpty { settled.append(batch.error) } else { remaining.append(batch) }
             }
             _pendingAdds[identifier] = remaining.isEmpty ? nil : remaining
@@ -318,18 +319,31 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
                 remainingAdvertisements.append(batch)
                 continue
             }
-            _swallowedAdvertisements[index] += 1
             if batch.owing.isEmpty { settledAdvertisements.append(batch.error) } else { remainingAdvertisements.append(batch) }
         }
         _pendingAdvertisements = remainingAdvertisements
         for error in settledAdvertisements { _eventHandler?(.didStartAdvertising(error: error)) }
 
+        // Nothing this child owed is counted as swallowed, and whatever it still had counted
+        // against it is dropped: a `CBPeripheralManager` leaving `.poweredOn` *abandons* the
+        // adds and the advertisement it had in flight, so the completions those counters
+        // stood in for may never arrive at all. Counted anyway, a counter left standing after
+        // a power-down never came back down, and the next completion the child produced for
+        // itself was eaten in place of one that was never coming. What does still arrive from
+        // a child that is no longer powered on is swallowed by ``completeAdd(_:error:from:)``
+        // and ``completeAdvertising(error:from:)`` on the child's *state* instead, which needs
+        // no counter — leaving both of these bounded by what ``powerUp(child:)`` re-issues.
+        _swallowedAdds[index] = 0
+        _swallowedAdvertisements[index] = 0
+
         reopenWindowIfPossible()
     }
 
     /// Catches child `index` up with the composite's current services and advertisement now
-    /// that it can serve them. Its completions are this composite's business, not the host's.
-    /// Must be called on ``queue``.
+    /// that it can serve them. Its completions are this composite's business, not the host's,
+    /// and the two swallow counters — cleared by ``powerDown(child:)`` — are set here to
+    /// exactly the number of republishes this catch-up owes an answer for. Must be called on
+    /// ``queue``.
     private func powerUp(child index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         _loggedOffline.remove(index)
@@ -395,12 +409,18 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
 
     /// Settles one child's `didAddService`, emitting the aggregate once the last child owing
     /// it has reported. Must be called on ``queue``.
+    ///
+    /// A completion from a child that is no longer powered on is swallowed outright:
+    /// ``powerDown(child:)`` released it from every batch it owed, so it can settle nothing,
+    /// and a radio that is off has published nothing of its own to report either. It is the
+    /// tail of an operation this composite has already settled without it.
     private func completeAdd(_ identifier: ServiceIdentifier, error: NSError?, from index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard isOnline(index) else { return }
         var batches = _pendingAdds[identifier] ?? []
         guard let position = batches.firstIndex(where: { $0.owing.contains(index) }) else {
-            // Either a completion for an operation this composite has already settled without
-            // this child, or one from its catch-up republish — swallowed, not aggregated.
+            // A completion for one of the catch-up republishes ``powerUp(child:)`` issued on
+            // this composite's own behalf — swallowed, not aggregated.
             if _swallowedAdds[index] > 0 {
                 _swallowedAdds[index] -= 1
                 return
@@ -422,9 +442,12 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     }
 
     /// Settles one child's `didStartAdvertising`, emitting the aggregate once the last child
-    /// owing it has reported. Must be called on ``queue``.
+    /// owing it has reported. A completion from a child that is no longer powered on is
+    /// swallowed, for the same reason as in ``completeAdd(_:error:from:)``. Must be called on
+    /// ``queue``.
     private func completeAdvertising(error: NSError?, from index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard isOnline(index) else { return }
         guard let position = _pendingAdvertisements.firstIndex(where: { $0.owing.contains(index) }) else {
             if _swallowedAdvertisements[index] > 0 {
                 _swallowedAdvertisements[index] -= 1

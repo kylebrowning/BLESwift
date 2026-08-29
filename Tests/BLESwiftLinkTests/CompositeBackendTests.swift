@@ -31,6 +31,7 @@ struct CompositeBackendTests {
     }
 
     private static let heartRate = ServiceIdentifier(uuid: "180D")
+    private static let battery = ServiceIdentifier(uuid: "180F")
     private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: heartRate)
 
     private static var service: GATTService {
@@ -860,6 +861,176 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { second.respondCalls.count } == 1)
         #expect(await onQueue(queue) { first.removeAllServicesCallCount } == 1)
         #expect(await onQueue(queue) { second.removeAllServicesCallCount } == 1)
+    }
+
+    @Test("A child that abandons what it had in flight still hears its own completions again")
+    func aChildThatAbandonsInFlightWorkIsNotOverCounted() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.abandon")
+        let virtual = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let real = AbandoningPeripheralManager(queue: queue, state: .poweredOn)
+        let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
+
+        let added = Mutex<[ServiceIdentifier]>([])
+        let started = Mutex<Int>(0)
+        await onQueue(queue) {
+            // The radio drops out from inside the fan-out — after the composite has issued the
+            // add to it, and before either completion could be delivered. Both are then
+            // abandoned, which is what a real `CBPeripheralManager` leaving `.poweredOn` does
+            // and what `FakePeripheralManager` (which always answers) cannot model.
+            real.onAdd = { _ in real.simulateStateChange(.poweredOff) }
+            composite.eventHandler = { event in
+                switch event {
+                case .didAddService(let identifier, _): added.withLock { $0.append(identifier) }
+                case .didStartAdvertising: started.withLock { $0 += 1 }
+                default: break
+                }
+            }
+        }
+
+        await onQueue(queue) {
+            composite.add(Self.service)
+            composite.startAdvertising(PeripheralAdvertisement(localName: "Composite", serviceUUIDs: [Self.heartRate]))
+        }
+        await waitFor { added.withLock { $0.count } == 1 && started.withLock { $0 } == 1 }
+        _ = await onQueue(queue) { true }
+        _ = await onQueue(queue) { true }
+        // Settled by the power-down over the powered-on child alone, exactly once each.
+        #expect(added.withLock { $0 } == [Self.heartRate])
+        #expect(started.withLock { $0 } == 1)
+
+        // Back on — and this time the radio stays on, so the catch-up completes. That
+        // republish is the composite's own business, so its two completions are swallowed and
+        // the host hears nothing more.
+        await onQueue(queue) { real.onAdd = nil }
+        real.simulateStateChange(.poweredOn)
+        await waitFor { await self.onQueue(queue) { real.addedServices.count == 2 && real.startAdvertisingCallCount == 2 } }
+        _ = await onQueue(queue) { true }
+        #expect(added.withLock { $0 } == [Self.heartRate])
+        #expect(started.withLock { $0 } == 1)
+
+        // And now the child publishes and advertises for itself — completions this composite
+        // never issued, which it must forward. Counting the abandoned pair at power-down time
+        // left both counters a full operation too high, and these were eaten in their place.
+        real.publishOnItsOwn(Self.battery)
+        real.advertiseOnItsOwn()
+        await waitFor { added.withLock { $0.count } == 2 && started.withLock { $0 } == 2 }
+        #expect(added.withLock { $0 } == [Self.heartRate, Self.battery])
+        #expect(started.withLock { $0 } == 2)
+    }
+}
+
+/// A peripheral-role child that answers only while its radio is on: whatever it had in flight
+/// when it left `.poweredOn` is *abandoned*, and no completion for it ever arrives.
+///
+/// `FakePeripheralManager` always answers an `add(_:)`, which is precisely the case
+/// ``CompositePeripheralManager``'s swallow counters must not be sized for — so the one child
+/// that models a `CBPeripheralManager` losing its radio mid-operation lives here.
+private final class AbandoningPeripheralManager: PeripheralManaging, Sendable {
+
+    /// The queue every method and every event delivery is confined to.
+    let queue: DispatchSerialQueue
+
+    nonisolated(unsafe) private var _radioState: CentralState
+    nonisolated(unsafe) private var _eventHandler: ((PeripheralHostEvent) -> Void)?
+    nonisolated(unsafe) private var _addedServices: [ServiceIdentifier] = []
+    nonisolated(unsafe) private var _startAdvertisingCallCount = 0
+    nonisolated(unsafe) private var _onAdd: ((GATTService) -> Void)?
+
+    init(queue: DispatchSerialQueue, state: CentralState) {
+        self.queue = queue
+        self._radioState = state
+    }
+
+    static var bluetoothAuthorization: BluetoothAuthorization { .allowedAlways }
+
+    var eventHandler: ((PeripheralHostEvent) -> Void)? {
+        get { dispatchPrecondition(condition: .onQueue(queue)); return _eventHandler }
+        set { dispatchPrecondition(condition: .onQueue(queue)); _eventHandler = newValue }
+    }
+
+    var radioState: CentralState {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _radioState
+    }
+
+    var isAdvertising: Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _startAdvertisingCallCount > 0 && _radioState == .poweredOn
+    }
+
+    /// The services this child was asked to publish, in order.
+    var addedServices: [ServiceIdentifier] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _addedServices
+    }
+
+    /// How many times this child was asked to advertise.
+    var startAdvertisingCallCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _startAdvertisingCallCount
+    }
+
+    /// Called synchronously from ``add(_:)``, before its completion is scheduled — the hook a
+    /// test uses to make the radio go away mid-operation.
+    var onAdd: ((GATTService) -> Void)? {
+        get { dispatchPrecondition(condition: .onQueue(queue)); return _onAdd }
+        set { dispatchPrecondition(condition: .onQueue(queue)); _onAdd = newValue }
+    }
+
+    func add(_ service: GATTService) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _addedServices.append(service.identifier)
+        _onAdd?(service)
+        queue.async { [self] in
+            guard _radioState == .poweredOn else { return }
+            _eventHandler?(.didAddService(service.identifier, error: nil))
+        }
+    }
+
+    func startAdvertising(_ advertisement: PeripheralAdvertisement) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _startAdvertisingCallCount += 1
+        queue.async { [self] in
+            guard _radioState == .poweredOn else { return }
+            _eventHandler?(.didStartAdvertising(error: nil))
+        }
+    }
+
+    func stopAdvertising() {
+        dispatchPrecondition(condition: .onQueue(queue))
+    }
+
+    func removeAllHostedServices() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _addedServices.removeAll()
+    }
+
+    func respond(to token: RequestToken, value: Data?, error: ATTError?) {
+        dispatchPrecondition(condition: .onQueue(queue))
+    }
+
+    func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return true
+    }
+
+    /// Simulates the radio changing state, delivering `didUpdateState` on ``queue``.
+    func simulateStateChange(_ newState: CentralState) {
+        queue.async { [self] in
+            _radioState = newState
+            _eventHandler?(.didUpdateState(newState))
+        }
+    }
+
+    /// Simulates the child publishing a service of its own — a completion the composite never
+    /// issued and therefore has to forward.
+    func publishOnItsOwn(_ identifier: ServiceIdentifier) {
+        queue.async { [self] in _eventHandler?(.didAddService(identifier, error: nil)) }
+    }
+
+    /// Simulates the child starting an advertisement of its own, for the same reason.
+    func advertiseOnItsOwn() {
+        queue.async { [self] in _eventHandler?(.didStartAdvertising(error: nil)) }
     }
 }
 #endif
