@@ -143,6 +143,65 @@ struct CentralSessionLimitsTests {
         await provider.stop()
     }
 
+    @Test("An unroutable withoutResponse write is still acknowledged, reopening the client's slot")
+    func unroutableWriteWithoutResponseIsAcknowledged() async throws {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        // A raw client, so the write can name a peripheral the session never connected — the
+        // one thing `Peripheral`'s own writer cannot produce.
+        let connection = LinkConnection.connect(
+            to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "centralsession.unroutablewrite")
+        )
+        let accepted = Mutex(false)
+        let acknowledged = Mutex<[UInt64]>([])
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(
+                protocolVersion: LinkProtocol.version,
+                role: .central,
+                clientName: "unroutable"
+            )))
+        }
+        connection.onMessage = { message in
+            switch message {
+            case .serverHello(let hello) where hello.accepted:
+                accepted.withLock { $0 = true }
+            case .centralEvent(.writeWithoutResponseAccepted(_, let sequence)):
+                acknowledged.withLock { $0.append(sequence) }
+            default:
+                break
+            }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { accepted.withLock { $0 } }
+
+        // Nothing was ever connected, so there is no remote to route either of these to.
+        for sequence in UInt64(0)..<3 {
+            connection.send(.centralRequest(.writeValue(
+                peripheral: Self.deviceID,
+                characteristic: WireCharacteristicRef(Self.control),
+                value: Data([0x01]),
+                type: .withoutResponse,
+                sequence: sequence
+            )))
+        }
+
+        // Every one of them comes back acknowledged: a dropped write must not cost the client
+        // the window slot it is holding for it.
+        await waitFor(timeout: .seconds(10)) { acknowledged.withLock { $0.count } == 3 }
+        #expect(acknowledged.withLock { $0 } == [0, 1, 2])
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+        await provider.stop()
+    }
+
     /// A provider serving one `FakePeripheral` over a `FakeCentral`, a linked `Central`
     /// already connected to it, and one open L2CAP channel.
     ///

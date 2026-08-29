@@ -303,7 +303,18 @@ final class CentralSession: Sendable {
 
         case .writeValue(let peripheral, let characteristic, let value, let type, let sequence):
             let identifier = try characteristic.identifier
-            guard let remote = self.remote(peripheral, for: "writeValue") else { return }
+            guard let remote = self.remote(peripheral, for: "writeValue") else {
+                // Dropped, but still acknowledged: a `.withoutResponse` write occupies a slot
+                // in the client's window until `writeWithoutResponseAccepted` reopens it, so
+                // silence here would cost the client that slot for the life of the session —
+                // and enough of them would wedge its writer for good. A `.withResponse` write
+                // has no window to reopen; its caller is answered by `didWriteValue`, or by
+                // the disconnect that follows a peripheral this session cannot reach.
+                if type == .withoutResponse {
+                    send(.writeWithoutResponseAccepted(peripheral: peripheral, sequence: sequence))
+                }
+                return
+            }
             guard type == .withoutResponse else {
                 // A `.withResponse` write is acknowledged by `didWriteValue`, so it needs no
                 // flow control of its own.
