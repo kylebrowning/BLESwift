@@ -50,6 +50,9 @@ final class HostSession: Sendable {
     /// Receives one line per notable session event.
     private let log: (@Sendable (String) -> Void)?
 
+    /// How this session names itself in the provider's log.
+    let label: String
+
     /// The backend this session drives. `nonisolated(unsafe)` because
     /// `any PeripheralManaging` is not `Sendable`; it is immutable and only ever touched on
     /// ``queue``.
@@ -69,16 +72,19 @@ final class HostSession: Sendable {
     ///   - backend: The peripheral-manager backend serving this connection. Must be confined
     ///     to `queue`.
     ///   - queue: This session's own serial queue.
+    ///   - ordinal: This session's number, for log lines.
     ///   - log: Receives one line per notable session event.
     init(
         connection: LinkConnection,
         backend: any PeripheralManaging,
         queue: DispatchSerialQueue,
+        ordinal: Int,
         log: (@Sendable (String) -> Void)?
     ) {
         self.connection = connection
         self.backend = backend
         self.queue = queue
+        self.label = "host session \(ordinal)"
         self.log = log
         queue.async { [self] in
             guard !isClosed else { return }
@@ -89,6 +95,7 @@ final class HostSession: Sendable {
                 self.queue.async { self.perform(request) }
             }
             send(.didUpdateState(WireCentralState(self.backend.radioState)))
+            log?("opened \(label) over a \(self.backend is CompositePeripheralManager ? "composite" : "virtual") backend")
         }
     }
 
@@ -104,9 +111,15 @@ final class HostSession: Sendable {
             backend.stopAdvertising()
             backend.removeAllHostedServices()
             backend.eventHandler = nil
+            // Dropped, not acknowledged: the connection is being cancelled, so no
+            // `updateValueDelivered` could reach the client anyway — and it does not need one.
+            // A client whose link drops empties its own window and releases a blocked host on
+            // the next reconnect, so both ends agree without a final exchange.
+            let discarded = pendingUpdates.count
             pendingUpdates.removeAll()
             connection.onMessage = nil
             connection.cancel()
+            log?("closed \(label), discarding \(discarded) queued update(s)")
         }
     }
 
@@ -166,6 +179,7 @@ final class HostSession: Sendable {
         while let next = pendingUpdates.first {
             guard backend.updateValue(next.value, for: next.characteristic, onSubscribed: next.centrals) else {
                 // The transmit queue is full; `readyToUpdateSubscribers` resumes the drain.
+                log?("\(label): updateValue parked, waiting for readyToUpdateSubscribers (\(pendingUpdates.count) queued)")
                 return
             }
             pendingUpdates.removeFirst()
@@ -223,8 +237,13 @@ final class HostSession: Sendable {
 }
 
 /// One live client session, whichever role it serves — the provider's session table holds
-/// both kinds and needs nothing from them but the ability to tear one down.
+/// both kinds and needs nothing from them but the ability to name one and tear it down.
 protocol ProviderSession: Sendable {
+
+    /// How this session names itself in the provider's log — its role and ordinal, as in
+    /// `"central session 3"`.
+    var label: String { get }
+
     /// Tears the session down and drops its client's link. Idempotent, and safe to call from
     /// any thread.
     func close()

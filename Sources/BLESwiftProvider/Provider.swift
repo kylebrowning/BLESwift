@@ -237,6 +237,7 @@ public actor Provider {
                 connection: connection,
                 backend: makeCentralBackend(queue: queue),
                 queue: queue,
+                ordinal: sessionOrdinal,
                 log: configuration.log
             )
             configuration.log?("opened central session \(sessionOrdinal) for \(hello.clientName)")
@@ -247,6 +248,7 @@ public actor Provider {
                 connection: connection,
                 backend: makePeripheralBackend(queue: queue, clientName: hello.clientName),
                 queue: queue,
+                ordinal: sessionOrdinal,
                 log: configuration.log
             )
             configuration.log?("opened host session \(sessionOrdinal) for \(hello.clientName)")
@@ -260,7 +262,7 @@ public actor Provider {
         pending.withLock { $0.release(connection) }
         guard let session = sessions.removeValue(forKey: key) else { return }
         session.close()
-        configuration.log?("closed a session")
+        configuration.log?("closed \(session.label)")
     }
 
     /// Builds the backend for one central-role session, on that session's own queue.

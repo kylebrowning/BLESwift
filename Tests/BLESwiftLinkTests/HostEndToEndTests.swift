@@ -9,6 +9,7 @@ import BLESwiftCore
 import BLESwiftLink
 import BLESwiftProvider
 import BLESwiftSimulatorLink
+import BLESwiftTestSupport
 import Dispatch
 import Foundation
 import Synchronization
@@ -253,6 +254,87 @@ struct HostEndToEndTests {
         centralLink.shutdown()
         await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
         await provider.stop()
+    }
+    /// A provider whose peripheral-role backend is composed with a fake that always reports a
+    /// full transmit queue, so the provider parks every push and never acknowledges one — the
+    /// only way to hold the client's window open long enough to drop the link under it.
+    private func makeStallingProvider(port: UInt16) async throws -> Provider {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: port)
+        configuration.passthrough = true
+        configuration.peripheralManagerBackendFactory = { queue in
+            let fake = FakePeripheralManager(queue: queue, state: .poweredOn)
+            // Called inside the provider's `queue.sync`, so this is already on `queue`.
+            fake.scriptedUpdateValueReturns = Array(repeating: false, count: 500)
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        return provider
+    }
+
+    @Test("A provider drop empties the notification window, and the reconnect releases a blocked host")
+    func windowSurvivesProviderDrop() async throws {
+        let first = try await makeStallingProvider(port: 0)
+        let port = await first.port
+        let queue = DispatchSerialQueue(label: "host.e2e.drop")
+        let link = LinkPeripheralManager(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
+            queue: queue,
+            clientName: "drop-e2e",
+            retryInterval: .milliseconds(50)
+        )
+
+        let states = Mutex<[CentralState]>([])
+        let readyCount = Mutex<Int>(0)
+        await Self.onQueue(queue) {
+            link.eventHandler = { event in
+                switch event {
+                case .didUpdateState(let state): states.withLock { $0.append(state) }
+                case .readyToUpdateSubscribers: readyCount.withLock { $0 += 1 }
+                default: break
+                }
+            }
+        }
+        await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .poweredOn } }
+        #expect(states.withLock { $0.last } == .poweredOn)
+
+        // The provider parks the very first push, so nothing is ever acknowledged and the
+        // window fills for real.
+        let results = await Self.onQueue(queue) {
+            (0..<33).map { _ in link.updateValue(Data([0, 99]), for: Self.measurement, onSubscribed: nil) }
+        }
+        #expect(results.prefix(LinkFlowControl.updateValueWindow).allSatisfy { $0 })
+        #expect(results[LinkFlowControl.updateValueWindow] == false)
+        #expect(readyCount.withLock { $0 } == 0)
+
+        // ---- Drop the provider with the window full ----
+        await first.stop()
+        await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .unsupported } }
+        #expect(states.withLock { $0.last } == .unsupported)
+        // The drop alone must not release the host: the radio it would push at is gone.
+        #expect(readyCount.withLock { $0 } == 0)
+
+        // ---- A new provider on the same port; the reconnect releases the blocked host ----
+        let second = try await Self.rebind(port: port) { try await self.makeStallingProvider(port: port) }
+        await waitFor(timeout: .seconds(10)) { states.withLock { $0.last == .poweredOn } }
+        #expect(states.withLock { $0.last } == .poweredOn)
+        await waitFor(timeout: .seconds(5)) { readyCount.withLock { $0 } == 1 }
+        #expect(readyCount.withLock { $0 } == 1)
+        #expect(await Self.onQueue(queue) { link.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil) })
+
+        link.shutdown()
+        await waitFor(timeout: .seconds(5)) { await second.sessionCount == 0 }
+        await second.stop()
+    }
+
+    /// Runs `make` until the port the previous provider released can be bound again — a
+    /// just-closed listener may hold it for a moment.
+    private static func rebind(port: UInt16, _ make: () async throws -> Provider) async throws -> Provider {
+        for _ in 0..<20 {
+            do { return try await make() } catch { try? await Task.sleep(for: .milliseconds(100)) }
+        }
+        return try await make()
     }
 }
 #endif

@@ -35,7 +35,10 @@ import Foundation
 /// ``BLESwiftLink/LinkFlowControl/updateValueWindow`` pushes are in flight unacknowledged,
 /// exactly as a full CoreBluetooth transmit queue does; the provider acknowledges each push
 /// as its own backend accepts it, and the acknowledgement that reopens the window is
-/// reported as `readyToUpdateSubscribers`.
+/// reported as `readyToUpdateSubscribers`. A dropped link empties the window — the
+/// acknowledgements died with the session that owed them — and a host that was blocked at
+/// the drop is released by one `readyToUpdateSubscribers` on the next reconnect, never by
+/// the drop itself.
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``LinkCentral``: every stored property is `nonisolated(unsafe)`, safe only because every
@@ -61,6 +64,11 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// How many pushes have been sent but not yet acknowledged — the occupied part of the
     /// window.
     nonisolated(unsafe) private var _outstandingUpdates = 0
+
+    /// Whether the window was full when the link dropped, so the owning `PeripheralHost` is
+    /// waiting on a `readyToUpdateSubscribers` that the dead session's acknowledgements can
+    /// never produce. Cleared by the reconnect that answers it.
+    nonisolated(unsafe) private var _wasBlockedAtDrop = false
 
     /// Creates a peripheral manager that drives the provider at `endpoint`, and starts
     /// dialing it immediately. Reconnection is automatic, at `retryInterval`.
@@ -232,9 +240,18 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// Handles the link dropping after having been established: nothing is advertising any
     /// more, whatever centrals had subscribed are gone with the session that owned them, and
     /// the radio state is unknowable again.
+    ///
+    /// The notification window is emptied here: every unacknowledged push belonged to a
+    /// session that no longer exists, so no `updateValueDelivered` can ever arrive for it and
+    /// a surviving count would wedge the window shut. A host that was *blocked* at that
+    /// moment is deliberately **not** released here — it is about to be told the radio is
+    /// `.unsupported`, and a readiness signal against a dead radio would only invite a push
+    /// that goes nowhere. The release is deferred to the reconnect.
     private func handleLinkDropped() {
         dispatchPrecondition(condition: .onQueue(queue))
         _isAdvertising = false
+        if _outstandingUpdates >= LinkFlowControl.updateValueWindow { _wasBlockedAtDrop = true }
+        _outstandingUpdates = 0
         guard _radioState != .unsupported else { return }
         _radioState = .unsupported
         deliver(.didUpdateState(.unsupported))
@@ -262,6 +279,13 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
             // a provider state landing before a handler exists must not suppress the attach.
             _radioState = state.state
             deliver(.didUpdateState(state.state))
+            if _wasBlockedAtDrop {
+                // The provider is back. Its window starts empty, and so does this one, so the
+                // host blocked when the old link died can push again — but only a
+                // `readyToUpdateSubscribers` will tell it so.
+                _wasBlockedAtDrop = false
+                deliver(.readyToUpdateSubscribers)
+            }
 
         case .didStartAdvertising(let error):
             if error == nil { _isAdvertising = true }

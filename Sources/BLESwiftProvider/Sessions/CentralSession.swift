@@ -72,6 +72,9 @@ final class CentralSession: Sendable {
     /// Receives one line per notable session event.
     private let log: (@Sendable (String) -> Void)?
 
+    /// How this session names itself in the provider's log.
+    let label: String
+
     /// The backend this session drives. `nonisolated(unsafe)` because `any CentralManaging`
     /// is not `Sendable`; it is immutable and only ever touched on ``queue``.
     nonisolated(unsafe) private let backend: any CentralManaging
@@ -92,16 +95,19 @@ final class CentralSession: Sendable {
     ///   - connection: The accepted link connection, already started.
     ///   - backend: The central backend serving this connection. Must be confined to `queue`.
     ///   - queue: This session's own serial queue.
+    ///   - ordinal: This session's number, for log lines.
     ///   - log: Receives one line per notable session event.
     init(
         connection: LinkConnection,
         backend: any CentralManaging,
         queue: DispatchSerialQueue,
+        ordinal: Int,
         log: (@Sendable (String) -> Void)?
     ) {
         self.connection = connection
         self.backend = backend
         self.queue = queue
+        self.label = "central session \(ordinal)"
         self.log = log
         queue.async { [self] in
             guard !isClosed else { return }
