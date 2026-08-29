@@ -264,6 +264,14 @@ is broken.
   peripheral the passthrough radio remembers from a previous run of your app. An identifier
   nothing knows fails at connect instead of being omitted here: `didFailToConnect` with an
   `NSError` in the `BLESwiftProvider` domain, code `1`.
+- **Notifications are not flow-controlled towards your client.** The link applies an
+  application-level window to what a hosted `PeripheralHost` pushes — that is what
+  `PeripheralHost/updateValue(_:for:onSubscribed:)` returning `false` and the
+  `readyToUpdateSubscribers` behind it are — but nothing bounds the other direction. A
+  provider delivers every notification for a subscribed characteristic as fast as its own
+  backend produces them, mirroring CoreBluetooth's unbounded delegate delivery, so a client
+  that stops draining its notification stream accumulates them in the transport rather than
+  slowing the peripheral down.
 - **Initial radio state.** A link-backed ``Central`` reports ``CentralState/unsupported`` until
   the provider answers — the same state the Simulator reports today, so an app that waits for
   `.poweredOn` simply waits — and then reports whatever state the provider does. If the provider
