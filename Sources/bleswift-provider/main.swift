@@ -49,8 +49,11 @@ let provider = Provider(configuration: configuration)
 Task {
     do {
         try await provider.start()
+        // The bound port, not the requested one: `--listen host:0` asks the system to pick,
+        // and the line scripts wait on has to name the port they can actually dial.
+        let bound = LinkEndpoint(host: options.endpoint.host, port: await provider.port)
         print(
-            "bleswift-provider listening on \(options.endpoint) "
+            "bleswift-provider listening on \(bound) "
                 + "(passthrough: \(options.passthrough ? "on" : "off"), "
                 + "fixtures: \(configuration.fixtures.count) device(s))"
         )
