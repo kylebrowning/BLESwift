@@ -502,8 +502,17 @@ public actor VirtualRadio {
 
     /// Reads `characteristic` from `offset` on. A characteristic with a static value is
     /// answered from the database; every other read reaches the device's handler. A session
-    /// that is not connected to `device` is refused with `ATTError.invalidHandle`, and an
-    /// `offset` past the end of a static value with `ATTError.invalidOffset`.
+    /// that is not connected to `device` is refused with `ATTError.invalidHandle`, a
+    /// characteristic declaring none of `read`, `notify`, or `indicate` with
+    /// `ATTError.readNotPermitted`, and an `offset` past the end of a static value with
+    /// `ATTError.invalidOffset`.
+    ///
+    /// **The permission check comes before the static short-circuit.** A characteristic the
+    /// fixture gave a value is answered from the database rather than through its handler, so
+    /// a check made only in the handler — which is where ``FixtureDeviceHandler`` makes it —
+    /// would let exactly the write-only characteristics that declare a value be read by any
+    /// connected central. Real hardware refuses that read at the ATT layer, and so does this
+    /// radio, whatever the value behind the handle.
     func read(
         device: UUID,
         characteristic: CharacteristicIdentifier,
@@ -513,6 +522,9 @@ public actor VirtualRadio {
         guard isConnected(session: session, to: device) else { return .failure(.invalidHandle) }
         guard let state = devices[device] else { return .failure(.invalidHandle) }
         guard let definition = definition(of: characteristic, in: state) else { return .failure(.attributeNotFound) }
+        guard definition.properties.contains(.read) || definition.properties.isNotifiable else {
+            return .failure(.readNotPermitted)
+        }
         if let value = definition.value {
             guard offset >= 0, offset <= value.count else { return .failure(.invalidOffset) }
             return .success(Data(value.dropFirst(offset)))

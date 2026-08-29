@@ -744,6 +744,42 @@ struct VirtualRadioTests {
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
     }
 
+    @Test("A static value is refused when its characteristic declares no read or notify")
+    func staticValueHonorsTheReadPermission() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        // Both carry a static value, so both are answered from the database rather than
+        // through the handler — whose `read` fails everything, so an answer proves the
+        // database served it.
+        let published = GATTService(identifier: Self.service, characteristics: [
+            GATTCharacteristic(
+                identifier: Self.control,
+                properties: [.write, .writeWithoutResponse],
+                permissions: [.writeable],
+                value: Data([0x2A])
+            ),
+            GATTCharacteristic(
+                identifier: Self.measurement,
+                properties: [.read],
+                permissions: [.readable],
+                value: Data([0, 0x48])
+            )
+        ])
+        _ = await radio.register(Self.device(identifier: identifier, name: "static", services: [published]))
+        let session = UUID()
+        await radio.attach(session: session, centralSink: { _ in })
+        #expect(await radio.connect(session: session, device: identifier, sink: { _ in }).error == nil)
+
+        // The write-only characteristic has a value the radio could answer with, and must not.
+        let refused = await radio.read(device: identifier, characteristic: Self.control, session: session)
+        #expect(refused == .failure(.readNotPermitted))
+
+        // The readable one on the same device still answers from the database, so the refusal
+        // above was the permission check and not the static path itself.
+        let allowed = await radio.read(device: identifier, characteristic: Self.measurement, session: session)
+        #expect(allowed == .success(Data([0, 0x48])))
+    }
+
     /// The remote `backend` vends for `identifier`, fetched on its own queue.
     private static func remote(
         _ backend: VirtualCentralBackend,

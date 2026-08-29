@@ -168,7 +168,10 @@ extension VirtualDevice {
 extension CharacteristicProperties {
 
     /// Whether these properties allow the peripheral to push the value to a subscriber.
-    fileprivate var isNotifiable: Bool {
+    ///
+    /// Internal rather than `fileprivate`: ``VirtualRadio/read(device:characteristic:offset:session:)``
+    /// applies the same read rule to a static value before it answers from the database.
+    var isNotifiable: Bool {
         contains(.notify) || contains(.indicate)
     }
 }
