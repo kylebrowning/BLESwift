@@ -297,10 +297,13 @@ extension CentralSession {
     /// Cancels a bridge's pump and its outbound write chain, releases anything waiting on its
     /// credit, and closes the transport.
     ///
-    /// The write chain goes with the pump: a write still queued behind another one has a
-    /// transport that is about to close under it, and leaving the tail task alive would keep
-    /// the chain — and the data it captured — around for as long as the write ahead of it
-    /// takes to fail.
+    /// **The write chain is dropped, not drained.** `cancel()` reaches only the *tail* task,
+    /// and even that one keeps going: each link awaits the value of the link ahead of it, an
+    /// await no cancellation interrupts. Every write still in the chain therefore runs, and
+    /// each fails against the transport this closes under it — which is the intended outcome,
+    /// not a leak. The channel is out of ``channels`` before this runs, so nothing new can
+    /// join the chain, and dropping the session's reference to the tail lets the whole chain
+    /// go as those failures unwind it.
     private func tearDown(_ open: OpenChannel) {
         open.pump?.cancel()
         open.pump = nil
