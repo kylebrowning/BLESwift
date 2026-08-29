@@ -11,6 +11,8 @@
 # Usage: Scripts/sim-to-sim-e2e.sh
 #   ADVERTISER_SIM   simulator name for the peripheral  (default "iPhone 17 Pro")
 #   SCANNER_SIM      simulator name for the central     (default "iPhone 17")
+#   ADVERTISER_READY_TIMEOUT
+#                    seconds to wait for the advertiser flow to pass (default 900)
 #
 # The port is fixed at 45541, `LinkEndpoint.default`. Nothing can set
 # `BLESWIFT_LINK` on an app driven by the UI runner, so both simulators dial the
@@ -24,6 +26,10 @@ ADVERTISER_SIM="${ADVERTISER_SIM:-iPhone 17 Pro}"
 SCANNER_SIM="${SCANNER_SIM:-iPhone 17}"
 # `LinkEndpoint.default`, and not overridable — see the header.
 readonly PORT=45541
+# Generous by default: on a cold runner grantiva builds its agent (5-10 minutes by its own
+# log) and a WebDriverAgent runner before the flow's first step ever runs, and that build is
+# paid inside this wait. The CI job's own 25-minute cap is the real backstop.
+ADVERTISER_READY_TIMEOUT="${ADVERTISER_READY_TIMEOUT:-900}"
 BUNDLE_ID="com.bleswift.explorer"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -168,7 +174,14 @@ ADVERTISER_PID=$!
 # grantiva exposes no readiness signal for a keep-alive session, so poll the
 # report it writes when the flow finishes.
 ADVERTISER_READY=0
-for _ in $(seq 1 120); do
+ADVERTISER_WAIT_START=$SECONDS
+for _ in $(seq 1 "$ADVERTISER_READY_TIMEOUT"); do
+    ELAPSED=$((SECONDS - ADVERTISER_WAIT_START))
+    # A heartbeat every ten seconds: without it a cold runner looks hung for minutes while
+    # grantiva is quietly building its agent.
+    if (( ELAPSED > 0 && ELAPSED % 10 == 0 )); then
+        echo "waiting for the advertiser flow: ${ELAPSED}s of ${ADVERTISER_READY_TIMEOUT}s"
+    fi
     if [[ -f "$ADVERTISER_REPORT/report.json" ]]; then
         # report.json is rewritten as the run progresses (see its `updateSeq`),
         # so a file on disk is not yet a verdict: keep polling while the status
@@ -198,7 +211,7 @@ except Exception:
     kill -0 "$ADVERTISER_PID" 2>/dev/null || { echo "advertiser session exited before writing a report:" >&2; cat "$ADVERTISER_LOG" >&2; exit 1; }
     sleep 1
 done
-[[ "$ADVERTISER_READY" == 1 ]] || { echo "advertiser flow did not pass within 120s:" >&2; cat "$ADVERTISER_LOG" >&2; exit 1; }
+[[ "$ADVERTISER_READY" == 1 ]] || { echo "advertiser flow did not pass within ${ADVERTISER_READY_TIMEOUT}s:" >&2; cat "$ADVERTISER_LOG" >&2; exit 1; }
 echo "advertiser flow passed; peripheral is live"
 
 # --- Scanner ----------------------------------------------------------------

@@ -31,6 +31,7 @@ Environment overrides:
 | --- | --- | --- |
 | `ADVERTISER_SIM` | `iPhone 17 Pro` | Simulator that hosts the peripheral |
 | `SCANNER_SIM` | `iPhone 17` | Simulator that scans |
+| `ADVERTISER_READY_TIMEOUT` | `900` | Seconds to wait for the advertiser flow to pass |
 
 **The port is fixed at 45541** and the script has no knob for it. The Explorer resolves its
 endpoint from `BLESWIFT_LINK` or `LinkEndpoint.default` (`127.0.0.1:45541`), and the runner
@@ -47,7 +48,10 @@ The script:
 3. Builds `BLESwiftExplorer` **once** for the simulator into `.build/e2e-dd`, and installs the
    same `.app` on both simulators via `grantiva run --app-file`.
 4. Runs the advertiser flow in the background with `--keep-alive`, polling its
-   `.build/e2e-report/advertiser/report.json` for `"status": "passed"` (≤ 120 s).
+   `.build/e2e-report/advertiser/report.json` for `"status": "passed"`
+   (≤ `ADVERTISER_READY_TIMEOUT`, default 900 s, logging elapsed time every 10 s). The bound
+   is that wide because a cold runner pays grantiva's agent build inside it — see friction
+   item #11.
 5. Runs the scanner flow in the foreground.
 6. Exits with the scanner's status; the `trap` reaps the provider, the keep-alive grantiva
    process, and the runner processes it strands.
@@ -250,3 +254,16 @@ for someone whose selector is provably correct.
 - Failure screenshots go to `.grantiva/captures/` in the working directory even when
   `--report-dir` is given; only the copies inside the report dir are useful to CI, and the
   stray `.grantiva/` directory has to be gitignored.
+
+### 11. No warm-up step: every cold run pays the 5-10 minute agent build
+
+The first `grantiva run` on a machine builds `GrantivaAgent` ("This may take 5-10 minutes" in
+its own output) and then a WebDriverAgent runner (~65 s), all *inside* the first flow's
+execution — nothing has run a step yet, and no progress reaches the caller. On CI that is the
+whole cost of the job, paid again on every run, and it was what first blew this script's
+advertiser-readiness bound.
+
+*Wish:* a warm-up command that does only that work and exits (`grantiva runner install
+--prebuild`, say), so CI can run it as its own step and see it fail as its own step. And a
+documented cache location for the built agent and runner, so `actions/cache` can restore them
+between runs instead of rebuilding from scratch each time.
