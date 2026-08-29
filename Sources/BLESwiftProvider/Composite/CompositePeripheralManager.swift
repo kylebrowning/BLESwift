@@ -33,7 +33,8 @@ import Foundation
 /// unauthorized, or resetting — can neither answer a completion nor accept a push, so the
 /// composite never waits on one. Such a child is skipped by ``add(_:)`` and
 /// ``startAdvertising(_:)`` (counted as immediately complete with no error: the powered-on
-/// children, the virtual radio among them, carry the service), and skipped by
+/// children, the virtual radio among them, carry the service — unless there are none, in which
+/// case both complete with ``noPoweredOnBackendError``), and skipped by
 /// ``updateValue(_:for:onSubscribed:)``, whose window never closes on it. When a child drops
 /// out of `poweredOn` the composite settles whatever it still owed and discards its FIFO;
 /// when a child comes back the composite republishes its current services and restarts
@@ -121,6 +122,23 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// `readyToUpdateSubscribers` — set by the `false` that closed it, cleared by the single
     /// event that reopens it.
     nonisolated(unsafe) private var _windowClosed = false
+
+    /// What ``add(_:)`` and ``startAdvertising(_:)`` complete with when *no* child is powered
+    /// on: nothing was published and nothing is advertising, and the caller has to be told so.
+    ///
+    /// A skipped child is normally harmless — the powered-on children, the virtual radio among
+    /// them, carry the operation, and the skipped one is caught up when it powers on. With no
+    /// powered-on child at all there is nobody to carry it, and reporting success left a
+    /// `PeripheralHost` believing it had published a database and started an advertisement that
+    /// reached no radio whatsoever. CoreBluetooth fails both outright while its manager is off,
+    /// and so does this composite.
+    public static var noPoweredOnBackendError: NSError {
+        NSError(
+            domain: "BLESwiftProvider",
+            code: 9,
+            userInfo: [NSLocalizedDescriptionKey: "no powered-on backend"]
+        )
+    }
 
     /// How many pushes one child may fall behind by before the composite closes its window.
     /// The same window the link's own client honors, so a composite behind a link cannot
@@ -473,6 +491,10 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// once every one of them has reported, carrying the first non-`nil` error; a child that
     /// is not powered on is skipped — it could never report — and picks the advertisement up
     /// when it powers on.
+    ///
+    /// With *no* powered-on child the completion carries ``noPoweredOnBackendError``: nothing
+    /// is advertising, so reporting success would be a lie. The advertisement is still
+    /// remembered, and the first child to power on starts it.
     public func startAdvertising(_ advertisement: PeripheralAdvertisement) {
         dispatchPrecondition(condition: .onQueue(queue))
         _advertisement = advertisement
@@ -483,7 +505,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         guard !targets.isEmpty else {
             queue.async { [self] in
                 dispatchPrecondition(condition: .onQueue(queue))
-                _eventHandler?(.didStartAdvertising(error: nil))
+                _eventHandler?(.didStartAdvertising(error: Self.noPoweredOnBackendError))
             }
             return
         }
@@ -502,6 +524,10 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// every one of them has reported, carrying the first non-`nil` error; a child that is not
     /// powered on is skipped — it could never report — and is caught up with the composite's
     /// services when it powers on.
+    ///
+    /// With *no* powered-on child the completion carries ``noPoweredOnBackendError``: the
+    /// service reached no radio. It is still remembered, and the first child to power on
+    /// publishes it.
     public func add(_ service: GATTService) {
         dispatchPrecondition(condition: .onQueue(queue))
         _services.removeAll { $0.identifier == service.identifier }
@@ -514,7 +540,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
             let identifier = service.identifier
             queue.async { [self] in
                 dispatchPrecondition(condition: .onQueue(queue))
-                _eventHandler?(.didAddService(identifier, error: nil))
+                _eventHandler?(.didAddService(identifier, error: Self.noPoweredOnBackendError))
             }
             return
         }

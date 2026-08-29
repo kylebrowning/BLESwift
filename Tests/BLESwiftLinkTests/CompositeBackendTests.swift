@@ -700,6 +700,52 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { real.startAdvertisingCallCount } == 0)
     }
 
+    @Test("With no powered-on child, add and startAdvertising complete with an error")
+    func addAndAdvertiseFailWithNoOnlineChild() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.allPoweredOff")
+        let first = FakePeripheralManager(queue: queue, state: .poweredOff)
+        let second = FakePeripheralManager(queue: queue, state: .unauthorized)
+        let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
+
+        let added = Mutex<[NSError?]>([])
+        let started = Mutex<[NSError?]>([])
+        await onQueue(queue) {
+            composite.eventHandler = { event in
+                switch event {
+                case .didAddService(_, let error): added.withLock { $0.append(error) }
+                case .didStartAdvertising(let error): started.withLock { $0.append(error) }
+                default: break
+                }
+            }
+        }
+
+        await onQueue(queue) {
+            composite.add(Self.service)
+            composite.startAdvertising(PeripheralAdvertisement(localName: "Composite", serviceUUIDs: [Self.heartRate]))
+        }
+        await waitFor { added.withLock { !$0.isEmpty } && started.withLock { !$0.isEmpty } }
+        _ = await onQueue(queue) { true }
+
+        // Nothing carried either operation, so neither may be reported as having succeeded.
+        let expected = CompositePeripheralManager.noPoweredOnBackendError
+        #expect(added.withLock { $0.count } == 1)
+        #expect(added.withLock { $0.first ?? nil } == expected)
+        #expect(started.withLock { $0.count } == 1)
+        #expect(started.withLock { $0.first ?? nil } == expected)
+        #expect(expected.domain == "BLESwiftProvider")
+        #expect(expected.code == 9)
+        #expect(expected.localizedDescription == "no powered-on backend")
+        #expect(await onQueue(queue) { !composite.isAdvertising })
+
+        // Both are still remembered: the first child to power on publishes and advertises.
+        first.simulateStateChange(.poweredOn)
+        await waitFor { await self.onQueue(queue) { first.startAdvertisingCallCount } == 1 }
+        #expect(await onQueue(queue) { first.addedServices.count } == 1)
+        // The catch-up is the composite's business, not the host's: no second completion.
+        #expect(added.withLock { $0.count } == 1)
+        #expect(started.withLock { $0.count } == 1)
+    }
+
     @Test("A child that is not powered on never fills a FIFO, so the window never latches")
     func aPoweredOffChildNeverClosesTheWindow() async {
         let queue = DispatchSerialQueue(label: "CompositeBackendTests.windowPoweredOff")
