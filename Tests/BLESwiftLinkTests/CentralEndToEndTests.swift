@@ -199,6 +199,46 @@ struct CentralEndToEndTests {
         await provider.stop()
     }
 
+    @Test("A hello arriving after stop() opens no session")
+    func helloAfterStop() async throws {
+        let provider = try await makeProvider()
+        let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+        let connection = LinkConnection.connect(
+            to: endpoint,
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "e2e.afterstop")
+        )
+        let ready = Mutex(false)
+        let answer = Mutex<ServerHello?>(nil)
+        connection.onStateChange = { state in
+            guard case .ready = state else { return }
+            ready.withLock { $0 = true }
+        }
+        connection.onMessage = { message in
+            guard case .serverHello(let hello) = message else { return }
+            answer.withLock { $0 = hello }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(2)) { ready.withLock { $0 } }
+        #expect(ready.withLock { $0 })
+
+        // The provider is torn down with the connection accepted but not yet handshaken; the
+        // hello that follows must not be answered with a session.
+        await provider.stop()
+        connection.send(.clientHello(ClientHello(
+            protocolVersion: LinkProtocol.version,
+            role: .central,
+            clientName: "after-stop"
+        )))
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(await provider.sessionCount == 0)
+        #expect(answer.withLock { $0?.accepted } != true)
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+    }
+
     /// The name on the first peripheral `central` sights, or `nil` if the scan ends first.
     private static func firstSighting(of central: Central) async -> String? {
         do {

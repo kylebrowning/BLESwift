@@ -200,12 +200,22 @@ public actor Provider {
     ///   entirely before the claim (which then fails) or entirely after the session exists
     ///   (which it then closes).
     private func handle(_ message: LinkMessage, from connection: LinkConnection) {
+        // A connection accepted while — or after — `stop()` ran must never open a session:
+        // `stop()` drains the pending table, so an acceptance racing it would otherwise leave
+        // a live session on a provider that is no longer listening.
+        guard listener != nil else {
+            connection.cancel()
+            return
+        }
         let key = ObjectIdentifier(connection)
-        guard pending.withLock({ $0.claim(connection) }) else {
+        guard pending.withLock({ $0.isClaimable(connection) }) else {
             // Either the session installed by a completed handshake now owns this
             // connection's messages, or the connection has already terminated.
             return
         }
+        // Every rejection below leaves the entry in `pending`, so the connection stays retained
+        // until its terminal state releases it — long enough for the rejection to reach the
+        // socket, which a claim-then-cancel would have raced.
         guard case .clientHello(let hello) = message else {
             configuration.log?("rejecting a connection whose first message was not a client hello")
             connection.cancel()
@@ -223,6 +233,9 @@ public actor Provider {
             connection.cancel()
             return
         }
+        // Only an accepted handshake takes the connection out of the pending table: from here
+        // on its session owns it.
+        guard pending.withLock({ $0.claim(connection) }) else { return }
         connection.send(.serverHello(ServerHello(
             protocolVersion: LinkProtocol.version,
             accepted: true,
@@ -315,14 +328,23 @@ struct PendingConnections {
         entries[ObjectIdentifier(connection)] = Entry(connection: connection)
     }
 
-    /// Claims `connection` for a handshake, removing it from the table.
+    /// Whether `connection` is still pending and has not terminated — so a hello that lost the
+    /// race to its own connection's teardown is ignored rather than resurrecting it.
     ///
-    /// - Returns: `true` only if the connection was still pending and had not terminated —
-    ///   so a hello that lost the race to its own connection's teardown is ignored rather
-    ///   than resurrecting it.
+    /// Non-mutating, so a handshake that is about to be *rejected* can be recognized without
+    /// releasing the connection the rejection still has to be written to.
+    func isClaimable(_ connection: LinkConnection) -> Bool {
+        guard let entry = entries[ObjectIdentifier(connection)] else { return false }
+        return !entry.isTerminated
+    }
+
+    /// Claims `connection` for a completed handshake, removing it from the table.
+    ///
+    /// - Returns: `true` only if the connection was still pending and had not terminated, as
+    ///   ``isClaimable(_:)`` reports.
     mutating func claim(_ connection: LinkConnection) -> Bool {
         let key = ObjectIdentifier(connection)
-        guard let entry = entries[key], !entry.isTerminated else { return false }
+        guard isClaimable(connection) else { return false }
         entries.removeValue(forKey: key)
         return true
     }
