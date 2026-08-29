@@ -75,21 +75,17 @@ struct LinkClientSessionTests {
 
     @Test("Retries until a provider appears")
     func retries() async throws {
-        // A port the system just handed out and released, rather than a fixed number another
-        // process — or another run of this suite — could be sitting on. Releasing it does mean
-        // something else can take it before this test binds it, so each attempt starts over
-        // with a fresh one.
+        // A port below the ephemeral range, so no parallel test's `port: 0` listener can be
+        // handed it and answer the dial that is supposed to be refused. An unrelated process
+        // taking it between the probe and the bind is all that is left, hence the attempts.
         for _ in 0..<5 {
-            let port = try await Self.freePort()
+            let port = try closedPort()
             let queue = DispatchSerialQueue(label: "client")
             let session = LinkClientSession(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), role: .central, clientName: "unit", queue: queue, retryInterval: .milliseconds(50))
             session.start()
             try await Task.sleep(for: .milliseconds(200))
-            guard !session.isConnected else {
-                // Something else answered on that port; it was never ours to test with.
-                session.stop()
-                continue
-            }
+            // Nothing is listening on that port, so every dial so far must have been refused.
+            #expect(!session.isConnected)
             guard let listener = try? LinkListener(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), codec: .json, queue: DispatchQueue(label: "srv")) else {
                 session.stop()
                 continue
@@ -120,7 +116,9 @@ struct LinkClientSessionTests {
 
     @Test("A session retrying against a closed port releases every connection it creates")
     func retryingReleasesItsConnections() async throws {
-        let port = try await Self.freePort()
+        // Below the ephemeral range: the dials must keep being refused, which they would not
+        // be if a parallel test were handed this port and bound a listener on it.
+        let port = try closedPort()
         let queue = DispatchSerialQueue(label: "client")
         let session = LinkClientSession(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
@@ -143,20 +141,6 @@ struct LinkClientSessionTests {
         try await Task.sleep(for: .milliseconds(300))
         let alive = observed.filter { $0.connection != nil }.count
         #expect(alive == 0, "\(alive) of \(observed.count) connections still alive")
-    }
-
-    /// A loopback port nothing is bound to: taken by a listener on port 0, read back, and
-    /// released again.
-    private static func freePort() async throws -> UInt16 {
-        let listener = try LinkListener(
-            endpoint: LinkEndpoint(host: "127.0.0.1", port: 0),
-            codec: .json,
-            queue: DispatchQueue(label: "freeport")
-        )
-        try await listener.start()
-        let port = listener.port
-        listener.cancel()
-        return port
     }
 
     @Test("Reconnects after the provider drops, reporting disconnect first")

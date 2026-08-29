@@ -380,8 +380,10 @@ struct HostEndToEndTests {
 
     @Test("A window filled before the first provider connection is cleared by that connection")
     func windowFilledBeforeFirstConnectionClearsOnConnect() async throws {
-        // A port nothing is listening on, so the link's first dial has nowhere to land.
-        let port = try await Self.freePort()
+        // A port nothing is listening on, so the link's first dial has nowhere to land. Taken
+        // from below the ephemeral range, so no test running in parallel can be handed it and
+        // accept this link's handshake.
+        let port = try closedPort()
         let queue = DispatchSerialQueue(label: "host.e2e.prefill")
         let link = LinkPeripheralManager(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
@@ -422,20 +424,6 @@ struct HostEndToEndTests {
         link.shutdown()
         await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
         await provider.stop()
-    }
-
-    /// A loopback port nothing is bound to: taken by a listener on port 0, read back, and
-    /// released again.
-    static func freePort() async throws -> UInt16 {
-        let listener = try LinkListener(
-            endpoint: LinkEndpoint(host: "127.0.0.1", port: 0),
-            codec: .binaryPropertyList,
-            queue: DispatchQueue(label: "host.e2e.freeport")
-        )
-        try await listener.start()
-        let port = listener.port
-        listener.cancel()
-        return port
     }
 
     /// Runs `make` until the port the previous provider released can be bound again — a
