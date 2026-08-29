@@ -709,14 +709,14 @@ struct VirtualRadioTests {
         await radio.attach(session: session, centralSink: { _ in })
 
         // Never connected: nothing is armed, nothing is filed, and the host is told nothing.
-        #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session) == false)
+        #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session).isNotifying == false)
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
 
         // Connected: the very same call takes, so the refusal above was the gate and not the
         // characteristic.
         #expect(await radio.connect(session: session, device: identifier, sink: { _ in }).error == nil)
-        #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session) == true)
+        #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session).isNotifying == true)
         await waitFor { await !host.subscribers(for: Self.measurement).isEmpty }
         #expect(await host.subscribers(for: Self.measurement).count == 1)
 
@@ -724,7 +724,7 @@ struct VirtualRadioTests {
         // session cannot plant a new one behind it.
         await radio.disconnect(session: session, device: identifier)
         await waitFor { await host.subscribers(for: Self.measurement).isEmpty }
-        #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session) == false)
+        #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session).isNotifying == false)
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
 
@@ -764,7 +764,16 @@ struct VirtualRadioTests {
             VirtualDevice(
                 descriptor: VirtualDeviceDescriptor(
                     identifier: identifier,
-                    advertisement: AdvertisementData(serviceUUIDs: [Self.service], isConnectable: true)
+                    advertisement: AdvertisementData(serviceUUIDs: [Self.service], isConnectable: true),
+                    services: [
+                        GATTService(identifier: Self.service, characteristics: [
+                            GATTCharacteristic(
+                                identifier: Self.measurement,
+                                properties: [.read, .notify],
+                                permissions: [.readable]
+                            )
+                        ])
+                    ]
                 ),
                 handler: handler
             )
@@ -775,7 +784,11 @@ struct VirtualRadioTests {
 
         /// Sets the notification state and returns what the radio reports it as afterwards.
         func setNotify(_ enabled: Bool) async -> Bool {
-            await radio.setNotify(enabled, device: identifier, characteristic: Self.measurement, session: session)
+            let outcome = await radio.setNotify(
+                enabled, device: identifier, characteristic: Self.measurement, session: session
+            )
+            #expect(outcome.error == nil)
+            return outcome.isNotifying
         }
 
         // Disabling a characteristic that was never enabled is not an unsubscribe: the host
@@ -794,6 +807,46 @@ struct VirtualRadioTests {
         #expect(await setNotify(false) == false)
         #expect(handler.reported == [true, false])
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
+    }
+
+    @Test("Notifying a characteristic that declares no notify or indicate is refused")
+    func setNotifyEnforcesTheNotifiableProperty() async throws {
+        let radio = VirtualRadio()
+        let hostQueue = DispatchSerialQueue(label: "VirtualRadioTests.notifiable.host")
+        let identifier = UUID()
+        let host = PeripheralHost(
+            backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier),
+            queue: hostQueue
+        )
+        // Read/write only: no CCCD, so no hardware would ever accept a subscription on it.
+        try await host.add(
+            GATTService(identifier: Self.service, characteristics: [
+                GATTCharacteristic(
+                    identifier: Self.control,
+                    properties: [.read, .write],
+                    permissions: [.readable, .writeable]
+                )
+            ])
+        )
+        await waitFor { await !radio.services(of: identifier, matching: nil).isEmpty }
+
+        let session = UUID()
+        await radio.attach(session: session, centralSink: { _ in })
+        #expect(await radio.connect(session: session, device: identifier, sink: { _ in }).error == nil)
+
+        let refused = await radio.setNotify(true, device: identifier, characteristic: Self.control, session: session)
+        #expect(refused.isNotifying == false)
+        #expect(refused.error == .requestNotSupported)
+        #expect(await radio.subscriberCount(device: identifier, characteristic: Self.control) == 0)
+        #expect(await host.subscribers(for: Self.control).isEmpty)
+
+        // A characteristic that is not in the database at all is refused the way a read or a
+        // write of it is.
+        let missing = await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session)
+        #expect(missing.isNotifying == false)
+        #expect(missing.error == .attributeNotFound)
+        #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
+        #expect(await host.subscribers(for: Self.measurement).isEmpty)
     }
 
     /// A second service, so a discovery can be narrowed and a database can drop one.

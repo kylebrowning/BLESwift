@@ -320,6 +320,10 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// remote has not discovered, for the same reason as
     /// ``readValue(for:)-(CharacteristicIdentifier)`` — the notification state is not recorded
     /// either, since nothing was armed.
+    ///
+    /// A request the radio refuses — a characteristic declaring neither `notify` nor
+    /// `indicate` — delivers the unchanged notification state along with the `ATTError` it was
+    /// refused with, which is what CoreBluetooth reports for a CCCD write hardware rejected.
     public func setNotifyValue(_ enabled: Bool, for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard _discoveredCharacteristics.contains(characteristic) else { return }
@@ -332,16 +336,22 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
             // The radio's answer, not the request: a session the radio no longer holds a
             // connection for arms nothing, and reporting `enabled` anyway would leave the
             // remote claiming to notify on a subscription that does not exist.
-            let isNotifying = await radio.setNotify(
+            let outcome = await radio.setNotify(
                 enabled, device: identifier, characteristic: characteristic, session: session
             )
             queue.async { [self] in
-                if isNotifying {
+                if outcome.isNotifying {
                     _notifying.insert(characteristic)
                 } else {
                     _notifying.remove(characteristic)
                 }
-                deliver(.didUpdateNotificationState(characteristic: characteristic, isNotifying: isNotifying, error: nil))
+                deliver(
+                    .didUpdateNotificationState(
+                        characteristic: characteristic,
+                        isNotifying: outcome.isNotifying,
+                        error: outcome.error.map(Self.error(for:))
+                    )
+                )
             }
         }
     }

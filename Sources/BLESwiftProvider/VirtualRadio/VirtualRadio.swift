@@ -606,18 +606,38 @@ public actor VirtualRadio {
     /// `didUnsubscribe` for a subscriber it never had. The set decides: the handler hears from
     /// this call only when the session really joined or really left.
     ///
+    /// **The permission check is the radio's, not the handler's.** It mirrors the ones
+    /// ``read(device:characteristic:offset:session:)`` and
+    /// ``write(device:characteristic:value:session:)`` make, and for the same reason:
+    /// subscribing is a write to the characteristic's Client Characteristic Configuration
+    /// descriptor, and a characteristic declaring neither `notify` nor `indicate` has no such
+    /// descriptor for real hardware to accept that write on. A hosted device — a remote
+    /// `PeripheralHost` at the far end of a link — has no ``FixtureDeviceHandler`` to refuse
+    /// for it, so a `setNotifyValue(true)` on a read/write-only characteristic recorded a
+    /// subscription and handed the host a `didSubscribe` no hardware would ever have produced.
+    /// A characteristic that is not in the database at all is refused the same way `read` and
+    /// `write` refuse it, with `ATTError.attributeNotFound`.
+    ///
     /// - Returns: Whether `session` is subscribed to `characteristic` now the call has been
     ///   applied — `enabled` for a connected session, and the unchanged current state for one
-    ///   that is not.
+    ///   that is not or for a request the checks above refused — together with the `ATTError`
+    ///   to fail the request with, or `nil` when it was applied.
     @discardableResult
     func setNotify(
         _ enabled: Bool,
         device: UUID,
         characteristic: CharacteristicIdentifier,
         session: UUID
-    ) async -> Bool {
+    ) async -> (isNotifying: Bool, error: ATTError?) {
+        let unchanged = subscriptions[device]?[characteristic]?.contains(session) == true
         guard let state = devices[device], isConnected(session: session, to: device) else {
-            return subscriptions[device]?[characteristic]?.contains(session) == true
+            return (unchanged, nil)
+        }
+        guard let definition = definition(of: characteristic, in: state) else {
+            return (unchanged, .attributeNotFound)
+        }
+        guard definition.properties.isNotifiable else {
+            return (unchanged, .requestNotSupported)
         }
         let didChange: Bool
         if enabled {
@@ -631,9 +651,9 @@ public actor VirtualRadio {
                 }
             }
         }
-        guard didChange else { return enabled }
+        guard didChange else { return (enabled, nil) }
         await state.handler.subscriptionChanged(characteristic, central: subscriber(session), isSubscribed: enabled)
-        return enabled
+        return (enabled, nil)
     }
 
     /// The characteristic definition for `characteristic` in `state`'s current database.
