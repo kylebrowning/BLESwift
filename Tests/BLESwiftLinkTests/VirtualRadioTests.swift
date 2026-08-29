@@ -368,5 +368,82 @@ struct VirtualRadioTests {
         #expect(await Self.onQueue(queue) { backend.retrievePeripherals(withIdentifiers: [oldest.id]).isEmpty })
         #expect(await Self.onQueue(queue) { backend.retrievePeripherals(withIdentifiers: [newest.id]).count } == 1)
     }
+
+    /// Registers an inert device on `radio` and returns its identifier.
+    private static func register(on radio: VirtualRadio) async -> UUID {
+        let identifier = UUID()
+        let device = VirtualDevice(
+            descriptor: VirtualDeviceDescriptor(
+                identifier: identifier,
+                advertisement: AdvertisementData(serviceUUIDs: [Self.service], isConnectable: true)
+            ),
+            handler: InertHandler()
+        )
+        _ = await radio.register(device)
+        return identifier
+    }
+
+    @Test("The remote table is capped, forgetting the least recently vended disconnected remote")
+    func remoteTableIsCapped() async throws {
+        let radio = VirtualRadio()
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.remotecap")
+        // A table of one, so the second remote is all it takes to forget the first.
+        let backend = VirtualCentralBackend(radio: radio, queue: queue, maximumDiscovered: 8, maximumRemotes: 1)
+        let oldest = await Self.register(on: radio)
+        let newest = await Self.register(on: radio)
+
+        let first = try #require(await Self.remote(backend, queue, oldest))
+        _ = await Self.remote(backend, queue, newest)
+
+        // Disconnected, so the cap was free to drop it: the identifier is still known, and
+        // retrieving it again mints a remote rather than returning the forgotten one.
+        let refetched = try #require(await Self.remote(backend, queue, oldest))
+        #expect(refetched !== first)
+    }
+
+    @Test("The remote cap keeps a connected remote and re-files one it evicted")
+    func remoteCapKeepsConnectedRemotesAndRefilesEvictedOnes() async throws {
+        let radio = VirtualRadio()
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.remotecap.connected")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue, maximumDiscovered: 8, maximumRemotes: 1)
+        let connected = await Self.register(on: radio)
+        let other = await Self.register(on: radio)
+        let filler = await Self.register(on: radio)
+
+        let events = Mutex<[UUID]>([])
+        await Self.onQueue(queue) {
+            backend.eventHandler = { event in
+                if case .didConnect(let peripheral) = event { events.withLock { $0.append(peripheral.uuid) } }
+            }
+        }
+
+        let live = try #require(await Self.remote(backend, queue, connected))
+        await Self.onQueue(queue) { backend.connect(live, options: nil, requiresANCS: false) }
+        await waitFor { events.withLock { $0.contains(connected) } }
+
+        // Overflows the table of one while `live` is connected: a connected remote is never
+        // the cap's candidate, so the newcomer is filed alongside it rather than in its place.
+        let evicted = try #require(await Self.remote(backend, queue, other))
+        #expect(await Self.remote(backend, queue, connected) === live)
+
+        // `evicted` is disconnected, so the next retrieval is what displaces it — and
+        // connecting it anyway re-files it, rather than leaving the caller waiting for a
+        // `didConnect` nothing would ever send.
+        _ = await Self.remote(backend, queue, filler)
+        await Self.onQueue(queue) { backend.connect(evicted, options: nil, requiresANCS: false) }
+        await waitFor(timeout: .seconds(5)) { events.withLock { $0.contains(other) } }
+        #expect(events.withLock { $0.contains(other) })
+    }
+
+    /// The remote `backend` vends for `identifier`, fetched on its own queue.
+    private static func remote(
+        _ backend: VirtualCentralBackend,
+        _ queue: DispatchSerialQueue,
+        _ identifier: UUID
+    ) async -> VirtualPeripheralRemote? {
+        await onQueue(queue) {
+            backend.retrievePeripherals(withIdentifiers: [identifier]).first as? VirtualPeripheralRemote
+        }
+    }
 }
 #endif

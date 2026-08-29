@@ -66,6 +66,13 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         nameBox.withLock { $0 = name }
     }
 
+    /// Whether `candidate` is the session identifier of the backend that vended this remote.
+    ///
+    /// The ownership test ``VirtualCentralBackend/connect(_:options:requiresANCS:)`` uses in
+    /// place of a table lookup, which the remote cap can invalidate under a caller still
+    /// holding a perfectly valid remote.
+    func isOwned(by candidate: UUID) -> Bool { session == candidate }
+
     /// This remote's identity as a ``BLESwiftCore/PeripheralIdentifier``.
     var peripheralIdentifier: PeripheralIdentifier {
         PeripheralIdentifier(uuid: identifier, name: name)

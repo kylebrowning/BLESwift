@@ -34,7 +34,32 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     private let radio: VirtualRadio
 
     nonisolated(unsafe) private var _eventHandler: ((CentralEvent) -> Void)?
+
+    /// The remote vended for each identifier this backend has been asked for, so the same
+    /// instance is returned every time — the object the radio's events are routed to.
+    ///
+    /// **Bounded, least recently vended first.** The same cap, for the same reason, as the
+    /// sighting history above and the provider session's own remote table: a long-lived
+    /// backend asked for identifier after identifier would otherwise grow one remote per
+    /// identifier ever named, for the life of the process. Only a remote that is
+    /// `.disconnected` — nothing connecting, connected, or disconnecting — is ever dropped;
+    /// anything else is still carrying a live connection whose events must reach the very
+    /// instance the caller is holding, so it is kept however old it is. Forgetting one costs
+    /// a caller nothing: retrieving that identifier again mints a fresh remote, and
+    /// ``connect(_:options:requiresANCS:)`` re-files a remote the cap evicted rather than
+    /// ignoring it.
     nonisolated(unsafe) private var _remotes: [UUID: VirtualPeripheralRemote] = [:]
+
+    /// ``_remotes``' keys in least-recently-vended order, which is what the cap evicts from.
+    nonisolated(unsafe) private var _remoteOrder: [UUID] = []
+
+    /// How many remotes ``_remotes`` keeps.
+    private let maximumRemotes: Int
+
+    /// The remote table's default size, used by the public initializer. Tests override it to
+    /// force eviction without naming a thousand identifiers.
+    package static let defaultMaximumRemotes = 1024
+
     nonisolated(unsafe) private var _announcedState = false
 
     /// Identifiers this backend has reported a sighting for. A device removed from the radio
@@ -89,21 +114,34 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     ///   - queue: The queue every method and event delivery is confined to — the same
     ///     queue the owning `Central` is constructed with.
     public convenience init(radio: VirtualRadio, queue: DispatchSerialQueue) {
-        self.init(radio: radio, queue: queue, maximumDiscovered: Self.defaultMaximumDiscovered)
+        self.init(
+            radio: radio,
+            queue: queue,
+            maximumDiscovered: Self.defaultMaximumDiscovered,
+            maximumRemotes: Self.defaultMaximumRemotes
+        )
     }
 
     /// Creates a backend whose sighting history holds at most `maximumDiscovered`
-    /// identifiers — the designated initializer, for tests that cannot report
-    /// ``defaultMaximumDiscovered`` sightings to force an eviction.
+    /// identifiers and whose remote table holds at most `maximumRemotes` — the designated
+    /// initializer, for tests that cannot report ``defaultMaximumDiscovered`` sightings or
+    /// name ``defaultMaximumRemotes`` identifiers to force an eviction.
     ///
     /// - Parameters:
     ///   - radio: The radio hosting the virtual devices to serve.
     ///   - queue: The queue every method and event delivery is confined to.
     ///   - maximumDiscovered: How many sightings to remember.
-    package init(radio: VirtualRadio, queue: DispatchSerialQueue, maximumDiscovered: Int) {
+    ///   - maximumRemotes: How many peripheral remotes to keep.
+    package init(
+        radio: VirtualRadio,
+        queue: DispatchSerialQueue,
+        maximumDiscovered: Int,
+        maximumRemotes: Int = VirtualCentralBackend.defaultMaximumRemotes
+    ) {
         self.radio = radio
         self.queue = queue
         self.maximumDiscovered = maximumDiscovered
+        self.maximumRemotes = maximumRemotes
         let session = sessionID
         // Weak, so the radio's registration never keeps this backend alive; the strong
         // reference the hop takes lasts only as long as the delivery itself.
@@ -178,11 +216,14 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         _discovered.remove(_discoveryOrder.removeFirst())
     }
 
-    /// The remote for `identifier`, created on first use and reused for the life of this
-    /// backend. Must be called on ``queue``.
+    /// The remote for `identifier`, created on first use and reused until the cap forgets
+    /// it. Must be called on ``queue``.
     private func remote(for identifier: UUID) -> VirtualPeripheralRemote {
         dispatchPrecondition(condition: .onQueue(queue))
-        if let existing = _remotes[identifier] { return existing }
+        if let existing = _remotes[identifier] {
+            touch(identifier)
+            return existing
+        }
         let created = VirtualPeripheralRemote(
             identifier: identifier,
             radio: radio,
@@ -190,8 +231,56 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             queue: queue,
             name: nil
         )
-        _remotes[identifier] = created
+        file(created)
         return created
+    }
+
+    /// Files `remote` under its identifier, evicting a stale one first so the insert this is
+    /// about to make cannot itself be what the cap drops — a remote nothing has connected yet
+    /// is disconnected, which is exactly what the cap considers droppable. Must be called on
+    /// ``queue``.
+    private func file(_ remote: VirtualPeripheralRemote) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        evictStaleRemotes(reserving: _remotes[remote.identifier] == nil ? 1 : 0)
+        _remotes[remote.identifier] = remote
+        touch(remote.identifier)
+    }
+
+    /// Moves `identifier` to the most-recently-vended end of ``_remoteOrder``. Must be called
+    /// on ``queue``.
+    private func touch(_ identifier: UUID) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        if let index = _remoteOrder.firstIndex(of: identifier) {
+            _remoteOrder.remove(at: index)
+        }
+        _remoteOrder.append(identifier)
+    }
+
+    /// Drops the least recently vended disconnected remotes until the table is back within
+    /// ``maximumRemotes``, detaching each one's event handler on the way out so nothing that
+    /// still holds it can deliver into a backend that has forgotten it. A remote in any other
+    /// connection state is left alone however old it is. Must be called on ``queue``.
+    ///
+    /// - Parameter reserving: How many slots the caller is about to fill, kept free on top of
+    ///   the entries already in the table.
+    private func evictStaleRemotes(reserving: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let limit = maximumRemotes - reserving
+        guard _remotes.count > limit else { return }
+        var overflow = _remotes.count - limit
+        var kept: [UUID] = []
+        kept.reserveCapacity(_remoteOrder.count)
+        for identifier in _remoteOrder {
+            guard let candidate = _remotes[identifier] else { continue }
+            guard overflow > 0, candidate.connectionState == .disconnected else {
+                kept.append(identifier)
+                continue
+            }
+            candidate.eventHandler = nil
+            _remotes.removeValue(forKey: identifier)
+            overflow -= 1
+        }
+        _remoteOrder = kept
     }
 
     // MARK: - CentralManaging
@@ -241,7 +330,18 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// not; an unregistered identifier fails with ``VirtualRadio/unknownDeviceError``.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard let remote = peripheral as? VirtualPeripheralRemote, remote === _remotes[remote.identifier] else { return }
+        // **A remote the cap evicted is re-filed rather than refused.** The table is bounded,
+        // so a caller holding a remote retrieved long enough ago can find its entry gone by
+        // the time it connects, and dropping the request would leave that caller waiting for
+        // a `didConnect` nothing was ever going to send. The test is on the remote's *owner*,
+        // which no eviction changes; a remote belonging to another backend, or one this
+        // backend has since replaced for the same identifier, is still ignored.
+        guard let remote = peripheral as? VirtualPeripheralRemote, remote.isOwned(by: sessionID) else { return }
+        if let filed = _remotes[remote.identifier] {
+            guard filed === remote else { return }
+        } else {
+            file(remote)
+        }
         remote.setConnectionState(.connecting)
         let device = remote.identifier
         enqueue { [radio, sessionID, queue] in
