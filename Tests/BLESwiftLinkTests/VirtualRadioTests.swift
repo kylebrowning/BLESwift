@@ -591,6 +591,68 @@ struct VirtualRadioTests {
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
     }
 
+    /// Records every `subscriptionChanged` the radio reports, so a test can assert on exactly
+    /// which calls produced one.
+    private final class RecordingHandler: VirtualDeviceHandler, Sendable {
+        private let changes = Mutex<[Bool]>([])
+
+        /// Every reported change, in order, as its `isSubscribed` flag.
+        var reported: [Bool] { changes.withLock { $0 } }
+
+        func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
+            .failure(.unlikelyError)
+        }
+
+        func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> {
+            .failure(.unlikelyError)
+        }
+
+        func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {
+            changes.withLock { $0.append(isSubscribed) }
+        }
+    }
+
+    @Test("A subscription change is reported only when the subscriber set really changed")
+    func subscriptionChangesAreReportedOnlyOnTransitions() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let handler = RecordingHandler()
+        _ = await radio.register(
+            VirtualDevice(
+                descriptor: VirtualDeviceDescriptor(
+                    identifier: identifier,
+                    advertisement: AdvertisementData(serviceUUIDs: [Self.service], isConnectable: true)
+                ),
+                handler: handler
+            )
+        )
+        let session = UUID()
+        await radio.attach(session: session, centralSink: { _ in })
+        #expect(await radio.connect(session: session, device: identifier, sink: { _ in }).error == nil)
+
+        /// Sets the notification state and returns what the radio reports it as afterwards.
+        func setNotify(_ enabled: Bool) async -> Bool {
+            await radio.setNotify(enabled, device: identifier, characteristic: Self.measurement, session: session)
+        }
+
+        // Disabling a characteristic that was never enabled is not an unsubscribe: the host
+        // never had this subscriber, so it must not be told it lost one.
+        #expect(await setNotify(false) == false)
+        #expect(handler.reported.isEmpty)
+
+        // The first enable is the transition; the second changes nothing and reports nothing.
+        #expect(await setNotify(true) == true)
+        #expect(await setNotify(true) == true)
+        #expect(handler.reported == [true])
+        #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 1)
+
+        // Symmetrically on the way out.
+        #expect(await setNotify(false) == false)
+        #expect(await setNotify(false) == false)
+        #expect(handler.reported == [true, false])
+        #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
+    }
+
     /// The remote `backend` vends for `identifier`, fetched on its own queue.
     private static func remote(
         _ backend: VirtualCentralBackend,

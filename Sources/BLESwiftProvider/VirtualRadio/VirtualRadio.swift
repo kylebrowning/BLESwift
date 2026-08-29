@@ -473,6 +473,13 @@ public actor VirtualRadio {
     /// its `PeripheralHost` could never lose, since neither ``disconnect(session:device:)`` nor
     /// ``detach(session:)`` walks a device the session has no connection to.
     ///
+    /// **Only a real membership transition is reported.** A repeated `setNotifyValue(true)` —
+    /// which CoreBluetooth permits, and which a `Central` re-arming a stream makes — would
+    /// otherwise hand the host a second `didSubscribe` for a subscriber it already has, and a
+    /// `setNotifyValue(false)` for a characteristic that was never subscribed would hand it a
+    /// `didUnsubscribe` for a subscriber it never had. The set decides: the handler hears from
+    /// this call only when the session really joined or really left.
+    ///
     /// - Returns: Whether `session` is subscribed to `characteristic` now the call has been
     ///   applied — `enabled` for a connected session, and the unchanged current state for one
     ///   that is not.
@@ -486,14 +493,19 @@ public actor VirtualRadio {
         guard let state = devices[device], isConnected(session: session, to: device) else {
             return subscriptions[device]?[characteristic]?.contains(session) == true
         }
+        let didChange: Bool
         if enabled {
-            subscriptions[device, default: [:]][characteristic, default: []].insert(session)
+            didChange = subscriptions[device, default: [:]][characteristic, default: []].insert(session).inserted
         } else {
-            subscriptions[device]?[characteristic]?.remove(session)
+            didChange = subscriptions[device]?[characteristic]?.remove(session) != nil
             if subscriptions[device]?[characteristic]?.isEmpty == true {
                 subscriptions[device]?.removeValue(forKey: characteristic)
+                if subscriptions[device]?.isEmpty == true {
+                    subscriptions.removeValue(forKey: device)
+                }
             }
         }
+        guard didChange else { return enabled }
         await state.handler.subscriptionChanged(characteristic, central: subscriber(session), isSubscribed: enabled)
         return enabled
     }
