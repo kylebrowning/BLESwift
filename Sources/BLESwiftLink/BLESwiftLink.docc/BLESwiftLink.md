@@ -44,6 +44,7 @@ Most apps never import it directly — see `BLESwiftSimulatorLink` and `BLESwift
 ### Trust boundary
 
 - ``WireIdentifierValidation``
+- ``WireLengthValidation``
 - ``WireDecodingError``
 
 ### Wire types

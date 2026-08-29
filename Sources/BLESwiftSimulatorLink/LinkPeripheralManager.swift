@@ -355,14 +355,16 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
 
         case .didSubscribe(let central, let characteristic):
             let identifier = try characteristic.identifier
-            _subscribers[identifier, default: [:]][central.subscriber.id] = central.subscriber
-            deliver(.didSubscribe(central: central.subscriber, characteristic: identifier))
+            let subscriber = try central.subscriber
+            _subscribers[identifier, default: [:]][subscriber.id] = subscriber
+            deliver(.didSubscribe(central: subscriber, characteristic: identifier))
 
         case .didUnsubscribe(let central, let characteristic):
             let identifier = try characteristic.identifier
-            _subscribers[identifier]?.removeValue(forKey: central.subscriber.id)
+            let subscriber = try central.subscriber
+            _subscribers[identifier]?.removeValue(forKey: subscriber.id)
             if _subscribers[identifier]?.isEmpty == true { _subscribers.removeValue(forKey: identifier) }
-            deliver(.didUnsubscribe(central: central.subscriber, characteristic: identifier))
+            deliver(.didUnsubscribe(central: subscriber, characteristic: identifier))
 
         case .updateValueDelivered(let sequence):
             // Consumed, never forwarded: `readyToUpdateSubscribers` is synthesized here from

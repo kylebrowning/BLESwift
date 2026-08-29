@@ -431,8 +431,17 @@ public struct WireSubscriber: Codable, Sendable, Equatable {
     }
 
     /// Converts back to a `Subscriber`.
+    ///
+    /// - Throws: ``WireDecodingError/invalidMaximumLength(_:)`` if
+    ///   ``maximumUpdateValueLength`` is one no caller could divide a payload by — see
+    ///   ``WireLengthValidation``.
     public var subscriber: Subscriber {
-        Subscriber(id: id, maximumUpdateValueLength: maximumUpdateValueLength)
+        get throws {
+            Subscriber(
+                id: id,
+                maximumUpdateValueLength: try WireLengthValidation.validated(maximumUpdateValueLength)
+            )
+        }
     }
 }
 
@@ -470,12 +479,14 @@ public struct WireReadRequest: Codable, Sendable, Equatable {
     /// Converts back to a `ReadRequest`.
     ///
     /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if the characteristic it names
-    ///   is not one BLESwift's identifiers could represent.
+    ///   is not one BLESwift's identifiers could represent, or
+    ///   ``WireDecodingError/invalidMaximumLength(_:)`` if the central's update length is
+    ///   unusable.
     public var readRequest: ReadRequest {
         get throws {
             ReadRequest(
                 token: RequestToken(rawValue: token),
-                central: central.subscriber,
+                central: try central.subscriber,
                 characteristic: try characteristic.identifier,
                 offset: offset
             )
@@ -517,11 +528,13 @@ public struct WireWriteEntry: Codable, Sendable, Equatable {
     /// Converts back to a `WriteRequest.Entry`.
     ///
     /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if the characteristic it names
-    ///   is not one BLESwift's identifiers could represent.
+    ///   is not one BLESwift's identifiers could represent, or
+    ///   ``WireDecodingError/invalidMaximumLength(_:)`` if the central's update length is
+    ///   unusable.
     public var entry: WriteRequest.Entry {
         get throws {
             WriteRequest.Entry(
-                central: central.subscriber,
+                central: try central.subscriber,
                 characteristic: try characteristic.identifier,
                 offset: offset,
                 value: value
@@ -554,7 +567,9 @@ public struct WireWriteRequest: Codable, Sendable, Equatable {
     /// Converts back to a `WriteRequest`.
     ///
     /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if any entry names a
-    ///   characteristic BLESwift's identifiers could not represent.
+    ///   characteristic BLESwift's identifiers could not represent, or
+    ///   ``WireDecodingError/invalidMaximumLength(_:)`` if an entry's central reports an
+    ///   unusable update length.
     public var writeRequest: WriteRequest {
         get throws {
             WriteRequest(token: RequestToken(rawValue: token), entries: try entries.map { try $0.entry })

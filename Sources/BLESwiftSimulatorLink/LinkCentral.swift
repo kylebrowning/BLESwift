@@ -417,9 +417,10 @@ public final class LinkCentral: CentralManaging, Sendable {
         do {
             try handle(event)
         } catch {
-            // A provider that puts an identifier no BLESwift type can hold on the wire is
-            // faulty, not merely unlucky: the session is dropped and redialed rather than
-            // trapping this process on the provider's behalf.
+            // A provider that puts a field no BLESwift type can hold on the wire — an
+            // identifier no identifier accepts, a negotiated maximum no caller can divide by
+            // — is faulty, not merely unlucky: the session is dropped and redialed rather
+            // than trapping this process on the provider's behalf.
             session.dropConnection()
         }
     }
@@ -450,11 +451,17 @@ public final class LinkCentral: CentralManaging, Sendable {
             ))
 
         case .didConnect(let uuid, let name, let maximumWriteWithResponse, let maximumWriteWithoutResponse):
+            // Validated before anything is mirrored: a maximum of zero spins
+            // `Peripheral.writeChunked` forever and a negative one traps it, so a provider
+            // that reports either is refused the same way one that reports a malformed
+            // identifier is — the session is dropped, not the process.
+            let withResponse = try WireLengthValidation.validated(maximumWriteWithResponse)
+            let withoutResponse = try WireLengthValidation.validated(maximumWriteWithoutResponse)
             let target = peripheral(for: uuid)
             target.markConnected(
                 name: name,
-                maximumWriteWithResponse: maximumWriteWithResponse,
-                maximumWriteWithoutResponse: maximumWriteWithoutResponse
+                maximumWriteWithResponse: withResponse,
+                maximumWriteWithoutResponse: withoutResponse
             )
             deliver(.didConnect(target.peripheralIdentifier))
 

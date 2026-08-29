@@ -26,6 +26,10 @@ public enum WireDecodingError: Error, Equatable, Sendable {
     /// corrupted it. Rejecting is the only safe answer — the alternative, building a
     /// dictionary from colliding keys, traps.
     case duplicateIdentifier(String)
+
+    /// A negotiated maximum payload length that no CoreBluetooth stack could report and no
+    /// caller could use — zero or negative — carried verbatim. See ``WireLengthValidation``.
+    case invalidMaximumLength(Int)
 }
 
 /// The wire boundary's copy of the UUID rule BLESwift's identifiers enforce.

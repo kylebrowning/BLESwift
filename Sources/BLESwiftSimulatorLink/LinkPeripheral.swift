@@ -316,6 +316,10 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     }
 
     /// Records a completed connection and the maxima the provider negotiated.
+    ///
+    /// Both maxima are already past the wire boundary's ``BLESwiftLink/WireLengthValidation``
+    /// when they arrive here, so neither can be a value `Peripheral`'s chunked writer would
+    /// spin or trap on.
     func markConnected(name: String?, maximumWriteWithResponse: Int, maximumWriteWithoutResponse: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectionState = .connected

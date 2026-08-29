@@ -154,7 +154,7 @@ struct WireMessageTests {
         #expect(try WireCharacteristicRef(Self.characteristic).identifier == Self.characteristic)
         #expect(try WireDescriptorRef(Self.descriptor).identifier == Self.descriptor)
         let subscriber = Subscriber(id: Self.id, maximumUpdateValueLength: 180)
-        #expect(WireSubscriber(subscriber).subscriber == subscriber)
+        #expect(try WireSubscriber(subscriber).subscriber == subscriber)
         let read = ReadRequest(token: RequestToken(rawValue: Self.id), central: subscriber, characteristic: Self.characteristic, offset: 4)
         #expect(try WireReadRequest(read).readRequest == read)
         let write = WriteRequest(token: RequestToken(rawValue: Self.id), entries: [WriteRequest.Entry(central: subscriber, characteristic: Self.characteristic, offset: 0, value: Data([1]))])
