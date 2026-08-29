@@ -5,6 +5,7 @@
 
 #if os(macOS)
 import BLESwiftCore
+import BLESwiftLink
 import Dispatch
 import Foundation
 
@@ -26,13 +27,13 @@ import Foundation
 /// forwarded verbatim, except `didUpdateState` (replaced by the composite's computed state)
 /// and `willRestoreState` (dropped) — see ``CompositeCentral`` for why.
 ///
-/// **A refused push is the composite's to finish.** ``updateValue(_:for:onSubscribed:)``
-/// returns the AND of its children's answers, and a push some child refused is held as the
-/// *outstanding* push: the composite re-offers it to the children that refused it — and only
-/// those — as their `readyToUpdateSubscribers` arrive, so no child's subscribers see a value
-/// twice. Until that push has landed everywhere the window is closed: a further
-/// `updateValue` is refused without being pushed, which keeps the caller's pushes in order.
-/// See ``updateValue(_:for:onSubscribed:)`` for the full state machine.
+/// **One FIFO per child.** ``updateValue(_:for:onSubscribed:)`` hands the value to every
+/// child that will take it and queues it for the ones that will not, in its own per-child
+/// FIFO; each child's `readyToUpdateSubscribers` drains that child's FIFO in order. So every
+/// value reaches every child exactly once, in the order it was pushed, and nothing is ever
+/// inferred from a payload or from the *position* of a push in the caller's sequence. The
+/// composite refuses a push — closing its window — only when some child's FIFO is full. See
+/// ``updateValue(_:for:onSubscribed:)``.
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``CompositeCentral``, including the requirement that **every child be confined to the
@@ -67,30 +68,27 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// Outstanding ``startAdvertising(_:)`` fan-outs, FIFO.
     nonisolated(unsafe) private var _pendingAdvertisements: [Pending] = []
 
-    /// The push some child refused, and the children that still owe it.
-    private struct OutstandingPush {
-        /// The value to re-offer, held so the composite can finish the push itself.
+    /// One push a child has not taken yet, held verbatim in that child's FIFO.
+    private struct PendingPush {
         let value: Data
         let characteristic: CharacteristicIdentifier
         let subscribers: [Subscriber]?
-        /// The indices into ``backends`` whose transmit queue was full. Only these are
-        /// pushed to again; empty once every child has taken the value, which leaves the
-        /// entry standing as the marker for the caller's re-offer.
-        var refused: [Int]
-
-        /// Whether every child has taken this value.
-        var isDelivered: Bool { refused.isEmpty }
     }
 
-    /// The push some child refused, held until every child has taken it — so the composite's
-    /// own re-offers reach the children that refused it alone, and a child that already
-    /// delivered the value does not notify its subscribers a second time.
-    ///
-    /// Once delivered the entry is kept, not cleared: it is what tells the caller's mandated
-    /// re-offer (`PeripheralManaging.updateValue(_:for:onSubscribed:)` promises a `false` is
-    /// retried after `readyToUpdateSubscribers`) from a *new* push, without ever inferring a
-    /// retry from the payload. The re-offer is answered `true` and pushed nowhere.
-    nonisolated(unsafe) private var _outstandingPush: OutstandingPush?
+    /// What each child still owes its subscribers, oldest first — one FIFO per child, indexed
+    /// like ``backends``. A child's queue grows when it refuses a push and drains, in order,
+    /// on its `readyToUpdateSubscribers`.
+    nonisolated(unsafe) private var _queues: [[PendingPush]] = []
+
+    /// Whether the composite has told its host the window is closed and owes it one
+    /// `readyToUpdateSubscribers` — set by the `false` that closed it, cleared by the single
+    /// event that reopens it.
+    nonisolated(unsafe) private var _windowClosed = false
+
+    /// How many pushes one child may fall behind by before the composite closes its window.
+    /// The same window the link's own client honors, so a composite behind a link cannot
+    /// queue more than the link would have let through.
+    private static var queueLimit: Int { LinkFlowControl.updateValueWindow }
 
     /// The authorization status this composite reports: always
     /// `BluetoothAuthorization.allowedAlways`. See
@@ -107,6 +105,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     public init(backends: [any PeripheralManaging], queue: DispatchSerialQueue) {
         self.backends = backends
         self.queue = queue
+        self._queues = Array(repeating: [], count: backends.count)
         queue.sync { attachChildren() }
     }
 
@@ -122,6 +121,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         self.backends = backends
         self.queue = queue
+        self._queues = Array(repeating: [], count: backends.count)
         attachChildren()
     }
 
@@ -129,9 +129,9 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// ``queue``.
     private func attachChildren() {
         dispatchPrecondition(condition: .onQueue(queue))
-        for backend in backends {
-            backend.eventHandler = { [weak self] event in
-                self?.handle(event)
+        for index in backends.indices {
+            backends[index].eventHandler = { [weak self] event in
+                self?.handle(event, from: index)
             }
         }
     }
@@ -154,8 +154,9 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         _eventHandler?(.didUpdateState(state))
     }
 
-    /// Fans one child's event in. Must be called on ``queue``.
-    private func handle(_ event: PeripheralHostEvent) {
+    /// Fans one child's event in, `index` naming the child it came from. Must be called on
+    /// ``queue``.
+    private func handle(_ event: PeripheralHostEvent, from index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         switch event {
         case .didUpdateState:
@@ -167,34 +168,49 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         case .didStartAdvertising(let error):
             completeAdvertising(error: error)
         case .readyToUpdateSubscribers:
-            resumeOutstandingPush()
+            resume(child: index)
         default:
             _eventHandler?(event)
         }
     }
 
-    /// Re-offers the outstanding push to the children that still owe it, and emits one
-    /// `readyToUpdateSubscribers` to the host once — and only once — that push has landed
-    /// everywhere. With nothing outstanding the child's event is forwarded verbatim. Must be
-    /// called on ``queue``.
-    private func resumeOutstandingPush() {
+    /// Drains what child `index` still owes, then decides what the host hears.
+    ///
+    /// With the window closed — the composite has refused a push — the host is owed exactly
+    /// one `readyToUpdateSubscribers`, and it comes when no child's FIFO is full any more, so
+    /// several children reopening produce one event rather than one apiece. With the window
+    /// open nothing is owed and the child's readiness is the composite's own: forwarded, as
+    /// every other event is. Must be called on ``queue``.
+    private func resume(child index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard var outstanding = _outstandingPush, !outstanding.isDelivered else {
+        drain(child: index)
+        guard _windowClosed else {
             _eventHandler?(.readyToUpdateSubscribers)
             return
         }
-        outstanding.refused = outstanding.refused.filter { index in
-            !backends[index].updateValue(
-                outstanding.value,
-                for: outstanding.characteristic,
-                onSubscribed: outstanding.subscribers
-            )
-        }
-        _outstandingPush = outstanding
-        // Still owed by someone: the window stays closed and the host hears nothing, so it
-        // cannot offer a push that would overtake this one.
-        guard outstanding.isDelivered else { return }
+        guard !isAnyQueueFull else { return }
+        _windowClosed = false
         _eventHandler?(.readyToUpdateSubscribers)
+    }
+
+    /// Offers child `index` what it owes, oldest first, stopping at the first refusal so the
+    /// child's subscribers see the values in the order they were pushed. Must be called on
+    /// ``queue``.
+    private func drain(child index: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        while let next = _queues[index].first {
+            guard backends[index].updateValue(next.value, for: next.characteristic, onSubscribed: next.subscribers) else {
+                return
+            }
+            _queues[index].removeFirst()
+        }
+    }
+
+    /// Whether any child has fallen a whole ``queueLimit`` behind. Must be called on
+    /// ``queue``.
+    private var isAnyQueueFull: Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _queues.contains { $0.count >= Self.queueLimit }
     }
 
     /// Settles one child's `didAddService`, emitting the aggregate once the last child has
@@ -322,44 +338,38 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         for backend in backends { backend.respond(to: token, value: value, error: error) }
     }
 
-    /// Pushes `value` through every child and returns the AND of their answers: `false` if
-    /// *any* child's transmit queue was full. Never short-circuits — every child is called
-    /// even once a `false` is known.
+    /// Delivers `value` to every child — now if it will take it, from that child's FIFO if it
+    /// will not.
     ///
-    /// **The composite finishes a refused push itself; the caller only re-offers it.** Three
-    /// states, and no retry is ever inferred from the payload:
+    /// **Per-child FIFOs, not a shared outstanding push.** For each child: if it owes nothing
+    /// and accepts the push, it is done; otherwise the push joins the back of *that child's*
+    /// FIFO, which its next `readyToUpdateSubscribers` drains in order. A value therefore
+    /// reaches each child exactly once and in order, whatever the children's windows are
+    /// doing, and two pushes carrying identical bytes are two pushes — nothing here compares
+    /// payloads or infers a retry.
     ///
-    /// - *Nothing outstanding.* The push fans out to every child. If they all take it the
-    ///   answer is `true` and nothing is remembered. If any refuses, the push becomes the
-    ///   outstanding one and the answer is `false`.
-    /// - *An outstanding push is still owed by some child.* The window is closed: the answer
-    ///   is `false` and nothing is pushed, so no later push can overtake the outstanding one.
-    ///   Each `readyToUpdateSubscribers` from a child re-offers the outstanding value to the
-    ///   children that refused it — and only those, so no subscriber sees it twice — with the
-    ///   host hearing nothing until it has landed everywhere.
-    /// - *The outstanding push has landed everywhere.* One `readyToUpdateSubscribers` has
-    ///   reached the host, and the seam's contract says the next push it offers is the
-    ///   re-offer of that same value. It is answered `true` and pushed nowhere: every child
-    ///   already has it.
+    /// - Returns: `true` when every child either took the value or queued it. `false` — the
+    ///   composite's window closing — only when some child has already fallen a full
+    ///   ``queueLimit`` behind, in which case *nothing* is pushed or queued, so the caller's
+    ///   re-offer after the next `readyToUpdateSubscribers` is the value's first and only
+    ///   delivery.
     public func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
-        if let outstanding = _outstandingPush {
-            guard outstanding.isDelivered else { return false }
-            _outstandingPush = nil
-            return true
+        // Checked before anything is delivered: a push that is refused must reach no child at
+        // all, or the caller's re-offer of it would notify some subscribers twice.
+        guard !isAnyQueueFull else {
+            _windowClosed = true
+            return false
         }
-        var refused: [Int] = []
-        for index in backends.indices where !backends[index].updateValue(value, for: characteristic, onSubscribed: centrals) {
-            refused.append(index)
+        let pending = PendingPush(value: value, characteristic: characteristic, subscribers: centrals)
+        for index in backends.indices {
+            if _queues[index].isEmpty,
+               backends[index].updateValue(value, for: characteristic, onSubscribed: centrals) {
+                continue
+            }
+            _queues[index].append(pending)
         }
-        guard !refused.isEmpty else { return true }
-        _outstandingPush = OutstandingPush(
-            value: value,
-            characteristic: characteristic,
-            subscribers: centrals,
-            refused: refused
-        )
-        return false
+        return true
     }
 }
 #endif

@@ -6,6 +6,7 @@
 #if os(macOS)
 import BLESwift
 import BLESwiftCore
+import BLESwiftLink
 import BLESwiftProvider
 import BLESwiftTestSupport
 import Dispatch
@@ -321,8 +322,8 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { second.stopAdvertisingCallCount } == 1)
     }
 
-    @Test("updateValue is the AND of every child's return")
-    func updateValueIsTheAndOfChildren() async {
+    @Test("Every child is offered every push, and a refusal does not stop the fan-out")
+    func everyChildIsOfferedEveryPush() async {
         let queue = DispatchSerialQueue(label: "CompositeBackendTests.update")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
@@ -332,18 +333,22 @@ struct CompositeBackendTests {
             composite.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil)
         })
 
+        // The second child refuses. The composite queues the value for it — one child being
+        // busy is not the whole composite's window closing — and still answers `true`.
         await onQueue(queue) { second.scriptedUpdateValueReturns = [false] }
         #expect(await onQueue(queue) {
             composite.updateValue(Data([2]), for: Self.measurement, onSubscribed: nil)
-        } == false)
+        })
 
-        // Every child still saw both pushes — the AND never short-circuits the fan-out.
+        // Both children were offered both pushes: the refusal never short-circuits the
+        // fan-out, and the first child is not held back by the second.
         #expect(await onQueue(queue) { first.updateValueCalls.count } == 2)
         #expect(await onQueue(queue) { second.updateValueCalls.count } == 2)
+        #expect(await onQueue(queue) { first.updateValueCalls.map(\.value) } == [Data([1]), Data([2])])
     }
 
-    @Test("The composite finishes a refused push, re-offering it to that child alone")
-    func refusedPushIsFinishedByTheComposite() async {
+    @Test("A push one child refused reaches it once, from its own FIFO, after it is ready")
+    func aRefusedPushIsDeliveredOnceFromTheChildsQueue() async {
         let queue = DispatchSerialQueue(label: "CompositeBackendTests.retry")
         let accepting = FakePeripheralManager(queue: queue, state: .poweredOn)
         let refusing = FakePeripheralManager(queue: queue, state: .poweredOn)
@@ -357,48 +362,108 @@ struct CompositeBackendTests {
         }
 
         let value = Data([0xA5])
-        // The first offer: the second child's transmit queue is full, so the composite
-        // reports `false` and holds the push.
+        // The second child's transmit queue is full, so it refuses; the value goes into that
+        // child's FIFO and the composite still answers `true` — nothing is lost, and the
+        // caller is not asked to re-offer a value one child already has.
         await onQueue(queue) { refusing.scriptedUpdateValueReturns = [false] }
-        #expect(await onQueue(queue) {
-            composite.updateValue(value, for: Self.measurement, onSubscribed: nil)
-        } == false)
-        #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
-        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 1)
-
-        // While that push is owed the window is closed: a further push is refused and
-        // reaches nobody, so it cannot overtake the outstanding one.
-        #expect(await onQueue(queue) {
-            composite.updateValue(Data([0x11]), for: Self.measurement, onSubscribed: nil)
-        } == false)
-        #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
-        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 1)
-
-        // The refusing child's window reopens: the composite re-offers the outstanding value
-        // to that child alone — the child that already took it must not be pushed to a second
-        // time, or its subscribers see a duplicate — and only then does one readiness reach
-        // the host.
-        refusing.simulateReadyToUpdate()
-        await waitFor { ready.withLock { $0 } == 1 }
-        #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
-        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 2)
-        #expect(await onQueue(queue) { refusing.updateValueCalls.last?.value } == value)
-
-        // The caller's mandated re-offer of the refused push is answered `true` and pushed
-        // nowhere: every child already has that value.
         #expect(await onQueue(queue) {
             composite.updateValue(value, for: Self.measurement, onSubscribed: nil)
         })
         #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
-        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 2)
+        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 1)
 
-        // And the next push fans out to every child again.
+        // That child's window reopens: its FIFO drains, and the value reaches it — once. The
+        // child that already took it is not pushed to a second time, or its subscribers would
+        // see a duplicate.
+        refusing.simulateReadyToUpdate()
+        await waitFor { ready.withLock { $0 } == 1 }
+        #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
+        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 2)
+        #expect(await onQueue(queue) { refusing.updateValueCalls.map(\.value) } == [value, value])
+        // Both offers carried the value; only the second was accepted, so exactly one
+        // notification reached that child's subscribers.
+
+        // And the next push fans out to every child again, from an empty FIFO.
         #expect(await onQueue(queue) {
             composite.updateValue(Data([0x5A]), for: Self.measurement, onSubscribed: nil)
         })
         #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 2)
         #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 3)
+    }
+
+    @Test("A child that falls a whole window behind closes the composite's window")
+    func afullChildQueueClosesTheWindow() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.window")
+        let accepting = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let refusing = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let composite = CompositePeripheralManager(backends: [accepting, refusing], queue: queue)
+
+        let ready = Mutex<Int>(0)
+        await onQueue(queue) {
+            composite.eventHandler = { event in
+                if case .readyToUpdateSubscribers = event { ready.withLock { $0 += 1 } }
+            }
+        }
+
+        // The second child refuses everything, so its FIFO fills to the window.
+        let window = LinkFlowControl.updateValueWindow
+        await onQueue(queue) { refusing.scriptedUpdateValueReturns = Array(repeating: false, count: window + 4) }
+        for index in 0..<window {
+            #expect(await onQueue(queue) {
+                composite.updateValue(Data([UInt8(index % 256)]), for: Self.measurement, onSubscribed: nil)
+            }, "push \(index) should have been queued")
+        }
+
+        // Full: the composite's window closes, and the refused push reaches nobody — so the
+        // caller's re-offer of it is still that value's first delivery.
+        let acceptedByFirst = await onQueue(queue) { accepting.updateValueCalls.count }
+        #expect(acceptedByFirst == window)
+        #expect(await onQueue(queue) {
+            composite.updateValue(Data([0xFF]), for: Self.measurement, onSubscribed: nil)
+        } == false)
+        #expect(await onQueue(queue) { accepting.updateValueCalls.count } == window)
+
+        // The refusing child comes back: its FIFO drains, and one readiness reaches the host.
+        await onQueue(queue) { refusing.scriptedUpdateValueReturns = [] }
+        refusing.simulateReadyToUpdate()
+        await waitFor { ready.withLock { $0 } >= 1 }
         #expect(ready.withLock { $0 } == 1)
+        #expect(await onQueue(queue) {
+            composite.updateValue(Data([0xFF]), for: Self.measurement, onSubscribed: nil)
+        })
+    }
+
+    @Test("Concurrent pushes reach every child exactly once, in per-child order")
+    func concurrentPushesAreDeliveredOncePerChild() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.concurrent")
+        let first = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let second = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
+
+        // Two tasks pushing at once. Every push still lands on `queue`, so the composite sees
+        // some interleaving of the two sequences — whichever it is, each value must reach
+        // each child exactly once, and each task's own values must stay in order.
+        let left = (0..<20).map { Data([0x00, UInt8($0)]) }
+        let right = (0..<20).map { Data([0x01, UInt8($0)]) }
+        async let leftPushes: Void = {
+            for value in left {
+                _ = await onQueue(queue) { composite.updateValue(value, for: Self.measurement, onSubscribed: nil) }
+            }
+        }()
+        async let rightPushes: Void = {
+            for value in right {
+                _ = await onQueue(queue) { composite.updateValue(value, for: Self.measurement, onSubscribed: nil) }
+            }
+        }()
+        _ = await (leftPushes, rightPushes)
+
+        for child in [first, second] {
+            let delivered = await onQueue(queue) { child.updateValueCalls.map(\.value) }
+            #expect(delivered.count == left.count + right.count)
+            #expect(Set(delivered).count == delivered.count, "no value may be delivered twice")
+            #expect(delivered.filter { $0.first == 0x00 } == left)
+            #expect(delivered.filter { $0.first == 0x01 } == right)
+        }
     }
 
     @Test("Two distinct pushes carrying the same bytes each reach every child")
