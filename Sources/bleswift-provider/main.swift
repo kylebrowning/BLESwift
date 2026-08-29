@@ -44,6 +44,12 @@ for path in options.fixturePaths {
     }
 }
 
+// The link authenticates nobody, so a listener that is not on loopback is worth one line at
+// startup — it is serving the Mac's radio to anything that can reach the port.
+if let warning = ProviderCommandLine.nonLoopbackWarning(for: options.endpoint) {
+    FileHandle.standardError.write(Data("\(warning)\n".utf8))
+}
+
 let provider = Provider(configuration: configuration)
 
 Task {

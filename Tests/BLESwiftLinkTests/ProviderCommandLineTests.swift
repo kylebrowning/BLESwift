@@ -135,5 +135,23 @@ struct ProviderCommandLineTests {
         #expect(usage.contains("--help"))
         #expect(usage.contains("BLESWIFT_LINK"))
     }
+
+    @Test("A loopback endpoint warns about nothing")
+    func loopbackEndpointsDoNotWarn() {
+        #expect(ProviderCommandLine.nonLoopbackWarning(for: .default) == nil)
+        #expect(ProviderCommandLine.nonLoopbackWarning(for: LinkEndpoint(host: "127.0.0.1", port: 1)) == nil)
+        #expect(ProviderCommandLine.nonLoopbackWarning(for: LinkEndpoint(host: "localhost", port: 1)) == nil)
+        #expect(LinkEndpoint.default.isLoopback)
+    }
+
+    @Test("A non-loopback endpoint warns that the link is unauthenticated")
+    func nonLoopbackEndpointsWarn() throws {
+        let options = try ProviderCommandLine.parse(["--listen", "0.0.0.0:45541"])
+        let warning = try #require(ProviderCommandLine.nonLoopbackWarning(for: options.endpoint))
+        #expect(warning.contains("non-loopback"))
+        #expect(warning.contains("unauthenticated"))
+        #expect(!LinkEndpoint(host: "192.168.1.10", port: 45541).isLoopback)
+        #expect(ProviderCommandLine.nonLoopbackWarning(for: LinkEndpoint(host: "192.168.1.10", port: 1)) != nil)
+    }
 }
 #endif

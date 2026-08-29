@@ -15,6 +15,13 @@ to `bleswift-provider`, a command-line tool running on the host Mac. The provide
 traffic from the Mac's own Bluetooth radio, from an in-process **virtual radio** hosting devices
 you declare, or from both at once.
 
+> Important: The link is **unauthenticated, and intended for loopback only**. A provider serves
+> every client that completes its handshake, and there is no handshake secret, no TLS, and no
+> access control of any kind — with `--passthrough`, that means the Mac's real Bluetooth radio.
+> Both ends default to `127.0.0.1:45541`, and a provider given a loopback host binds the
+> loopback interface alone. Give `--listen` any other host and the provider binds every
+> interface and prints a warning saying so.
+
 Nothing about this is simulator-specific inside `BLESwift` or `BLESwiftCore`: the whole hook is
 `BackendRegistry`, a process-wide pair of optional backend factories that
 ``Central/init(configuration:)`` and ``PeripheralHost/init(configuration:)`` consult once, at
@@ -191,6 +198,20 @@ advertises, the other scans, connects, reads, writes, and subscribes.
 `Scripts/sim-to-sim-e2e.sh` runs exactly that, end to end, across two booted simulators and the
 `BLESwiftExplorer` sample app, and runs on CI. See `Scripts/e2e/README.md` for the topology, the
 environment overrides, and what to check when it goes red.
+
+## Security
+
+There is none, deliberately. The link carries no authentication, no encryption, and no
+authorization: any process that can open a TCP connection to a running `bleswift-provider` and
+send a `ClientHello` of the right protocol version is served a full central- or
+peripheral-role session. It is a development tool for a Mac talking to its own simulators over
+loopback, and it is only safe on that footing.
+
+So: leave the provider on `127.0.0.1`. Passing `--listen` a non-loopback host binds every
+interface, exposes the provider — and, under `--passthrough`, the Mac's real radio — to anything
+that can route to the port, and makes the provider print
+`listening on a non-loopback interface; the link is unauthenticated` at startup. Do not run a
+passthrough provider on a shared network, and do not put one behind a port-forward.
 
 ## Performance
 

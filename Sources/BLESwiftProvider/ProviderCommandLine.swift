@@ -115,13 +115,30 @@ public enum ProviderCommandLine {
         return options
     }
 
+    /// The warning to print at startup when `endpoint` is not on the loopback interface, or
+    /// `nil` when it is.
+    ///
+    /// The link carries no authentication of any kind: a provider bound to a routable address
+    /// serves any client that reaches it, with the Mac's real Bluetooth radio behind it when
+    /// `--passthrough` is on. That is a deliberate simplification for a loopback development
+    /// tool — and worth saying out loud the moment the tool stops being on loopback.
+    ///
+    /// - Parameter endpoint: The endpoint the provider is about to listen on.
+    /// - Returns: One line to print, or `nil`.
+    public static func nonLoopbackWarning(for endpoint: LinkEndpoint) -> String? {
+        guard !endpoint.isLoopback else { return nil }
+        return "bleswift-provider: warning: listening on a non-loopback interface; the link is unauthenticated"
+    }
+
     /// Usage text for `-h`/`--help` and for reporting a ``ParseError``.
     public static let usage = """
     Usage: bleswift-provider [options]
 
     Options:
       --listen <host:port>   Where to listen. Defaults to the BLESWIFT_LINK environment
-                              variable if set, otherwise 127.0.0.1:45541.
+                              variable if set, otherwise 127.0.0.1:45541. The link is
+                              unauthenticated and intended for loopback only; a non-loopback
+                              host serves any client that can reach the port.
       --fixture <path>       Load a fixture document and host its devices. Repeatable.
       --passthrough          Also expose the host machine's real CoreBluetooth to central-role
                               clients, alongside the virtual devices.

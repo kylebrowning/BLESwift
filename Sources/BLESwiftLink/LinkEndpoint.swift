@@ -38,6 +38,14 @@ public struct LinkEndpoint: Sendable, Hashable, Codable, CustomStringConvertible
         environment[environmentKey].flatMap(LinkEndpoint.init(string:))
     }
 
+    /// Whether ``host`` names the loopback interface — `127.0.0.1` or `localhost`.
+    ///
+    /// The link is **unauthenticated**: anything that can open a TCP connection to a provider
+    /// is served, with the Mac's Bluetooth radio behind it when `--passthrough` is on. It is
+    /// meant for loopback, and a listener bound anywhere else is exposing that to the network.
+    /// A ``LinkListener`` binds loopback-only exactly when this is `true`.
+    public var isLoopback: Bool { LinkTransportParameters.isLoopback(host) }
+
     /// `"host:port"`.
     public var description: String { "\(host):\(port)" }
 }
