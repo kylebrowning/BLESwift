@@ -29,8 +29,8 @@ public enum WireDecodingError: Error, Equatable, Sendable {
 /// So the rule is checked here first, on every string that crosses the wire, and a string
 /// that fails becomes a thrown ``WireDecodingError/invalidIdentifier(_:)`` instead of a trap.
 /// The rule is replicated rather than shared because `BLESwiftCore`'s own normalizer is
-/// internal to it and deliberately non-throwing; ``WireIdentifierValidationTests`` pins the
-/// two to each other.
+/// internal to it and deliberately non-throwing; a table-driven test pins the two to each
+/// other.
 ///
 /// **The rule.** A 4-character (16-bit) or 8-character (32-bit) string of ASCII hex digits,
 /// or a 36-character dashed 128-bit string whose dashes sit at indices 8, 13, 18 and 23 and

@@ -350,7 +350,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     ///
     /// - Returns: `true` when every child either took the value or queued it. `false` — the
     ///   composite's window closing — only when some child has already fallen a full
-    ///   ``queueLimit`` behind, in which case *nothing* is pushed or queued, so the caller's
+    ///   `queueLimit` behind, in which case *nothing* is pushed or queued, so the caller's
     ///   re-offer after the next `readyToUpdateSubscribers` is the value's first and only
     ///   delivery.
     public func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool {

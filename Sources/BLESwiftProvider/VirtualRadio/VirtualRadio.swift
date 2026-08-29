@@ -89,7 +89,8 @@ public actor VirtualRadio {
     private var devices: [UUID: DeviceState] = [:]
     private var sessions: [UUID: Session] = [:]
 
-    /// The identifiers ``devices`` currently holds, readable without awaiting the actor.
+    /// The identifiers this radio currently has devices registered for, readable without
+    /// awaiting the actor.
     ///
     /// A backend has to answer `retrievePeripherals(withIdentifiers:)` **synchronously**, on
     /// its own queue, so it cannot ask the radio. Pushing a snapshot to it instead was the
@@ -97,7 +98,7 @@ public actor VirtualRadio {
     /// a client that registers a device and connects to it in the same synchronous flow — the
     /// provider's own sessions do exactly that — could look the identifier up before the
     /// snapshot arrived and be told no such device exists. This is the same set, written
-    /// inside ``register(_:advertising:)`` and ``remove(device:)`` before either returns, so a
+    /// inside ``register(_:advertising:)`` and the removal path before either returns, so a
     /// registration is visible to every backend the instant it has happened.
     public nonisolated let knownDeviceIDs = Mutex<Set<UUID>>([])
 
