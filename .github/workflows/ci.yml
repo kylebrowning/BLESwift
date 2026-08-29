@@ -30,11 +30,16 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      # Named devices drift with the runner image's Xcode: `iPhone 16` is gone from the
-      # current one (`iPhone 16e` and `iPhone 17` are what it ships), and a destination that
-      # matches nothing fails the job outright.
+      # Named devices drift with the runner image's Xcode — `iPhone 16` is gone from the
+      # current one — and a destination that matches nothing fails the job outright. So the
+      # name is resolved from what the runner actually has rather than pinned here.
+      - name: Resolve a simulator
+        run: |
+          SIM=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; names=[x['name'] for r in d for x in d[r] if x['name'].startswith('iPhone')]; print(sorted(names)[-1])")
+          echo "SIM=$SIM" >> "$GITHUB_ENV"
+          echo "Using $SIM"
       - name: Test on iOS Simulator
-        run: xcodebuild test -scheme BLESwift-Package -destination 'platform=iOS Simulator,name=iPhone 17'
+        run: xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,name=$SIM"
 
   platform-build:
     # The manifest declares watchOS/tvOS/visionOS; the peripheral role's CoreBluetooth
@@ -89,11 +94,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install grantiva
+        # Unpinned: the tap ships a single `grantiva.rb`, with no versioned formulae to pin
+        # to. Noted in Scripts/e2e/README.md.
         run: brew install grantiva/tap/grantiva
+      - name: Resolve two simulators
+        # The two newest iPhone names the runner actually has, resolved the same way the iOS
+        # test job resolves its one. Pinned names drift with the runner image's Xcode.
+        run: |
+          NAMES=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; names={x['name'] for r in d for x in d[r] if x['name'].startswith('iPhone')}; print('\n'.join(sorted(names)[-2:]))")
+          echo "ADVERTISER_SIM=$(echo "$NAMES" | tail -1)" >> "$GITHUB_ENV"
+          echo "SCANNER_SIM=$(echo "$NAMES" | head -1)" >> "$GITHUB_ENV"
+          echo "Using $NAMES"
       - name: Run
-        # Both exist on the runner image, so `ensure_simulator` finds them instead of
-        # paying to create one.
-        run: ADVERTISER_SIM="iPhone 17" SCANNER_SIM="iPhone 16e" Scripts/sim-to-sim-e2e.sh
+        run: Scripts/sim-to-sim-e2e.sh
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4

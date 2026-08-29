@@ -84,8 +84,19 @@ to run it by hand.
 
 ## When it fails on CI
 
-The `sim-to-sim-e2e` job on `macos-latest` uses `iPhone 16 Pro` / `iPhone 16`. First things to
-check when it goes red:
+The `sim-to-sim-e2e` job on `macos-latest` resolves `ADVERTISER_SIM` / `SCANNER_SIM` at run
+time — the two newest distinct `iPhone …` names the runner image actually has, taken from
+`xcrun simctl list devices available -j`. Nothing is pinned, because named devices drift with
+the image's Xcode and a name that matches nothing fails the job outright.
+
+**grantiva is installed unpinned.** The ruling for the CI cleanup asked for
+`brew install grantiva/tap/grantiva@<version>` *if the tap supports versioned formulae*. It
+does not: `grantiva/homebrew-tap` ships a single `Formula/grantiva.rb`, so there is no
+`grantiva@1.6.5` to install and the job takes whatever the tap's HEAD formula points at. A
+grantiva release that changes the CLI can therefore turn this job red without a commit here;
+the friction log below is written against **1.6.5**.
+
+First things to check when it goes red:
 
 - **grantiva installation.** `brew install grantiva/tap/grantiva` must succeed, and the first
   `grantiva run` extracts and builds an embedded WebDriverAgent runner — several minutes, and
