@@ -88,9 +88,7 @@ public actor FixtureDeviceHandler: VirtualDeviceHandler {
     public func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> {
         for entry in entries {
             guard let declared = properties[entry.characteristic] else { return .failure(.writeNotPermitted) }
-            guard declared.contains(.write) || declared.contains(.writeWithoutResponse) else {
-                return .failure(.writeNotPermitted)
-            }
+            guard declared.isWritable else { return .failure(.writeNotPermitted) }
         }
 
         for entry in entries {
@@ -173,6 +171,15 @@ extension CharacteristicProperties {
     /// applies the same read rule to a static value before it answers from the database.
     var isNotifiable: Bool {
         contains(.notify) || contains(.indicate)
+    }
+
+    /// Whether these properties allow a central to write the value.
+    ///
+    /// Internal rather than `fileprivate`, as ``isNotifiable`` is:
+    /// ``VirtualRadio/write(device:characteristic:value:session:)`` applies the same rule at
+    /// the ATT layer, before a write can reach any device's handler.
+    var isWritable: Bool {
+        contains(.write) || contains(.writeWithoutResponse)
     }
 }
 #endif

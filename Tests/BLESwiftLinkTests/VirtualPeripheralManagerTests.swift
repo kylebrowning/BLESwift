@@ -319,6 +319,75 @@ struct VirtualPeripheralManagerTests {
         readResponder.cancel()
     }
 
+    @Test("A write to a characteristic declaring no write property never reaches the host")
+    func writeToAReadOnlyCharacteristicIsRefusedAtTheRadio() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.ReadOnlyHost")
+        let host = PeripheralHost(
+            backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier),
+            queue: hostQueue
+        )
+        try await host.add(Self.service)
+
+        // A host that would happily acknowledge anything it is handed: the refusal has to come
+        // from the radio's own ATT layer, or this responder answers the write successfully.
+        let arrived = Mutex(0)
+        let writeResponder = Task { @Sendable in
+            for await request in await host.writeRequests() {
+                arrived.withLock { $0 += 1 }
+                await host.respond(to: request, with: .success(()))
+            }
+        }
+        defer { writeResponder.cancel() }
+
+        // The backend is driven directly: `Peripheral`'s own writer refuses a write to a
+        // characteristic that declares no write property before it ever reaches a radio, and
+        // the radio's refusal — what real hardware does at the ATT layer, for a host that has
+        // no fixture handler to refuse for it — is what is under test.
+        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.ReadOnlyCentral")
+        let central = VirtualCentralBackend(radio: radio, queue: centralQueue)
+        await waitFor { await Self.onQueue(centralQueue) { !central.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
+        let remote = try #require(await Self.onQueue(centralQueue) {
+            central.retrievePeripherals(withIdentifiers: [identifier]).first as? VirtualPeripheralRemote
+        })
+        let writes = Mutex<[(CharacteristicIdentifier, NSError?)]>([])
+        await Self.onQueue(centralQueue) {
+            remote.eventHandler = { event in
+                if case .didWriteValue(let characteristic, let error) = event {
+                    writes.withLock { $0.append((characteristic, error)) }
+                }
+            }
+            central.connect(remote, options: nil, requiresANCS: false)
+        }
+        await waitFor { await Self.onQueue(centralQueue) { remote.connectionState == .connected } }
+        await Self.onQueue(centralQueue) {
+            remote.discoverServices([Self.heartRate])
+            remote.discoverCharacteristics([Self.measurement, Self.control], for: Self.heartRate)
+        }
+        await waitFor { await Self.onQueue(centralQueue) { remote.isDiscovered(Self.measurement) } }
+
+        // `measurement` declares `.read` and `.notify` and nothing else, so ATT refuses.
+        await Self.onQueue(centralQueue) {
+            remote.writeValue(Data([0x2A]), for: Self.measurement, type: .withResponse)
+        }
+        await waitFor { writes.withLock { !$0.isEmpty } }
+        let refused = try #require(writes.withLock { $0.first })
+        #expect(refused.0 == Self.measurement)
+        #expect(refused.1?.domain == "CBATTErrorDomain")
+        #expect(refused.1?.code == ATTError.writeNotPermitted.rawValue)
+        #expect(arrived.withLock { $0 } == 0)
+
+        // The writable characteristic on the same device is unaffected: the refusal is the
+        // permission check, not a blanket block on writes to this host.
+        await Self.onQueue(centralQueue) {
+            remote.writeValue(Data([0x2A]), for: Self.control, type: .withResponse)
+        }
+        await waitFor { writes.withLock { $0.count == 2 } }
+        #expect(writes.withLock { $0.last?.1 } == nil)
+        #expect(arrived.withLock { $0 } == 1)
+    }
+
     @Test("The advertised local name becomes the discovered peripheral's name")
     func advertisedLocalNameBecomesPeripheralName() async throws {
         let radio = VirtualRadio()

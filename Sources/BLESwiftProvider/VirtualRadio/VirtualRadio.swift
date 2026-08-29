@@ -566,7 +566,16 @@ public actor VirtualRadio {
     }
 
     /// Writes `value` to `characteristic` through the device's handler. A session that is not
-    /// connected to `device` is refused with `ATTError.invalidHandle`.
+    /// connected to `device` is refused with `ATTError.invalidHandle`, a characteristic
+    /// declaring neither `write` nor `writeWithoutResponse` with `ATTError.writeNotPermitted`.
+    ///
+    /// **The permission check is the radio's, not the handler's.** It mirrors the one
+    /// ``read(device:characteristic:offset:session:)`` makes, and for the same reason: a
+    /// hosted device — a remote `PeripheralHost` at the far end of a link — has no
+    /// ``FixtureDeviceHandler`` to refuse for it, so a write to a read-only characteristic
+    /// reached its `didReceiveWrite` and was served. Real hardware refuses that write at the
+    /// ATT layer, before any of it reaches the peripheral's application code, and so does this
+    /// radio, whatever the device behind the handle is.
     func write(
         device: UUID,
         characteristic: CharacteristicIdentifier,
@@ -575,7 +584,8 @@ public actor VirtualRadio {
     ) async -> Result<Void, ATTError> {
         guard isConnected(session: session, to: device) else { return .failure(.invalidHandle) }
         guard let state = devices[device] else { return .failure(.invalidHandle) }
-        guard definition(of: characteristic, in: state) != nil else { return .failure(.attributeNotFound) }
+        guard let definition = definition(of: characteristic, in: state) else { return .failure(.attributeNotFound) }
+        guard definition.properties.isWritable else { return .failure(.writeNotPermitted) }
         let central = subscriber(session)
         let entry = WriteRequest.Entry(central: central, characteristic: characteristic, offset: 0, value: value)
         return await state.handler.write([entry], from: central)
