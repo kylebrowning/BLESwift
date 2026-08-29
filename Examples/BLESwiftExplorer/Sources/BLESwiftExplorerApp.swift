@@ -22,8 +22,11 @@ struct BLESwiftExplorerApp: App {
     // consuming `restorationEvents()` immediately, in this same launch path.
     @State private var model = ExplorerModel()
 
-    // The peripheral-role counterpart. Created here so its `PeripheralHost` is built after
-    // `ExplorerModel.init()` has installed the simulator link.
+    // The peripheral-role counterpart. Its `PeripheralHost` resolves a backend from
+    // `BackendRegistry` at construction, and gets the link's because `AdvertiserModel`
+    // creates it lazily on the first `start()` — long after `ExplorerModel.init()` has
+    // installed the link. Declaration order here is not what makes that safe: SwiftUI
+    // guarantees no ordering between two `@State` initial values.
     @State private var advertiser = AdvertiserModel()
 
     var body: some Scene {

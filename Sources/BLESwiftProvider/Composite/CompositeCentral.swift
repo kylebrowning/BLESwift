@@ -36,7 +36,7 @@ import Foundation
 /// - Important: ``init(backends:queue:)`` installs the children's event handlers with
 ///   `queue.sync`, so it must not be called from `queue` itself. Code already running on
 ///   `queue` — which is where a real `CBCentralManager` has to be built and wired without
-///   yielding — uses ``init(backends:onQueue:)`` instead.
+///   yielding — uses `init(backends:onQueue:)` instead.
 public final class CompositeCentral: CentralManaging, Sendable {
 
     /// The queue every method, property access, and event delivery is confined to — and

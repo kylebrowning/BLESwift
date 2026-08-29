@@ -199,6 +199,19 @@ public final class LinkCentral: CentralManaging, Sendable {
     /// it has not seen. The same instance is always returned for a given identifier, so a
     /// `Central` that attaches an event handler to a retrieved peripheral is attaching it to
     /// the object the wire events will be routed to.
+    ///
+    /// **Every identifier gets one, seen or not.** This call is synchronous — there is no
+    /// round trip to ask the provider what it has scanned — so nothing here can tell a
+    /// previously-seen identifier from an invented one, and none is omitted. That is the
+    /// point: a placeholder is what lets `Central.connect(identifier:)` reach a peripheral
+    /// the provider's passthrough radio knows from a previous run of the client process,
+    /// which no scan in *this* process has sighted. An identifier nothing knows fails where
+    /// it should, at the connect: the provider answers `didFailToConnect` with
+    /// `VirtualRadio.unknownDeviceError` (the `BLESwiftProvider` domain, code `1`).
+    ///
+    /// This is the one place the link's answer is wider than
+    /// `Central.knownPeripherals(withIdentifiers:)` promises, whose contract omits
+    /// unrecognized identifiers — see BLESwift's "Running in the iOS Simulator" article.
     public func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote] {
         dispatchPrecondition(condition: .onQueue(queue))
         return identifiers.map { peripheral(for: $0) }

@@ -35,9 +35,15 @@ enum LinkL2CAPError: Error, Equatable {
 /// queued and served in arrival order, so concurrent writers neither starve nor lose each
 /// other's continuations.
 ///
-/// **Flow control, inbound.** Every ``receive(_:)`` yields to the inbound stream and
-/// immediately credits the provider for the bytes taken, since the client-side stream buffers
-/// them for a consumer that is under no obligation to be ready.
+/// **Flow control, inbound — a wire window, not back-pressure.** Every ``receive(_:)``
+/// credits the provider the moment the bytes arrive, whether they were yielded to a waiting
+/// consumer or buffered for one that has not asked yet. So the provider→client direction has
+/// **no end-to-end back-pressure by design**: a consumer that never reads does not slow the
+/// provider down, it simply grows this channel's `pending` buffer. The credit window bounds
+/// how much is in flight on the wire at once — the provider stops sending until it is
+/// credited — and nothing more. Only the client→provider direction carries back-pressure all
+/// the way to the peer, because the provider credits a write only once its own write to the
+/// real transport has returned.
 ///
 /// **Concurrency.** Every mutable field lives in one `Mutex`-protected ``State``; no
 /// continuation is ever resumed and no sink is ever called with the lock held. Every entry

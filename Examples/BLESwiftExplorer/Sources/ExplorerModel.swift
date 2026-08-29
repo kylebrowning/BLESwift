@@ -82,6 +82,10 @@ final class ExplorerModel {
         #if targetEnvironment(simulator)
         // The Simulator has no Bluetooth; route Central/PeripheralHost to a host-side
         // bleswift-provider (BLESWIFT_LINK overrides the endpoint).
+        // Must stay ahead of the `Central(configuration:)` below, in this same
+        // initializer: `Central` resolves its backend from `BackendRegistry` once, at
+        // construction, so an install that ran after it would leave this `Central` on
+        // CoreBluetooth for good.
         SimulatorLink.install()
         #endif
 

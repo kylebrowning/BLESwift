@@ -14,7 +14,14 @@ import Synchronization
 ///
 /// A `LinkPeripheral` is never created directly: ``LinkCentral`` owns the table of them and
 /// vends the same instance for a given identifier every time, exactly as CoreBluetooth
-/// vends one `CBPeripheral` per peripheral. It refers back to its central `unowned` — the
+/// vends one `CBPeripheral` per peripheral.
+///
+/// **A mirror is not evidence the peripheral exists.**
+/// ``LinkCentral/retrievePeripherals(withIdentifiers:)`` mints one of these for *any*
+/// identifier, seen or not: the call is synchronous, so there is no way to ask the provider
+/// first. A placeholder carries no name, no services, and a `.disconnected` state until the
+/// provider reports otherwise, and an identifier nothing knows fails at the connect —
+/// `didFailToConnect`, `BLESwiftProvider` domain, code `1` — not at retrieval. It refers back to its central `unowned` — the
 /// central owns it, so it can never outlive it — and sends every request through the
 /// central's one session.
 ///
@@ -81,7 +88,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     /// The peripheral's advertised or cached name, as last reported by the provider.
     /// `Mutex`-backed, so it is readable from any context — `Central`'s
-    /// `connectedPeripherals` adoption reads it off ``queue``.
+    /// `connectedPeripherals` adoption reads it off the central's queue.
     public var name: String? {
         nameBox.withLock { $0 }
     }

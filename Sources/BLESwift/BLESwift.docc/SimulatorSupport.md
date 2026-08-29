@@ -228,6 +228,13 @@ is broken.
 - **No L2CAP on the virtual radio.** ``Peripheral/openL2CAPChannel(psm:timeout:)`` against a
   virtual device fails with an `NSError` in the `BLESwiftProvider` domain, code `3`. L2CAP works
   over the link only in `--passthrough` mode, against a real peripheral.
+- **`knownPeripherals(withIdentifiers:)` answers for every identifier.** The seam call behind
+  it is synchronous, with no wire round trip to ask the provider what it has seen, so the link
+  vends a placeholder ``Peripheral`` for *every* identifier passed — including ones neither it
+  nor the provider recognizes. That is what lets `Central.connect(identifier:)` reach a
+  peripheral the passthrough radio remembers from a previous run of your app. An identifier
+  nothing knows fails at connect instead of being omitted here: `didFailToConnect` with an
+  `NSError` in the `BLESwiftProvider` domain, code `1`.
 - **Initial radio state.** A link-backed ``Central`` reports ``CentralState/unsupported`` until
   the provider answers — the same state the Simulator reports today, so an app that waits for
   `.poweredOn` simply waits — and then reports whatever state the provider does. If the provider
