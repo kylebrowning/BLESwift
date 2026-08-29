@@ -72,12 +72,13 @@ final class CentralSession: Sendable {
     /// simultaneous opens than any honest client has.
     static let maximumPendingOpens = 16
 
-    /// How many peripheral remotes this session keeps.
+    /// How many peripheral remotes a session keeps by default.
     ///
     /// The same 1024 the client's own mirror table is capped at, for the same reason: a
     /// long-lived client that connects across a busy room would otherwise grow this table
-    /// without limit, one remote per identifier ever connected.
-    static let maximumRemotes = 1024
+    /// without limit, one remote per identifier ever connected. Tests override it rather than
+    /// connecting a thousand peripherals to force an eviction.
+    static let defaultMaximumRemotes = 1024
 
     /// The error a channel-open completion reports when the backend reported neither a
     /// channel nor an error of its own.
@@ -124,6 +125,10 @@ final class CentralSession: Sendable {
     /// ``remotes``' keys in least-recently-connected order, which is what the cap evicts from.
     /// Linear to update, over a list bounded by ``maximumRemotes``.
     nonisolated(unsafe) private var connectOrder: [UUID] = []
+
+    /// How many remotes this session keeps — ``defaultMaximumRemotes``, unless a test asked
+    /// for a smaller table.
+    private let maximumRemotes: Int
     nonisolated(unsafe) private var pendingWrites: [UUID: [PendingWrite]] = [:]
     nonisolated(unsafe) var pendingOpens: [UUID: [PendingOpen]] = [:]
     nonisolated(unsafe) private var isClosed = false
@@ -151,6 +156,7 @@ final class CentralSession: Sendable {
     ///   - install: Hands this session the connection's messages, replaying any that arrived
     ///     behind the hello. Called once, synchronously.
     ///   - log: Receives one line per notable session event.
+    ///   - maximumRemotes: How many peripheral remotes this session keeps.
     init(
         connection: LinkConnection,
         backend: any CentralManaging,
@@ -158,11 +164,13 @@ final class CentralSession: Sendable {
         ordinal: Int,
         hello: ServerHello,
         install: (@escaping @Sendable (LinkMessage) -> Void) -> Void,
-        log: (@Sendable (String) -> Void)?
+        log: (@Sendable (String) -> Void)?,
+        maximumRemotes: Int = CentralSession.defaultMaximumRemotes
     ) {
         self.connection = connection
         self.backend = backend
         self.queue = queue
+        self.maximumRemotes = maximumRemotes
         self.label = "central session \(ordinal)"
         self.log = log
         queue.async { [self] in
@@ -246,9 +254,15 @@ final class CentralSession: Sendable {
                 send(.didFailToConnect(peripheral: peripheral, error: WireError(VirtualRadio.unknownDeviceError)))
                 return
             }
+            // Evicted *before* the insert, never after: a remote this session has only just
+            // filed is disconnected with nothing in flight, which is exactly what the cap
+            // calls idle, so a table full of busy remotes would otherwise answer an overflow
+            // by dropping the very peripheral being connected — the same ordering
+            // `LinkCentral.connect` fixes by marking its mirror connecting first. A slot is
+            // reserved for the insert, so the table still settles at `maximumRemotes`.
+            evictStaleRemotes(reserving: remotes[peripheral] == nil ? 1 : 0)
             remotes[peripheral] = remote
             touch(peripheral)
-            evictStaleRemotes()
             attachHandler(to: remote, for: peripheral)
             backend.connect(remote, options: options?.warningOptions, requiresANCS: requiresANCS)
 
@@ -397,10 +411,14 @@ final class CentralSession: Sendable {
     /// still holds it cannot deliver into a session that has forgotten it. A remote is idle
     /// only when it is `.disconnected` and this session has nothing in flight for it; anything
     /// else is left alone however old it is. Must be called on ``queue``.
-    private func evictStaleRemotes() {
+    ///
+    /// - Parameter reserving: How many slots the caller is about to fill, kept free on top of
+    ///   the entries already in the table.
+    private func evictStaleRemotes(reserving: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard remotes.count > Self.maximumRemotes else { return }
-        var overflow = remotes.count - Self.maximumRemotes
+        let limit = maximumRemotes - reserving
+        guard remotes.count > limit else { return }
+        var overflow = remotes.count - limit
         var kept: [UUID] = []
         kept.reserveCapacity(connectOrder.count)
         for identifier in connectOrder {

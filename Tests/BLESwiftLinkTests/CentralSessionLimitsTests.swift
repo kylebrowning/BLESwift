@@ -143,10 +143,65 @@ struct CentralSessionLimitsTests {
         await provider.stop()
     }
 
+    @Test("A connect is still tracked when every remote the session already holds is busy")
+    func connectSurvivesATableOfBusyRemotes() async throws {
+        let busy = UUID()
+        let arriving = UUID()
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        // A table of one, so the second connect overflows it with the first still connected.
+        configuration.maximumRemotesPerCentralSession = 1
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            for identifier in [busy, arriving] {
+                // `busy` reports itself connected from the start — `FakeCentral` delivers the
+                // connection events but never moves a `FakePeripheral`'s own state, and the
+                // cap reads that state to decide what it may evict.
+                let peripheral = FakePeripheral(
+                    identifier: identifier,
+                    name: "Fake",
+                    state: identifier == busy ? .connected : .disconnected,
+                    queue: queue
+                )
+                peripheral.availableServices = [Self.service: [Self.control]]
+                fake.retrievablePeripherals[identifier] = peripheral
+            }
+            fake.connectBehavior = .succeed
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let queue = DispatchSerialQueue(label: "centralsession.busytable")
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            queue: queue,
+            clientName: "busy",
+            retryInterval: .seconds(30)
+        )
+        let central = Central(backend: link, queue: queue)
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+
+        // Connected, and stays that way: this remote is never idle, so the cap may not evict
+        // it — which leaves the arriving one as the only candidate the eviction could pick.
+        _ = try await bounded { try await central.connect(PeripheralIdentifier(uuid: busy, name: "Fake")) }
+        let second = try await bounded { try await central.connect(PeripheralIdentifier(uuid: arriving, name: "Fake")) }
+
+        // The session still has a remote filed for it, so its requests reach the backend and
+        // the answers come back. Before the eviction ran ahead of the insert, this connect
+        // evicted itself and every request after it was answered with silence.
+        let services = try await bounded { try await second.discoverServices() }
+        #expect(services == [Self.service])
+
+        link.shutdown()
+        await provider.stop()
+    }
+
     @Test("An idle remote is evicted once the session is holding more than it keeps")
     func remoteTableIsCapped() async throws {
         // One more than the cap, so exactly the least recently connected one is evicted.
-        let identifiers = (0..<(CentralSession.maximumRemotes + 1)).map { _ in UUID() }
+        let identifiers = (0..<(CentralSession.defaultMaximumRemotes + 1)).map { _ in UUID() }
         let oldest = try #require(identifiers.first)
         let newest = try #require(identifiers.last)
         var configuration = ProviderConfiguration()

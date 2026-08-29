@@ -54,6 +54,11 @@ public struct ProviderConfiguration: Sendable {
     /// that session's own serial queue, and must return a backend confined to that queue.
     public var peripheralManagerBackendFactory: (@Sendable (DispatchSerialQueue) -> any PeripheralManaging)?
 
+    /// Test hook: how many peripheral remotes each central-role session keeps. Deliberately
+    /// not `public` — a client cannot see this table, and the only reason to shrink it is a
+    /// test that would otherwise have to connect a thousand peripherals to force an eviction.
+    var maximumRemotesPerCentralSession: Int = CentralSession.defaultMaximumRemotes
+
     /// Creates a configuration with every field at its default.
     public init() {}
 }
