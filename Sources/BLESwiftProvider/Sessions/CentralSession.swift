@@ -121,9 +121,11 @@ final class CentralSession: Sendable {
             self.backend.eventHandler = { [weak self] event in self?.translate(event) }
             // Installed only once the backend's own handler exists, so no request can reach
             // the backend before its events have somewhere to go. Nothing is lost by the
-            // wait: a client sends nothing until it has processed the `ServerHello`, which
-            // the provider sends after this block is already enqueued. Weak, because the
-            // session owns the connection and a strong capture would be a cycle.
+            // wait: `Provider.handle` sends the `ServerHello` *before* it constructs this
+            // session, and a client sends nothing until it has processed that hello — a
+            // round trip that cannot beat the single `queue.async` this block is enqueued
+            // by. Weak, because the session owns the connection and a strong capture would
+            // be a cycle.
             connection.onMessage = { [weak self] message in
                 guard let self, case .centralRequest(let request) = message else { return }
                 self.queue.async { self.perform(request) }
