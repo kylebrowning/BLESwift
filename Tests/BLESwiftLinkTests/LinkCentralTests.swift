@@ -175,14 +175,18 @@ struct LinkCentralTests {
         await waitFor { !provider.requests.withLock { $0 }.isEmpty }
         provider.emit(.didConnect(peripheral: id, name: "x", maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
         _ = try await bounded { try await connectTask.value }
-        let events = Task { () -> ConnectionEvent? in
-            for await event in await central.connectionEvents() {
+        // Subscribed before the stimulus, for the reason spelled out in `VirtualRadioTests`:
+        // the broadcast does not replay, so a subscription created inside the task can miss
+        // the very event the task exists to see.
+        let events = await central.connectionEvents()
+        let disconnects = Task { () -> ConnectionEvent? in
+            for await event in events {
                 if case .disconnected = event { return event }
             }
             return nil
         }
         provider.stop()
-        let event = try await bounded { await events.value }
+        let event = try await bounded { await disconnects.value }
         #expect(event != nil)
         await waitFor { central.state == .unsupported }
         #expect(central.state == .unsupported)

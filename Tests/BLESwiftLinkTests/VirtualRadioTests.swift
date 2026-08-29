@@ -135,14 +135,20 @@ struct VirtualRadioTests {
         let (central, _, handle) = try await makeRig()
         let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
         _ = try await central.connect(PeripheralIdentifier(uuid: id, name: nil))
-        let events = Task { () -> (any Error)?? in
-            for await event in await central.connectionEvents() {
+        // Subscribed here, not inside the task: `connectionEvents()` is a broadcast with no
+        // replay, and the stream's subscriber is registered the moment it is created. Creating
+        // it inside the task let `remove()` win the race perhaps one run in ten — the
+        // `.disconnected` was yielded to nobody, the stream then never yielded again, and the
+        // test parked on `events.value` forever, hanging the whole bundle with it.
+        let events = await central.connectionEvents()
+        let disconnects = Task { () -> (any Error)?? in
+            for await event in events {
                 if case .disconnected(_, let error, _) = event { return .some(error) }
             }
             return .none
         }
         await handle.remove()
-        let reported = try #require(try await bounded { await events.value })
+        let reported = try #require(try await bounded { await disconnects.value })
         let nsError = try #require(reported) as NSError
         #expect(nsError.domain == "BLESwiftProvider")
         #expect(nsError.code == 2)
