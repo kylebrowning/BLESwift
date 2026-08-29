@@ -7,6 +7,7 @@ import BLESwiftCore
 import BLESwiftLink
 import BLESwiftSimulatorLink
 import Foundation
+import Synchronization
 import Testing
 
 #if os(macOS)
@@ -169,10 +170,9 @@ struct SimulatorLinkInstallTests {
             queue: queue
         )
         // Silent again, and with a 30-second bound: nothing but the cancellation can end this
-        // probe, so a prompt `false` proves the cancelled path resumes at all. It used to be
-        // able to deadlock — the cancellation handler cancels the connection before the state
-        // handler exists, the terminal state is published to nobody, and the group waits on a
-        // continuation no one will ever resume.
+        // probe, so a prompt `false` proves the cancelled path resumes at all. Cancelled
+        // before the probe has run a line, which is its own case — the loop must notice the
+        // flag rather than dial once and wait out the timeout.
         try await listener.start()
         defer { listener.cancel() }
 
@@ -185,6 +185,48 @@ struct SimulatorLinkInstallTests {
         probe.cancel()
 
         #expect(try await bounded(seconds: 1) { await probe.value } == false)
+    }
+
+    @Test("isProviderReachable returns false promptly when cancelled mid-probe")
+    func isProviderReachableCancelledMidProbe() async throws {
+        let queue = DispatchQueue(label: "reachable.cancelled.midprobe")
+        let listener = try LinkListener(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: 0),
+            codec: .binaryPropertyList,
+            queue: queue
+        )
+        // The path the cancellation handler exists for: the probe is *inside* its dial, on a
+        // connection that reached `.ready` and is waiting on a hello that will never come.
+        // Cancelling then used to be able to deadlock — the handler cancels the connection
+        // before the state handler exists, the terminal state is published to nobody, and the
+        // group waits on a continuation no one will ever resume. The connections are held
+        // (the listener does not retain what it accepts) so the probe keeps waiting on a live,
+        // silent socket rather than one that died under it.
+        let accepted = Mutex<[LinkConnection]>([])
+        listener.onConnection = { connection in
+            accepted.withLock { $0.append(connection) }
+        }
+        try await listener.start()
+        defer {
+            listener.cancel()
+            for connection in accepted.withLock({ $0 }) { connection.cancel() }
+        }
+
+        let probe = Task {
+            await SimulatorLink.isProviderReachable(
+                LinkEndpoint(host: "127.0.0.1", port: listener.port),
+                timeout: .seconds(30)
+            )
+        }
+        // Gate on the listener actually accepting: the probe has reached `.ready` and sent its
+        // hello, so the cancellation lands mid-dial rather than before the probe started.
+        await waitFor(timeout: .seconds(5)) { accepted.withLock { !$0.isEmpty } }
+        #expect(accepted.withLock { !$0.isEmpty })
+
+        let start = ContinuousClock.now
+        probe.cancel()
+        #expect(try await bounded(seconds: 1) { await probe.value } == false)
+        #expect(ContinuousClock.now - start < .seconds(1))
     }
 #endif
 }
