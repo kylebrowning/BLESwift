@@ -53,6 +53,15 @@ final class CentralSession: Sendable {
     /// never saw — the conservative default a client assumes before any negotiation.
     private static let defaultMaximumWriteWithoutResponse = 20
 
+    /// How many unsent `.withoutResponse` writes this session holds for one peripheral before
+    /// it stops believing the client.
+    ///
+    /// Four times the window the client agreed to honor: a client that has stopped waiting
+    /// for `writeWithoutResponseAccepted` can otherwise grow this queue — and the provider's
+    /// memory — without bound, and there is no answer to that but to disbelieve it. The
+    /// factor of four is slack for the acknowledgements still in flight, not a second window.
+    static let maximumPendingWrites = 4 * LinkFlowControl.writeWithoutResponseWindow
+
     /// The error a channel-open completion reports when the backend reported neither a
     /// channel nor an error of its own.
     static var l2capOpenFailed: NSError {
@@ -252,6 +261,12 @@ final class CentralSession: Sendable {
                 remote.writeValue(value, for: identifier, type: .withResponse)
                 return
             }
+            // A client that keeps queueing past the window it agreed to has stopped following
+            // the protocol; the link goes rather than this session's memory.
+            guard pendingWrites[peripheral, default: []].count < Self.maximumPendingWrites else {
+                failProtocol(ProtocolViolation.writeWindowExceeded(peripheral: peripheral))
+                return
+            }
             pendingWrites[peripheral, default: []].append(
                 PendingWrite(sequence: sequence, characteristic: identifier, value: value)
             )
@@ -295,6 +310,14 @@ final class CentralSession: Sendable {
         case .l2capClose(let channel):
             closeChannel(channel)
         }
+    }
+
+    /// What a client did that the protocol does not permit, beyond the malformed fields the
+    /// wire boundary itself rejects.
+    enum ProtocolViolation: Error, Equatable {
+        /// More `.withoutResponse` writes were queued for one peripheral than
+        /// ``maximumPendingWrites`` allows — the client has ignored its flow-control window.
+        case writeWindowExceeded(peripheral: UUID)
     }
 
     /// `uuid` as a `ServiceIdentifier`, rejecting a string no `ServiceIdentifier` could
