@@ -241,6 +241,11 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
     }
 
     /// Whether the hosted device is currently advertising on the radio.
+    ///
+    /// Reported from the radio's own chain: it turns `true` once ``startAdvertising(_:)`` has
+    /// been applied — the same moment `didStartAdvertising` is delivered — and `false` once
+    /// ``stopAdvertising()`` has, never from a write that could land out of order behind
+    /// either.
     public var isAdvertising: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _isAdvertising
@@ -272,12 +277,24 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
 
     /// Stops advertising. Idempotent, and reports no completion of its own — exactly like
     /// `CBPeripheralManager.stopAdvertising()`.
+    ///
+    /// **``isAdvertising`` is cleared from the chain, not here.** Written synchronously, it
+    /// raced ``startAdvertising(_:)``, which sets the flag from a queue hop taken *inside* its
+    /// own enqueued body: a `start()` and the `stop()` behind it on the same turn left the
+    /// radio correctly silent and this backend reporting `isAdvertising == true` for good,
+    /// with `PeripheralHost.isAdvertising` reading straight through it. Both writes are made
+    /// from the same serial chain instead, so the last call made is the one that decides.
     public func stopAdvertising() {
         dispatchPrecondition(condition: .onQueue(queue))
-        _isAdvertising = false
-        enqueue { handle in
+        enqueue({ [weak self] handle in
             await handle.setAdvertising(false)
-        }
+            guard let self else { return }
+            self.queue.async { self._isAdvertising = false }
+        }, ifRemoved: { [weak self] in
+            // A device that is gone advertises nothing, and no later call will say so.
+            guard let self else { return }
+            self.queue.async { self._isAdvertising = false }
+        })
     }
 
     /// Publishes `service` into the hosted device's GATT database, delivering

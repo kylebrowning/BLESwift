@@ -421,6 +421,47 @@ struct VirtualPeripheralManagerTests {
         #expect(discovery.advertisement.localName == "Renamed")
     }
 
+    @Test("A stop right behind a start leaves the backend reporting not advertising")
+    func stopBehindStartDoesNotLatchAdvertising() async {
+        let radio = VirtualRadio()
+        let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.advertising")
+        let backend = VirtualPeripheralManagerBackend(radio: radio, queue: queue)
+        let started = Mutex(false)
+
+        // Both calls on one queue turn, which is what CoreBluetooth permits and what raced:
+        // the start's flag write comes off the radio's chain, the stop's used to be made here
+        // and to be overwritten by it a moment later.
+        await Self.onQueue(queue) {
+            backend.eventHandler = { event in
+                if case .didStartAdvertising = event { started.withLock { $0 = true } }
+            }
+            backend.startAdvertising(PeripheralAdvertisement(localName: "Virtual HRM", serviceUUIDs: [Self.heartRate]))
+            backend.stopAdvertising()
+        }
+
+        // Both calls have reached the radio by the time the start reports itself applied and
+        // the chain behind it has drained.
+        await waitFor { started.withLock { $0 } }
+        await waitFor { await Self.onQueue(queue) { !backend.isAdvertising } }
+        #expect(await Self.onQueue(queue) { !backend.isAdvertising })
+
+        // And the radio agrees: a scan started now finds nothing to report.
+        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.advertising.central")
+        let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
+        await waitFor { central.state == .poweredOn }
+        var found: Discovery?
+        // A scan that finds nothing ends by timing out, which is the outcome under test.
+        do {
+            for try await event in await central.scan(services: [Self.heartRate], timeout: .milliseconds(200)) {
+                if case .discovered(let discovery) = event {
+                    found = discovery
+                    break
+                }
+            }
+        } catch {}
+        #expect(found == nil)
+    }
+
     // MARK: - Departing subscribers
 
     /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.
