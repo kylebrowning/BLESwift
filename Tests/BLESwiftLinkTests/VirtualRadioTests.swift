@@ -444,6 +444,41 @@ struct VirtualRadioTests {
         #expect(events.withLock { $0.contains(other) })
     }
 
+    @Test("A connect to a remote this backend has replaced fails instead of being dropped")
+    func connectToAStaleRemoteFails() async throws {
+        let radio = VirtualRadio()
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.staleconnect")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue, maximumDiscovered: 8, maximumRemotes: 1)
+        let target = await Self.register(on: radio)
+        let filler = await Self.register(on: radio)
+
+        let failures = Mutex<[(peripheral: UUID, error: NSError?)]>([])
+        await Self.onQueue(queue) {
+            backend.eventHandler = { event in
+                guard case .didFailToConnect(let peripheral, let error) = event else { return }
+                failures.withLock { $0.append((peripheral.uuid, error as NSError?)) }
+            }
+        }
+
+        let stale = try #require(await Self.remote(backend, queue, target))
+        // Evicted by the overflow, then re-minted: the backend files a *different* remote for
+        // `target`, and the radio's events for it would be routed there.
+        _ = await Self.remote(backend, queue, filler)
+        let current = try #require(await Self.remote(backend, queue, target))
+        #expect(current !== stale)
+
+        await Self.onQueue(queue) { backend.connect(stale, options: nil, requiresANCS: false) }
+
+        await waitFor { failures.withLock { !$0.isEmpty } }
+        let reported = failures.withLock { $0 }
+        #expect(reported.count == 1)
+        #expect(reported.first?.peripheral == target)
+        #expect(reported.first?.error?.domain == "BLESwiftProvider")
+        #expect(reported.first?.error?.code == 7)
+        // Refused before the radio was ever asked, so the stale remote never left `.disconnected`.
+        #expect(await Self.onQueue(queue) { stale.connectionState } == .disconnected)
+    }
+
     @Test("A read for a characteristic the remote has not discovered is a no-op")
     func undiscoveredReadIsANoOp() async throws {
         let radio = VirtualRadio()

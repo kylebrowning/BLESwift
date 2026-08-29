@@ -220,8 +220,14 @@ public final class LinkCentral: CentralManaging, Sendable {
     /// time it connects — and dropping the request on the floor would leave that caller
     /// waiting for a `didConnect` nothing was ever going to send. The identity check is on the
     /// peripheral's *owner*, which no eviction changes; only a peripheral belonging to another
-    /// central, or one this central has since replaced with a different mirror for the same
-    /// identifier, is ignored.
+    /// central is ignored.
+    ///
+    /// **A mirror this central has since replaced is failed, not ignored.** An eviction
+    /// followed by a fresh retrieval of the same identifier mints a second mirror, and the
+    /// provider's events for that identifier go to the new one — so connecting the old one
+    /// could never complete. Dropping the request would park the caller on its connect timeout
+    /// for an outcome already settled, so it is answered instead: `didFailToConnect` with
+    /// ``stalePeripheralHandleError``, delivered on ``queue`` like every other event.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let target = peripheral as? LinkPeripheral, target.isOwned(by: self) else { return }
@@ -235,9 +241,25 @@ public final class LinkCentral: CentralManaging, Sendable {
             send(.connect(peripheral: target.identifier, options: options.map(WireConnectOptions.init), requiresANCS: requiresANCS))
             return
         }
-        guard filed === target else { return }
+        guard filed === target else {
+            deliver(.didFailToConnect(target.peripheralIdentifier, error: Self.stalePeripheralHandleError))
+            return
+        }
         target.markConnecting()
         send(.connect(peripheral: target.identifier, options: options.map(WireConnectOptions.init), requiresANCS: requiresANCS))
+    }
+
+    /// The error a connect fails with when the peripheral it was handed is no longer the
+    /// mirror this central has filed for that identifier.
+    ///
+    /// In `LinkError.domain` but outside `LinkError`'s own cases: this is a client-side
+    /// refusal, not a failure the link reported.
+    public static var stalePeripheralHandleError: NSError {
+        NSError(
+            domain: LinkError.domain,
+            code: 7,
+            userInfo: [NSLocalizedDescriptionKey: "stale peripheral handle"]
+        )
     }
 
     /// Asks the provider to cancel `peripheral`'s connection or connection attempt. A

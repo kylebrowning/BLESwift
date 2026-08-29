@@ -576,5 +576,54 @@ struct LinkCentralTests {
         #expect(await onQueue(queue) { link.retrievePeripherals(withIdentifiers: [target]).first as? LinkPeripheral === held })
         #expect(await onQueue(queue) { held.connectionState } == .connecting)
     }
+
+    @Test("A connect to a mirror this central has replaced fails instead of being dropped")
+    func connectToAStaleMirrorFails() async throws {
+        let provider = try ScriptedProvider()
+        try await provider.start()
+        let queue = DispatchSerialQueue(label: "LinkCentralTests.staleConnect")
+        let link = LinkCentral(
+            endpoint: provider.endpoint,
+            queue: queue,
+            clientName: "test",
+            retryInterval: .milliseconds(50),
+            maximumPeripherals: 1
+        )
+        defer { link.shutdown(); provider.stop() }
+        await waitFor(timeout: .seconds(30)) { link.isProviderConnected }
+        #expect(link.isProviderConnected)
+
+        let failures = Mutex<[(peripheral: UUID, error: NSError?)]>([])
+        await onQueue(queue) {
+            link.eventHandler = { event in
+                guard case .didFailToConnect(let peripheral, let error) = event else { return }
+                failures.withLock { $0.append((peripheral.uuid, error as NSError?)) }
+            }
+        }
+
+        let target = UUID()
+        let stale = try #require(await onQueue(queue) {
+            link.retrievePeripherals(withIdentifiers: [target]).first as? LinkPeripheral
+        })
+        // Evicted by the overflow, then re-minted: the central now files a *different* mirror
+        // for `target`, and the provider's events for it would go there, not to `stale`.
+        await onQueue(queue) { _ = link.retrievePeripherals(withIdentifiers: [UUID()]) }
+        let current = try #require(await onQueue(queue) {
+            link.retrievePeripherals(withIdentifiers: [target]).first as? LinkPeripheral
+        })
+        #expect(current !== stale)
+
+        await onQueue(queue) { link.connect(stale, options: nil, requiresANCS: false) }
+
+        await waitFor(timeout: .seconds(10)) { failures.withLock { !$0.isEmpty } }
+        let reported = failures.withLock { $0 }
+        #expect(reported.count == 1)
+        #expect(reported.first?.peripheral == target)
+        #expect(reported.first?.error?.domain == "BLESwiftLink")
+        #expect(reported.first?.error?.code == 7)
+        // Refused, not sent: the provider never saw a connect for the stale handle.
+        #expect(Self.connectCount(provider, for: target) == 0)
+        #expect(await onQueue(queue) { stale.connectionState } == .disconnected)
+    }
 }
 #endif

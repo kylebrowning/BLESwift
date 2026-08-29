@@ -331,11 +331,23 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         // so a caller holding a remote retrieved long enough ago can find its entry gone by
         // the time it connects, and dropping the request would leave that caller waiting for
         // a `didConnect` nothing was ever going to send. The test is on the remote's *owner*,
-        // which no eviction changes; a remote belonging to another backend, or one this
-        // backend has since replaced for the same identifier, is still ignored.
+        // which no eviction changes; a remote belonging to another backend is still ignored.
+        //
+        // A remote this backend has since *replaced* for the same identifier is a different
+        // matter: the radio's events for that identifier go to the newer object, so connecting
+        // the older one could never complete. It is failed rather than dropped, so the caller
+        // is not left on its connect timeout for an outcome already settled.
         guard let remote = peripheral as? VirtualPeripheralRemote, remote.isOwned(by: sessionID) else { return }
         if let filed = _remotes[remote.identifier] {
-            guard filed === remote else { return }
+            guard filed === remote else {
+                // Hopped, never inline: `connect(_:options:requiresANCS:)` is called
+                // synchronously by the consumer, and the seam forbids re-entering its handler
+                // from inside its own call.
+                queue.async { [self] in
+                    deliver(.didFailToConnect(remote.peripheralIdentifier, error: Self.stalePeripheralHandleError))
+                }
+                return
+            }
         } else {
             file(remote)
         }
@@ -358,6 +370,16 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
                 }
             }
         }
+    }
+
+    /// The error a connect fails with when the remote it was handed is no longer the one this
+    /// backend has filed for that identifier.
+    public static var stalePeripheralHandleError: NSError {
+        NSError(
+            domain: "BLESwiftProvider",
+            code: 7,
+            userInfo: [NSLocalizedDescriptionKey: "stale peripheral handle"]
+        )
     }
 
     /// Cancels a connection, delivering `didDisconnect` with no error — CoreBluetooth
