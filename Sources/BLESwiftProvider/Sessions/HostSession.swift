@@ -237,6 +237,58 @@ final class HostSession: Sendable {
     /// this session had to invent.
     private static let maximumUpdateValueLength = 512
 
+    /// The `maximumUpdateValueLength` to report for a subscriber whose backend reported one
+    /// no caller could divide a payload by: the conservative ATT default, the same number
+    /// ``CentralSession`` falls back to for a write maximum.
+    private static let defaultMaximumUpdateValueLength = 20
+
+    /// The wire form of `subscriber`, with its `maximumUpdateValueLength` put through the
+    /// same rule the client applies on arrival.
+    ///
+    /// The peripheral-role counterpart to ``CentralSession``'s `reportableMaximum`: the
+    /// client runs ``BLESwiftLink/WireLengthValidation`` over whatever lands, and a maximum
+    /// it refuses costs it the whole session — so an unusable one costs this *subscriber* its
+    /// reported maximum instead. A non-positive maximum is replaced by
+    /// ``defaultMaximumUpdateValueLength`` and logged; an implausibly large one is clamped,
+    /// exactly as the client clamps it. Must be called on ``queue``.
+    ///
+    /// - Parameter subscriber: The subscriber the backend reported.
+    /// - Returns: A subscriber the client will accept.
+    private func reportableSubscriber(_ subscriber: Subscriber) -> WireSubscriber {
+        dispatchPrecondition(condition: .onQueue(queue))
+        var wire = WireSubscriber(subscriber)
+        guard wire.maximumUpdateValueLength > 0 else {
+            log?("""
+                \(label): subscriber \(subscriber.id) reported maximumUpdateValueLength \
+                \(wire.maximumUpdateValueLength); reporting the default
+                """)
+            wire.maximumUpdateValueLength = Self.defaultMaximumUpdateValueLength
+            return wire
+        }
+        wire.maximumUpdateValueLength = min(wire.maximumUpdateValueLength, WireLengthValidation.maximumLength)
+        return wire
+    }
+
+    /// The wire form of `request`, with its central's maximum made reportable. Must be called
+    /// on ``queue``.
+    private func reportableRead(_ request: ReadRequest) -> WireReadRequest {
+        dispatchPrecondition(condition: .onQueue(queue))
+        var wire = WireReadRequest(request)
+        wire.central = reportableSubscriber(request.central)
+        return wire
+    }
+
+    /// The wire form of `request`, with every entry's central made reportable. Must be called
+    /// on ``queue``.
+    private func reportableWrite(_ request: WriteRequest) -> WireWriteRequest {
+        dispatchPrecondition(condition: .onQueue(queue))
+        var wire = WireWriteRequest(request)
+        for index in wire.entries.indices {
+            wire.entries[index].central = reportableSubscriber(request.entries[index].central)
+        }
+        return wire
+    }
+
     /// Offers queued pushes to the backend until it refuses one, acknowledging each one it
     /// accepts. Must be called on ``queue``.
     ///
@@ -278,16 +330,16 @@ final class HostSession: Sendable {
             send(.didAddService(service: service.uuidString, error: error.wire))
 
         case .didReceiveRead(let request):
-            send(.didReceiveRead(WireReadRequest(request)))
+            send(.didReceiveRead(reportableRead(request)))
 
         case .didReceiveWrite(let request):
-            send(.didReceiveWrite(WireWriteRequest(request)))
+            send(.didReceiveWrite(reportableWrite(request)))
 
         case .didSubscribe(let central, let characteristic):
-            send(.didSubscribe(central: WireSubscriber(central), characteristic: WireCharacteristicRef(characteristic)))
+            send(.didSubscribe(central: reportableSubscriber(central), characteristic: WireCharacteristicRef(characteristic)))
 
         case .didUnsubscribe(let central, let characteristic):
-            send(.didUnsubscribe(central: WireSubscriber(central), characteristic: WireCharacteristicRef(characteristic)))
+            send(.didUnsubscribe(central: reportableSubscriber(central), characteristic: WireCharacteristicRef(characteristic)))
 
         case .readyToUpdateSubscribers:
             // Never forwarded: the client synthesizes its own readiness from the

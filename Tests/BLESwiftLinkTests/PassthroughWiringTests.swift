@@ -372,6 +372,63 @@ struct PassthroughWiringTests {
         await provider.stop()
     }
 
+    @Test("A subscriber reporting an unusable update maximum costs that maximum, not the session")
+    func unusableUpdateMaximumFallsBackToTheDefault() async throws {
+        let box = FakeBox<FakePeripheralManager>()
+        let provider = try await makeProvider(peripheralFactory: { queue in
+            let fake = FakePeripheralManager(queue: queue, state: .poweredOn)
+            box.store(fake)
+            return fake
+        })
+        let (host, hostLink) = makeHost(port: await provider.port, label: "passthrough.host.maxima")
+        await waitFor(timeout: .seconds(5)) { host.state == .poweredOn }
+        try await host.add(Self.service)
+
+        // Streams before the simulation: neither replays.
+        let events = await host.subscriptionEvents()
+        let requests = await host.readRequests()
+        // One mutex per task: a `Mutex` is non-copyable, so two concurrent closures cannot
+        // share one.
+        let subscribeMaxima = Mutex<[Int]>([])
+        let readMaxima = Mutex<[Int]>([])
+        let watcher = Task {
+            for await event in events {
+                if case .subscribed(let subscriber, _) = event {
+                    subscribeMaxima.withLock { $0.append(subscriber.maximumUpdateValueLength) }
+                }
+            }
+        }
+        let responder = Task {
+            for await request in requests {
+                readMaxima.withLock { $0.append(request.central.maximumUpdateValueLength) }
+                await host.respond(to: request, with: .success(Data([1])))
+            }
+        }
+
+        let fake = try #require(box.value)
+        // A maximum no caller could fragment a value by. The client refuses it outright, so
+        // an unclamped one here would cost the whole session.
+        let subscriber = Subscriber(id: UUID(), maximumUpdateValueLength: 0)
+        fake.simulateSubscribe(central: subscriber, to: Self.measurement)
+        _ = fake.simulateReadRequest(central: subscriber, characteristic: Self.measurement)
+
+        await waitFor(timeout: .seconds(5)) {
+            subscribeMaxima.withLock { !$0.isEmpty } && readMaxima.withLock { !$0.isEmpty }
+        }
+        // The conservative ATT default stood in for the unusable maximum, on both events.
+        #expect(subscribeMaxima.withLock { $0 } == [20])
+        #expect(readMaxima.withLock { $0 } == [20])
+        // The link cost nothing: the session is the one the client dialed.
+        #expect(await provider.sessionCount == 1)
+        #expect(hostLink.isProviderConnected)
+
+        watcher.cancel()
+        responder.cancel()
+        hostLink.shutdown()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
+    }
+
     // MARK: - CoreBluetoothBackends
 
     @Test("CoreBluetoothBackends vends a live, queue-confined real central")
