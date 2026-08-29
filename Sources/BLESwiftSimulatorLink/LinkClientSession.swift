@@ -16,7 +16,8 @@ import Synchronization
 /// speaks ``LinkProtocol/version`` makes the session connected — ``onConnected`` fires and
 /// subsequent messages are delivered to ``onMessage``. Anything else ends the connection:
 ///
-/// - A transport failure or a refused dial retries after `retryInterval`.
+/// - A transport failure or a refused dial retries: quickly at first (see
+///   ``init(endpoint:role:clientName:codec:queue:retryInterval:)``), then at `retryInterval`.
 /// - A rejected hello reports `LinkError.handshakeRejected` and retries.
 /// - A protocol version mismatch reports `LinkError.protocolVersionMismatch` and never retries:
 ///   a provider speaking another version will not become compatible by trying again.
@@ -37,6 +38,9 @@ package final class LinkClientSession: Sendable {
         /// Set once a provider answers with a different protocol version; suppresses all retries.
         var versionMismatch = false
         var retryScheduled = false
+        /// Dials scheduled since the session started or since the last link dropped. The
+        /// first `fastRetryAttempts` of them are the fast burst.
+        var retriesSinceConnected = 0
         var onConnected: (@Sendable () -> Void)?
         var onDisconnected: (@Sendable (NSError?) -> Void)?
         var onMessage: (@Sendable (LinkMessage) -> Void)?
@@ -67,7 +71,17 @@ package final class LinkClientSession: Sendable {
     ///   - clientName: A human-readable name sent in the hello, for provider-side logging.
     ///   - codec: The codec used to encode outgoing messages.
     ///   - queue: The serial queue every callback is delivered on — the owning actor's queue.
-    ///   - retryInterval: How long to wait before redialing after a failure.
+    ///   - retryInterval: How long to wait before redialing after a failure, once the
+    ///     opening burst is spent.
+    ///
+    /// **Fast, then slow.** The first `fastRetryAttempts` dials after ``start()`` — and
+    /// after every drop of an established link — are spaced `min(retryInterval, 100 ms)`
+    /// apart; every dial after that waits `retryInterval`. Two things need the burst: a
+    /// provider that is slow to accept, or momentarily refusing (a loopback dial storm on a
+    /// loaded machine), otherwise costs a full `retryInterval` to recover from; and an app
+    /// launched before its provider, which should come up within about a tenth of a second of
+    /// the provider appearing rather than up to `retryInterval` later. The counter resets on
+    /// every successful handshake, so a link that keeps dropping keeps getting the burst.
     package init(
         endpoint: LinkEndpoint,
         role: LinkRole,
@@ -258,6 +272,8 @@ package final class LinkClientSession: Sendable {
             }
             state.handshakeComplete = true
             state.isConnected = true
+            // A link that establishes and later drops earns a fresh burst.
+            state.retriesSinceConnected = 0
             return (.accepted, state.onConnected, nil)
         }
         switch outcome.0 {
@@ -279,15 +295,29 @@ package final class LinkClientSession: Sendable {
 
     // MARK: - Retry
 
+    /// How many dials at the top of a burst are spaced ``fastRetryInterval`` apart rather
+    /// than `retryInterval`.
+    private static let fastRetryAttempts = 20
+
+    /// The spacing of a burst dial: a tenth of a second, or `retryInterval` if that is
+    /// already shorter — the burst may never be slower than the configured schedule.
+    private var fastRetryInterval: Duration {
+        min(retryInterval, .milliseconds(100))
+    }
+
     /// Schedules the next dial, at most one at a time.
     private func scheduleRetry() {
-        let shouldSchedule = state.withLock { state -> Bool in
-            guard !state.stopped, !state.versionMismatch, !state.retryScheduled else { return false }
+        let delay = state.withLock { state -> DispatchTimeInterval? in
+            guard !state.stopped, !state.versionMismatch, !state.retryScheduled else { return nil }
             state.retryScheduled = true
-            return true
+            state.retriesSinceConnected += 1
+            let interval = state.retriesSinceConnected <= Self.fastRetryAttempts
+                ? fastRetryInterval
+                : retryInterval
+            return Self.dispatchInterval(for: interval)
         }
-        guard shouldSchedule else { return }
-        queue.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+        guard let delay else { return }
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             let shouldDial = self.state.withLock { state -> Bool in
                 state.retryScheduled = false
@@ -298,9 +328,9 @@ package final class LinkClientSession: Sendable {
         }
     }
 
-    /// ``retryInterval`` as a `DispatchTimeInterval`, saturating rather than trapping.
-    private var retryDelay: DispatchTimeInterval {
-        let components = retryInterval.components
+    /// `interval` as a `DispatchTimeInterval`, saturating rather than trapping.
+    private static func dispatchInterval(for interval: Duration) -> DispatchTimeInterval {
+        let components = interval.components
         let nanoseconds = components.seconds
             .multipliedReportingOverflow(by: 1_000_000_000)
         guard !nanoseconds.overflow else { return .nanoseconds(.max) }

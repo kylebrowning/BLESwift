@@ -109,6 +109,48 @@ struct LinkClientSessionTests {
         Issue.record("could not hold on to a free port for the retry test")
     }
 
+    @Test("The opening burst reaches a provider that appears late, at the default interval")
+    func fastRetryFindsALateProvider() async throws {
+        // The DEFAULT retry interval — two seconds — is the point: without the opening burst
+        // a provider that appears half a second in would not be found for another 1.5 s.
+        for _ in 0..<5 {
+            let port = try closedPort()
+            let queue = DispatchSerialQueue(label: "client")
+            let session = LinkClientSession(
+                endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
+                role: .central,
+                clientName: "unit",
+                queue: queue
+            )
+            session.start()
+            try await Task.sleep(for: .milliseconds(500))
+            #expect(!session.isConnected)
+
+            guard let listener = try? LinkListener(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), codec: .json, queue: DispatchQueue(label: "srv")) else {
+                session.stop()
+                continue
+            }
+            listener.onConnection = { connection in
+                connection.onMessage = { _ in
+                    connection.send(.serverHello(ServerHello(protocolVersion: LinkProtocol.version, accepted: true, reason: nil, providerName: "t")))
+                }
+            }
+            do {
+                try await listener.start()
+            } catch {
+                listener.cancel()
+                session.stop()
+                continue
+            }
+            defer { listener.cancel() }
+            await waitFor(timeout: .seconds(1)) { session.isConnected }
+            #expect(session.isConnected)
+            session.stop()
+            return
+        }
+        Issue.record("could not hold on to a free port for the fast-retry test")
+    }
+
     /// A weak handle on one of the connections a session dialled.
     private struct WeakConnection: Sendable {
         weak var connection: LinkConnection?

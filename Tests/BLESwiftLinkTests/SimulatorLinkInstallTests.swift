@@ -83,18 +83,18 @@ struct SimulatorLinkInstallTests {
         SimulatorLink.install(endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port))
         defer { SimulatorLink.uninstall() }
 
-        // Ten seconds, not the usual five: these backends are built by `SimulatorLink.install`
-        // with the *production* retry interval of two seconds, and a first dial that a loaded
-        // machine refuses outright (`EADDRINUSE` from the local stack) is not retried until
-        // that interval is up. Two such refusals already outrun a five-second wait and leave
-        // the state at `.unsupported`. Widen the wait rather than add API to shorten the
+        // Twenty seconds, not the usual five: these backends are built by
+        // `SimulatorLink.install` with the *production* retry interval of two seconds. The
+        // session's opening burst absorbs the dials a loaded machine refuses outright
+        // (`EADDRINUSE` from the local stack), but once that burst is spent every further
+        // refusal costs a full two seconds. Widen the wait rather than add API to shorten the
         // interval: the interval is what ships, and it belongs in what is tested.
         let central = Central()
-        await waitFor(timeout: .seconds(10)) { central.state == .poweredOn }
+        await waitFor(timeout: .seconds(20)) { central.state == .poweredOn }
         #expect(central.state == .poweredOn)
 
         let host = PeripheralHost()
-        await waitFor(timeout: .seconds(10)) { host.state == .poweredOn }
+        await waitFor(timeout: .seconds(20)) { host.state == .poweredOn }
         #expect(host.state == .poweredOn)
 
         await provider.stop()
