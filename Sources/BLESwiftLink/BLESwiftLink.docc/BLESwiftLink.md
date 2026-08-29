@@ -41,6 +41,11 @@ Most apps never import it directly — see `BLESwiftSimulatorLink` and `BLESwift
 - ``HostRequest``
 - ``HostWireEvent``
 
+### Trust boundary
+
+- ``WireIdentifierValidation``
+- ``WireDecodingError``
+
 ### Wire types
 
 - ``WireAdvertisement``
