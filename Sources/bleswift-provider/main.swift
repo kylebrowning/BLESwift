@@ -9,6 +9,10 @@ import BLESwiftProvider
 import Dispatch
 import Foundation
 
+// Line-buffer stdout so the "listening on …" line reaches a redirected log
+// (a pipe or file) immediately; scripts wait on that line for readiness.
+setlinebuf(stdout)
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 
 let options: ProviderCommandLine.Options

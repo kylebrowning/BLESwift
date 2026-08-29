@@ -1,0 +1,25 @@
+# Advertiser side of the two-simulator end-to-end test.
+#
+# The actual advertising is driven by the app's `--auto-advertise` launch
+# argument, so this flow only has to prove the app launched and reached the
+# Advertise tab with the peripheral host live. The Explorer has seven tabs, so on
+# iPhone the Advertise tab lives inside the system "More" tab.
+#
+# The key below is written with ONE dash on purpose: grantiva 1.6.5 prepends a
+# "-" to every launch-argument key, so "--auto-advertise" would reach the app as
+# "---auto-advertise". See "grantiva friction log" #1 in Scripts/e2e/README.md.
+appId: com.bleswift.explorer
+---
+- launchApp:
+    arguments:
+      "-auto-advertise": true
+- tapOn: "More"
+- tapOn: "Advertise"
+# `text:` alone, not `id: advertise.status` + `text:`: grantiva silently drops
+# the id when both are given (friction log #2). The status label's idle text is
+# "Idle" rather than "Not advertising" precisely so this unanchored,
+# case-insensitive match cannot be satisfied by the negative label (#3).
+- extendedWaitUntil:
+    visible:
+      text: "Advertising"
+    timeout: 20000

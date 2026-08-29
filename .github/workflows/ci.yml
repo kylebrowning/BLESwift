@@ -70,3 +70,21 @@ jobs:
           -scheme BLESwiftExplorer
           -destination 'generic/platform=${{ matrix.platform }}'
           -skipPackagePluginValidation -skipMacroValidation
+
+  sim-to-sim-e2e:
+    # Two simulator apps talk BLE to each other through bleswift-provider's virtual radio,
+    # driven by grantiva. No hardware, no entitlements.
+    name: Sim-to-sim E2E (grantiva)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install grantiva
+        run: brew install grantiva/tap/grantiva
+      - name: Run
+        run: ADVERTISER_SIM="iPhone 16 Pro" SCANNER_SIM="iPhone 16" Scripts/sim-to-sim-e2e.sh
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-to-sim-e2e
+          path: .build/e2e-report

@@ -187,5 +187,35 @@ struct VirtualPeripheralManagerTests {
 
         readResponder.cancel()
     }
+
+    @Test("The advertised local name becomes the discovered peripheral's name")
+    func advertisedLocalNameBecomesPeripheralName() async throws {
+        let radio = VirtualRadio()
+
+        // Registered under a placeholder name, the way `Provider` names a host session's
+        // device after its link client. CoreBluetooth reports the *advertised* local name, and
+        // so must the radio: otherwise a scanner sees the placeholder, not the advertiser.
+        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.RenamedHost")
+        let host = PeripheralHost(
+            backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, name: "PlaceholderClient"),
+            queue: hostQueue
+        )
+        try await host.add(Self.service)
+        try await host.startAdvertising(
+            PeripheralAdvertisement(localName: "Renamed", serviceUUIDs: [Self.heartRate])
+        )
+
+        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.RenamedCentral")
+        let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
+        await waitFor { central.state == .poweredOn }
+
+        var found: Discovery?
+        for try await event in await central.scan(services: [Self.heartRate], timeout: .seconds(2)) {
+            if case .discovered(let discovery) = event { found = discovery; break }
+        }
+        let discovery = try #require(found)
+        #expect(discovery.peripheral.name == "Renamed")
+        #expect(discovery.advertisement.localName == "Renamed")
+    }
 }
 #endif

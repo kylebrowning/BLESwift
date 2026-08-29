@@ -130,8 +130,17 @@ public actor VirtualRadio {
 
     /// Replaces a registered device's advertisement. See
     /// ``VirtualDeviceHandle/setAdvertisement(_:)``.
+    ///
+    /// A non-`nil` ``BLESwiftCore/AdvertisementData/localName`` also becomes the device's
+    /// ``VirtualDeviceDescriptor/name``, which is CoreBluetooth's behavior: a `CBPeripheral`
+    /// discovered from an advertisement carrying a local name reports that name, so a
+    /// `PeripheralHost` that advertises under a local name is seen under it. An advertisement
+    /// without a local name leaves the existing name alone.
     func setAdvertisement(_ advertisement: AdvertisementData, device: UUID) {
         devices[device]?.descriptor.advertisement = advertisement
+        if let localName = advertisement.localName {
+            devices[device]?.descriptor.name = localName
+        }
     }
 
     /// Replaces a registered device's GATT database. See

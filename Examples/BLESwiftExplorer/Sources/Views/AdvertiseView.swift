@@ -25,7 +25,10 @@ struct AdvertiseView: View {
             Section {
                 Toggle("Advertise as BLESwift Explorer Sim", isOn: advertising)
                     .accessibilityIdentifier("advertise.toggle")
-                Text(model.isAdvertising ? "Advertising" : "Not advertising")
+                // "Idle", not "Not advertising": the E2E driver's text matching is
+                // unanchored and case-insensitive, so "Not advertising" would satisfy an
+                // assertion for "Advertising" (see Scripts/e2e/README.md, friction log #3).
+                Text(model.isAdvertising ? "Advertising" : "Idle")
                     .accessibilityIdentifier("advertise.status")
                 Text("\(model.bpm) bpm")
                     .accessibilityIdentifier("advertise.bpm")
