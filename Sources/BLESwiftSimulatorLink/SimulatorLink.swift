@@ -109,39 +109,51 @@ public enum SimulatorLink {
 
         return await withTaskGroup(of: Bool.self) { group in
             group.addTask {
-                await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                    let resumed = Mutex(false)
-                    @Sendable func resumeOnce(_ value: Bool) {
-                        let shouldResume = resumed.withLock { flag -> Bool in
-                            guard !flag else { return false }
-                            flag = true
-                            return true
+                // Cancellation (from `group.cancelAll()` below, once the sleep task wins the
+                // race) only flags this task — it does nothing to the in-flight `NWConnection`
+                // by itself. Without `onCancel` cancelling `connection` explicitly, a host that
+                // accepts the TCP connection and then goes silent (or one that black-holes the
+                // SYN outright) leaves this continuation suspended for as long as the OS gives
+                // the connect/read a chance to fail, which can be tens of seconds — far past
+                // `timeout`. Cancelling `connection` here publishes a terminal `.cancelled`
+                // state, which `onStateChange` below turns into a `resumeOnce(false)`.
+                await withTaskCancellationHandler {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                        let resumed = Mutex(false)
+                        @Sendable func resumeOnce(_ value: Bool) {
+                            let shouldResume = resumed.withLock { flag -> Bool in
+                                guard !flag else { return false }
+                                flag = true
+                                return true
+                            }
+                            guard shouldResume else { return }
+                            continuation.resume(returning: value)
                         }
-                        guard shouldResume else { return }
-                        continuation.resume(returning: value)
-                    }
-                    connection.onStateChange = { state in
-                        switch state {
-                        case .ready:
-                            connection.send(
-                                .clientHello(
-                                    ClientHello(protocolVersion: LinkProtocol.version, role: .central, clientName: "probe")
+                        connection.onStateChange = { state in
+                            switch state {
+                            case .ready:
+                                connection.send(
+                                    .clientHello(
+                                        ClientHello(protocolVersion: LinkProtocol.version, role: .central, clientName: "probe")
+                                    )
                                 )
-                            )
-                        case .failed, .cancelled:
-                            resumeOnce(false)
-                        case .idle, .connecting:
-                            break
+                            case .failed, .cancelled:
+                                resumeOnce(false)
+                            case .idle, .connecting:
+                                break
+                            }
                         }
-                    }
-                    connection.onMessage = { message in
-                        guard case .serverHello(let hello) = message else {
-                            resumeOnce(false)
-                            return
+                        connection.onMessage = { message in
+                            guard case .serverHello(let hello) = message else {
+                                resumeOnce(false)
+                                return
+                            }
+                            resumeOnce(hello.accepted)
                         }
-                        resumeOnce(hello.accepted)
+                        connection.start()
                     }
-                    connection.start()
+                } onCancel: {
+                    connection.cancel()
                 }
             }
             group.addTask {

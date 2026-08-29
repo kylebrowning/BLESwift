@@ -111,5 +111,30 @@ struct SimulatorLinkInstallTests {
 
         await provider.stop()
     }
+
+    @Test("isProviderReachable times out promptly against a listener that accepts but never replies")
+    func isProviderReachableTimesOutOnSilentListener() async throws {
+        let queue = DispatchSerialQueue(label: "silent-listener")
+        let listener = try LinkListener(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: 0),
+            codec: .binaryPropertyList,
+            queue: queue
+        )
+        // Deliberately no `onConnection` handler: every accepted connection is started (so the
+        // TCP handshake completes and the client sees `.ready`) but nothing is ever sent back —
+        // the "connected but silent" case a refused or black-holed port doesn't exercise.
+        try await listener.start()
+        defer { listener.cancel() }
+
+        let start = ContinuousClock.now
+        let reachable = await SimulatorLink.isProviderReachable(
+            LinkEndpoint(host: "127.0.0.1", port: listener.port),
+            timeout: .milliseconds(300)
+        )
+        let elapsed = ContinuousClock.now - start
+
+        #expect(!reachable)
+        #expect(elapsed < .seconds(1))
+    }
 #endif
 }
