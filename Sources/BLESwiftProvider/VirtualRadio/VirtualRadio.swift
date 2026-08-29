@@ -31,9 +31,22 @@ public actor VirtualRadio {
     /// Virtual devices have no radio distance, so a single plausible value stands in.
     public static let rssi = -50
 
-    /// The MTU-derived length reported for notifications and writes. 512 is the maximum
-    /// ATT attribute length, the natural ceiling for a link with no real MTU negotiation.
+    /// The MTU-derived length reported for notifications and `.withResponse` writes. 512 is
+    /// the maximum ATT attribute length, the natural ceiling for a link with no real MTU
+    /// negotiation — and the length a `.withResponse` write really does reach on hardware,
+    /// through ATT long writes.
     public static let maximumValueLength = 512
+
+    /// The length a single `.withoutResponse` write may reach: 182, iOS's ATT_MTU of 185 less
+    /// the three bytes of ATT header.
+    ///
+    /// **The two write types differ sharply on hardware, and a harness that hides it is worse
+    /// than useless.** A `.withResponse` write reaches 512 bytes because ATT splits it into
+    /// long-write chunks; a `.withoutResponse` write is one ATT packet and cannot exceed
+    /// ATT_MTU − 3, and CoreBluetooth *silently drops* an oversize one. Reporting 512 for both
+    /// let a 400-byte `.withoutResponse` write pass here and vanish on device — the single
+    /// most common MTU footgun this harness exists to catch.
+    public static let maximumWriteWithoutResponseLength = 182
 
     /// How long a GATT request parked for a hosted `PeripheralHost` waits for that host's
     /// answer before it is refused with `ATTError.unlikelyError`.
@@ -291,6 +304,11 @@ public actor VirtualRadio {
 
     /// Pushes a notification to every subscribed, connected central. See
     /// ``VirtualDeviceHandle/notify(_:for:to:)``.
+    ///
+    /// **The value is truncated to each subscriber's `maximumUpdateValueLength`**, as
+    /// CoreBluetooth truncates a notification that will not fit the subscriber's MTU. Passed
+    /// whole, a payload larger than the maximum this radio reports arrived intact here and
+    /// arrived clipped on device — the same divergence an unenforced write ceiling is.
     func notify(
         device: UUID,
         characteristic: CharacteristicIdentifier,
@@ -304,7 +322,8 @@ public actor VirtualRadio {
         for sessionID in subscribers {
             if let allowed, !allowed.contains(sessionID) { continue }
             guard let session = sessions[sessionID], session.connections.contains(device) else { continue }
-            session.peripheralSinks[device]?(.didUpdateValue(characteristic: characteristic, value: value, error: nil))
+            let delivered = Data(value.prefix(subscriber(sessionID).maximumUpdateValueLength))
+            session.peripheralSinks[device]?(.didUpdateValue(characteristic: characteristic, value: delivered, error: nil))
         }
     }
 
@@ -592,6 +611,14 @@ public actor VirtualRadio {
     /// connected to `device` is refused with `ATTError.invalidHandle`, a characteristic
     /// declaring neither `write` nor `writeWithoutResponse` with `ATTError.writeNotPermitted`.
     ///
+    /// **Each write type carries its own length ceiling**, the one hardware imposes: a
+    /// `.withResponse` write past ``maximumValueLength`` is refused with
+    /// `ATTError.invalidAttributeValueLength`, and a `.withoutResponse` write past
+    /// ``maximumWriteWithoutResponseLength`` is *dropped* — it never reaches the device's
+    /// handler, and the caller hears nothing, exactly as CoreBluetooth drops one too large for
+    /// a single ATT packet. Enforced here rather than in the remote so that every route to a
+    /// virtual device, hosted or fixture, is held to the same ceiling.
+    ///
     /// **The permission check is the radio's, not the handler's.** It mirrors the one
     /// ``read(device:characteristic:offset:session:)`` makes, and for the same reason: a
     /// hosted device — a remote `PeripheralHost` at the far end of a link — has no
@@ -603,12 +630,32 @@ public actor VirtualRadio {
         device: UUID,
         characteristic: CharacteristicIdentifier,
         value: Data,
+        type: WriteType = .withResponse,
         session: UUID
     ) async -> Result<Void, ATTError> {
         guard isConnected(session: session, to: device) else { return .failure(.invalidHandle) }
         guard let state = devices[device] else { return .failure(.invalidHandle) }
         guard let definition = definition(of: characteristic, in: state) else { return .failure(.attributeNotFound) }
         guard definition.properties.isWritable else { return .failure(.writeNotPermitted) }
+        switch type {
+        case .withResponse:
+            guard value.count <= Self.maximumValueLength else {
+                return .failure(.invalidAttributeValueLength)
+            }
+        case .withoutResponse:
+            // Dropped, not refused: an unacknowledged write has no response to fail, and
+            // CoreBluetooth reports nothing for one it could not fit in a packet either. The
+            // `.success` releases the caller's transmit slot; nothing reached the device.
+            guard value.count <= Self.maximumWriteWithoutResponseLength else {
+                Self.logger.debug(
+                    """
+                    Dropping a \(value.count)-byte .withoutResponse write to \(characteristic) on device \(device): \
+                    the ceiling is \(Self.maximumWriteWithoutResponseLength) bytes
+                    """
+                )
+                return .success(())
+            }
+        }
         let central = subscriber(session)
         let entry = WriteRequest.Entry(central: central, characteristic: characteristic, offset: 0, value: value)
         return await state.handler.write([entry], from: central)

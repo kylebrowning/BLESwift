@@ -679,7 +679,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// refuses without reaching CoreBluetooth at all, and no readiness ever follows. Such a
     /// child is queued for exactly as any other is, but until it has proved itself — by taking
     /// a push, or raising a readiness of its own — its FIFO is not counted by
-    /// ``isAnyQueueFull``, and the entry that would take it past ``queueLimit`` displaces its
+    /// `isAnyQueueFull`, and the entry that would take it past `queueLimit` displaces its
     /// oldest instead. So one dead handle costs that child the pushes it could not take,
     /// rather than latching the composite's window shut for every characteristic on every
     /// child for the life of the session, and the child still catches up in order if it comes

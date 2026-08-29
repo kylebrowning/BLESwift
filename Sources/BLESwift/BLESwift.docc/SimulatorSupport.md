@@ -303,6 +303,20 @@ is broken.
   device's identifier: a link-hosted host keeps one identity for the life of the
   `PeripheralHost`, so a central that noted its `PeripheralIdentifier` before the drop can
   connect to it again once the host has republished.
+- **Write ceilings are emulated; the MTU is not negotiated.** The virtual radio reports 512
+  bytes for a `.withResponse` write — what ATT long writes really reach — and 182 for a
+  `.withoutResponse` one, iOS's ATT_MTU of 185 less its three-byte header, and it *enforces*
+  both: a `.withResponse` write past 512 fails with `CBATTErrorDomain` code 13
+  (`invalidAttributeValueLength`), and a `.withoutResponse` write past 182 is dropped with
+  nothing reported, exactly as CoreBluetooth drops one too large for a single packet. What is
+  **not** emulated is MTU negotiation: a real connection may agree on far less than 185, so
+  ``Peripheral/maximumWriteValueLength(for:)`` is the number to ask rather than a constant to
+  assume, and a `--passthrough` connection to real hardware reports that hardware's real
+  maximum instead.
+- **Notifications are truncated, not split.** A pushed value longer than the subscriber's
+  `maximumUpdateValueLength` — 512 on the virtual radio — is clipped to it, as CoreBluetooth
+  clips a notification that will not fit the subscriber's MTU. Nothing chunks a large value
+  across several notifications for you, here or on device.
 - **Initial radio state.** A link-backed ``Central`` reports ``CentralState/unsupported`` until
   the provider answers — the same state the Simulator reports today, so an app that waits for
   `.poweredOn` simply waits — and then reports whatever state the provider does. If the provider

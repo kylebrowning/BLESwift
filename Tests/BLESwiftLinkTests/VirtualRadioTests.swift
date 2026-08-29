@@ -734,6 +734,123 @@ struct VirtualRadioTests {
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
     }
 
+    /// Records every write the radio passes down, and accepts all of them.
+    private final class WriteRecordingHandler: VirtualDeviceHandler, Sendable {
+        private let writes = Mutex<[Data]>([])
+
+        /// Every write that reached this handler, in order.
+        var received: [Data] { writes.withLock { $0 } }
+
+        func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
+            .failure(.unlikelyError)
+        }
+
+        func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> {
+            writes.withLock { $0.append(contentsOf: entries.map(\.value)) }
+            return .success(())
+        }
+
+        func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {}
+    }
+
+    @Test("Each write type carries its own ceiling: one refuses, the other drops")
+    func writeLengthCeilingsMatchTheWriteType() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let handler = WriteRecordingHandler()
+        let writable = GATTService(identifier: Self.service, characteristics: [
+            GATTCharacteristic(
+                identifier: Self.control,
+                properties: [.write, .writeWithoutResponse],
+                permissions: [.writeable]
+            )
+        ])
+        _ = await radio.register(
+            VirtualDevice(
+                descriptor: VirtualDeviceDescriptor(
+                    identifier: identifier,
+                    advertisement: AdvertisementData(serviceUUIDs: [Self.service], isConnectable: true),
+                    services: [writable]
+                ),
+                handler: handler
+            )
+        )
+        let session = UUID()
+        await radio.attach(session: session, centralSink: { _ in })
+        #expect(await radio.connect(session: session, device: identifier, sink: { _ in }).error == nil)
+
+        /// Writes `count` bytes of `type` and returns the `ATTError` it was refused with, or
+        /// `nil` when the radio served it. (`Result<Void, _>` is not `Equatable`.)
+        func write(_ count: Int, _ type: WriteType) async -> ATTError? {
+            let result = await radio.write(
+                device: identifier,
+                characteristic: Self.control,
+                value: Data(repeating: 0x2A, count: count),
+                type: type,
+                session: session
+            )
+            guard case .failure(let error) = result else { return nil }
+            return error
+        }
+
+        // 400 bytes without response: one ATT packet on hardware cannot carry them, so
+        // CoreBluetooth drops it and nothing reaches the device.
+        #expect(await write(400, .withoutResponse) == nil)
+        #expect(handler.received.isEmpty)
+
+        // The same 400 bytes with response: ATT long writes carry them, and they arrive whole.
+        #expect(await write(400, .withResponse) == nil)
+        #expect(handler.received.map(\.count) == [400])
+
+        // Past the maximum ATT attribute length, even a long write is refused.
+        #expect(await write(513, .withResponse) == .invalidAttributeValueLength)
+        #expect(handler.received.map(\.count) == [400])
+
+        // Right at each ceiling, both are served.
+        #expect(await write(VirtualRadio.maximumWriteWithoutResponseLength, .withoutResponse) == nil)
+        #expect(await write(VirtualRadio.maximumValueLength, .withResponse) == nil)
+        #expect(handler.received.map(\.count) == [400, VirtualRadio.maximumWriteWithoutResponseLength, 512])
+
+        // And the remote reports the two ceilings it is held to.
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.ceilings")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        await waitFor { await Self.onQueue(queue) { !backend.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
+        let remote = try #require(await Self.remote(backend, queue, identifier))
+        #expect(await Self.onQueue(queue) { remote.maximumWriteValueLength(for: .withResponse) } == 512)
+        #expect(await Self.onQueue(queue) { remote.maximumWriteValueLength(for: .withoutResponse) } == 182)
+    }
+
+    @Test("A notification longer than the subscriber's maximum is truncated to it")
+    func notificationsAreTruncatedToTheSubscribersMaximum() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let handle = await radio.register(
+            Self.device(identifier: identifier, name: "truncating", services: Self.twoServices)
+        )
+        let session = UUID()
+        await radio.attach(session: session, centralSink: { _ in })
+        let values = Mutex<[Data]>([])
+        #expect(await radio.connect(session: session, device: identifier, sink: { event in
+            guard case .didUpdateValue(_, let value, _) = event, let value else { return }
+            values.withLock { $0.append(value) }
+        }).error == nil)
+        #expect(
+            await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session)
+                .isNotifying
+        )
+
+        // Longer than the subscriber's `maximumUpdateValueLength`: clipped to it, as
+        // CoreBluetooth clips a notification that will not fit the subscriber's MTU.
+        await handle.notify(Data(repeating: 0x7F, count: 700), for: Self.measurement, to: nil)
+        await waitFor { values.withLock { !$0.isEmpty } }
+        #expect(values.withLock { $0 }.map(\.count) == [VirtualRadio.maximumValueLength])
+
+        // A value that fits is delivered whole.
+        await handle.notify(Data(repeating: 0x01, count: 8), for: Self.measurement, to: nil)
+        await waitFor { values.withLock { $0.count } == 2 }
+        #expect(values.withLock { $0 }.last == Data(repeating: 0x01, count: 8))
+    }
+
     /// Records every `subscriptionChanged` the radio reports, so a test can assert on exactly
     /// which calls produced one.
     private final class RecordingHandler: VirtualDeviceHandler, Sendable {

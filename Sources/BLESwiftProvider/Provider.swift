@@ -248,7 +248,7 @@ public actor Provider {
     /// shared with another provider, keep its identifier in
     /// ``ProviderConfiguration/fixtures``' way, and keep a handle alive for a device nothing
     /// drives any more. Every identifier stays protected up to that point: the removals happen
-    /// before ``providerOwnedIdentifiers`` is emptied, so no window exists in which a device is
+    /// before the set of provider-owned identifiers is emptied, so no window exists in which a device is
     /// still on the radio and its identifier no longer refused to a client claiming it.
     ///
     /// - Note: ``start()`` after a ``stop()`` registers the configured fixtures again, from

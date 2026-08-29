@@ -268,6 +268,11 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// exactly as CoreBluetooth does. A no-op for a characteristic this remote has not
     /// discovered, for the same reason as ``readValue(for:)-(CharacteristicIdentifier)``.
     ///
+    /// A write longer than ``maximumWriteValueLength(for:)`` permits is refused by the radio:
+    /// a `.withResponse` write fails with `ATTError.invalidAttributeValueLength`, and a
+    /// `.withoutResponse` write is dropped with nothing reported, exactly as CoreBluetooth
+    /// drops one too large for a single ATT packet.
+    ///
     /// A `.withoutResponse` write occupies a slot in this remote's window until the radio has
     /// answered it; the slot's release raises
     /// `PeripheralEvent.isReadyToSendWriteWithoutResponse`, which is the
@@ -282,6 +287,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
                 device: identifier,
                 characteristic: characteristic,
                 value: data,
+                type: type,
                 session: session
             )
             queue.async { [self] in
@@ -363,7 +369,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// asks the radio nothing: a bare `queue.async` runs *before* any radio round-trip already
     /// in flight, so a `discoverCharacteristics` and the `discoverDescriptors` behind it
     /// completed in the opposite order to the one they were called in — an ordering
-    /// CoreBluetooth cannot produce. See ``_work``.
+    /// CoreBluetooth cannot produce. See `enqueue(_:)`.
     public func discoverDescriptors(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         enqueue { [queue] in
@@ -395,10 +401,16 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         }
     }
 
-    /// Returns ``VirtualRadio/maximumValueLength`` for both write types.
+    /// The length ceiling for `type`: ``VirtualRadio/maximumValueLength`` for a
+    /// `.withResponse` write, which ATT long writes really do reach, and
+    /// ``VirtualRadio/maximumWriteWithoutResponseLength`` for a `.withoutResponse` write,
+    /// which is one ATT packet on hardware. The radio enforces both.
     public func maximumWriteValueLength(for type: WriteType) -> Int {
         dispatchPrecondition(condition: .onQueue(queue))
-        return VirtualRadio.maximumValueLength
+        switch type {
+        case .withResponse: return VirtualRadio.maximumValueLength
+        case .withoutResponse: return VirtualRadio.maximumWriteWithoutResponseLength
+        }
     }
 
     /// Whether `service` has been discovered on this remote.
