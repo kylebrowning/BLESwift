@@ -86,6 +86,14 @@ CoreBluetooth on the app-sandbox Bluetooth entitlement and on TCC approval, so a
 `swift run` binary may be denied the radio. Virtual mode needs nothing at all — no entitlement,
 no approval, no hardware.
 
+`--passthrough` with the Mac's radio off: the virtual radio still serves; the real radio joins
+when it powers on. A hosted `PeripheralHost` publishes its services and starts advertising on
+whichever radios are powered on at the time, and never waits on one that is off, unauthorized,
+or resetting — so `add` and `startAdvertising` complete, and notifications keep flowing, with
+Bluetooth switched off entirely. The moment the Mac's radio powers on, the provider republishes
+the host's current services to it and restarts its advertisement, so passthrough picks the
+hardware up mid-session without a reconnect.
+
 ## Declaring virtual devices with a fixture
 
 A fixture is a JSON document describing devices, their advertisements, and their GATT

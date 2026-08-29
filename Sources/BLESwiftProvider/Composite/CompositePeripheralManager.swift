@@ -21,19 +21,32 @@ import Foundation
 /// so no routing table is needed.
 ///
 /// **Two completions are aggregated, not forwarded.** ``add(_:)`` and
-/// ``startAdvertising(_:)`` each report once per child; the composite holds a pending count
-/// per outstanding operation and emits a single `didAddService`/`didStartAdvertising` once
-/// every child has reported, carrying the *first* non-`nil` error. Every other event is
-/// forwarded verbatim, except `didUpdateState` (replaced by the composite's computed state)
-/// and `willRestoreState` (dropped) — see ``CompositeCentral`` for why.
+/// ``startAdvertising(_:)`` each report once per child; the composite holds the set of
+/// children still owing each outstanding operation and emits a single
+/// `didAddService`/`didStartAdvertising` once every one of them has reported, carrying the
+/// *first* non-`nil` error. Every other event is forwarded verbatim, except `didUpdateState`
+/// (replaced by the composite's computed state) and `willRestoreState` (dropped) — see
+/// ``CompositeCentral`` for why.
+///
+/// **Only powered-on children take part.** A child whose `radioState` is not
+/// `CentralState/poweredOn` — the Mac's real `CBPeripheralManager` while Bluetooth is off,
+/// unauthorized, or resetting — can neither answer a completion nor accept a push, so the
+/// composite never waits on one. Such a child is skipped by ``add(_:)`` and
+/// ``startAdvertising(_:)`` (counted as immediately complete with no error: the powered-on
+/// children, the virtual radio among them, carry the service), and skipped by
+/// ``updateValue(_:for:onSubscribed:)``, whose window never closes on it. When a child drops
+/// out of `poweredOn` the composite settles whatever it still owed and discards its FIFO;
+/// when a child comes back the composite republishes its current services and restarts
+/// advertising on it, so `--passthrough` picks the Mac's radio up the moment the user turns
+/// it on. Each skipped child is logged once.
 ///
 /// **One FIFO per child.** ``updateValue(_:for:onSubscribed:)`` hands the value to every
-/// child that will take it and queues it for the ones that will not, in its own per-child
-/// FIFO; each child's `readyToUpdateSubscribers` drains that child's FIFO in order. So every
-/// value reaches every child exactly once, in the order it was pushed, and nothing is ever
-/// inferred from a payload or from the *position* of a push in the caller's sequence. The
-/// composite refuses a push — closing its window — only when some child's FIFO is full. See
-/// ``updateValue(_:for:onSubscribed:)``.
+/// powered-on child that will take it and queues it for the ones that will not, in its own
+/// per-child FIFO; each child's `readyToUpdateSubscribers` drains that child's FIFO in order.
+/// So every value reaches every such child exactly once, in the order it was pushed, and
+/// nothing is ever inferred from a payload or from the *position* of a push in the caller's
+/// sequence. The composite refuses a push — closing its window — only when some powered-on
+/// child's FIFO is full. See ``updateValue(_:for:onSubscribed:)``.
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``CompositeCentral``, including the requirement that **every child be confined to the
@@ -42,8 +55,8 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
 
     /// One outstanding fan-out awaiting its children's completions.
     private struct Pending {
-        /// How many children have yet to report.
-        var remaining: Int
+        /// The children that have yet to report, by index into ``backends``.
+        var owing: Set<Int>
         /// The first non-`nil` error reported so far.
         var error: NSError?
     }
@@ -80,6 +93,30 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// on its `readyToUpdateSubscribers`.
     nonisolated(unsafe) private var _queues: [[PendingPush]] = []
 
+    /// Each child's last observed ``BLESwiftCore/CentralState``, indexed like ``backends`` —
+    /// what a `didUpdateState` is compared against to spot a child entering or leaving
+    /// `poweredOn`.
+    nonisolated(unsafe) private var _childStates: [CentralState] = []
+
+    /// The services this composite has published, newest write per identifier — what a child
+    /// coming back to `poweredOn` is caught up with.
+    nonisolated(unsafe) private var _services: [GATTService] = []
+
+    /// The advertisement this composite is running, or `nil` once ``stopAdvertising()`` has
+    /// been called — what a child coming back to `poweredOn` is restarted with.
+    nonisolated(unsafe) private var _advertisement: PeripheralAdvertisement?
+
+    /// How many `didAddService`/`didStartAdvertising` completions from each child must be
+    /// swallowed rather than aggregated or forwarded: the ones a child still owed when it
+    /// powered off (already settled without it), plus the ones its catch-up republish will
+    /// produce (never the host's to hear).
+    nonisolated(unsafe) private var _swallowedAdds: [Int] = []
+    nonisolated(unsafe) private var _swallowedAdvertisements: [Int] = []
+
+    /// The children already reported as skipped for being powered off — the skip is logged
+    /// once per child, not once per operation.
+    nonisolated(unsafe) private var _loggedOffline: Set<Int> = []
+
     /// Whether the composite has told its host the window is closed and owes it one
     /// `readyToUpdateSubscribers` — set by the `false` that closed it, cleared by the single
     /// event that reopens it.
@@ -105,7 +142,8 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     ///   - backends: The children, in priority order. Must all be confined to `queue`.
     ///   - queue: The shared queue — the same one the owning `PeripheralHost` is
     ///     constructed with.
-    ///   - log: Where to report a child whose FIFO has filled, if anywhere.
+    ///   - log: Where to report a child whose FIFO has filled, or that was skipped for being
+    ///     powered off, if anywhere.
     public init(
         backends: [any PeripheralManaging],
         queue: DispatchSerialQueue,
@@ -115,6 +153,8 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         self.queue = queue
         self.log = log
         self._queues = Array(repeating: [], count: backends.count)
+        self._swallowedAdds = Array(repeating: 0, count: backends.count)
+        self._swallowedAdvertisements = Array(repeating: 0, count: backends.count)
         queue.sync { attachChildren() }
     }
 
@@ -126,7 +166,8 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// - Parameters:
     ///   - backends: The children, in priority order. Must all be confined to `queue`.
     ///   - queue: The shared queue, which this call must already be running on.
-    ///   - log: Where to report a child whose FIFO has filled, if anywhere.
+    ///   - log: Where to report a child whose FIFO has filled, or that was skipped for being
+    ///     powered off, if anywhere.
     package init(
         backends: [any PeripheralManaging],
         onQueue queue: DispatchSerialQueue,
@@ -137,18 +178,42 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         self.queue = queue
         self.log = log
         self._queues = Array(repeating: [], count: backends.count)
+        self._swallowedAdds = Array(repeating: 0, count: backends.count)
+        self._swallowedAdvertisements = Array(repeating: 0, count: backends.count)
         attachChildren()
     }
 
-    /// Installs this composite as every child's event sink. Idempotent; must be called on
-    /// ``queue``.
+    /// Installs this composite as every child's event sink, and records the state each child
+    /// starts from. Idempotent; must be called on ``queue``.
     private func attachChildren() {
         dispatchPrecondition(condition: .onQueue(queue))
+        _childStates = backends.map(\.radioState)
         for index in backends.indices {
             backends[index].eventHandler = { [weak self] event in
                 self?.handle(event, from: index)
             }
         }
+    }
+
+    /// Whether child `index` can currently answer a completion and accept a push. Must be
+    /// called on ``queue``.
+    private func isOnline(_ index: Int) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return backends[index].radioState == .poweredOn
+    }
+
+    /// The children a fan-out may wait on. Must be called on ``queue``.
+    private var onlineIndices: [Int] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return backends.indices.filter { isOnline($0) }
+    }
+
+    /// Reports, once per child, that `index` was skipped for not being powered on. Must be
+    /// called on ``queue``.
+    private func noteOffline(_ index: Int, operation: String) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard _loggedOffline.insert(index).inserted else { return }
+        log?("composite child \(index) is \(backends[index].radioState); skipping \(operation) until it powers on")
     }
 
     /// ``BLESwiftCore/CentralState/poweredOn`` if any child is on, else the first child's
@@ -175,18 +240,98 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         switch event {
         case .didUpdateState:
+            childChangedState(index)
             emitState()
         case .willRestoreState:
             break
         case .didAddService(let identifier, let error):
-            completeAdd(identifier, error: error)
+            completeAdd(identifier, error: error, from: index)
         case .didStartAdvertising(let error):
-            completeAdvertising(error: error)
+            completeAdvertising(error: error, from: index)
         case .readyToUpdateSubscribers:
             resume(child: index)
         default:
             _eventHandler?(event)
         }
+    }
+
+    /// Reconciles child `index` entering or leaving `poweredOn`. Must be called on ``queue``.
+    private func childChangedState(_ index: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let was = _childStates[index]
+        let now = backends[index].radioState
+        guard was != now else { return }
+        _childStates[index] = now
+        if was == .poweredOn, now != .poweredOn {
+            powerDown(child: index)
+        } else if was != .poweredOn, now == .poweredOn {
+            powerUp(child: index)
+        }
+    }
+
+    /// Settles everything child `index` still owed, and drops what it will never take: it
+    /// cannot answer a completion or a push while it is not powered on, and the host must
+    /// not wait on it. Must be called on ``queue``.
+    private func powerDown(child index: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _queues[index].removeAll()
+
+        for (identifier, batches) in _pendingAdds {
+            var remaining: [Pending] = []
+            var settled: [NSError?] = []
+            for var batch in batches {
+                guard batch.owing.remove(index) != nil else {
+                    remaining.append(batch)
+                    continue
+                }
+                // The completion this child owed will still arrive if it was already in
+                // flight; it is no longer anyone's to hear.
+                _swallowedAdds[index] += 1
+                if batch.owing.isEmpty { settled.append(batch.error) } else { remaining.append(batch) }
+            }
+            _pendingAdds[identifier] = remaining.isEmpty ? nil : remaining
+            for error in settled { _eventHandler?(.didAddService(identifier, error: error)) }
+        }
+
+        var remainingAdvertisements: [Pending] = []
+        var settledAdvertisements: [NSError?] = []
+        for var batch in _pendingAdvertisements {
+            guard batch.owing.remove(index) != nil else {
+                remainingAdvertisements.append(batch)
+                continue
+            }
+            _swallowedAdvertisements[index] += 1
+            if batch.owing.isEmpty { settledAdvertisements.append(batch.error) } else { remainingAdvertisements.append(batch) }
+        }
+        _pendingAdvertisements = remainingAdvertisements
+        for error in settledAdvertisements { _eventHandler?(.didStartAdvertising(error: error)) }
+
+        reopenWindowIfPossible()
+    }
+
+    /// Catches child `index` up with the composite's current services and advertisement now
+    /// that it can serve them. Its completions are this composite's business, not the host's.
+    /// Must be called on ``queue``.
+    private func powerUp(child index: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _loggedOffline.remove(index)
+        for service in _services {
+            _swallowedAdds[index] += 1
+            backends[index].add(service)
+        }
+        if let advertisement = _advertisement {
+            _swallowedAdvertisements[index] += 1
+            backends[index].startAdvertising(advertisement)
+        }
+    }
+
+    /// Emits the one `readyToUpdateSubscribers` the host is owed, if the window it closed can
+    /// now reopen. Must be called on ``queue``.
+    private func reopenWindowIfPossible() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard _windowClosed, !isAnyQueueFull else { return }
+        _windowClosed = false
+        _eventHandler?(.readyToUpdateSubscribers)
     }
 
     /// Drains what child `index` still owes, then decides what the host hears.
@@ -213,6 +358,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// ``queue``.
     private func drain(child index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard isOnline(index) else { return }
         while let next = _queues[index].first {
             guard backends[index].updateValue(next.value, for: next.characteristic, onSubscribed: next.subscribers) else {
                 return
@@ -221,46 +367,58 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
-    /// Whether any child has fallen a whole ``queueLimit`` behind. Must be called on
+    /// Whether any powered-on child has fallen a whole ``queueLimit`` behind. A child that is
+    /// not powered on is never queued for, and so never closes the window. Must be called on
     /// ``queue``.
     private var isAnyQueueFull: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
-        return _queues.contains { $0.count >= Self.queueLimit }
+        return _queues.indices.contains { isOnline($0) && _queues[$0].count >= Self.queueLimit }
     }
 
-    /// Settles one child's `didAddService`, emitting the aggregate once the last child has
-    /// reported. Must be called on ``queue``.
-    private func completeAdd(_ identifier: ServiceIdentifier, error: NSError?) {
+    /// Settles one child's `didAddService`, emitting the aggregate once the last child owing
+    /// it has reported. Must be called on ``queue``.
+    private func completeAdd(_ identifier: ServiceIdentifier, error: NSError?, from index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard var batches = _pendingAdds[identifier], !batches.isEmpty else {
+        var batches = _pendingAdds[identifier] ?? []
+        guard let position = batches.firstIndex(where: { $0.owing.contains(index) }) else {
+            // Either a completion for an operation this composite has already settled without
+            // this child, or one from its catch-up republish — swallowed, not aggregated.
+            if _swallowedAdds[index] > 0 {
+                _swallowedAdds[index] -= 1
+                return
+            }
             // A completion for an add this composite never issued (a child publishing on
             // its own). Nothing to aggregate — forward it as-is.
             _eventHandler?(.didAddService(identifier, error: error))
             return
         }
-        batches[0].remaining -= 1
-        if batches[0].error == nil { batches[0].error = error }
-        guard batches[0].remaining <= 0 else {
+        batches[position].owing.remove(index)
+        if batches[position].error == nil { batches[position].error = error }
+        guard batches[position].owing.isEmpty else {
             _pendingAdds[identifier] = batches
             return
         }
-        let settled = batches.removeFirst()
+        let settled = batches.remove(at: position)
         _pendingAdds[identifier] = batches.isEmpty ? nil : batches
         _eventHandler?(.didAddService(identifier, error: settled.error))
     }
 
-    /// Settles one child's `didStartAdvertising`, emitting the aggregate once the last
-    /// child has reported. Must be called on ``queue``.
-    private func completeAdvertising(error: NSError?) {
+    /// Settles one child's `didStartAdvertising`, emitting the aggregate once the last child
+    /// owing it has reported. Must be called on ``queue``.
+    private func completeAdvertising(error: NSError?, from index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard !_pendingAdvertisements.isEmpty else {
+        guard let position = _pendingAdvertisements.firstIndex(where: { $0.owing.contains(index) }) else {
+            if _swallowedAdvertisements[index] > 0 {
+                _swallowedAdvertisements[index] -= 1
+                return
+            }
             _eventHandler?(.didStartAdvertising(error: error))
             return
         }
-        _pendingAdvertisements[0].remaining -= 1
-        if _pendingAdvertisements[0].error == nil { _pendingAdvertisements[0].error = error }
-        guard _pendingAdvertisements[0].remaining <= 0 else { return }
-        let settled = _pendingAdvertisements.removeFirst()
+        _pendingAdvertisements[position].owing.remove(index)
+        if _pendingAdvertisements[position].error == nil { _pendingAdvertisements[position].error = error }
+        guard _pendingAdvertisements[position].owing.isEmpty else { return }
+        let settled = _pendingAdvertisements.remove(at: position)
         _eventHandler?(.didStartAdvertising(error: settled.error))
     }
 
@@ -303,32 +461,48 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         return backends.allSatisfy(\.isAdvertising)
     }
 
-    /// Starts advertising on every child. A single `didStartAdvertising` follows once every
-    /// child has reported, carrying the first non-`nil` error.
+    /// Starts advertising on every powered-on child. A single `didStartAdvertising` follows
+    /// once every one of them has reported, carrying the first non-`nil` error; a child that
+    /// is not powered on is skipped — it could never report — and picks the advertisement up
+    /// when it powers on.
     public func startAdvertising(_ advertisement: PeripheralAdvertisement) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard !backends.isEmpty else {
+        _advertisement = advertisement
+        let targets = onlineIndices
+        for index in backends.indices where !targets.contains(index) {
+            noteOffline(index, operation: "startAdvertising")
+        }
+        guard !targets.isEmpty else {
             queue.async { [self] in
                 dispatchPrecondition(condition: .onQueue(queue))
                 _eventHandler?(.didStartAdvertising(error: nil))
             }
             return
         }
-        _pendingAdvertisements.append(Pending(remaining: backends.count, error: nil))
-        for backend in backends { backend.startAdvertising(advertisement) }
+        _pendingAdvertisements.append(Pending(owing: Set(targets), error: nil))
+        for index in targets { backends[index].startAdvertising(advertisement) }
     }
 
     /// Stops advertising on every child.
     public func stopAdvertising() {
         dispatchPrecondition(condition: .onQueue(queue))
+        _advertisement = nil
         for backend in backends { backend.stopAdvertising() }
     }
 
-    /// Publishes `service` on every child. A single `didAddService` follows once every child
-    /// has reported, carrying the first non-`nil` error.
+    /// Publishes `service` on every powered-on child. A single `didAddService` follows once
+    /// every one of them has reported, carrying the first non-`nil` error; a child that is not
+    /// powered on is skipped — it could never report — and is caught up with the composite's
+    /// services when it powers on.
     public func add(_ service: GATTService) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard !backends.isEmpty else {
+        _services.removeAll { $0.identifier == service.identifier }
+        _services.append(service)
+        let targets = onlineIndices
+        for index in backends.indices where !targets.contains(index) {
+            noteOffline(index, operation: "add")
+        }
+        guard !targets.isEmpty else {
             let identifier = service.identifier
             queue.async { [self] in
                 dispatchPrecondition(condition: .onQueue(queue))
@@ -336,13 +510,14 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
             }
             return
         }
-        _pendingAdds[service.identifier, default: []].append(Pending(remaining: backends.count, error: nil))
-        for backend in backends { backend.add(service) }
+        _pendingAdds[service.identifier, default: []].append(Pending(owing: Set(targets), error: nil))
+        for index in targets { backends[index].add(service) }
     }
 
     /// Clears every child's GATT database.
     public func removeAllHostedServices() {
         dispatchPrecondition(condition: .onQueue(queue))
+        _services.removeAll()
         for backend in backends { backend.removeAllHostedServices() }
     }
 
@@ -353,21 +528,22 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         for backend in backends { backend.respond(to: token, value: value, error: error) }
     }
 
-    /// Delivers `value` to every child — now if it will take it, from that child's FIFO if it
-    /// will not.
+    /// Delivers `value` to every powered-on child — now if it will take it, from that child's
+    /// FIFO if it will not.
     ///
-    /// **Per-child FIFOs, not a shared outstanding push.** For each child: if it owes nothing
-    /// and accepts the push, it is done; otherwise the push joins the back of *that child's*
-    /// FIFO, which its next `readyToUpdateSubscribers` drains in order. A value therefore
-    /// reaches each child exactly once and in order, whatever the children's windows are
-    /// doing, and two pushes carrying identical bytes are two pushes — nothing here compares
-    /// payloads or infers a retry.
+    /// **Per-child FIFOs, not a shared outstanding push.** For each powered-on child: if it
+    /// owes nothing and accepts the push, it is done; otherwise the push joins the back of
+    /// *that child's* FIFO, which its next `readyToUpdateSubscribers` drains in order. A value
+    /// therefore reaches each such child exactly once and in order, whatever the children's
+    /// windows are doing, and two pushes carrying identical bytes are two pushes — nothing
+    /// here compares payloads or infers a retry. A child that is not powered on refuses every
+    /// push and can never drain, so it is skipped outright rather than queued for.
     ///
-    /// - Returns: `true` when every child either took the value or queued it. `false` — the
-    ///   composite's window closing — only when some child has already fallen a full
-    ///   `queueLimit` behind, in which case *nothing* is pushed or queued, so the caller's
-    ///   re-offer after the next `readyToUpdateSubscribers` is the value's first and only
-    ///   delivery.
+    /// - Returns: `true` when every powered-on child either took the value or queued it.
+    ///   `false` — the composite's window closing — only when some powered-on child has
+    ///   already fallen a full `queueLimit` behind, in which case *nothing* is pushed or
+    ///   queued, so the caller's re-offer after the next `readyToUpdateSubscribers` is the
+    ///   value's first and only delivery.
     public func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         // Checked before anything is delivered: a push that is refused must reach no child at
@@ -378,6 +554,10 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         }
         let pending = PendingPush(value: value, characteristic: characteristic, subscribers: centrals)
         for index in backends.indices {
+            guard isOnline(index) else {
+                noteOffline(index, operation: "updateValue")
+                continue
+            }
             if _queues[index].isEmpty,
                backends[index].updateValue(value, for: characteristic, onSubscribed: centrals) {
                 continue

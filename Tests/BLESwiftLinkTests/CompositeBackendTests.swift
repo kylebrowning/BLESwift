@@ -570,6 +570,140 @@ struct CompositeBackendTests {
         #expect(subscribes.withLock { $0 } == 1)
     }
 
+    @Test("add and startAdvertising complete over a child that is not powered on")
+    func addAndAdvertiseSkipAPoweredOffChild() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.addPoweredOff")
+        let virtual = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let real = FakePeripheralManager(queue: queue, state: .poweredOff)
+        let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
+
+        let added = Mutex<[NSError?]>([])
+        let started = Mutex<[NSError?]>([])
+        await onQueue(queue) {
+            composite.eventHandler = { event in
+                switch event {
+                case .didAddService(_, let error): added.withLock { $0.append(error) }
+                case .didStartAdvertising(let error): started.withLock { $0.append(error) }
+                default: break
+                }
+            }
+        }
+
+        // The powered-off child can never report a completion, so the composite must not wait
+        // on it: the aggregate arrives from the powered-on child alone.
+        await onQueue(queue) {
+            composite.add(Self.service)
+            composite.startAdvertising(PeripheralAdvertisement(localName: "Composite", serviceUUIDs: [Self.heartRate]))
+        }
+        await waitFor { added.withLock { !$0.isEmpty } && started.withLock { !$0.isEmpty } }
+        _ = await onQueue(queue) { true }
+
+        #expect(added.withLock { $0 } == [nil])
+        #expect(started.withLock { $0 } == [nil])
+        #expect(await onQueue(queue) { virtual.addedServices.count } == 1)
+        #expect(await onQueue(queue) { virtual.startAdvertisingCallCount } == 1)
+        // Nothing was even offered to the radio that is off.
+        #expect(await onQueue(queue) { real.addedServices.isEmpty })
+        #expect(await onQueue(queue) { real.startAdvertisingCallCount } == 0)
+    }
+
+    @Test("A child that is not powered on never fills a FIFO, so the window never latches")
+    func aPoweredOffChildNeverClosesTheWindow() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.windowPoweredOff")
+        let virtual = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let real = FakePeripheralManager(queue: queue, state: .poweredOff)
+        let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
+
+        // Far past the window: the powered-off child is skipped outright rather than queued
+        // for, so no FIFO ever fills and the composite keeps accepting pushes.
+        let pushes = LinkFlowControl.updateValueWindow * 2
+        for index in 0..<pushes {
+            #expect(await onQueue(queue) {
+                composite.updateValue(Data([UInt8(index % 256)]), for: Self.measurement, onSubscribed: nil)
+            }, "push \(index) should have been accepted")
+        }
+
+        #expect(await onQueue(queue) { virtual.updateValueCalls.count } == pushes)
+        #expect(await onQueue(queue) { real.updateValueCalls.isEmpty })
+    }
+
+    @Test("A child powering on later is caught up with the services and the advertisement")
+    func aChildPoweringOnIsCaughtUp() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.powerUp")
+        let virtual = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let real = FakePeripheralManager(queue: queue, state: .poweredOff)
+        let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
+
+        let added = Mutex<[NSError?]>([])
+        let started = Mutex<[NSError?]>([])
+        await onQueue(queue) {
+            composite.eventHandler = { event in
+                switch event {
+                case .didAddService(_, let error): added.withLock { $0.append(error) }
+                case .didStartAdvertising(let error): started.withLock { $0.append(error) }
+                default: break
+                }
+            }
+        }
+
+        let advertisement = PeripheralAdvertisement(localName: "Composite", serviceUUIDs: [Self.heartRate])
+        await onQueue(queue) {
+            composite.add(Self.service)
+            composite.startAdvertising(advertisement)
+        }
+        await waitFor { added.withLock { !$0.isEmpty } && started.withLock { !$0.isEmpty } }
+
+        // The Mac's radio comes on mid-session: the composite republishes what it is hosting.
+        real.simulateStateChange(.poweredOn)
+        await waitFor {
+            await onQueue(queue) { real.addedServices.count == 1 && real.startAdvertisingCallCount == 1 }
+        }
+        #expect(await onQueue(queue) { real.addedServices.first?.identifier } == Self.heartRate)
+        #expect(await onQueue(queue) { real.lastAdvertisement?.localName } == "Composite")
+
+        // The catch-up is the composite's own business: the host hears no second completion.
+        _ = await onQueue(queue) { true }
+        #expect(added.withLock { $0 } == [nil])
+        #expect(started.withLock { $0 } == [nil])
+
+        // And it now takes its share of the pushes.
+        #expect(await onQueue(queue) {
+            composite.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil)
+        })
+        #expect(await onQueue(queue) { real.updateValueCalls.count } == 1)
+    }
+
+    @Test("A child powering off mid-add settles the pending it still owed")
+    func aChildPoweringOffMidAddSettlesThePending() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.powerDownMidAdd")
+        let virtual = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let real = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
+
+        let added = Mutex<[NSError?]>([])
+        let failure = NSError(domain: "CompositeBackendTests", code: 13)
+        await onQueue(queue) {
+            // The radio drops out from inside the fan-out, after the composite has issued the
+            // add to it but before its completion is delivered — and that completion carries
+            // an error, so a settlement that carried it would be visible here.
+            real.addServiceError = failure
+            real.onAddService = { _ in real.simulateStateChange(.poweredOff) }
+            composite.eventHandler = { event in
+                if case .didAddService(_, let error) = event { added.withLock { $0.append(error) } }
+            }
+        }
+
+        await onQueue(queue) { composite.add(Self.service) }
+        await waitFor { added.withLock { !$0.isEmpty } }
+        _ = await onQueue(queue) { true }
+        _ = await onQueue(queue) { true }
+
+        // Settled by the power-off, not by the child's own late completion — which is
+        // swallowed, so the host never hears the aggregate twice.
+        #expect(added.withLock { $0 } == [nil])
+        #expect(await onQueue(queue) { composite.radioState } == .poweredOn)
+    }
+
     @Test("respond and removeAllHostedServices fan out to every child")
     func respondAndRemoveFanOut() async {
         let queue = DispatchSerialQueue(label: "CompositeBackendTests.respond")
