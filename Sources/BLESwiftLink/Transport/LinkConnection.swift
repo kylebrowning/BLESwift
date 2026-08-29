@@ -55,12 +55,26 @@ public final class LinkConnection: Sendable {
     private let storage = Mutex(Storage())
     private let sendGate = Mutex(SendGate())
 
+    /// How many `LinkConnection`s exist right now.
+    ///
+    /// Not API: it exists so a test can assert that a connection which reached a terminal
+    /// state is actually released, rather than kept alive by a handler it stored.
+    private static let liveCount = Mutex(0)
+
+    /// The number of `LinkConnection`s currently alive. See ``liveCount``.
+    package static var liveConnectionCount: Int { liveCount.withLock { $0 } }
+
     /// Wraps an existing `NWConnection` — typically one handed to a ``LinkListener``'s
     /// `newConnectionHandler`. Messages and state changes are delivered on `queue`.
     public init(connection: NWConnection, codec: LinkCodec, queue: DispatchQueue) {
         self.connection = connection
         self.codec = codec
         self.queue = queue
+        Self.liveCount.withLock { $0 += 1 }
+    }
+
+    deinit {
+        Self.liveCount.withLock { $0 -= 1 }
     }
 
     /// Creates an outbound connection to `endpoint`. Call ``start()`` to begin connecting.
@@ -224,13 +238,22 @@ public final class LinkConnection: Sendable {
 
     /// Moves to a terminal state exactly once, cancels the underlying connection, and publishes
     /// the transition on `queue`.
+    ///
+    /// Both handlers are released here, after the one being published has been copied out. A
+    /// handler stored into a connection routinely captures that same connection strongly —
+    /// `LinkClientSession.dial()` does — which is a retain cycle nothing else breaks, and a
+    /// client redialing a dead provider every couple of seconds would leak one
+    /// ``LinkConnection`` and its `NWConnection` per attempt.
     private func finish(with terminal: State) {
         let outcome = storage.withLock { storage -> (published: Bool, handler: (@Sendable (State) -> Void)?) in
             guard !storage.isTerminal else { return (false, nil) }
             storage.isTerminal = true
             storage.state = terminal
             storage.buffer = Data()
-            return (true, storage.onStateChange)
+            let handler = storage.onStateChange
+            storage.onMessage = nil
+            storage.onStateChange = nil
+            return (true, handler)
         }
         guard outcome.published else { return }
         connection.cancel()

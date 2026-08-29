@@ -92,6 +92,44 @@ struct LinkClientSessionTests {
         session.stop()
     }
 
+    @Test("A session retrying against a closed port leaks no connections")
+    func retryingLeaksNoConnections() async throws {
+        let port = try await Self.freePort()
+        let queue = DispatchSerialQueue(label: "client")
+        let session = LinkClientSession(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
+            role: .central,
+            clientName: "unit",
+            queue: queue,
+            retryInterval: .milliseconds(50)
+        )
+        // `dial()` stores handlers that capture their own connection strongly, so a
+        // connection whose handlers outlive its terminal state can never be released.
+        let baseline = LinkConnection.liveConnectionCount
+        session.start()
+        // Roughly a dozen dial-and-fail cycles at a 50 ms retry interval.
+        try await Task.sleep(for: .milliseconds(700))
+        #expect(!session.isConnected)
+        // One live connection is the dial currently in flight; anything more is a leak.
+        let live = LinkConnection.liveConnectionCount - baseline
+        #expect(live <= 1, "\(live) connections still alive after retrying")
+        session.stop()
+    }
+
+    /// A loopback port nothing is bound to: taken by a listener on port 0, read back, and
+    /// released again.
+    private static func freePort() async throws -> UInt16 {
+        let listener = try LinkListener(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: 0),
+            codec: .json,
+            queue: DispatchQueue(label: "freeport")
+        )
+        try await listener.start()
+        let port = listener.port
+        listener.cancel()
+        return port
+    }
+
     @Test("Reconnects after the provider drops, reporting disconnect first")
     func reconnects() async throws {
         let (listener, server) = try await makeServer(accept: true)
