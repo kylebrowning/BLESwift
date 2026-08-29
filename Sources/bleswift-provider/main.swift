@@ -34,6 +34,10 @@ configuration.codec = options.codec
 configuration.passthrough = options.passthrough
 configuration.log = { print($0) }
 
+// A fixture that cannot be read or decoded exits `66` (`EX_NOINPUT`) with the underlying
+// error printed. Every UUID string in the document is validated while decoding — a typo like
+// `"zzzz"` arrives here as a `DecodingError` naming the key it sits under, rather than
+// trapping the provider inside `ServiceIdentifier`.
 for path in options.fixturePaths {
     do {
         let document = try FixtureDocument.load(from: URL(fileURLWithPath: path))

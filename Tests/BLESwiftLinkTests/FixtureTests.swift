@@ -81,4 +81,31 @@ struct FixtureTests {
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(try FixtureDocument.load(from: url).devices.count == 1)
     }
+
+    /// A malformed UUID anywhere in a fixture used to trap the provider at load, inside the
+    /// identifier it was handed to. Each one is now a `DecodingError` naming its key, which
+    /// `bleswift-provider` prints before exiting 66.
+    @Test(
+        "A malformed UUID fails decoding rather than trapping",
+        arguments: [
+            ("\"advertisedServices\": [\"180D\"]", "\"advertisedServices\": [\"zzzz\"]", "advertisedServices"),
+            ("{ \"uuid\": \"180F\", \"isPrimary\": false", "{ \"uuid\": \"zzzz\", \"isPrimary\": false", "uuid"),
+            ("{ \"uuid\": \"2A37\"", "{ \"uuid\": \"zzzz\"", "uuid"),
+        ]
+    )
+    func malformedUUIDFailsDecoding(original: String, replacement: String, key: String) throws {
+        let bad = Self.json.replacingOccurrences(of: original, with: replacement)
+        #expect(bad != Self.json)
+        let error = #expect(throws: DecodingError.self) {
+            try FixtureDocument.parse(Data(bad.utf8))
+        }
+        guard case .dataCorrupted(let context) = try #require(error) else {
+            Issue.record("expected a dataCorrupted error, got \(String(describing: error))")
+            return
+        }
+        // The message names both the offending string and where in the document it sits.
+        #expect(context.codingPath.last?.stringValue == key)
+        #expect(context.codingPath.first?.stringValue == "devices")
+        #expect(context.debugDescription.contains("zzzz"))
+    }
 }

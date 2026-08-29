@@ -35,10 +35,44 @@ public struct FixtureDocument: Codable, Sendable, Equatable {
     ///
     /// - Parameter data: The document's JSON bytes.
     /// - Throws: `DecodingError` if `data` is not a valid fixture document — including an
-    ///   unrecognized ``FixtureProperty`` or ``FixturePermission`` case name.
+    ///   unrecognized ``FixtureProperty`` or ``FixturePermission`` case name, or a UUID
+    ///   string BLESwift's identifiers could not hold.
     public static func parse(_ data: Data) throws -> FixtureDocument {
         try JSONDecoder().decode(FixtureDocument.self, from: data)
     }
+}
+
+/// Rejects a fixture UUID string BLESwift's identifiers could not hold.
+///
+/// `ServiceIdentifier` and `CharacteristicIdentifier` **trap** on a string they cannot
+/// normalize, so a typo in a hand-written fixture — `"zzzz"` where `"180D"` was meant — would
+/// take `bleswift-provider` down at load rather than telling its author what is wrong. Every
+/// UUID a fixture carries is therefore checked while decoding, against the same rule the wire
+/// boundary applies (``WireIdentifierValidation``), and a bad one becomes a `DecodingError`
+/// naming the key it sits under — which the CLI prints before exiting `66`.
+///
+/// - Parameters:
+///   - uuid: The candidate UUID string, as written in the fixture.
+///   - key: The key `uuid` was decoded from, for the error's coding path.
+///   - container: The container `key` belongs to, for the error's coding path.
+///   - index: The element's position, when `key` holds an array of UUID strings.
+/// - Throws: `DecodingError.dataCorrupted` if `uuid` is not a UUID string BLESwift accepts.
+private func validateFixtureUUID<Key: CodingKey>(
+    _ uuid: String,
+    forKey key: Key,
+    in container: KeyedDecodingContainer<Key>,
+    index: Int? = nil
+) throws {
+    guard !WireIdentifierValidation.isValid(uuid) else { return }
+    let position = index.map { " at index \($0)" } ?? ""
+    throw DecodingError.dataCorruptedError(
+        forKey: key,
+        in: container,
+        debugDescription: """
+            "\(uuid)"\(position) is not a BLE UUID: expected 4 or 8 hex digits, or a dashed \
+            36-character UUID (for example "180D" or "6BA7B810-9DAD-11D1-80B4-00C04FD430C8").
+            """
+    )
 }
 
 /// One virtual peripheral described by a ``FixtureDocument``: its advertisement and the
@@ -73,6 +107,34 @@ public struct FixtureDevice: Codable, Sendable, Equatable {
         self.advertisedServices = advertisedServices
         self.manufacturerData = manufacturerData
         self.services = services
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, advertisedServices, manufacturerData, services
+    }
+
+    /// Decodes a fixture device, rejecting an ``advertisedServices`` entry BLESwift's
+    /// identifiers could not hold rather than trapping on it later in ``advertisement``.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        advertisedServices = try container.decode([String].self, forKey: .advertisedServices)
+        for (index, uuid) in advertisedServices.enumerated() {
+            try validateFixtureUUID(uuid, forKey: .advertisedServices, in: container, index: index)
+        }
+        manufacturerData = try container.decodeIfPresent(Data.self, forKey: .manufacturerData)
+        services = try container.decode([FixtureService].self, forKey: .services)
+    }
+
+    /// Encodes a fixture device, in the shape ``init(from:)`` reads.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encode(advertisedServices, forKey: .advertisedServices)
+        try container.encodeIfPresent(manufacturerData, forKey: .manufacturerData)
+        try container.encode(services, forKey: .services)
     }
 
     /// This device's advertisement, derived from ``name``, ``advertisedServices``, and
@@ -116,9 +178,12 @@ public struct FixtureService: Codable, Sendable, Equatable {
         case uuid, isPrimary, characteristics
     }
 
+    /// Decodes a fixture service, rejecting a ``uuid`` BLESwift's identifiers could not hold
+    /// rather than trapping on it later in ``gattService``.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         uuid = try container.decode(String.self, forKey: .uuid)
+        try validateFixtureUUID(uuid, forKey: .uuid, in: container)
         isPrimary = try container.decodeIfPresent(Bool.self, forKey: .isPrimary) ?? true
         characteristics = try container.decode([FixtureCharacteristic].self, forKey: .characteristics)
     }
@@ -179,9 +244,12 @@ public struct FixtureCharacteristic: Codable, Sendable, Equatable {
         case uuid, properties, permissions, value
     }
 
+    /// Decodes a fixture characteristic, rejecting a ``uuid`` BLESwift's identifiers could
+    /// not hold rather than trapping on it later in `gattCharacteristic(service:)`.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         uuid = try container.decode(String.self, forKey: .uuid)
+        try validateFixtureUUID(uuid, forKey: .uuid, in: container)
         properties = try container.decode([FixtureProperty].self, forKey: .properties)
         value = try container.decodeIfPresent(Data.self, forKey: .value)
         if let explicit = try container.decodeIfPresent([FixturePermission].self, forKey: .permissions) {
