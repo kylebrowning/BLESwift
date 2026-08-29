@@ -173,14 +173,20 @@ ADVERTISER_PID=$!
 
 # grantiva exposes no readiness signal for a keep-alive session, so poll the
 # report it writes when the flow finishes.
+# Bounded by a wall-clock deadline, not by a count of iterations: each pass also
+# pays for a `grep`, a `python3` and a `kill -0`, so counting `sleep 1`s would cut
+# the wait well short of the seconds `ADVERTISER_READY_TIMEOUT` promises.
 ADVERTISER_READY=0
 ADVERTISER_WAIT_START=$SECONDS
-for _ in $(seq 1 "$ADVERTISER_READY_TIMEOUT"); do
+ADVERTISER_DEADLINE=$((SECONDS + ADVERTISER_READY_TIMEOUT))
+NEXT_HEARTBEAT=10
+while (( SECONDS < ADVERTISER_DEADLINE )); do
     ELAPSED=$((SECONDS - ADVERTISER_WAIT_START))
     # A heartbeat every ten seconds: without it a cold runner looks hung for minutes while
     # grantiva is quietly building its agent.
-    if (( ELAPSED > 0 && ELAPSED % 10 == 0 )); then
+    if (( ELAPSED >= NEXT_HEARTBEAT )); then
         echo "waiting for the advertiser flow: ${ELAPSED}s of ${ADVERTISER_READY_TIMEOUT}s"
+        NEXT_HEARTBEAT=$((ELAPSED + 10))
     fi
     if [[ -f "$ADVERTISER_REPORT/report.json" ]]; then
         # report.json is rewritten as the run progresses (see its `updateSeq`),
