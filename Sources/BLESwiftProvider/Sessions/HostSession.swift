@@ -156,8 +156,9 @@ final class HostSession: Sendable {
     /// Applies one request to the backend. Must be called on ``queue``.
     ///
     /// - Throws: ``BLESwiftLink/WireDecodingError`` for a request carrying a field no
-    ///   BLESwift type can represent — a malformed UUID string, say. The caller treats it as
-    ///   a protocol violation and drops the connection.
+    ///   BLESwift type can represent — a malformed UUID string, say — or
+    ///   ``ProtocolViolation/unknownATTError(_:)`` for an ATT code no `ATTError` holds. The
+    ///   caller treats either as a protocol violation and drops the connection.
     private func perform(_ request: HostRequest) throws {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !isClosed else { return }
@@ -179,11 +180,17 @@ final class HostSession: Sendable {
             backend.removeAllHostedServices()
 
         case .respond(let token, let value, let attError):
-            backend.respond(
-                to: RequestToken(rawValue: token),
-                value: value,
-                error: attError.flatMap(ATTError.init(rawValue:))
-            )
+            // A code no `ATTError` can hold is a malformed field like a malformed UUID, and
+            // is refused for the same reason: dropping it would answer the request
+            // *successfully* on the client's behalf, turning the failure it asked for into a
+            // success the remote central then acts on.
+            let error = try attError.map { code in
+                guard let error = ATTError(rawValue: code) else {
+                    throw ProtocolViolation.unknownATTError(code)
+                }
+                return error
+            }
+            backend.respond(to: RequestToken(rawValue: token), value: value, error: error)
 
         case .updateValue(let sequence, let value, let characteristic, let centrals):
             // A client that keeps queueing past the window it agreed to has stopped following
@@ -210,6 +217,9 @@ final class HostSession: Sendable {
         /// More `updateValue` pushes were queued than ``maximumPendingUpdates`` allows — the
         /// client has ignored its flow-control window.
         case updateWindowExceeded
+
+        /// A `respond` carried an ATT error code no `ATTError` represents, carried verbatim.
+        case unknownATTError(Int)
     }
 
     /// Drops the client's link because it sent something the protocol does not allow — a

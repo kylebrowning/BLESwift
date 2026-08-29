@@ -14,7 +14,8 @@ import Synchronization
 import Testing
 
 /// What a peripheral-role session refuses to hold on a misbehaving client's behalf — the
-/// counterpart to `CentralSessionLimitsTests` for the notification queue.
+/// counterpart to `CentralSessionLimitsTests` for the notification queue — and what it
+/// refuses to pass on from a malformed request.
 @Suite("Host session limits")
 struct HostSessionLimitsTests {
 
@@ -87,6 +88,51 @@ struct HostSessionLimitsTests {
         }
 
         // The session goes, rather than the provider's memory.
+        await waitFor(timeout: .seconds(10)) { await provider.sessionCount == 0 }
+        #expect(await provider.sessionCount == 0)
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+        await provider.stop()
+    }
+
+    @Test("A respond carrying an ATT code no ATTError holds loses the session")
+    func unknownATTErrorClosesTheSession() async throws {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+
+        // Straight down the link, behind `LinkPeripheralManager`'s back: its own `respond`
+        // can only ever send a code an `ATTError` already held.
+        let connection = LinkConnection.connect(
+            to: endpoint,
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "hostsession.atterror")
+        )
+        let accepted = Mutex(false)
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(
+                protocolVersion: LinkProtocol.version,
+                role: .peripheral,
+                clientName: "malformed-host"
+            )))
+        }
+        connection.onMessage = { message in
+            guard case .serverHello(let hello) = message, hello.accepted else { return }
+            accepted.withLock { $0 = true }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { accepted.withLock { $0 } }
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
+        #expect(await provider.sessionCount == 1)
+
+        connection.send(.hostRequest(.respond(token: UUID(), value: nil, attError: 999)))
+
+        // Refused outright, rather than passed on as a success the client never asked for.
         await waitFor(timeout: .seconds(10)) { await provider.sessionCount == 0 }
         #expect(await provider.sessionCount == 0)
 
