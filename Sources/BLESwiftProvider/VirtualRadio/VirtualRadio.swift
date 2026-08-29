@@ -230,6 +230,14 @@ public actor VirtualRadio {
         sessions[session]?.scanner?.repeater = repeater
     }
 
+    /// Whether `session` currently has a scanner installed.
+    ///
+    /// Not API: it exists so a test can assert that a scan and the `stopScan` right behind it
+    /// left nothing running.
+    package func hasScanner(session: UUID) -> Bool {
+        sessions[session]?.scanner != nil
+    }
+
     /// Stops `session`'s scan, if any.
     func stopScan(session: UUID) {
         sessions[session]?.scanner?.repeater?.cancel()

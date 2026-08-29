@@ -15,10 +15,11 @@ import Synchronization
 /// **Concurrency — queue-confined, not lock-protected.** Every stored property is
 /// `nonisolated(unsafe)` and touched only on ``queue``, which every `PeripheralRemote`
 /// method asserts at entry — the serial queue is the synchronization, exactly as it is for
-/// a real `CBPeripheral`. GATT work is handed to the radio actor with `Task { await … }`,
-/// and every resulting event is delivered back with `queue.async`, never inline. The one
-/// exception is ``name``, which the radio fills in asynchronously and CoreBluetooth
-/// callers read off-queue, so it is `Mutex`-protected instead.
+/// a real `CBPeripheral`. GATT work reaches the radio actor through one serial chain of
+/// `Task`s (see ``enqueue(_:)``), and every resulting event is delivered back with
+/// `queue.async`, never inline. The one exception is ``name``, which the radio fills in
+/// asynchronously and CoreBluetooth callers read off-queue, so it is `Mutex`-protected
+/// instead.
 public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
 
     /// The device identifier this remote stands for.
@@ -37,6 +38,12 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _discoveredCharacteristics: Set<CharacteristicIdentifier> = []
     nonisolated(unsafe) private var _properties: [CharacteristicIdentifier: CharacteristicProperties] = [:]
     nonisolated(unsafe) private var _notifying: Set<CharacteristicIdentifier> = []
+
+    /// The serial chain of radio work this remote has queued. Swift guarantees no ordering
+    /// between independent `Task`s, so two back-to-back writes — or a `setNotifyValue(true)`
+    /// and the write that triggers the notification it arms — could otherwise reach the actor
+    /// in either order. Every radio call is appended to this chain instead.
+    nonisolated(unsafe) private var _work: Task<Void, Never>?
 
     /// Creates a remote for `identifier`, served by `radio` under `session`.
     init(identifier: UUID, radio: VirtualRadio, session: UUID, queue: DispatchSerialQueue, name: String?) {
@@ -68,6 +75,17 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     func deliver(_ event: PeripheralEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
         _eventHandler?(event)
+    }
+
+    /// Appends `body` to the serial chain of radio work, so it runs after every operation
+    /// queued before it. Must be called on ``queue``.
+    private func enqueue(_ body: @escaping @Sendable () async -> Void) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let previous = _work
+        _work = Task {
+            await previous?.value
+            await body()
+        }
     }
 
     /// Records a connection-state transition. Must be called on ``queue``.
@@ -114,7 +132,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// `didDiscoverServices` once the answer lands.
     public func discoverServices(_ services: [ServiceIdentifier]?) {
         dispatchPrecondition(condition: .onQueue(queue))
-        Task { [radio, identifier, queue] in
+        enqueue { [radio, identifier, queue] in
             let found = await radio.services(of: identifier, matching: services)
             queue.async { [self] in
                 _discoveredServices.formUnion(found)
@@ -128,7 +146,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// advertised properties.
     public func discoverCharacteristics(_ characteristics: [CharacteristicIdentifier]?, for service: ServiceIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
-        Task { [radio, identifier, queue] in
+        enqueue { [radio, identifier, queue] in
             let found = await radio.characteristics(of: identifier, service: service, matching: characteristics)
             queue.async { [self] in
                 for characteristic in found {
@@ -144,7 +162,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// `didUpdateValue`.
     public func readValue(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
-        Task { [radio, identifier, session, queue] in
+        enqueue { [radio, identifier, session, queue] in
             let result = await radio.read(device: identifier, characteristic: characteristic, session: session)
             queue.async { [self] in
                 switch result {
@@ -162,7 +180,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// exactly as CoreBluetooth does.
     public func writeValue(_ data: Data, for characteristic: CharacteristicIdentifier, type: WriteType) {
         dispatchPrecondition(condition: .onQueue(queue))
-        Task { [radio, identifier, session, queue] in
+        enqueue { [radio, identifier, session, queue] in
             let result = await radio.write(
                 device: identifier,
                 characteristic: characteristic,
@@ -191,7 +209,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         } else {
             _notifying.remove(characteristic)
         }
-        Task { [radio, identifier, session, queue] in
+        enqueue { [radio, identifier, session, queue] in
             await radio.setNotify(enabled, device: identifier, characteristic: characteristic, session: session)
             queue.async { [self] in
                 deliver(.didUpdateNotificationState(characteristic: characteristic, isNotifying: enabled, error: nil))

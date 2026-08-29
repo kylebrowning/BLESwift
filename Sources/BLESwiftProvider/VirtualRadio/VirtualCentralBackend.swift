@@ -18,8 +18,9 @@ import Synchronization
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Every stored property is
 /// `nonisolated(unsafe)` and touched only on ``queue``, which every `CentralManaging`
-/// method asserts at entry. Work is handed to the radio actor with `Task { await … }` and
-/// every event is delivered back with `queue.async`, never inline — the delivery contract
+/// method asserts at entry. Work reaches the radio actor through one serial chain of
+/// `Task`s rooted in this backend's attachment (see ``enqueue(_:)``) and every event is
+/// delivered back with `queue.async`, never inline — the delivery contract
 /// `CentralManaging` requires.
 public final class VirtualCentralBackend: CentralManaging, Sendable {
 
@@ -45,6 +46,12 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// after being seen stays retrievable exactly as CoreBluetooth keeps vending a
     /// `CBPeripheral` for a peer it has scanned; the connect attempt is what then fails.
     nonisolated(unsafe) private var _discovered: Set<UUID> = []
+
+    /// The serial chain of radio work, rooted in this backend's attachment. Swift guarantees
+    /// no ordering between independent `Task`s, so a `scan` and the `stopScan` right behind it
+    /// could otherwise reach the actor in either order — leaving a duplicate-reporting
+    /// repeater running for a scan that has already been stopped.
+    nonisolated(unsafe) private var _work: Task<Void, Never>!
 
     /// Backs ``bluetoothAuthorization``; a `static var` isn't scoped to any one backend's
     /// queue, so it is `Mutex`-protected rather than queue-confined.
@@ -82,15 +89,36 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             guard let self else { return }
             self.queue.async { self._knownDevices = devices }
         }
-        Task { [radio] in
+        // The root of the chain: nothing this backend asks of the radio can outrun the
+        // attachment that gives the radio somewhere to answer.
+        _work = Task { [radio] in
             await radio.attach(session: session, centralSink: sink, knownDevicesSink: knownDevices)
         }
     }
 
+    /// Detaches from the radio behind whatever work is still queued.
+    ///
+    /// Reading `_work` off-queue is safe here: `deinit` runs only once every reference is
+    /// gone, and every queued delivery holds one.
     deinit {
         let radio = self.radio
         let session = sessionID
-        Task { await radio.detach(session: session) }
+        let work = _work
+        Task {
+            await work?.value
+            await radio.detach(session: session)
+        }
+    }
+
+    /// Appends `body` to the serial chain of radio work, so it runs after the attachment and
+    /// after every operation queued before it. Must be called on ``queue``.
+    private func enqueue(_ body: @escaping @Sendable () async -> Void) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let previous = _work
+        _work = Task {
+            await previous?.value
+            await body()
+        }
     }
 
     /// Delivers `event` to ``eventHandler``. Must be called on ``queue``.
@@ -155,7 +183,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// per second until ``stopScan()``.
     public func scanForPeripherals(withServices services: [ServiceIdentifier]?, options: ScanOptions) {
         dispatchPrecondition(condition: .onQueue(queue))
-        Task { [radio, sessionID] in
+        enqueue { [radio, sessionID] in
             await radio.startScan(session: sessionID, services: services, allowDuplicates: options.allowDuplicates)
         }
     }
@@ -163,7 +191,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// Stops the active scan, if any.
     public func stopScan() {
         dispatchPrecondition(condition: .onQueue(queue))
-        Task { [radio, sessionID] in
+        enqueue { [radio, sessionID] in
             await radio.stopScan(session: sessionID)
         }
     }
@@ -175,7 +203,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         guard let remote = peripheral as? VirtualPeripheralRemote, remote === _remotes[remote.identifier] else { return }
         remote.setConnectionState(.connecting)
         let device = remote.identifier
-        Task { [radio, sessionID, queue] in
+        enqueue { [radio, sessionID, queue] in
             // Connect-and-name in one actor hop: a second hop for the name could observe a
             // `remove()` that landed in between and rename a live connection to `nil`.
             let (failure, name) = await radio.connect(session: sessionID, device: device) { event in
@@ -201,7 +229,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         guard let remote = peripheral as? VirtualPeripheralRemote, remote === _remotes[remote.identifier] else { return }
         remote.setConnectionState(.disconnecting)
         let device = remote.identifier
-        Task { [radio, sessionID, queue] in
+        enqueue { [radio, sessionID, queue] in
             await radio.disconnect(session: sessionID, device: device)
             queue.async { [self] in
                 remote.setConnectionState(.disconnected)
@@ -229,7 +257,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             guard _knownDevices.contains(identifier) || _discovered.contains(identifier) else { return nil }
             let created = remote(for: identifier)
             if created.name == nil {
-                Task { [radio, queue] in
+                enqueue { [radio, queue] in
                     let name = await radio.name(of: identifier)
                     queue.async { created.updateName(name) }
                 }
