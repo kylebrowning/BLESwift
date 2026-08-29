@@ -342,6 +342,39 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { second.updateValueCalls.count } == 2)
     }
 
+    @Test("A retried push reaches only the child that refused it")
+    func retriedUpdateSkipsTheChildThatAccepted() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.retry")
+        let accepting = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let refusing = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let composite = CompositePeripheralManager(backends: [accepting, refusing], queue: queue)
+
+        let value = Data([0xA5])
+        // The first offer: the second child's transmit queue is full, so the composite
+        // reports `false` and the caller has to retry the very same push.
+        await onQueue(queue) { refusing.scriptedUpdateValueReturns = [false] }
+        #expect(await onQueue(queue) {
+            composite.updateValue(value, for: Self.measurement, onSubscribed: nil)
+        } == false)
+        #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
+        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 1)
+
+        // The retry, once the refusing child is ready again: the child that already took the
+        // value must not be pushed to a second time, or its subscribers see a duplicate.
+        #expect(await onQueue(queue) {
+            composite.updateValue(value, for: Self.measurement, onSubscribed: nil)
+        })
+        #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
+        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 2)
+
+        // A *different* push is not a retry: it fans out to every child again.
+        #expect(await onQueue(queue) {
+            composite.updateValue(Data([0x5A]), for: Self.measurement, onSubscribed: nil)
+        })
+        #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 2)
+        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 3)
+    }
+
     @Test("readyToUpdateSubscribers from any child is forwarded")
     func readyToUpdateIsForwarded() async {
         let queue = DispatchSerialQueue(label: "CompositeBackendTests.ready")

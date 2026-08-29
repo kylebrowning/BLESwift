@@ -174,6 +174,10 @@ final class HostSession: Sendable {
 
     /// Offers queued pushes to the backend until it refuses one, acknowledging each one it
     /// accepts. Must be called on ``queue``.
+    ///
+    /// A refused push is re-offered **verbatim** — same value, characteristic and subscriber
+    /// list — which is what lets a ``CompositePeripheralManager`` recognize the retry and
+    /// route it to the children that refused it alone.
     private func drainUpdates() {
         dispatchPrecondition(condition: .onQueue(queue))
         while let next = pendingUpdates.first {

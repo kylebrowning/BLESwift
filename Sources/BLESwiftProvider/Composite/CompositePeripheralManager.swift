@@ -26,6 +26,11 @@ import Foundation
 /// forwarded verbatim, except `didUpdateState` (replaced by the composite's computed state)
 /// and `willRestoreState` (dropped) — see ``CompositeCentral`` for why.
 ///
+/// **A refused push is remembered per child.** ``updateValue(_:for:onSubscribed:)`` returns
+/// the AND of its children's answers, and the caller re-offers a refused push once the
+/// transmit queue drains; the composite tracks which children refused so the retry reaches
+/// only those, never re-notifying a child's subscribers with a value it already delivered.
+///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``CompositeCentral``, including the requirement that **every child be confined to the
 /// same `queue`** and that ``init(backends:queue:)`` not be called from that queue.
@@ -58,6 +63,22 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
 
     /// Outstanding ``startAdvertising(_:)`` fan-outs, FIFO.
     nonisolated(unsafe) private var _pendingAdvertisements: [Pending] = []
+
+    /// The push a child refused, and which children refused it.
+    private struct OutstandingPush {
+        /// What was pushed, so a retry can be told from a *new* push.
+        let value: Data
+        let characteristic: CharacteristicIdentifier
+        let subscribers: [Subscriber]?
+        /// The indices into ``backends`` whose transmit queue was full. Only these are
+        /// pushed to again.
+        var refused: [Int]
+    }
+
+    /// The push some child refused, held until every child has taken it — so a retry of a
+    /// partially-accepted push reaches only the children that refused it, and a child that
+    /// already delivered the value does not notify its subscribers a second time.
+    nonisolated(unsafe) private var _outstandingPush: OutstandingPush?
 
     /// The authorization status this composite reports: always
     /// `BluetoothAuthorization.allowedAlways`. See
@@ -248,18 +269,41 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         for backend in backends { backend.respond(to: token, value: value, error: error) }
     }
 
-    /// Pushes `value` through every child and returns the AND of their answers: `false` if
-    /// *any* child's transmit queue was full, so the caller retries the push everywhere
-    /// after the next `readyToUpdateSubscribers`. Never short-circuits — every child is
-    /// called even once a `false` is known.
+    /// Pushes `value` through the children that have not already taken it and returns the AND
+    /// of their answers: `false` if *any* child's transmit queue was full, so the caller
+    /// retries the push after the next `readyToUpdateSubscribers`. Never short-circuits —
+    /// every child that is due the push is called even once a `false` is known.
+    ///
+    /// **A retry goes only to the children that refused.** A partially accepted push is
+    /// remembered — like ``add(_:)``'s and ``startAdvertising(_:)``'s outstanding fan-outs —
+    /// so re-offering it does not push the same value through a child that already delivered
+    /// it, which its subscribers would see as a duplicate notification. A push that differs
+    /// from the outstanding one (a different value, characteristic, or subscriber list) is a
+    /// *new* push and fans out to every child again.
     public func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
-        var queued = true
-        for backend in backends {
-            let accepted = backend.updateValue(value, for: characteristic, onSubscribed: centrals)
-            queued = queued && accepted
+        var targets = Array(backends.indices)
+        if let outstanding = _outstandingPush,
+           outstanding.value == value,
+           outstanding.characteristic == characteristic,
+           outstanding.subscribers == centrals {
+            targets = outstanding.refused
         }
-        return queued
+        var refused: [Int] = []
+        for index in targets where !backends[index].updateValue(value, for: characteristic, onSubscribed: centrals) {
+            refused.append(index)
+        }
+        guard !refused.isEmpty else {
+            _outstandingPush = nil
+            return true
+        }
+        _outstandingPush = OutstandingPush(
+            value: value,
+            characteristic: characteristic,
+            subscribers: centrals,
+            refused: refused
+        )
+        return false
     }
 }
 #endif
