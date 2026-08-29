@@ -100,6 +100,193 @@ struct L2CAPLinkTests {
         return try #require(await fake.onQueue { fake.lastOpenedL2CAPChannel })
     }
 
+    // MARK: - Channel identity
+
+    /// A raw central-role client: every frame in and out, so a test can send what no honest
+    /// `LinkCentral` would — two opens naming the same channel id.
+    private final class RawClient: Sendable {
+        let connection: LinkConnection
+        private let received = Mutex<[CentralWireEvent]>([])
+        private let hello = Mutex<Bool>(false)
+
+        /// Every central event the provider has sent so far, in order.
+        var events: [CentralWireEvent] { received.withLock { $0 } }
+
+        /// Whether the provider has accepted this client's hello.
+        var isAccepted: Bool { hello.withLock { $0 } }
+
+        init(port: UInt16, label: String) {
+            connection = LinkConnection.connect(
+                to: LinkEndpoint(host: "127.0.0.1", port: port),
+                codec: .binaryPropertyList,
+                queue: DispatchQueue(label: label)
+            )
+            connection.onStateChange = { [weak connection] state in
+                guard case .ready = state else { return }
+                connection?.send(.clientHello(ClientHello(
+                    protocolVersion: LinkProtocol.version,
+                    role: .central,
+                    clientName: "raw-l2cap"
+                )))
+            }
+            // Strongly captured, and released by ``shutdown()``: a `Mutex` is non-copyable,
+            // so the two boxes cannot be captured by value.
+            connection.onMessage = { [self] message in
+                switch message {
+                case .serverHello(let answer) where answer.accepted: hello.withLock { $0 = true }
+                case .centralEvent(let event): received.withLock { $0.append(event) }
+                default: break
+                }
+            }
+            connection.start()
+        }
+
+        func send(_ request: CentralRequest) { connection.send(.centralRequest(request)) }
+
+        func shutdown() {
+            connection.onStateChange = nil
+            connection.onMessage = nil
+            connection.cancel()
+        }
+    }
+
+    /// A provider serving one `FakePeripheral` over `FakeCentral`, with no client attached —
+    /// the rig the raw-client tests below drive by hand.
+    private func makeProvider(_ box: PeripheralBox) async throws -> Provider {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            let peripheral = FakePeripheral(identifier: Self.deviceID, name: "Fake L2CAP", queue: queue)
+            fake.retrievablePeripherals[Self.deviceID] = peripheral
+            fake.connectBehavior = .succeed
+            box.store(peripheral)
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        return provider
+    }
+
+#if !targetEnvironment(simulator)
+    // Sockets in a CI simulator are unreliable; the simulator-side path is covered by the
+    // two-simulator E2E on real simulators.
+
+    @Test("A second open naming a live channel id is refused, and the live channel survives")
+    func aDuplicateChannelIdentifierIsRefused() async throws {
+        let box = PeripheralBox()
+        let provider = try await makeProvider(box)
+        let client = RawClient(port: await provider.port, label: "l2cap.duplicate")
+        await waitFor(timeout: .seconds(5)) { client.isAccepted }
+        client.send(.connect(peripheral: Self.deviceID, options: nil, requiresANCS: false))
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains { if case .didConnect = $0 { return true } else { return false } }
+        }
+
+        // The first open takes channel id 7.
+        client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: Self.psm.rawValue, channel: 7))
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains { if case .didOpenL2CAPChannel = $0 { return true } else { return false } }
+        }
+        #expect(client.events.contains(.didOpenL2CAPChannel(
+            peripheral: Self.deviceID, channel: 7, psm: Self.psm.rawValue, error: nil
+        )))
+        let fake = try #require(box.peripheral)
+        let first = try #require(await fake.onQueue { fake.lastOpenedL2CAPChannel })
+
+        // A second open naming the same id — which no honest client sends, and which used to
+        // orphan the bridge above with its pump, transport and credit window still live.
+        client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: Self.psm.rawValue, channel: 7))
+        await waitFor(timeout: .seconds(5)) {
+            client.events.filter { if case .didOpenL2CAPChannel = $0 { return true } else { return false } }.count == 2
+        }
+        // `true` for an open that was refused. (Mapped to `Bool` rather than the optional
+        // error: `compactMap` would swallow the successful open's `nil`.)
+        let refusals = client.events.compactMap { event -> Bool? in
+            guard case .didOpenL2CAPChannel(_, let channel, _, let error) = event, channel == 7 else { return nil }
+            return error != nil
+        }
+        #expect(refusals == [false, true], "the first open takes the id and the duplicate is refused")
+        // The channel the second open produced was closed rather than bridged, and it is not
+        // the one still serving id 7.
+        let second = try #require(await fake.onQueue { fake.lastOpenedL2CAPChannel })
+        #expect(second !== first)
+        await waitFor(timeout: .seconds(5)) { await second.onQueue { second.isClosed } }
+
+        // The live channel is untouched: no `l2capClosed` for it, and it still carries data.
+        #expect(!client.events.contains { if case .l2capClosed = $0 { return true } else { return false } })
+        first.simulateInbound(Data([0xA1, 0xB2]))
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains(.l2capData(channel: 7, data: Data([0xA1, 0xB2])))
+        }
+        #expect(await first.onQueue { !first.isClosed })
+
+        client.shutdown()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
+    }
+
+    @Test("A stale write failure under a reused channel id leaves the live channel alone")
+    func aStaleWriteFailureDoesNotTearDownAReusedIdentifier() async throws {
+        let box = PeripheralBox()
+        let provider = try await makeProvider(box)
+        let client = RawClient(port: await provider.port, label: "l2cap.reuse")
+        await waitFor(timeout: .seconds(5)) { client.isAccepted }
+        client.send(.connect(peripheral: Self.deviceID, options: nil, requiresANCS: false))
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains { if case .didConnect = $0 { return true } else { return false } }
+        }
+        let fake = try #require(box.peripheral)
+
+        /// Opens channel id 7 and returns the transport the provider bridged it to.
+        func open() async throws -> FakeL2CAPChannel {
+            let before = client.events.filter {
+                if case .didOpenL2CAPChannel = $0 { return true } else { return false }
+            }.count
+            client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: Self.psm.rawValue, channel: 7))
+            await waitFor(timeout: .seconds(5)) {
+                client.events.filter {
+                    if case .didOpenL2CAPChannel = $0 { return true } else { return false }
+                }.count > before
+            }
+            return try #require(await fake.onQueue { fake.lastOpenedL2CAPChannel })
+        }
+
+        // Each round: park writes on the channel behind id 7, close it — which fails every
+        // parked write against the transport closing under it — and reuse the id at once. The
+        // failures those writes report name channel 7, which by then is another channel's.
+        for _ in 0..<2 {
+            let stale = try await open()
+            await stale.onQueue { stale.writeBehavior = .hold }
+            for _ in 0..<8 {
+                client.send(.l2capData(channel: 7, data: Data([0x01, 0x02, 0x03, 0x04])))
+            }
+            await waitFor(timeout: .seconds(5)) { await stale.onQueue { !stale.writtenData.isEmpty } }
+            client.send(.l2capClose(channel: 7))
+            let live = try await open()
+
+            // The live channel is never the stale one, is never closed by the stale channel's
+            // unwinding writes, and still carries data both ways.
+            #expect(live !== stale)
+            live.simulateInbound(Data([0xC3]))
+            await waitFor(timeout: .seconds(5)) {
+                client.events.contains(.l2capData(channel: 7, data: Data([0xC3])))
+            }
+            client.send(.l2capData(channel: 7, data: Data([0xD4])))
+            await waitFor(timeout: .seconds(5)) { await live.onQueue { live.writtenData.contains(Data([0xD4])) } }
+            #expect(await live.onQueue { !live.isClosed })
+            #expect(!client.events.contains { if case .l2capClosed = $0 { return true } else { return false } })
+            client.send(.l2capClose(channel: 7))
+            await waitFor(timeout: .seconds(5)) { await live.onQueue { live.isClosed } }
+        }
+
+        client.shutdown()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
+    }
+#endif
+
     // MARK: - Teardown
 
     @Test("A writer suspended for credit is resumed when its LinkCentral is deallocated")

@@ -183,6 +183,23 @@ extension CentralSession {
             return
         }
 
+        // The channel id is the *client's*, carried verbatim from its request, so two opens
+        // can name the same one. Overwriting orphaned the first bridge: nothing could reach it
+        // again — every close path iterates ``channels`` — so its pump kept interleaving frames
+        // under an id that now belonged to another channel, and its transport, its task and its
+        // parked continuation lived on for the session. The duplicate is refused instead, and
+        // the channel already open under that id is untouched.
+        guard channels[pending.channel] == nil else {
+            log?("L2CAP channel \(pending.channel) is already open; refusing the duplicate open")
+            channel.close(error: nil)
+            send(.didOpenL2CAPChannel(
+                peripheral: peripheral,
+                channel: pending.channel,
+                psm: pending.psm,
+                error: WireError(CentralSession.l2capDuplicateChannel)
+            ))
+            return
+        }
         let open = OpenChannel(remote: channel, peripheral: peripheral)
         channels[pending.channel] = open
         send(.didOpenL2CAPChannel(
@@ -208,9 +225,9 @@ extension CentralSession {
                         self?.sendFromPump(.l2capData(channel: channel, data: piece))
                     }
                 }
-                self?.finishChannel(channel, error: nil)
+                self?.finishChannel(channel, open: open, error: nil)
             } catch {
-                self?.finishChannel(channel, error: error)
+                self?.finishChannel(channel, open: open, error: error)
             }
         }
     }
@@ -264,9 +281,9 @@ extension CentralSession {
             await previous?.value
             do {
                 try await open.remote.write(data)
-                self?.creditFromWrite(channel: channel, bytes: data.count)
+                self?.creditFromWrite(channel: channel, open: open, bytes: data.count)
             } catch {
-                self?.failFromWrite(channel: channel, error: error)
+                self?.failFromWrite(channel: channel, open: open, error: error)
             }
         }
     }
@@ -294,6 +311,15 @@ extension CentralSession {
             send(.l2capClosed(channel: channel, error: WireError(CentralSession.l2capCreditRejected)))
             return
         }
+    }
+
+    /// The error a second open naming a channel id that is already in use is refused with.
+    static var l2capDuplicateChannel: NSError {
+        NSError(
+            domain: "BLESwiftProvider",
+            code: 10,
+            userInfo: [NSLocalizedDescriptionKey: "That L2CAP channel identifier is already open"]
+        )
     }
 
     /// The error a channel is closed with when its peer granted a credit the scheme does not
@@ -348,6 +374,19 @@ extension CentralSession {
 
     // MARK: - Off-queue completions
 
+    /// Whether `channel` still names `open` — the identity check every off-queue completion
+    /// makes before it acts.
+    ///
+    /// A channel id is the client's to choose and to reuse: once a bridge has been dropped, the
+    /// next open may take its id, and a write or a stream end from the *old* bridge, which was
+    /// already in flight, would otherwise credit, close, or tear down the live channel that
+    /// replaced it. The bridge each completion belongs to is captured at the point it was
+    /// started, so the id alone is never trusted. Must be called on ``CentralSession/queue``.
+    private func isCurrent(_ channel: UInt32, _ open: OpenChannel) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return channels[channel] === open
+    }
+
     /// Sends one event from the pump, hopping onto ``CentralSession/queue`` first. The queue
     /// is serial, so the pump's frames keep their order.
     private func sendFromPump(_ event: CentralWireEvent) {
@@ -358,9 +397,9 @@ extension CentralSession {
 
     /// Releases a completed write's share of the channel's outstanding window and credits the
     /// client for it.
-    private func creditFromWrite(channel: UInt32, bytes: Int) {
+    private func creditFromWrite(channel: UInt32, open: OpenChannel, bytes: Int) {
         queue.async { [self] in
-            guard let open = channels[channel] else { return }
+            guard isCurrent(channel, open) else { return }
             open.outstanding -= bytes
             // A write of nothing consumed no window, and `0` is not a credit the client would
             // accept: it treats a non-positive grant as a protocol violation and closes the
@@ -372,9 +411,10 @@ extension CentralSession {
     }
 
     /// Reports a failed write as the channel closing, and drops the bridge.
-    private func failFromWrite(channel: UInt32, error: any Error) {
+    private func failFromWrite(channel: UInt32, open: OpenChannel, error: any Error) {
         queue.async { [self] in
-            guard let open = channels.removeValue(forKey: channel) else { return }
+            guard isCurrent(channel, open) else { return }
+            channels.removeValue(forKey: channel)
             tearDown(open)
             send(.l2capClosed(channel: channel, error: WireError(error as NSError)))
         }
@@ -387,9 +427,10 @@ extension CentralSession {
     /// under whatever is still queued, so leaving the tail task alive would only keep the
     /// chain — and the data it captured — around until the write ahead of it fails. The pump
     /// is dropped rather than cancelled because this *is* the pump reporting its own end.
-    private func finishChannel(_ channel: UInt32, error: (any Error)?) {
+    private func finishChannel(_ channel: UInt32, open: OpenChannel, error: (any Error)?) {
         queue.async { [self] in
-            guard let open = channels.removeValue(forKey: channel) else { return }
+            guard isCurrent(channel, open) else { return }
+            channels.removeValue(forKey: channel)
             open.releaseWaiter()
             open.pump = nil
             open.writes?.cancel()
