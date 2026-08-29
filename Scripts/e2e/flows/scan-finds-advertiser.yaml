@@ -6,7 +6,7 @@
 #
 # The Scan screen is a List: both the scan button and the Discoveries section sit
 # below the fold on an iPhone, so each has to be scrolled into view before it can
-# be tapped or asserted on (friction log #9).
+# be tapped or asserted on.
 appId: com.bleswift.explorer
 ---
 - launchApp
@@ -25,4 +25,5 @@ appId: com.bleswift.explorer
 - extendedWaitUntil:
     visible:
       text: "BLESwift Explorer Sim"
+      exact: true
     timeout: 30000

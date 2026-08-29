@@ -25,10 +25,10 @@ struct AdvertiseView: View {
             Section {
                 Toggle("Advertise as BLESwift Explorer Sim", isOn: advertising)
                     .accessibilityIdentifier("advertise.toggle")
-                // "Idle", not "Not advertising": the E2E driver's text matching is
-                // unanchored and case-insensitive, so "Not advertising" would satisfy an
-                // assertion for "Advertising" (see Scripts/e2e/README.md, friction log #3).
-                Text(model.isAdvertising ? "Advertising" : "Idle")
+                // The E2E's advertiser flow asserts on this label by identifier with an
+                // exact text match, so the idle wording is free to read naturally: it says
+                // what the host is doing, not what it is not.
+                Text(model.isAdvertising ? "Advertising" : "Not advertising")
                     .accessibilityIdentifier("advertise.status")
                 Text("\(model.bpm) bpm")
                     .accessibilityIdentifier("advertise.bpm")
