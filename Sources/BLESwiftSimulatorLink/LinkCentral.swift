@@ -147,6 +147,17 @@ public final class LinkCentral: CentralManaging, Sendable {
 
     deinit {
         session.stop()
+        // The same teardown ``shutdown()`` performs, minus the queue hop it cannot take: a
+        // deallocating object cannot be captured by a `queue.async`, and the table would
+        // otherwise go with the central untouched — leaving every writer suspended for credit
+        // parked on a continuation nothing would ever resume, since the provider's events can
+        // no longer reach a central that no longer exists. `deinit` is the last reference by
+        // definition, so the table is this thread's to take without the queue's protection.
+        let doomed = _channels
+        _channels = [:]
+        for entry in doomed.values {
+            entry.channel.remoteClosed(error: LinkError.providerDisconnected.nsError)
+        }
     }
 
     /// Whether the provider has accepted the handshake and the link is live.
@@ -155,8 +166,8 @@ public final class LinkCentral: CentralManaging, Sendable {
     }
 
     /// Stops the session and detaches every event handler — this central's and each of its
-    /// peripherals'. Idempotent, and safe to call from any thread. Nothing calls it in
-    /// production; `deinit` stops the session on its own.
+    /// peripherals' — failing every open L2CAP channel. Idempotent, and safe to call from any
+    /// thread. Nothing calls it in production; `deinit` does the same work on its own.
     public func shutdown() {
         session.stop()
         queue.async { [self] in

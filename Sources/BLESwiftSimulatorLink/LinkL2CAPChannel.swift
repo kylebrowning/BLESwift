@@ -106,6 +106,12 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
 
     private let state = Mutex(State())
 
+    /// How many writers are currently suspended waiting for outbound credit.
+    ///
+    /// A test hook: a writer has to be *parked* before the teardown that must resume it, and
+    /// nothing else about a suspended writer is observable from outside.
+    var suspendedWriterCount: Int { state.withLock { $0.waiters.count } }
+
     /// Creates a channel bound to `channel` on the link.
     ///
     /// - Parameters:

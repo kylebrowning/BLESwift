@@ -100,6 +100,56 @@ struct L2CAPLinkTests {
         return try #require(await fake.onQueue { fake.lastOpenedL2CAPChannel })
     }
 
+    // MARK: - Teardown
+
+    @Test("A writer suspended for credit is resumed when its LinkCentral is deallocated")
+    func deallocatingTheCentralResumesSuspendedWriters() async throws {
+        let queue = DispatchSerialQueue(label: "l2cap.dealloc")
+        // Dialing a port nothing is listening on: this central never connects, so no credit
+        // can ever arrive from a provider and the only thing that can resume a parked writer
+        // is the central's own teardown.
+        var link: LinkCentral? = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: try closedPort()),
+            queue: queue,
+            clientName: "dealloc",
+            retryInterval: .seconds(60)
+        )
+        weak var deallocated = link
+        // Captured by value into the hop and released with it, so `link` stays the only
+        // strong reference this test holds.
+        let channel: LinkL2CAPChannel = await withCheckedContinuation { continuation in
+            queue.async { [link] in
+                continuation.resume(returning: link!.registerChannel(1, psm: Self.psm, peripheral: Self.deviceID))
+            }
+        }
+
+        // The whole window in one write, so the next byte has nothing left to spend.
+        try await bounded { try await channel.write(Data(repeating: 0x5A, count: LinkFlowControl.l2capInitialCredit)) }
+        let parked = Task { try await channel.write(Data([0x01])) }
+        await waitFor(timeout: .seconds(5)) { channel.suspendedWriterCount == 1 }
+        #expect(channel.suspendedWriterCount == 1)
+
+        // Released, not shut down: `deinit` is the whole point — a central that simply goes
+        // out of scope must not leave its writers parked forever.
+        link = nil
+        #expect(deallocated == nil)
+
+        do {
+            try await bounded { try await parked.value }
+            Issue.record("expected the parked write to fail")
+        } catch let error as LinkL2CAPError {
+            #expect(error == .closed)
+        }
+    }
+
+    /// Hops onto `queue` to run `body` and returns its result — the door for off-queue test
+    /// code to touch queue-confined state.
+    private static func onQueue<T: Sendable>(_ queue: DispatchSerialQueue, _ body: @Sendable @escaping () -> T) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async { continuation.resume(returning: body()) }
+        }
+    }
+
     // MARK: - Throughput
 
     @Test("A megabyte written client-to-provider arrives byte for byte, in order")
