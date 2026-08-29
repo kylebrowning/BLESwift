@@ -388,9 +388,16 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
 
     /// Cancels a connection, delivering `didDisconnect` with no error — CoreBluetooth
     /// reports an explicit cancellation as an error-free disconnect.
+    ///
+    /// **A no-op on a remote that is already disconnected**, exactly as
+    /// `CBCentralManager.cancelPeripheralConnection(_:)` is: it delivers nothing for a
+    /// peripheral that is neither connected nor connecting. Answered anyway, this fabricated a
+    /// second `didDisconnect` — so a cancel racing a radio-initiated disconnect (a device
+    /// removed from under it) reported the peripheral gone twice here and once on device.
     public func cancelPeripheralConnection(_ peripheral: any PeripheralRemote) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let remote = peripheral as? VirtualPeripheralRemote, remote === _remotes[remote.identifier] else { return }
+        guard remote.connectionState != .disconnected else { return }
         remote.setConnectionState(.disconnecting)
         let device = remote.identifier
         enqueue { [radio, sessionID, queue] in

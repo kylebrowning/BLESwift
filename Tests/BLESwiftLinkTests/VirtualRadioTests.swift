@@ -872,6 +872,40 @@ struct VirtualRadioTests {
         return remote
     }
 
+    @Test("A cancel on an already-disconnected remote delivers nothing")
+    func cancelOnADisconnectedRemoteIsANoOp() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let handle = await radio.register(Self.device(identifier: identifier, name: "cancel", services: Self.twoServices))
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.cancel")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        let remote = try await Self.discoveredRemote(radio: radio, backend: backend, queue: queue, identifier: identifier)
+
+        let disconnects = Mutex<Int>(0)
+        await Self.onQueue(queue) {
+            backend.eventHandler = { event in
+                if case .didDisconnect = event { disconnects.withLock { $0 += 1 } }
+            }
+        }
+
+        // The radio disconnects it first — the device is removed from under the central.
+        await handle.remove()
+        await waitFor { disconnects.withLock { $0 } == 1 }
+        await waitFor { await Self.onQueue(queue) { remote.connectionState == .disconnected } }
+
+        // The cancel that follows has nothing to cancel, and CoreBluetooth would report
+        // nothing for it either.
+        await Self.onQueue(queue) { backend.cancelPeripheralConnection(remote) }
+        // Long enough for the radio round-trip a cancel would have taken, plus the queue hop
+        // its `didDisconnect` would have come back on: this is a negative assertion, so it is
+        // given every chance to fail.
+        try? await Task.sleep(for: .milliseconds(50))
+        _ = await radio.generation(of: identifier)
+        await Self.onQueue(queue) {}
+        #expect(await Self.onQueue(queue) { remote.connectionState == .disconnected })
+        #expect(disconnects.withLock { $0 } == 1)
+    }
+
     @Test("Completions arrive in the order their calls were made, radio round-trip or not")
     func offChainCompletionsKeepCallOrder() async throws {
         let radio = VirtualRadio()
