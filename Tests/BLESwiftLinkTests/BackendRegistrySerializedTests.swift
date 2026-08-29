@@ -134,6 +134,9 @@ struct BackendRegistrySerializedTests {
         }
 
 #if os(macOS)
+        // Everything below dials a provider over loopback. It is already `#if os(macOS)`, so
+        // it is compiled out of the iOS-simulator run — where sockets are unreliable — for
+        // free; see `TransportLoopbackTests` for the fence the cross-platform suites carry.
         private static let fixtureJSON = """
         { "devices": [] }
         """

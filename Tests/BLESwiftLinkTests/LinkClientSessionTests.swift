@@ -3,6 +3,11 @@
 //  BLESwiftLinkTests
 //
 
+// Sockets in a CI simulator are unreliable — a runner's simulator network can wedge outright,
+// leaving a loopback connect stuck in `.connecting` for tens of seconds — so every suite that
+// opens one is compiled out there. The simulator-side path is covered by the two-simulator
+// E2E, which runs on real simulators.
+#if !targetEnvironment(simulator)
 import BLESwiftLink
 import BLESwiftSimulatorLink
 import Dispatch
@@ -243,3 +248,4 @@ struct LinkClientSessionTests {
         return (listener, hellos)
     }
 }
+#endif
