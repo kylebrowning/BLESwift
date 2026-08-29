@@ -253,8 +253,12 @@ struct ParityTests {
         let central = Central(backend: link, queue: queue)
 
         // The factory runs when the session is created, i.e. once the client's socket is
-        // accepted — so wait for the fake before scripting it.
-        await waitFor(timeout: .seconds(10)) { centralBox.value != nil && peripheralBox.value != nil }
+        // accepted — so wait for the fake before scripting it. The window is generous because
+        // the session may have to dial through a spell of the local stack refusing loopback
+        // connects outright (`EADDRINUSE`), which on a machine running several test bundles at
+        // once has been seen to last past ten seconds; the session redials every 50 ms
+        // throughout, so the wait costs nothing when the first dial lands.
+        await waitFor(timeout: .seconds(45)) { centralBox.value != nil && peripheralBox.value != nil }
         let fake = try #require(centralBox.value)
         let fakePeripheral = try #require(peripheralBox.value)
         await Self.scriptFake(fake, peripheral: fakePeripheral)
