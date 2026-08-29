@@ -170,6 +170,30 @@ struct TransportLoopbackTests {
         defer { listener.cancel() }
         await #expect(throws: LinkListenerError.alreadyStarted) { try await listener.start() }
     }
+
+    @Test("start() from an already-cancelled task throws promptly and binds nothing")
+    func startFromCancelledTask() async throws {
+        let listener = try LinkListener(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: 0),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "listener-cancelled")
+        )
+        defer { listener.cancel() }
+
+        // Cancelled before it has run a line, which is the hard case: the cancellation
+        // handler fires before the continuation exists, so nothing but the one-shot guard
+        // inside `start()` can resume it. A bind that hangs is not something a test can
+        // manufacture; a pre-cancelled task exercises the same resumption.
+        let start = Task { try await listener.start() }
+        start.cancel()
+
+        let outcome = await start.result
+        #expect(throws: CancellationError.self) { try outcome.get() }
+        // Nothing was bound: the listener was cancelled rather than left listening.
+        #expect(listener.port == 0)
+        // And it is spent — the one-shot guard stands whichever way `start()` ended.
+        await #expect(throws: LinkListenerError.alreadyStarted) { try await listener.start() }
+    }
 }
 
 extension LinkConnection.State {

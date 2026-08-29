@@ -45,6 +45,9 @@ public final class LinkListener: Sendable {
         var port: UInt16 = 0
         var startContinuation: CheckedContinuation<Void, any Error>?
         var didStart = false
+        /// Set once the awaiting task is cancelled, so a `start()` that has not yet stored its
+        /// continuation fails immediately rather than waiting on a listener already cancelled.
+        var isCancelled = false
     }
 
     private let listener: NWListener
@@ -81,16 +84,45 @@ public final class LinkListener: Sendable {
 
     /// Starts listening and returns once the port is bound, so ``port`` is valid on return.
     ///
-    /// - Throws: ``LinkListenerError/alreadyStarted`` if the listener was already started, or the
-    ///   `NWError` reported by the listener if it fails or has to wait to bind — a port already in
-    ///   use is a failure here, never something to sit and retry.
+    /// **Cancellable.** Cancelling the awaiting task cancels the listener and fails this call
+    /// with `CancellationError`, including when the task was already cancelled on the way in —
+    /// binding is otherwise the one step of provider startup with nothing to interrupt it, and
+    /// a caller racing a bind against a timeout would be left holding a listener it never
+    /// learned about. The resumption is one-shot, so a cancellation landing alongside the
+    /// listener's own `.ready` or `.failed` is harmless.
+    ///
+    /// - Throws: ``LinkListenerError/alreadyStarted`` if the listener was already started,
+    ///   `CancellationError` if the awaiting task is cancelled, or the `NWError` reported by
+    ///   the listener if it fails or has to wait to bind — a port already in use is a failure
+    ///   here, never something to sit and retry.
     public func start() async throws {
         try storage.withLock { storage in
             guard !storage.didStart else { throw LinkListenerError.alreadyStarted }
             storage.didStart = true
         }
+        try await withTaskCancellationHandler {
+            try await bind()
+        } onCancel: {
+            cancelStart()
+        }
+    }
+
+    /// Binds the listener and suspends until it is ready, fails, or is cancelled.
+    private func bind() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-            storage.withLock { $0.startContinuation = continuation }
+            // A task cancelled before this ran already had `onCancel` fire against an empty
+            // continuation slot; nothing would ever resume this one, so it is failed here
+            // instead — and the listener is not started at all.
+            let wasCancelled = storage.withLock { storage -> Bool in
+                guard !storage.isCancelled else { return true }
+                storage.startContinuation = continuation
+                return false
+            }
+            guard !wasCancelled else {
+                listener.cancel()
+                continuation.resume(throwing: CancellationError())
+                return
+            }
             listener.newConnectionHandler = { [weak self] nwConnection in
                 guard let self else {
                     nwConnection.cancel()
@@ -125,6 +157,13 @@ public final class LinkListener: Sendable {
             }
             listener.start(queue: queue)
         }
+    }
+
+    /// Cancels the listener and fails a pending ``start()`` with `CancellationError`. Safe
+    /// before the continuation exists: the flag makes ``bind()`` fail on sight.
+    private func cancelStart() {
+        storage.withLock { $0.isCancelled = true }
+        resumeStart(throwing: CancellationError())
     }
 
     /// Stops listening. Already-accepted connections are unaffected. Idempotent.
