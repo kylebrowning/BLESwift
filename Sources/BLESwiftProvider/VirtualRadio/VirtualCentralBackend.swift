@@ -91,16 +91,13 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// repeater running for a scan that has already been stopped.
     nonisolated(unsafe) private var _work: Task<Void, Never>!
 
-    /// Backs ``bluetoothAuthorization``; a `static var` isn't scoped to any one backend's
-    /// queue, so it is `Mutex`-protected rather than queue-confined.
-    private static let authorizationBox = Mutex<BluetoothAuthorization>(.allowedAlways)
-
-    /// The authorization status this backend reports. Defaults to `.allowedAlways` — a
-    /// virtual radio is never gated by the system's Bluetooth permission.
-    public static var bluetoothAuthorization: BluetoothAuthorization {
-        get { authorizationBox.withLock { $0 } }
-        set { authorizationBox.withLock { $0 = newValue } }
-    }
+    /// The authorization status this backend reports: always `.allowedAlways`.
+    ///
+    /// Constant, not settable — a virtual radio is never gated by the system's Bluetooth
+    /// permission, and a `static` setter would be process-wide state no one backend owns.
+    /// A test that needs a denied backend uses `BLESwiftTestSupport`'s fakes, whose
+    /// `bluetoothAuthorization` is scripted for exactly that.
+    public static var bluetoothAuthorization: BluetoothAuthorization { .allowedAlways }
 
     /// Creates a backend served by `radio` and confined to `queue`.
     ///
