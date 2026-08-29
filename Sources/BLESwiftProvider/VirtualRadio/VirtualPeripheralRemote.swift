@@ -84,8 +84,14 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     }
 
     /// Delivers `event` to ``eventHandler``. Must be called on ``queue``.
+    ///
+    /// A `didModifyServices` prunes the caches on its way past, so a remote whose device
+    /// dropped a service stops reporting that service — and everything under it — as
+    /// discovered, exactly as `LinkPeripheral` does with the same event off the link and as
+    /// CoreBluetooth does to a `CBPeripheral`'s `services`.
     func deliver(_ event: PeripheralEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
+        if case .didModifyServices(let invalidated) = event { prune(Set(invalidated)) }
         _eventHandler?(event)
     }
 
@@ -117,6 +123,28 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
             _properties.removeAll()
             _notifying.removeAll()
         }
+    }
+
+    /// Replaces the discovered-service cache with `services`, dropping everything beneath a
+    /// service that is no longer there. Must be called on ``queue``.
+    private func replaceServices(_ services: [ServiceIdentifier]) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let discovered = Set(services)
+        let departed = _discoveredServices.subtracting(discovered)
+        _discoveredServices = discovered
+        prune(departed)
+    }
+
+    /// Drops `services` and everything beneath them from the caches — the same pruning
+    /// `LinkPeripheral.invalidate(services:)` does off a `didModifyServices`. Must be called
+    /// on ``queue``.
+    private func prune(_ services: Set<ServiceIdentifier>) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard !services.isEmpty else { return }
+        _discoveredServices.subtract(services)
+        _discoveredCharacteristics = _discoveredCharacteristics.filter { !services.contains($0.service) }
+        _properties = _properties.filter { !services.contains($0.key.service) }
+        _notifying = _notifying.filter { !services.contains($0.service) }
     }
 
     /// Translates a GATT-layer failure into the `NSError` CoreBluetooth would report.
@@ -168,12 +196,19 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
 
     /// Asks the radio for `services` (or every service, when `nil`) and delivers
     /// `didDiscoverServices` once the answer lands.
+    ///
+    /// **The answer replaces the cache rather than joining it**, exactly as
+    /// `LinkPeripheral.replaceServices(_:)` does with the same answer arriving over the link.
+    /// A union kept reporting a service the device has since dropped as discovered, so a read
+    /// or a `setNotifyValue(_:for:)` under it passed the discovery guard and reached a radio
+    /// with no such attribute — and the two backends behind one seam disagreed about what the
+    /// same device had.
     public func discoverServices(_ services: [ServiceIdentifier]?) {
         dispatchPrecondition(condition: .onQueue(queue))
         enqueue { [radio, identifier, queue] in
             let found = await radio.services(of: identifier, matching: services)
             queue.async { [self] in
-                _discoveredServices.formUnion(found)
+                replaceServices(found)
                 deliver(.didDiscoverServices(error: nil))
             }
         }
@@ -187,6 +222,10 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         enqueue { [radio, identifier, queue] in
             let found = await radio.characteristics(of: identifier, service: service, matching: characteristics)
             queue.async { [self] in
+                // This service's entries only, replaced — `LinkPeripheral`'s
+                // `replaceCharacteristics(_:for:)` keys its mirror by service the same way.
+                _discoveredCharacteristics = _discoveredCharacteristics.filter { $0.service != service }
+                _properties = _properties.filter { $0.key.service != service }
                 for characteristic in found {
                     _discoveredCharacteristics.insert(characteristic.identifier)
                     _properties[characteristic.identifier] = characteristic.properties

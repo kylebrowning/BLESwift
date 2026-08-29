@@ -744,6 +744,117 @@ struct VirtualRadioTests {
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
     }
 
+    /// A second service, so a discovery can be narrowed and a database can drop one.
+    private static let batteryService = ServiceIdentifier(uuid: "180F")
+    private static let batteryLevel = CharacteristicIdentifier(uuid: "2A19", service: batteryService)
+
+    /// A device hosting the heart-rate and battery services, connected to `backend`, with
+    /// both services and the heart rate's characteristics already discovered.
+    private static func discoveredRemote(
+        radio: VirtualRadio,
+        backend: VirtualCentralBackend,
+        queue: DispatchSerialQueue,
+        identifier: UUID
+    ) async throws -> VirtualPeripheralRemote {
+        await waitFor { await onQueue(queue) { !backend.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
+        let remote = try #require(await remote(backend, queue, identifier))
+        await onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
+        await waitFor { await onQueue(queue) { remote.connectionState == .connected } }
+        await onQueue(queue) {
+            remote.discoverServices(nil)
+            remote.discoverCharacteristics(nil, for: service)
+        }
+        await waitFor { await onQueue(queue) { remote.isDiscovered(measurement) } }
+        return remote
+    }
+
+    /// Both services, the heart rate carrying its measurement and control point.
+    private static var twoServices: [GATTService] {
+        [
+            GATTService(identifier: service, characteristics: [
+                GATTCharacteristic(identifier: measurement, properties: [.read, .notify], permissions: [.readable]),
+                GATTCharacteristic(identifier: control, properties: [.write], permissions: [.writeable])
+            ]),
+            GATTService(identifier: batteryService, characteristics: [
+                GATTCharacteristic(identifier: batteryLevel, properties: [.read], permissions: [.readable])
+            ])
+        ]
+    }
+
+    @Test("A narrower discovery replaces the caches rather than adding to them")
+    func discoveryReplacesTheCaches() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        _ = await radio.register(Self.device(identifier: identifier, name: "two", services: Self.twoServices))
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.replace")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        let remote = try await Self.discoveredRemote(radio: radio, backend: backend, queue: queue, identifier: identifier)
+
+        #expect(await Self.onQueue(queue) { Set(remote.discoveredServices) } == [Self.service, Self.batteryService])
+        #expect(await Self.onQueue(queue) { Set(remote.discoveredCharacteristics(for: Self.service)) } == [Self.measurement, Self.control])
+
+        // A discovery narrowed to one service leaves exactly that one discovered — the answer
+        // is the cache, not an addition to it, which is what `LinkPeripheral` does with the
+        // same answer arriving over the link.
+        await Self.onQueue(queue) { remote.discoverServices([Self.batteryService]) }
+        await waitFor { await Self.onQueue(queue) { !remote.isDiscovered(Self.service) } }
+        #expect(await Self.onQueue(queue) { remote.discoveredServices } == [Self.batteryService])
+        // And the heart rate's characteristics went with it.
+        #expect(await Self.onQueue(queue) { remote.discoveredCharacteristics(for: Self.service).isEmpty })
+        #expect(await Self.onQueue(queue) { remote.properties(of: Self.measurement) } == [])
+
+        // Narrowing a characteristic discovery replaces that service's entries the same way.
+        await Self.onQueue(queue) {
+            remote.discoverServices(nil)
+            remote.discoverCharacteristics(nil, for: Self.service)
+        }
+        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
+        await Self.onQueue(queue) { remote.discoverCharacteristics([Self.measurement], for: Self.service) }
+        await waitFor { await Self.onQueue(queue) { !remote.isDiscovered(Self.control) } }
+        #expect(await Self.onQueue(queue) { remote.discoveredCharacteristics(for: Self.service) } == [Self.measurement])
+        // The battery service, discovered in the same sweep, is untouched: the replacement is
+        // per service.
+        #expect(await Self.onQueue(queue) { remote.isDiscovered(Self.batteryService) })
+    }
+
+    @Test("Dropping a service from the database invalidates it on every connected remote")
+    func droppedServiceIsReportedAsModified() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let handle = await radio.register(Self.device(identifier: identifier, name: "two", services: Self.twoServices))
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.modify")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        let remote = try await Self.discoveredRemote(radio: radio, backend: backend, queue: queue, identifier: identifier)
+        let modified = Mutex<[[ServiceIdentifier]]>([])
+        await Self.onQueue(queue) {
+            remote.eventHandler = { event in
+                if case .didModifyServices(let services) = event { modified.withLock { $0.append(services) } }
+            }
+        }
+        await Self.onQueue(queue) { remote.setNotifyValue(true, for: Self.measurement) }
+        await waitFor { await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 1 }
+
+        // The device drops the heart-rate service — the hosted-host equivalent of a
+        // `CBPeripheralManager` removing a published service.
+        await handle.setServices([Self.twoServices[1]])
+
+        await waitFor { modified.withLock { !$0.isEmpty } }
+        #expect(modified.withLock { $0 } == [[Self.service]])
+        // The remote pruned what went with it: the service, its characteristics, their
+        // properties, and the notification it had armed under them.
+        #expect(await Self.onQueue(queue) { !remote.isDiscovered(Self.service) })
+        #expect(await Self.onQueue(queue) { remote.discoveredCharacteristics(for: Self.service).isEmpty })
+        #expect(await Self.onQueue(queue) { !remote.isNotifying(Self.measurement) })
+        // The service that stayed is still discovered.
+        #expect(await Self.onQueue(queue) { remote.isDiscovered(Self.batteryService) })
+
+        // A purely additive change invalidates nothing, so nothing more is reported.
+        await handle.setServices(Self.twoServices)
+        await Self.onQueue(queue) { remote.discoverServices(nil) }
+        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
+        #expect(modified.withLock { $0 } == [[Self.service]])
+    }
+
     @Test("A static value is refused when its characteristic declares no read or notify")
     func staticValueHonorsTheReadPermission() async throws {
         let radio = VirtualRadio()

@@ -223,9 +223,22 @@ public actor VirtualRadio {
 
     /// Replaces a registered device's GATT database. See
     /// ``VirtualDeviceHandle/setServices(_:)``.
+    ///
+    /// A service the new database drops is reported to every connected session as
+    /// `PeripheralEvent.didModifyServices`, carrying the invalidated services —
+    /// CoreBluetooth's `peripheral(_:didModifyServices:)`, which is how a central learns that
+    /// handles it discovered are gone and must be discovered again. Nothing is reported for a
+    /// database that only gained services: CoreBluetooth's callback names what was
+    /// *invalidated*, and a purely additive change invalidates nothing.
     func setServices(_ services: [GATTService], device: UUID, generation: UInt64) {
         guard isCurrent(device, generation: generation, operation: "setServices") else { return }
+        let before = Set(devices[device]?.descriptor.services.map(\.identifier) ?? [])
         devices[device]?.descriptor.services = services
+        let invalidated = before.subtracting(services.map(\.identifier))
+        guard !invalidated.isEmpty else { return }
+        for session in sessions.values where session.connections.contains(device) {
+            session.peripheralSinks[device]?(.didModifyServices(Array(invalidated)))
+        }
     }
 
     /// Removes a registered device, disconnecting every central attached to it. See
