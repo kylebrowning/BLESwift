@@ -46,7 +46,15 @@ public final class LinkCentral: CentralManaging, Sendable {
     nonisolated(unsafe) private var _radioState: CentralState = .unsupported
     nonisolated(unsafe) private var _didDeliverInitialState = false
     nonisolated(unsafe) private var _peripherals: [UUID: LinkPeripheral] = [:]
-    nonisolated(unsafe) private var _nextChannelIdentifier: UInt32 = 0
+    nonisolated(unsafe) private var _nextChannelIdentifier: UInt32 = 1
+    nonisolated(unsafe) private var _channels: [UInt32: ChannelEntry] = [:]
+
+    /// One L2CAP channel this central is tunnelling, and the peripheral that owns it — so a
+    /// disconnect can tear down exactly that peripheral's channels.
+    private struct ChannelEntry {
+        let channel: LinkL2CAPChannel
+        let peripheral: UUID
+    }
 
     /// Creates a central that drives the provider at `endpoint`, and starts dialing it
     /// immediately. Reconnection is automatic, at `retryInterval`.
@@ -100,6 +108,7 @@ public final class LinkCentral: CentralManaging, Sendable {
         session.stop()
         queue.async { [self] in
             _eventHandler = nil
+            closeChannels(matching: { _ in true }, error: LinkError.providerDisconnected.nsError)
             for peripheral in _peripherals.values {
                 peripheral.detachEventHandler()
             }
@@ -207,12 +216,44 @@ public final class LinkCentral: CentralManaging, Sendable {
         session.send(.centralRequest(request))
     }
 
-    /// Allocates the next local L2CAP channel id.
+    /// Allocates the next local L2CAP channel id. Monotonic from 1, so `0` is never a live
+    /// channel and can stand in for "no channel" in a failed open.
     func allocateChannelIdentifier() -> UInt32 {
         dispatchPrecondition(condition: .onQueue(queue))
         let identifier = _nextChannelIdentifier
         _nextChannelIdentifier &+= 1
         return identifier
+    }
+
+    // MARK: - L2CAP channels
+
+    /// Creates the client half of an L2CAP channel under `identifier` and files it against
+    /// `peripheral`, ready for the provider's `didOpenL2CAPChannel` to hand to `Central`.
+    /// Called by ``LinkPeripheral/openL2CAPChannel(_:)`` before it sends the open request.
+    @discardableResult
+    func registerChannel(_ identifier: UInt32, psm: L2CAPPSM, peripheral: UUID) -> LinkL2CAPChannel {
+        dispatchPrecondition(condition: .onQueue(queue))
+        // The send closure hops onto `queue` — a channel's own methods run wherever its
+        // consumer happens to be — and doubles as the deregistration point for a
+        // client-initiated close, which the provider answers with no event of its own.
+        let channel = LinkL2CAPChannel(channel: identifier, psm: psm) { [weak self] request in
+            guard let self else { return }
+            queue.async { [self] in
+                if case .l2capClose(let closing) = request { _channels.removeValue(forKey: closing) }
+                send(request)
+            }
+        }
+        _channels[identifier] = ChannelEntry(channel: channel, peripheral: peripheral)
+        return channel
+    }
+
+    /// Tears down every channel `predicate` selects, reporting `error` on each inbound
+    /// stream, and drops them from the table. Must be called on ``queue``.
+    private func closeChannels(matching predicate: (ChannelEntry) -> Bool, error: Error?) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let doomed = _channels.filter { predicate($0.value) }
+        for identifier in doomed.keys { _channels.removeValue(forKey: identifier) }
+        for entry in doomed.values { entry.channel.remoteClosed(error: error) }
     }
 
     // MARK: - Peripheral table
@@ -236,6 +277,7 @@ public final class LinkCentral: CentralManaging, Sendable {
     private func handleLinkDropped() {
         dispatchPrecondition(condition: .onQueue(queue))
         let error = LinkError.providerDisconnected.nsError
+        closeChannels(matching: { _ in true }, error: error)
         for peripheral in _peripherals.values where peripheral.connectionState != .disconnected {
             let identifier = peripheral.peripheralIdentifier
             peripheral.markDisconnected()
@@ -292,12 +334,14 @@ public final class LinkCentral: CentralManaging, Sendable {
             let target = peripheral(for: uuid)
             let identifier = target.peripheralIdentifier
             target.markDisconnected()
+            closeChannels(matching: { $0.peripheral == uuid }, error: error?.nsError ?? Self.disconnectedError)
             deliver(.didFailToConnect(identifier, error: error?.nsError))
 
         case .didDisconnect(let uuid, let error):
             let target = peripheral(for: uuid)
             let identifier = target.peripheralIdentifier
             target.markDisconnected()
+            closeChannels(matching: { $0.peripheral == uuid }, error: error?.nsError ?? Self.disconnectedError)
             deliver(.didDisconnect(identifier, error: error?.nsError))
 
         case .connectionEventDidOccur(let uuid, let connected):
@@ -373,23 +417,42 @@ public final class LinkCentral: CentralManaging, Sendable {
             target.invalidate(services: services)
             target.deliver(.didModifyServices(services))
 
-        case .didOpenL2CAPChannel(let uuid, _, _, let error):
-            // Task 14 replaces this stub: no transport is tunnelled over the link yet, so the
-            // open always reports a `nil` channel and a failure.
-            peripheral(for: uuid).deliver(.didOpenL2CAPChannel(channel: nil, error: error?.nsError ?? Self.l2capUnavailable))
+        case .didOpenL2CAPChannel(let uuid, let identifier, _, let error):
+            let target = peripheral(for: uuid)
+            guard error == nil, let entry = _channels[identifier] else {
+                _channels.removeValue(forKey: identifier)
+                target.deliver(.didOpenL2CAPChannel(channel: nil, error: error?.nsError ?? Self.unknownChannelError))
+                return
+            }
+            target.deliver(.didOpenL2CAPChannel(channel: entry.channel, error: nil))
 
-        case .l2capData, .l2capCredit, .l2capClosed:
-            // Task 14 replaces this stub: there is no open channel to route payloads to.
-            break
+        case .l2capData(let identifier, let data):
+            _channels[identifier]?.channel.receive(data)
+
+        case .l2capCredit(let identifier, let bytes):
+            _channels[identifier]?.channel.addCredit(bytes: bytes)
+
+        case .l2capClosed(let identifier, let error):
+            guard let entry = _channels.removeValue(forKey: identifier) else { return }
+            entry.channel.remoteClosed(error: error?.nsError)
         }
     }
 
-    /// The error a stubbed L2CAP open reports when the provider itself did not report one.
-    /// Task 14 replaces this stub.
-    private static let l2capUnavailable = NSError(
+    /// The error a successful-looking open reports when this central has no channel filed
+    /// under the id the provider named — a protocol violation, not something a caller can
+    /// act on.
+    private static let unknownChannelError = NSError(
         domain: LinkError.domain,
-        code: 100,
-        userInfo: [NSLocalizedDescriptionKey: "L2CAP over the link is not yet available"]
+        code: 101,
+        userInfo: [NSLocalizedDescriptionKey: "The provider reported an L2CAP channel this central never opened"]
+    )
+
+    /// The error open channels are torn down with when their peripheral disconnects without
+    /// one of its own.
+    private static let disconnectedError = NSError(
+        domain: LinkError.domain,
+        code: 102,
+        userInfo: [NSLocalizedDescriptionKey: "The peripheral disconnected, closing its L2CAP channels"]
     )
 
     /// Delivers `event` to ``eventHandler`` asynchronously on ``queue``, honoring the seam's

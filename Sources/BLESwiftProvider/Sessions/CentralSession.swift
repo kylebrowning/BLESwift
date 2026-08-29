@@ -40,7 +40,7 @@ final class CentralSession: Sendable {
 
     /// One `openL2CAPChannel` request waiting for its completion, so the completion can be
     /// tagged with the channel id the client allocated.
-    private struct PendingOpen {
+    struct PendingOpen {
         let channel: UInt32
         let psm: UInt16
     }
@@ -53,12 +53,13 @@ final class CentralSession: Sendable {
     /// never saw — the conservative default a client assumes before any negotiation.
     private static let defaultMaximumWriteWithoutResponse = 20
 
-    /// The error a channel-open completion reports until L2CAP is tunnelled over the link.
-    private static var l2capUnavailable: NSError {
+    /// The error a channel-open completion reports when the backend reported neither a
+    /// channel nor an error of its own.
+    static var l2capOpenFailed: NSError {
         NSError(
             domain: "BLESwiftProvider",
             code: 6,
-            userInfo: [NSLocalizedDescriptionKey: "L2CAP bridging not yet available"]
+            userInfo: [NSLocalizedDescriptionKey: "The peripheral reported no L2CAP channel"]
         )
     }
 
@@ -66,11 +67,13 @@ final class CentralSession: Sendable {
     private let connection: LinkConnection
 
     /// The serial queue the backend, its remotes, and every piece of session state are
-    /// confined to.
-    private let queue: DispatchSerialQueue
+    /// confined to. Internal rather than private so the L2CAP bridge in
+    /// `CentralSession+L2CAP.swift` shares it.
+    let queue: DispatchSerialQueue
 
-    /// Receives one line per notable session event.
-    private let log: (@Sendable (String) -> Void)?
+    /// Receives one line per notable session event. Internal for the same reason as
+    /// ``queue``.
+    let log: (@Sendable (String) -> Void)?
 
     /// How this session names itself in the provider's log.
     let label: String
@@ -81,8 +84,12 @@ final class CentralSession: Sendable {
 
     nonisolated(unsafe) private var remotes: [UUID: any PeripheralRemote] = [:]
     nonisolated(unsafe) private var pendingWrites: [UUID: [PendingWrite]] = [:]
-    nonisolated(unsafe) private var pendingOpens: [UUID: [PendingOpen]] = [:]
+    nonisolated(unsafe) var pendingOpens: [UUID: [PendingOpen]] = [:]
     nonisolated(unsafe) private var isClosed = false
+
+    /// The L2CAP channels this session is bridging, keyed by the id the client allocated.
+    /// Internal so `CentralSession+L2CAP.swift` can service them.
+    nonisolated(unsafe) var channels: [UInt32: OpenChannel] = [:]
 
     /// Creates a session serving `connection` from `backend`.
     ///
@@ -141,6 +148,7 @@ final class CentralSession: Sendable {
                 remote.eventHandler = nil
             }
             backend.eventHandler = nil
+            closeChannels(matching: { _ in true })
             remotes.removeAll()
             pendingWrites.removeAll()
             pendingOpens.removeAll()
@@ -242,10 +250,14 @@ final class CentralSession: Sendable {
             pendingOpens[peripheral, default: []].append(PendingOpen(channel: channel, psm: psm))
             remote.openL2CAPChannel(L2CAPPSM(psm))
 
-        case .l2capData, .l2capCredit, .l2capClose:
-            // Task 14 replaces this: no channel is tunnelled over the link yet, so there is
-            // nothing to route a payload, a credit, or a close to.
-            break
+        case .l2capData(let channel, let data):
+            write(data, to: channel)
+
+        case .l2capCredit(let channel, let bytes):
+            grantCredit(bytes, to: channel)
+
+        case .l2capClose(let channel):
+            closeChannel(channel)
         }
     }
 
@@ -417,18 +429,7 @@ final class CentralSession: Sendable {
             drainWrites(for: peripheral)
 
         case .didOpenL2CAPChannel(let channel, let error):
-            // Task 14 replaces this: the channel cannot be tunnelled, so it is closed here
-            // and the client is told the open failed.
-            var queued = pendingOpens[peripheral] ?? []
-            let pending = queued.isEmpty ? nil : queued.removeFirst()
-            pendingOpens[peripheral] = queued
-            channel?.close(error: nil)
-            send(.didOpenL2CAPChannel(
-                peripheral: peripheral,
-                channel: pending?.channel ?? 0,
-                psm: pending?.psm ?? channel?.psm.rawValue ?? 0,
-                error: WireError(error ?? Self.l2capUnavailable)
-            ))
+            bridgeOpenedChannel(channel, error: error, from: peripheral)
         }
     }
 
@@ -438,10 +439,14 @@ final class CentralSession: Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         pendingWrites.removeValue(forKey: peripheral)
         pendingOpens.removeValue(forKey: peripheral)
+        // The client tears its own halves down off the disconnect; closing the backend's
+        // ends here is what stops their pumps and releases the transports.
+        closeChannels(matching: { $0.peripheral == peripheral })
     }
 
-    /// Writes one event to the link. Must be called on ``queue``.
-    private func send(_ event: CentralWireEvent) {
+    /// Writes one event to the link. Must be called on ``queue``. Internal so the L2CAP
+    /// bridge can answer on the same path.
+    func send(_ event: CentralWireEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
         connection.send(.centralEvent(event))
     }

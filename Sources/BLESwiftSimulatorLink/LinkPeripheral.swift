@@ -191,13 +191,14 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     /// Asks the provider to open an L2CAP channel to `psm`.
     ///
-    /// - Note: Task 14 replaces this stub. The request is sent with a locally allocated
-    ///   channel id, but the completion always reports a `nil` channel: no transport is
-    ///   tunnelled over the link yet.
+    /// The client half of the channel is created and filed with the central *before* the
+    /// request goes out, so the provider's `didOpenL2CAPChannel` — and any bytes that follow
+    /// it — always find a channel to route to. A failed open drops it again.
     public func openL2CAPChannel(_ psm: L2CAPPSM) {
         dispatchPrecondition(condition: .onQueue(queue))
-        // Task 14 replaces this stub.
-        central.send(.openL2CAPChannel(peripheral: identifier, psm: psm.rawValue, channel: central.allocateChannelIdentifier()))
+        let channel = central.allocateChannelIdentifier()
+        central.registerChannel(channel, psm: psm, peripheral: identifier)
+        central.send(.openL2CAPChannel(peripheral: identifier, psm: psm.rawValue, channel: channel))
     }
 
     /// The provider-reported maximum payload length for a write of `type`.
