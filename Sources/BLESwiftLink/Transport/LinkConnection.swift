@@ -55,26 +55,12 @@ public final class LinkConnection: Sendable {
     private let storage = Mutex(Storage())
     private let sendGate = Mutex(SendGate())
 
-    /// How many `LinkConnection`s exist right now.
-    ///
-    /// Not API: it exists so a test can assert that a connection which reached a terminal
-    /// state is actually released, rather than kept alive by a handler it stored.
-    private static let liveCount = Mutex(0)
-
-    /// The number of `LinkConnection`s currently alive. See ``liveCount``.
-    package static var liveConnectionCount: Int { liveCount.withLock { $0 } }
-
     /// Wraps an existing `NWConnection` — typically one handed to a ``LinkListener``'s
     /// `newConnectionHandler`. Messages and state changes are delivered on `queue`.
     public init(connection: NWConnection, codec: LinkCodec, queue: DispatchQueue) {
         self.connection = connection
         self.codec = codec
         self.queue = queue
-        Self.liveCount.withLock { $0 += 1 }
-    }
-
-    deinit {
-        Self.liveCount.withLock { $0 -= 1 }
     }
 
     /// Creates an outbound connection to `endpoint`. Call ``start()`` to begin connecting.

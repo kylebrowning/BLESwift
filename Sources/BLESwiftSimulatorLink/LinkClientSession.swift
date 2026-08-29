@@ -40,6 +40,8 @@ package final class LinkClientSession: Sendable {
         var onConnected: (@Sendable () -> Void)?
         var onDisconnected: (@Sendable (NSError?) -> Void)?
         var onMessage: (@Sendable (LinkMessage) -> Void)?
+        /// See `LinkClientSession.onDial`.
+        var onDial: (@Sendable (LinkConnection) -> Void)?
     }
 
     /// What a `ServerHello` means for the session, decided under the lock and acted on outside it.
@@ -105,6 +107,15 @@ package final class LinkClientSession: Sendable {
     /// Whether a provider has accepted the handshake and the link is live.
     package var isConnected: Bool { state.withLock { $0.isConnected } }
 
+    /// Called on the dialling thread with every connection a dial creates.
+    ///
+    /// Not API: it exists so a test can take a `weak` reference to what a dial created and
+    /// assert that reaching a terminal state actually releases it.
+    package var onDial: (@Sendable (LinkConnection) -> Void)? {
+        get { state.withLock { $0.onDial } }
+        set { state.withLock { $0.onDial = newValue } }
+    }
+
     /// Dials the endpoint and begins the connect-and-retry loop. Calling this more than once has
     /// no additional effect, and it does nothing after ``stop()``.
     package func start() {
@@ -147,14 +158,15 @@ package final class LinkClientSession: Sendable {
     /// Creates, stores, and starts a connection. Called from ``start()`` and from the retry timer.
     private func dial() {
         let connection = LinkConnection.connect(to: endpoint, codec: codec, queue: queue)
-        let shouldStart = state.withLock { state -> Bool in
-            guard !state.stopped, !state.versionMismatch else { return false }
+        let outcome = state.withLock { state -> (Bool, (@Sendable (LinkConnection) -> Void)?) in
+            guard !state.stopped, !state.versionMismatch else { return (false, nil) }
             state.connection = connection
             state.isConnected = false
             state.handshakeComplete = false
-            return true
+            return (true, state.onDial)
         }
-        guard shouldStart else { return }
+        guard outcome.0 else { return }
+        outcome.1?(connection)
         connection.onStateChange = { [weak self] connectionState in
             self?.handle(connectionState: connectionState, from: connection)
         }

@@ -92,8 +92,13 @@ struct LinkClientSessionTests {
         session.stop()
     }
 
-    @Test("A session retrying against a closed port leaks no connections")
-    func retryingLeaksNoConnections() async throws {
+    /// A weak handle on one of the connections a session dialled.
+    private struct WeakConnection: Sendable {
+        weak var connection: LinkConnection?
+    }
+
+    @Test("A session retrying against a closed port releases every connection it creates")
+    func retryingReleasesItsConnections() async throws {
         let port = try await Self.freePort()
         let queue = DispatchSerialQueue(label: "client")
         let session = LinkClientSession(
@@ -103,17 +108,20 @@ struct LinkClientSessionTests {
             queue: queue,
             retryInterval: .milliseconds(50)
         )
-        // `dial()` stores handlers that capture their own connection strongly, so a
-        // connection whose handlers outlive its terminal state can never be released.
-        let baseline = LinkConnection.liveConnectionCount
+        // `dial()` stores handlers that capture their own connection strongly, so a connection
+        // whose handlers survive its terminal state can never be released.
+        let dialled = Mutex<[WeakConnection]>([])
+        session.onDial = { connection in dialled.withLock { $0.append(WeakConnection(connection: connection)) } }
         session.start()
-        // Roughly a dozen dial-and-fail cycles at a 50 ms retry interval.
         try await Task.sleep(for: .milliseconds(700))
-        #expect(!session.isConnected)
-        // One live connection is the dial currently in flight; anything more is a leak.
-        let live = LinkConnection.liveConnectionCount - baseline
-        #expect(live <= 1, "\(live) connections still alive after retrying")
         session.stop()
+        #expect(!session.isConnected)
+
+        let observed = dialled.withLock { $0 }
+        #expect(observed.count >= 5, "only \(observed.count) dials observed")
+        try await Task.sleep(for: .milliseconds(300))
+        let alive = observed.filter { $0.connection != nil }.count
+        #expect(alive == 0, "\(alive) of \(observed.count) connections still alive")
     }
 
     /// A loopback port nothing is bound to: taken by a listener on port 0, read back, and
