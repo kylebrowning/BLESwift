@@ -96,10 +96,20 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     }
 
     /// Records a connection-state transition. Must be called on ``queue``.
+    ///
+    /// A transition to `.disconnected` empties every discovery cache along with the
+    /// notification set, exactly as `LinkPeripheral.markDisconnected()` does and as
+    /// CoreBluetooth does to a `CBPeripheral`'s `services`: the handles a disconnected
+    /// peripheral's database was described by are gone, so continuing to report them
+    /// discovered would let a read, a write, or a `setNotifyValue(_:for:)` past the
+    /// discovery guard and on to a radio that has no connection left to serve it over.
     func setConnectionState(_ state: PeripheralConnectionState) {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectionState = state
         if state == .disconnected {
+            _discoveredServices.removeAll()
+            _discoveredCharacteristics.removeAll()
+            _properties.removeAll()
             _notifying.removeAll()
         }
     }
@@ -232,9 +242,19 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
             _notifying.remove(characteristic)
         }
         enqueue { [radio, identifier, session, queue] in
-            await radio.setNotify(enabled, device: identifier, characteristic: characteristic, session: session)
+            // The radio's answer, not the request: a session the radio no longer holds a
+            // connection for arms nothing, and reporting `enabled` anyway would leave the
+            // remote claiming to notify on a subscription that does not exist.
+            let isNotifying = await radio.setNotify(
+                enabled, device: identifier, characteristic: characteristic, session: session
+            )
             queue.async { [self] in
-                deliver(.didUpdateNotificationState(characteristic: characteristic, isNotifying: enabled, error: nil))
+                if isNotifying {
+                    _notifying.insert(characteristic)
+                } else {
+                    _notifying.remove(characteristic)
+                }
+                deliver(.didUpdateNotificationState(characteristic: characteristic, isNotifying: isNotifying, error: nil))
             }
         }
     }

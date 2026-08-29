@@ -276,6 +276,14 @@ public actor VirtualRadio {
         sessions[session]?.scanner != nil
     }
 
+    /// How many sessions are subscribed to `characteristic` on `device`.
+    ///
+    /// Not API: it exists so a test can assert that a refused ``setNotify(_:device:characteristic:session:)``
+    /// left no entry behind, and that a ``detach(session:)`` cleared the ones there were.
+    package func subscriberCount(device: UUID, characteristic: CharacteristicIdentifier) -> Int {
+        subscriptions[device]?[characteristic]?.count ?? 0
+    }
+
     /// Stops `session`'s scan, if any.
     func stopScan(session: UUID) {
         sessions[session]?.scanner?.repeater?.cancel()
@@ -418,22 +426,38 @@ public actor VirtualRadio {
             .map { CharacteristicDiscovery(identifier: $0.identifier, properties: $0.properties) }
     }
 
+    /// Whether `session` currently holds a connection to `device`.
+    ///
+    /// The gate every GATT entry point applies, and the same test ``notify(device:characteristic:value:to:)``
+    /// makes before routing a notification: a session that has disconnected — or was never
+    /// connected at all — has no ATT bearer to carry a request over, so the radio must refuse
+    /// rather than serve it. Without it a stale remote could still read, write, and plant a
+    /// subscription that no ``disconnect(session:device:)`` or ``detach(session:)`` would ever
+    /// clean up, because neither walks a device the session is not recorded as connected to.
+    private func isConnected(session: UUID, to device: UUID) -> Bool {
+        sessions[session]?.connections.contains(device) == true
+    }
+
     /// Reads `characteristic`. A characteristic with a static value is answered from the
-    /// database; every other read reaches the device's handler.
+    /// database; every other read reaches the device's handler. A session that is not
+    /// connected to `device` is refused with `ATTError.invalidHandle`.
     func read(device: UUID, characteristic: CharacteristicIdentifier, session: UUID) async -> Result<Data, ATTError> {
+        guard isConnected(session: session, to: device) else { return .failure(.invalidHandle) }
         guard let state = devices[device] else { return .failure(.invalidHandle) }
         guard let definition = definition(of: characteristic, in: state) else { return .failure(.attributeNotFound) }
         if let value = definition.value { return .success(value) }
         return await state.handler.read(characteristic, offset: 0, from: subscriber(session))
     }
 
-    /// Writes `value` to `characteristic` through the device's handler.
+    /// Writes `value` to `characteristic` through the device's handler. A session that is not
+    /// connected to `device` is refused with `ATTError.invalidHandle`.
     func write(
         device: UUID,
         characteristic: CharacteristicIdentifier,
         value: Data,
         session: UUID
     ) async -> Result<Void, ATTError> {
+        guard isConnected(session: session, to: device) else { return .failure(.invalidHandle) }
         guard let state = devices[device] else { return .failure(.invalidHandle) }
         guard definition(of: characteristic, in: state) != nil else { return .failure(.attributeNotFound) }
         let central = subscriber(session)
@@ -443,13 +467,25 @@ public actor VirtualRadio {
 
     /// Subscribes or unsubscribes `session` to `characteristic` and reports the change to
     /// the device's handler.
+    ///
+    /// A session that is not connected to `device` changes nothing and tells the handler
+    /// nothing: a subscription planted from a disconnected session would be a ghost subscriber
+    /// its `PeripheralHost` could never lose, since neither ``disconnect(session:device:)`` nor
+    /// ``detach(session:)`` walks a device the session has no connection to.
+    ///
+    /// - Returns: Whether `session` is subscribed to `characteristic` now the call has been
+    ///   applied — `enabled` for a connected session, and the unchanged current state for one
+    ///   that is not.
+    @discardableResult
     func setNotify(
         _ enabled: Bool,
         device: UUID,
         characteristic: CharacteristicIdentifier,
         session: UUID
-    ) async {
-        guard let state = devices[device] else { return }
+    ) async -> Bool {
+        guard let state = devices[device], isConnected(session: session, to: device) else {
+            return subscriptions[device]?[characteristic]?.contains(session) == true
+        }
         if enabled {
             subscriptions[device, default: [:]][characteristic, default: []].insert(session)
         } else {
@@ -459,6 +495,7 @@ public actor VirtualRadio {
             }
         }
         await state.handler.subscriptionChanged(characteristic, central: subscriber(session), isSubscribed: enabled)
+        return enabled
     }
 
     /// The characteristic definition for `characteristic` in `state`'s current database.

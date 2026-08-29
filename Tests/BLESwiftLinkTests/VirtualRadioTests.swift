@@ -484,6 +484,113 @@ struct VirtualRadioTests {
         #expect(values.withLock { $0.count } == 1)
     }
 
+    @Test("A disconnected remote reads nothing and the radio refuses the read outright")
+    func readAfterDisconnectIsRefused() async throws {
+        let radio = VirtualRadio()
+        let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
+        let (device, handler) = VirtualDevice.fixture(fixture)
+        await handler.attach(await radio.register(device))
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.readafterdisconnect")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+
+        await waitFor { await Self.onQueue(queue) { !backend.retrievePeripherals(withIdentifiers: [id]).isEmpty } }
+        let remote = try #require(await Self.remote(backend, queue, id))
+        let values = Mutex<[Data]>([])
+        let rssis = Mutex<[Int]>([])
+        await Self.onQueue(queue) {
+            remote.eventHandler = { event in
+                switch event {
+                case .didUpdateValue(_, let value, _):
+                    if let value { values.withLock { $0.append(value) } }
+                case .didReadRSSI(let rssi, _):
+                    rssis.withLock { $0.append(rssi) }
+                default:
+                    break
+                }
+            }
+            backend.connect(remote, options: nil, requiresANCS: false)
+        }
+        await waitFor { await Self.onQueue(queue) { remote.connectionState == .connected } }
+        await Self.onQueue(queue) {
+            remote.discoverServices([Self.service])
+            remote.discoverCharacteristics([Self.control], for: Self.service)
+        }
+        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
+
+        await Self.onQueue(queue) { backend.cancelPeripheralConnection(remote) }
+        await waitFor { await Self.onQueue(queue) { remote.connectionState == .disconnected } }
+        // The disconnect emptied the discovery caches, exactly as a `LinkPeripheral`'s
+        // `markDisconnected()` does, so the read never leaves the remote at all.
+        #expect(await Self.onQueue(queue) { !remote.isDiscovered(Self.control) })
+        #expect(await Self.onQueue(queue) { remote.discoveredServices.isEmpty })
+        #expect(await Self.onQueue(queue) { remote.properties(of: Self.control) == [] })
+
+        // `readRSSI()` is the barrier: it always completes, and on the same queue, so its
+        // event landing proves the read's would have landed by now had one been produced.
+        await Self.onQueue(queue) {
+            remote.readValue(for: Self.control)
+            remote.readRSSI()
+        }
+        await waitFor { rssis.withLock { !$0.isEmpty } }
+        #expect(values.withLock { $0 }.isEmpty)
+
+        // And the radio refuses it on its own account, for any caller that reaches past the
+        // remote's cache: `2A39` has a static value, so only the connection gate can refuse it.
+        let refused = await radio.read(device: id, characteristic: Self.control, session: backend.sessionID)
+        #expect(refused == .failure(.invalidHandle))
+        let written = await radio.write(device: id, characteristic: Self.control, value: Data([1]), session: backend.sessionID)
+        guard case .failure(.invalidHandle) = written else {
+            Issue.record("Expected the write to be refused with .invalidHandle, got \(written)")
+            return
+        }
+    }
+
+    @Test("A disconnected session cannot plant a subscription, and detach leaves no ghost")
+    func setNotifyWhileDisconnectedPlantsNoSubscription() async throws {
+        let radio = VirtualRadio()
+        let hostQueue = DispatchSerialQueue(label: "VirtualRadioTests.ghost.host")
+        let identifier = UUID()
+        let host = PeripheralHost(
+            backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier),
+            queue: hostQueue
+        )
+        try await host.add(
+            GATTService(identifier: Self.service, characteristics: [
+                GATTCharacteristic(identifier: Self.measurement, properties: [.read, .notify], permissions: [.readable])
+            ])
+        )
+        await waitFor { await !radio.services(of: identifier, matching: nil).isEmpty }
+
+        let session = UUID()
+        await radio.attach(session: session, centralSink: { _ in })
+
+        // Never connected: nothing is armed, nothing is filed, and the host is told nothing.
+        #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session) == false)
+        #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
+        #expect(await host.subscribers(for: Self.measurement).isEmpty)
+
+        // Connected: the very same call takes, so the refusal above was the gate and not the
+        // characteristic.
+        #expect(await radio.connect(session: session, device: identifier, sink: { _ in }).error == nil)
+        #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session) == true)
+        await waitFor { await !host.subscribers(for: Self.measurement).isEmpty }
+        #expect(await host.subscribers(for: Self.measurement).count == 1)
+
+        // Disconnected again: the subscription is dropped, and a `setNotify` from the stale
+        // session cannot plant a new one behind it.
+        await radio.disconnect(session: session, device: identifier)
+        await waitFor { await host.subscribers(for: Self.measurement).isEmpty }
+        #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session) == false)
+        #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
+        #expect(await host.subscribers(for: Self.measurement).isEmpty)
+
+        // A detach has nothing left to clean, and leaves nothing behind either.
+        await radio.detach(session: session)
+        #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
+        #expect(await host.subscribers(for: Self.measurement).isEmpty)
+    }
+
     /// The remote `backend` vends for `identifier`, fetched on its own queue.
     private static func remote(
         _ backend: VirtualCentralBackend,
