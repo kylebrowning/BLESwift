@@ -90,6 +90,86 @@ struct TransportLoopbackTests {
         await waitFor(timeout: .seconds(5)) { client.state.isTerminal }
         if case .failed = client.state {} else { Issue.record("expected .failed, got \(client.state)") }
     }
+
+    @Test("Handlers are invoked on the connection's queue")
+    func handlersRunOnQueue() async throws {
+        let listener = try await makeListener()
+        defer { listener.cancel() }
+        listener.onConnection = { connection in
+            connection.onMessage = { connection.send($0) }
+        }
+
+        let key = DispatchSpecificKey<Bool>()
+        let queue = DispatchQueue(label: "client")
+        queue.setSpecific(key: key, value: true)
+        let stateChangesOnQueue = Mutex<[Bool]>([])
+        let messagesOnQueue = Mutex<[Bool]>([])
+
+        let client = LinkConnection.connect(to: LinkEndpoint(host: "127.0.0.1", port: listener.port), codec: .json, queue: queue)
+        client.onStateChange = { _ in
+            stateChangesOnQueue.withLock { $0.append(DispatchQueue.getSpecific(key: key) == true) }
+        }
+        client.onMessage = { _ in
+            messagesOnQueue.withLock { $0.append(DispatchQueue.getSpecific(key: key) == true) }
+        }
+        client.start()                                   // publishes .connecting synchronously
+        await waitFor { if case .ready = client.state { return true }; return false }
+        client.send(.centralRequest(.stopScan))
+        await waitFor { messagesOnQueue.withLock { $0.count } == 1 }
+        client.cancel()                                  // publishes .cancelled synchronously
+        await waitFor { stateChangesOnQueue.withLock { $0.count } >= 3 }
+
+        #expect(stateChangesOnQueue.withLock { $0.count } >= 3)   // .connecting, .ready, .cancelled
+        #expect(stateChangesOnQueue.withLock { $0 }.allSatisfy { $0 })
+        #expect(messagesOnQueue.withLock { $0 } == [true])
+    }
+
+    @Test("Sends are delivered in call order")
+    func sendOrdering() async throws {
+        let listener = try await makeListener()
+        defer { listener.cancel() }
+        let channels = Mutex<[UInt32]>([])
+        // The listener does not retain accepted connections — the caller owns them.
+        let serverSide = Mutex<LinkConnection?>(nil)
+        listener.onConnection = { connection in
+            serverSide.withLock { $0 = connection }
+            connection.onMessage = { message in
+                if case .centralRequest(.l2capData(let channel, _)) = message {
+                    channels.withLock { $0.append(channel) }
+                }
+            }
+        }
+        let client = LinkConnection.connect(to: LinkEndpoint(host: "127.0.0.1", port: listener.port), codec: .binaryPropertyList, queue: DispatchQueue(label: "client"))
+        client.start()
+        await waitFor { if case .ready = client.state { return true }; return false }
+
+        let sender = DispatchQueue(label: "sender")
+        for index in 0 ..< 200 {
+            sender.async {
+                client.send(.centralRequest(.l2capData(channel: UInt32(index), data: Data([UInt8(index & 0xFF)]))))
+            }
+        }
+        await waitFor(timeout: .seconds(5)) { channels.withLock { $0.count } == 200 }
+        #expect(channels.withLock { $0 } == (0 ..< 200).map(UInt32.init))
+        client.cancel()
+        serverSide.withLock { $0 }?.cancel()
+    }
+
+    @Test("Starting a listener on a port already in use throws")
+    func portInUse() async throws {
+        let first = try await makeListener()
+        defer { first.cancel() }
+        let second = try LinkListener(endpoint: LinkEndpoint(host: "127.0.0.1", port: first.port), codec: .json, queue: DispatchQueue(label: "listener-2"))
+        await #expect(throws: (any Error).self) { try await second.start() }
+        second.cancel()
+    }
+
+    @Test("Starting a listener twice throws")
+    func doubleStart() async throws {
+        let listener = try await makeListener()
+        defer { listener.cancel() }
+        await #expect(throws: LinkListenerError.alreadyStarted) { try await listener.start() }
+    }
 }
 
 extension LinkConnection.State {

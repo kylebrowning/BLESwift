@@ -25,6 +25,12 @@ enum LinkTransportParameters {
     }
 }
 
+/// Why a ``LinkListener`` refused to do something.
+public enum LinkListenerError: Error, Equatable, Sendable {
+    /// ``LinkListener/start()`` was called more than once on the same listener.
+    case alreadyStarted
+}
+
 /// Accepts framed message connections on a TCP port.
 ///
 /// Each accepted connection is wrapped in a ``LinkConnection``, started, and handed to
@@ -38,6 +44,7 @@ public final class LinkListener: Sendable {
         var onConnection: (@Sendable (LinkConnection) -> Void)?
         var port: UInt16 = 0
         var startContinuation: CheckedContinuation<Void, any Error>?
+        var didStart = false
     }
 
     private let listener: NWListener
@@ -51,9 +58,13 @@ public final class LinkListener: Sendable {
         let parameters = LinkTransportParameters.tcp()
         let port = NWEndpoint.Port(rawValue: endpoint.port) ?? .any
         if LinkTransportParameters.isLoopback(endpoint.host) {
+            // `requiredLocalEndpoint` already names the port; passing it to `on:` as well is
+            // rejected as EINVAL, so the loopback path binds through the parameters alone.
             parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port)
+            self.listener = try NWListener(using: parameters)
+        } else {
+            self.listener = try NWListener(using: parameters, on: port)
         }
-        self.listener = try NWListener(using: parameters, on: port)
         self.codec = codec
         self.queue = queue
     }
@@ -70,8 +81,14 @@ public final class LinkListener: Sendable {
 
     /// Starts listening and returns once the port is bound, so ``port`` is valid on return.
     ///
-    /// - Throws: The `NWError` reported by the listener if binding fails.
+    /// - Throws: ``LinkListenerError/alreadyStarted`` if the listener was already started, or the
+    ///   `NWError` reported by the listener if it fails or has to wait to bind — a port already in
+    ///   use is a failure here, never something to sit and retry.
     public func start() async throws {
+        try storage.withLock { storage in
+            guard !storage.didStart else { throw LinkListenerError.alreadyStarted }
+            storage.didStart = true
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             storage.withLock { $0.startContinuation = continuation }
             listener.newConnectionHandler = { [weak self] nwConnection in
@@ -94,8 +111,12 @@ public final class LinkListener: Sendable {
                         defer { storage.startContinuation = nil }
                         return storage.startContinuation
                     }?.resume()
+                case .waiting(let error):
+                    // Binding is one-shot: a port already in use must fail `start()` rather than
+                    // leave the caller awaiting a retry that may never succeed.
+                    self.resumeStart(throwing: error as NSError)
                 case .failed(let error):
-                    self.resumeStart(throwing: error)
+                    self.resumeStart(throwing: error as NSError)
                 case .cancelled:
                     self.resumeStart(throwing: NWError.posix(.ECANCELED))
                 default:
@@ -113,8 +134,9 @@ public final class LinkListener: Sendable {
 
     // MARK: - Internals
 
-    /// Fails a pending ``start()``, if one is still waiting.
+    /// Fails a pending ``start()``, if one is still waiting, and tears the listener down.
     private func resumeStart(throwing error: some Error) {
+        listener.cancel()
         storage.withLock { storage -> CheckedContinuation<Void, any Error>? in
             defer { storage.startContinuation = nil }
             return storage.startContinuation

@@ -13,7 +13,8 @@ import Synchronization
 /// Wraps an `NWConnection` and speaks the ``LinkFraming`` wire format: outgoing messages are
 /// encoded with this connection's ``LinkCodec`` and framed; incoming bytes are reassembled and
 /// each frame is decoded with the codec named by that frame, so the two ends may use different
-/// codecs. Handlers are invoked on the `queue` supplied at initialization.
+/// codecs. Every handler — ``onMessage`` and ``onStateChange`` — is invoked on the `queue`
+/// supplied at initialization, never on a caller's thread.
 public final class LinkConnection: Sendable {
 
     /// The lifecycle of a ``LinkConnection``.
@@ -44,10 +45,15 @@ public final class LinkConnection: Sendable {
         var didStart = false
     }
 
+    /// Held across the whole of ``send(_:)`` so frames reach the socket in call order. Separate
+    /// from ``storage`` so a send never blocks a state read.
+    private struct SendGate {}
+
     private let connection: NWConnection
     private let codec: LinkCodec
     private let queue: DispatchQueue
     private let storage = Mutex(Storage())
+    private let sendGate = Mutex(SendGate())
 
     /// Wraps an existing `NWConnection` — typically one handed to a ``LinkListener``'s
     /// `newConnectionHandler`. Messages and state changes are delivered on `queue`.
@@ -71,13 +77,16 @@ public final class LinkConnection: Sendable {
         )
     }
 
-    /// Called on `queue` for every message decoded from the stream.
+    /// Called on `queue` for every message decoded from the stream. No message is delivered once
+    /// the connection has reached a terminal state.
     public var onMessage: (@Sendable (LinkMessage) -> Void)? {
         get { storage.withLock { $0.onMessage } }
         set { storage.withLock { $0.onMessage = newValue } }
     }
 
-    /// Called on `queue` for every ``State`` transition. Each transition is published once.
+    /// Called on `queue` for every ``State`` transition — including the transitions caused
+    /// synchronously by ``start()`` and ``cancel()``, which are dispatched onto `queue` rather
+    /// than run on the calling thread. Each transition is published once.
     public var onStateChange: (@Sendable (State) -> Void)? {
         get { storage.withLock { $0.onStateChange } }
         set { storage.withLock { $0.onStateChange = newValue } }
@@ -104,22 +113,30 @@ public final class LinkConnection: Sendable {
 
     /// Encodes `message` with this connection's codec, frames it, and writes it.
     ///
+    /// Frames reach the socket in the order `send` was called: the readiness check, the encode,
+    /// and the write are serialized by a dedicated lock, so two callers racing on different
+    /// threads still produce a well-ordered stream.
+    ///
     /// Messages sent while the connection is not ``State/ready`` are dropped silently: the link
     /// is a best-effort transport and every caller already handles a dropped link.
     public func send(_ message: LinkMessage) {
-        let isReady = storage.withLock { storage -> Bool in
-            if case .ready = storage.state { return true }
-            return false
+        let encodeFailure: (any Error)? = sendGate.withLock { _ in
+            let isReady = storage.withLock { storage -> Bool in
+                if case .ready = storage.state { return true }
+                return false
+            }
+            guard isReady else { return nil }
+            do {
+                let frame = LinkFraming.encodeFrame(codec: codec, payload: try codec.encode(message))
+                connection.send(content: frame, completion: .contentProcessed { _ in })
+                return nil
+            } catch {
+                return error
+            }
         }
-        guard isReady else { return }
-        let frame: Data
-        do {
-            frame = LinkFraming.encodeFrame(codec: codec, payload: try codec.encode(message))
-        } catch {
-            fail(with: error)
-            return
+        if let encodeFailure {
+            fail(with: encodeFailure)
         }
-        connection.send(content: frame, completion: .contentProcessed { _ in })
     }
 
     /// Closes the connection. Idempotent; the state becomes ``State/cancelled`` unless the
@@ -154,7 +171,7 @@ public final class LinkConnection: Sendable {
 
     private func receiveNext() {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
+            guard let self, !self.isTerminal else { return }
             if let error {
                 self.fail(with: error)
                 return
@@ -178,7 +195,15 @@ public final class LinkConnection: Sendable {
                         self.fail(with: error)
                         return
                     }
-                    self.storage.withLock { $0.onMessage }?(message)
+                    // A cancel racing this receive must win: nothing is delivered after the
+                    // connection has ended.
+                    let delivery = self.storage.withLock { storage -> (live: Bool, handler: (@Sendable (LinkMessage) -> Void)?) in
+                        (!storage.isTerminal, storage.onMessage)
+                    }
+                    guard delivery.live else { return }
+                    if let handler = delivery.handler {
+                        self.queue.async { handler(message) }
+                    }
                 }
             }
             if isComplete {
@@ -190,12 +215,15 @@ public final class LinkConnection: Sendable {
         }
     }
 
+    /// Whether the connection has already reached ``State/failed(_:)`` or ``State/cancelled``.
+    private var isTerminal: Bool { storage.withLock { $0.isTerminal } }
+
     private func fail(with error: some Error) {
         finish(with: .failed(error as NSError))
     }
 
     /// Moves to a terminal state exactly once, cancels the underlying connection, and publishes
-    /// the transition.
+    /// the transition on `queue`.
     private func finish(with terminal: State) {
         let outcome = storage.withLock { storage -> (published: Bool, handler: (@Sendable (State) -> Void)?) in
             guard !storage.isTerminal else { return (false, nil) }
@@ -206,10 +234,12 @@ public final class LinkConnection: Sendable {
         }
         guard outcome.published else { return }
         connection.cancel()
-        outcome.handler?(terminal)
+        if let handler = outcome.handler {
+            queue.async { handler(terminal) }
+        }
     }
 
-    /// Publishes a non-terminal transition, ignoring it once the connection has ended.
+    /// Publishes a non-terminal transition on `queue`, ignoring it once the connection has ended.
     private func transition(to newState: State) {
         let handler = storage.withLock { storage -> (@Sendable (State) -> Void)? in
             guard !storage.isTerminal else { return nil }
@@ -222,6 +252,8 @@ public final class LinkConnection: Sendable {
             storage.state = newState
             return storage.onStateChange
         }
-        handler?(newState)
+        if let handler {
+            queue.async { handler(newState) }
+        }
     }
 }
