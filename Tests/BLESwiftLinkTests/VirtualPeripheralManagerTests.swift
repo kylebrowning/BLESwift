@@ -149,6 +149,54 @@ struct VirtualPeripheralManagerTests {
         }
     }
 
+    @Test("A request the host never answers times out, and the remote keeps working")
+    func unansweredRequestTimesOut() async throws {
+        let radio = VirtualRadio()
+        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.SilentHost")
+        let identifier = UUID()
+        // A short stand-in for `VirtualRadio.attTimeout`, so the test need not wait 30 s.
+        let backend = VirtualPeripheralManagerBackend(
+            radio: radio,
+            queue: hostQueue,
+            identifier: identifier,
+            attTimeout: .milliseconds(200)
+        )
+        let host = PeripheralHost(backend: backend, queue: hostQueue)
+        try await host.add(Self.service)
+
+        // The first read is swallowed — a host wedged in its own handler — and every one
+        // after it is answered.
+        let seen = Mutex<Int>(0)
+        let readResponder = Task { @Sendable in
+            for await request in await host.readRequests() {
+                let ordinal = seen.withLock { $0 += 1; return $0 }
+                guard ordinal > 1 else { continue }
+                await host.respond(to: request, with: .success(Data([0, 72])))
+            }
+        }
+
+        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.SilentCentral")
+        let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
+        await waitFor { central.state == .poweredOn }
+        let peripheral = try await central.connect(PeripheralIdentifier(uuid: identifier, name: nil))
+
+        do {
+            let value: Data = try await peripheral.read(from: Self.measurement)
+            Issue.record("Expected the unanswered read to time out, got \(value as NSData)")
+        } catch {
+            let nsError = error as NSError
+            #expect(nsError.domain == "CBATTErrorDomain")
+            #expect(nsError.code == ATTError.unlikelyError.rawValue)
+        }
+
+        // The timed-out request released the remote's serial chain: the next read still works.
+        let measured: Data = try await peripheral.read(from: Self.measurement)
+        #expect(measured == Data([0, 72]))
+        #expect(seen.withLock { $0 } == 2)
+
+        readResponder.cancel()
+    }
+
     @Test("A host's ATT failure surfaces to the central as a CBATTErrorDomain error")
     func readFailure() async throws {
         let radio = VirtualRadio()

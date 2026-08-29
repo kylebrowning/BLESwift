@@ -97,11 +97,32 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
     ///     `UUID`.
     ///   - name: The device name centrals see on discovery and connection. Defaults to
     ///     `nil`; ``startAdvertising(_:)`` supplies the advertised local name separately.
-    public init(radio: VirtualRadio, queue: DispatchSerialQueue, identifier: UUID = UUID(), name: String? = nil) {
+    public convenience init(radio: VirtualRadio, queue: DispatchSerialQueue, identifier: UUID = UUID(), name: String? = nil) {
+        self.init(radio: radio, queue: queue, identifier: identifier, name: name, attTimeout: VirtualRadio.attTimeout)
+    }
+
+    /// Creates a backend whose parked requests time out after `attTimeout` — the designated
+    /// initializer, for tests that cannot wait ``VirtualRadio/attTimeout`` for a host that
+    /// never answers.
+    ///
+    /// - Parameters:
+    ///   - radio: The radio to host this peripheral on.
+    ///   - queue: The queue every method and event delivery is confined to.
+    ///   - identifier: The identifier to register the device under.
+    ///   - name: The device name centrals see on discovery and connection.
+    ///   - attTimeout: How long a request parked for the host waits for its answer before it
+    ///     is refused with ``BLESwiftCore/ATTError/unlikelyError``.
+    package init(
+        radio: VirtualRadio,
+        queue: DispatchSerialQueue,
+        identifier: UUID = UUID(),
+        name: String? = nil,
+        attTimeout: Duration
+    ) {
         self.radio = radio
         self.queue = queue
         self.identifier = identifier
-        self.handler = VirtualHostedDeviceHandler()
+        self.handler = VirtualHostedDeviceHandler(attTimeout: attTimeout)
 
         let device = VirtualDevice(
             descriptor: VirtualDeviceDescriptor(
@@ -354,6 +375,12 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
 /// One continuation per ``BLESwiftCore/RequestToken``, in two maps — a read and a write
 /// success are both answered as `value: nil, error: nil`, so the request's kind is
 /// recovered from which map the token is in, never from the response's shape.
+///
+/// **No request parks forever.** Each one is bounded by ``VirtualRadio/attTimeout``: a host
+/// that never answers has its request refused with
+/// ``BLESwiftCore/ATTError/unlikelyError``, which releases the central's call and every
+/// operation queued behind it on that remote. A response arriving after that is a no-op,
+/// exactly as one for any other unknown token is.
 actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
 
     /// Delivers events to the owning backend's `eventHandler`, hopping onto its queue, and
@@ -362,6 +389,21 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
 
     private var pendingReads: [RequestToken: CheckedContinuation<Result<Data, ATTError>, Never>] = [:]
     private var pendingWrites: [RequestToken: CheckedContinuation<Result<Void, ATTError>, Never>] = [:]
+
+    /// How long a parked request waits for the host's answer before it is refused.
+    private let attTimeout: Duration
+
+    /// The countdown running against each parked request, cancelled the moment that request
+    /// is settled by any other route.
+    private var timeouts: [RequestToken: Task<Void, Never>] = [:]
+
+    /// Creates a handler whose parked requests time out after `attTimeout`.
+    ///
+    /// - Parameter attTimeout: The ATT transaction timeout. Defaults to
+    ///   ``VirtualRadio/attTimeout``; tests shorten it.
+    init(attTimeout: Duration = VirtualRadio.attTimeout) {
+        self.attTimeout = attTimeout
+    }
 
     /// Attaches the event sink, before the device is registered.
     func attach(_ sink: @escaping @Sendable (PeripheralHostEvent) -> Bool) {
@@ -373,6 +415,8 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
     /// host is gone.
     func failPendingRequests() {
         sink = nil
+        for countdown in timeouts.values { countdown.cancel() }
+        timeouts.removeAll()
         let reads = pendingReads
         pendingReads.removeAll()
         for continuation in reads.values { continuation.resume(returning: .failure(.unlikelyError)) }
@@ -381,8 +425,11 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         for continuation in writes.values { continuation.resume(returning: .failure(.unlikelyError)) }
     }
 
-    /// Answers the request `token` identifies, if it is still parked.
+    /// Answers the request `token` identifies, if it is still parked. A response that arrives
+    /// after the request timed out is a no-op, as the seam's contract for an unknown token
+    /// already says.
     func respond(to token: RequestToken, value: Data?, error: ATTError?) {
+        timeouts.removeValue(forKey: token)?.cancel()
         if let continuation = pendingReads.removeValue(forKey: token) {
             continuation.resume(returning: error.map { .failure($0) } ?? .success(value ?? Data()))
         } else if let continuation = pendingWrites.removeValue(forKey: token) {
@@ -400,6 +447,7 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         let token = RequestToken()
         return await withCheckedContinuation { continuation in
             pendingReads[token] = continuation
+            startTimeout(for: token)
             let event = PeripheralHostEvent.didReceiveRead(
                 ReadRequest(token: token, central: central, characteristic: characteristic, offset: offset)
             )
@@ -414,14 +462,27 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         let token = RequestToken()
         return await withCheckedContinuation { continuation in
             pendingWrites[token] = continuation
+            startTimeout(for: token)
             if !sink(.didReceiveWrite(WriteRequest(token: token, entries: entries))) { fail(token) }
+        }
+    }
+
+    /// Starts the ATT transaction countdown for a freshly parked request: a host that never
+    /// answers refuses it after ``attTimeout`` rather than leaving its caller — and every
+    /// operation queued behind it on that remote — suspended forever.
+    private func startTimeout(for token: RequestToken) {
+        timeouts[token] = Task { [attTimeout] in
+            try? await Task.sleep(for: attTimeout)
+            guard !Task.isCancelled else { return }
+            fail(token)
         }
     }
 
     /// Refuses the parked request `token` identifies with
     /// ``BLESwiftCore/ATTError/unlikelyError`` — the answer for a request no attached handler
-    /// ever saw.
+    /// ever saw, and for one the host let time out.
     private func fail(_ token: RequestToken) {
+        timeouts.removeValue(forKey: token)?.cancel()
         if let continuation = pendingReads.removeValue(forKey: token) {
             continuation.resume(returning: .failure(.unlikelyError))
         } else if let continuation = pendingWrites.removeValue(forKey: token) {

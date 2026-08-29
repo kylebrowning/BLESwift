@@ -33,6 +33,16 @@ public actor VirtualRadio {
     /// ATT attribute length, the natural ceiling for a link with no real MTU negotiation.
     public static let maximumValueLength = 512
 
+    /// How long a GATT request parked for a hosted `PeripheralHost` waits for that host's
+    /// answer before it is refused with ``BLESwiftCore/ATTError/unlikelyError``.
+    ///
+    /// A host that never responds — one wedged in its own request handler, or a link client
+    /// that stopped answering — would otherwise leave the central's read or write suspended
+    /// forever, and with it every later operation queued behind it on that remote. Thirty
+    /// seconds is the ATT transaction timeout Bluetooth Core specifies, so a virtual radio
+    /// gives up on the same schedule real hardware does.
+    public static let attTimeout = Duration.seconds(30)
+
     /// The error a connection attempt to an unregistered device fails with.
     public static var unknownDeviceError: NSError {
         NSError(
