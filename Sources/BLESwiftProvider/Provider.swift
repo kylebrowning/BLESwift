@@ -70,6 +70,13 @@ public actor Provider {
     /// The handles of the fixture devices ``start()`` registered, keyed by device id.
     private var fixtures: [UUID: VirtualDeviceHandle] = [:]
 
+    /// The handles of the devices ``addVirtualDevice(_:advertising:)`` registered, keyed by
+    /// device id — kept for exactly one reason: ``stop()`` takes them off the radio too.
+    ///
+    /// Held apart from ``fixtures`` because ``handle(for:)`` vends a *fixture*'s handle, and
+    /// the caller of `addVirtualDevice` already has the one it returned.
+    private var addedDevices: [UUID: VirtualDeviceHandle] = [:]
+
     /// The identifiers of the devices the *provider itself* put on the radio — its fixtures,
     /// and everything ``addVirtualDevice(_:advertising:)`` registered.
     ///
@@ -96,14 +103,22 @@ public actor Provider {
 
     /// Registers `device` on ``radio``.
     ///
+    /// The device is the provider's own from here on: its identifier is refused to any
+    /// peripheral-role client that asks to be hosted under it, and ``stop()`` takes it back off
+    /// the radio along with the configured fixtures.
+    ///
     /// - Parameters:
     ///   - device: The device to host.
     ///   - advertising: Whether it starts out advertising. Defaults to `true`.
     /// - Returns: The handle for pushing notifications and mutating the device afterwards.
+    ///   Stale once ``stop()`` has removed the device, exactly as a fixture's handle is.
     @discardableResult
     public func addVirtualDevice(_ device: VirtualDevice, advertising: Bool = true) async -> VirtualDeviceHandle {
-        providerOwnedIdentifiers.insert(device.descriptor.identifier)
-        return await radio.register(device, advertising: advertising)
+        let identifier = device.descriptor.identifier
+        providerOwnedIdentifiers.insert(identifier)
+        let handle = await radio.register(device, advertising: advertising)
+        addedDevices[identifier] = handle
+        return handle
     }
 
     /// The handle of the fixture device registered under `identifier`, or `nil` if
@@ -225,13 +240,16 @@ public actor Provider {
     }
 
     /// Stops listening, closes every live session — dropping each client's link — and takes
-    /// this provider's own fixture devices back off the radio. Idempotent.
+    /// this provider's own devices, the configured fixtures and everything
+    /// ``addVirtualDevice(_:advertising:)`` registered alike, back off the radio. Idempotent.
     ///
     /// **The radio is left as this provider found it.** A `Provider` that stopped listening is
-    /// hosting nothing, and a fixture left registered would keep answering a `VirtualRadio`
+    /// hosting nothing, and a device left registered would keep answering a `VirtualRadio`
     /// shared with another provider, keep its identifier in
     /// ``ProviderConfiguration/fixtures``' way, and keep a handle alive for a device nothing
-    /// drives any more.
+    /// drives any more. Every identifier stays protected up to that point: the removals happen
+    /// before ``providerOwnedIdentifiers`` is emptied, so no window exists in which a device is
+    /// still on the radio and its identifier no longer refused to a client claiming it.
     ///
     /// - Note: ``start()`` after a ``stop()`` registers the configured fixtures again, from
     ///   scratch: each one is a *new* registration under the same id, and ``handle(for:)``
@@ -252,8 +270,13 @@ public actor Provider {
             await handle.remove()
         }
         fixtures.removeAll()
-        // Everything ``addVirtualDevice(_:advertising:)`` registered goes with them: this
-        // provider defends no identifier it is no longer hosting a device under.
+        // Everything ``addVirtualDevice(_:advertising:)`` registered goes with them, and is
+        // gone from the radio before the set below stops defending its identifier.
+        for handle in addedDevices.values {
+            await handle.remove()
+        }
+        addedDevices.removeAll()
+        // This provider defends no identifier it is no longer hosting a device under.
         providerOwnedIdentifiers.removeAll()
     }
 

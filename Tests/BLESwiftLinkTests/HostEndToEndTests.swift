@@ -642,6 +642,65 @@ struct HostEndToEndTests {
         await provider.stop()
     }
 
+    @Test("A device added at runtime is defended while it is hosted, and stop() removes it")
+    func addedVirtualDeviceIsRemovedByStop() async throws {
+        let addedJSON = """
+        { "devices": [ { "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C9", "name": "Added HRM",
+          "advertisedServices": ["180D"], "services": [ { "uuid": "180D", "characteristics": [
+            { "uuid": "2A37", "properties": ["read", "notify"], "value": "AEg=" } ] } ] } ] }
+        """
+        let addedID = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C9")!
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        // Registered after start, through the runtime entry point rather than the fixture
+        // document — the path that kept no handle.
+        let fixture = try FixtureDocument.parse(Data(addedJSON.utf8)).devices[0]
+        let (device, handler) = VirtualDevice.fixture(fixture)
+        let handle = await provider.addVirtualDevice(device)
+        await handler.attach(handle)
+        #expect(provider.radio.knownDeviceIDs.withLock { $0.contains(addedID) })
+
+        // A peripheral-role client claiming that identifier is refused it, exactly as one
+        // claiming a fixture's is.
+        let connection = LinkConnection.connect(
+            to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "host.e2e.added")
+        )
+        let answer = Mutex<ServerHello?>(nil)
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(
+                protocolVersion: LinkProtocol.version,
+                role: .peripheral,
+                clientName: "collider",
+                hostIdentifier: addedID
+            )))
+        }
+        connection.onMessage = { message in
+            guard case .serverHello(let hello) = message else { return }
+            answer.withLock { $0 = hello }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { answer.withLock { $0 } != nil }
+        #expect(answer.withLock { $0?.accepted } == true)
+        #expect(try #require(answer.withLock { $0?.assignedHostIdentifier }) != addedID)
+        // Untouched: still the provider's own device, still its own database.
+        #expect(await provider.radio.services(of: addedID, matching: nil) == [Self.heartRate])
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+
+        // And it goes with the provider, rather than answering a shared radio forever.
+        await provider.stop()
+        #expect(provider.radio.knownDeviceIDs.withLock { !$0.contains(addedID) })
+        #expect(await provider.radio.services(of: addedID, matching: nil).isEmpty)
+    }
+
     @Test("Two fixtures declaring the same id fail the provider's start")
     func duplicateFixtureIdentifiersAreRejectedAtStart() async throws {
         let fixtureJSON = """
