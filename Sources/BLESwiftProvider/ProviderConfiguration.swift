@@ -50,7 +50,8 @@ public struct ProviderConfiguration: Sendable {
     public var centralBackendFactory: (@Sendable (DispatchSerialQueue) -> any CentralManaging)?
 
     /// Test/consumer hook: the peripheral-manager counterpart of
-    /// ``centralBackendFactory``, used by the peripheral-role sessions a later task adds.
+    /// ``centralBackendFactory``. The factory is called once per peripheral-role session, on
+    /// that session's own serial queue, and must return a backend confined to that queue.
     public var peripheralManagerBackendFactory: (@Sendable (DispatchSerialQueue) -> any PeripheralManaging)?
 
     /// Creates a configuration with every field at its default.

@@ -23,10 +23,12 @@ import Synchronization
 ///
 /// **One session per connection, one backend per session.** A client identifies its role in
 /// the handshake; a `.central` client gets a ``CentralSession`` driving a
-/// ``VirtualCentralBackend`` — optionally composed with the host's real CoreBluetooth, when
-/// ``ProviderConfiguration/passthrough`` is set — on a serial queue created for that session
-/// alone. Sessions share only the radio, so one client's scans and connections never leak
-/// into another's.
+/// ``VirtualCentralBackend``, and a `.peripheral` client gets a ``HostSession`` driving a
+/// ``VirtualPeripheralManagerBackend`` — each optionally composed with the host's real
+/// CoreBluetooth, when ``ProviderConfiguration/passthrough`` is set — on a serial queue
+/// created for that session alone. Sessions share only the radio, which is exactly what makes
+/// sim-to-sim work: one simulator's `PeripheralHost` is hosted there as a device, and another
+/// simulator's `Central` scans and connects to it. Nothing else leaks between sessions.
 public actor Provider {
 
     /// The radio hosting every virtual device this provider serves. `nonisolated` because
@@ -56,8 +58,8 @@ public actor Provider {
     /// released it, so no `ObjectIdentifier` can be recycled underneath a pending key.
     private nonisolated let pending = Mutex(PendingConnections())
 
-    /// The live central-role sessions, keyed by their connection.
-    private var sessions: [ObjectIdentifier: CentralSession] = [:]
+    /// The live sessions of both roles, keyed by their connection.
+    private var sessions: [ObjectIdentifier: any ProviderSession] = [:]
 
     /// The handles of the fixture devices ``start()`` registered, keyed by device id.
     private var fixtures: [UUID: VirtualDeviceHandle] = [:]
@@ -155,7 +157,7 @@ public actor Provider {
         listener?.port ?? 0
     }
 
-    /// How many central-role sessions are live.
+    /// How many sessions — of either role — are live.
     public var sessionCount: Int {
         sessions.count
     }
@@ -239,9 +241,15 @@ public actor Provider {
             )
             configuration.log?("opened central session \(sessionOrdinal) for \(hello.clientName)")
         case .peripheral:
-            // Task 13 replaces this.
-            configuration.log?("peripheral role not yet available")
-            connection.cancel()
+            sessionOrdinal += 1
+            let queue = DispatchSerialQueue(label: "bleswift-provider.host.\(sessionOrdinal)")
+            sessions[key] = HostSession(
+                connection: connection,
+                backend: makePeripheralBackend(queue: queue, clientName: hello.clientName),
+                queue: queue,
+                log: configuration.log
+            )
+            configuration.log?("opened host session \(sessionOrdinal) for \(hello.clientName)")
         }
     }
 
@@ -252,7 +260,7 @@ public actor Provider {
         pending.withLock { $0.release(connection) }
         guard let session = sessions.removeValue(forKey: key) else { return }
         session.close()
-        configuration.log?("closed a central session")
+        configuration.log?("closed a session")
     }
 
     /// Builds the backend for one central-role session, on that session's own queue.
@@ -268,6 +276,28 @@ public actor Provider {
         }
         let real = queue.sync { factory(queue) }
         return CompositeCentral(backends: [virtual, real], queue: queue)
+    }
+
+    /// Builds the backend for one peripheral-role session, on that session's own queue.
+    ///
+    /// The virtual half registers a device on ``radio`` under a fresh identifier, named after
+    /// the client — so a central-role session's scan sees the remote `PeripheralHost` exactly
+    /// as it sees a fixture.
+    private func makePeripheralBackend(queue: DispatchSerialQueue, clientName: String) -> any PeripheralManaging {
+        let virtual = queue.sync {
+            VirtualPeripheralManagerBackend(radio: radio, queue: queue, identifier: UUID(), name: clientName)
+        }
+        guard configuration.passthrough else { return virtual }
+        guard let factory = configuration.peripheralManagerBackendFactory else {
+            // Task 15 replaces this: `CoreBluetoothBackends` — the real peripheral-manager
+            // backend a passthrough provider composes with — does not exist yet, so a
+            // passthrough session with no injected factory is served by the virtual radio
+            // alone.
+            configuration.log?("passthrough has no peripheral backend factory; CoreBluetoothBackends arrives in Task 15")
+            return virtual
+        }
+        let real = queue.sync { factory(queue) }
+        return CompositePeripheralManager(backends: [virtual, real], queue: queue)
     }
 }
 
