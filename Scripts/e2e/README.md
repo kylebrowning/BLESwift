@@ -9,7 +9,7 @@ iPhone "advertiser"                       iPhone "scanner"
   PeripheralHost (180D)                     Central.scan(services: [180D])
         │                                          │
         └──────── BLESwiftSimulatorLink ───────────┘
-                          │  TCP 127.0.0.1:45541
+                          │  TCP 127.0.0.1:<ephemeral>
                   bleswift-provider (no --passthrough)
                        VirtualRadio
 ```
@@ -31,30 +31,31 @@ Environment overrides:
 | --- | --- | --- |
 | `ADVERTISER_SIM` | `iPhone 17 Pro` | Simulator that hosts the peripheral |
 | `SCANNER_SIM` | `iPhone 17` | Simulator that scans |
-| `ADVERTISER_READY_TIMEOUT` | `900` | Seconds to wait for the advertiser flow to pass |
+| `ADVERTISER_READY_TIMEOUT` | `900` | Seconds to wait for the advertiser flow to finish |
 
-**The port is fixed at 45541** and the script has no knob for it. The Explorer resolves its
-endpoint from `BLESWIFT_LINK` or `LinkEndpoint.default` (`127.0.0.1:45541`), and the runner
-offers no way to put an environment variable in front of the app under test — `grantiva run`
-takes launch *arguments* only, and `SIMCTL_CHILD_*` reaches a `simctl launch` the runner never
-performs — so a provider on any other port would simply never be dialed. It used to be a
-`PORT` variable that quietly did nothing; see friction item #10.
+**Nothing is pinned to a port.** The provider is started with `--listen 127.0.0.1:0`, so the
+system picks; the provider names the *bound* port on its (line-buffered) `listening on …`
+line, the script reads it back from there, and both `grantiva run` invocations get
+`--env BLESWIFT_LINK=127.0.0.1:<port>`. The Explorer resolves its endpoint through
+`SimulatorLink.install()` → `LinkEndpoint.fromEnvironment()`, so both simulators dial exactly
+the provider this run started, and a port already in use on the machine cannot collide with it.
 
 The script:
 
-1. Ensures both simulators exist and are booted (idempotent — it looks each one up by name
-   and creates it only if missing).
-2. Builds and starts `bleswift-provider`, waiting for its `listening on …` line.
+1. Ensures both simulators exist and are booted, with
+   `grantiva simulator ensure --name <name> --json` — find-or-create, boots by default, and
+   reports the UDID that every downstream command takes.
+2. Builds and starts `bleswift-provider` on an ephemeral loopback port, waiting for its
+   `listening on …` line and parsing the port out of it.
 3. Builds `BLESwiftExplorer` **once** for the simulator into `.build/e2e-dd`, and installs the
-   same `.app` on both simulators via `grantiva run --app-file`.
-4. Runs the advertiser flow in the background with `--keep-alive`, polling its
-   `.build/e2e-report/advertiser/report.json` for `"status": "passed"`
-   (≤ `ADVERTISER_READY_TIMEOUT`, default 900 s, logging elapsed time every 10 s). The bound
-   is that wide because a cold runner pays grantiva's agent build inside it — see friction
-   item #11.
+   same `.app` on both simulators with `simctl install` before either session starts.
+4. Runs the advertiser flow in the background with `--keep-alive` and
+   `--ready-file .build/e2e-report/advertiser.ready`, waiting for that file (≤
+   `ADVERTISER_READY_TIMEOUT`, default 900 s, logging elapsed time every 10 s) and then
+   requiring its `"status"` to be `passed`.
 5. Runs the scanner flow in the foreground.
-6. Exits with the scanner's status; the `trap` reaps the provider, the keep-alive grantiva
-   process, and the runner processes it strands.
+6. Exits with the scanner's status; the `trap` reaps the provider and runs
+   `grantiva simulator teardown --udid <UDID> --force` for each simulator.
 
 Reports land in `.build/e2e-report/{advertiser,scanner}` (grantiva writes `report.json`,
 `report.html`, JUnit XML, Allure results and failure screenshots there); the provider's stdout
@@ -62,34 +63,11 @@ is `.build/e2e-report/provider.log`.
 
 ## Provisioning the second simulator
 
-Only one simulator normally exists on a fresh machine. The second one was created with:
-
-```sh
-xcrun simctl create "iPhone 17" "iPhone 17"
-xcrun simctl boot "iPhone 17"
-```
-
-If the plain device-type name is not accepted, spell out the identifiers:
-
-```sh
-xcrun simctl list devicetypes | grep 'iPhone 17'
-xcrun simctl list runtimes | grep iOS
-xcrun simctl create "iPhone 17" \
-    com.apple.CoreSimulator.SimDeviceType.iPhone-17 \
-    com.apple.CoreSimulator.SimRuntime.iOS-27-0
-```
-
-The script does this itself (picking the newest available iOS runtime), so you should not have
-to run it by hand.
-
-**Duplicates are tolerated, not created.** The lookup matches by name across *every* device the
-runtime knows, whatever its state and whether or not it is currently available — a device whose
-runtime profile is momentarily missing is still a device, and looking only at
-`simctl list devices available` is what used to make the script create a second `iPhone 17` on a
-runner that already had one. `grantiva run` then refused the ambiguous name outright. If several
-devices do share a name, the first (preferring an available one) wins with a warning rather than
-a third being created, and both sessions are launched by **UDID**, so a duplicate cannot make a
-run ambiguous.
+Nothing to do by hand: `grantiva simulator ensure --name "iPhone 17"` resolves the device type
+from the name and the newest installed iOS runtime, creates the simulator if it is missing,
+reuses it if it is not, and boots it either way. A machine that already has two simulators
+sharing a name is fine too — `ensure` reports one UDID and every downstream command is given
+that UDID rather than the name, so a duplicate cannot make a run ambiguous.
 
 ## When it fails on CI
 
@@ -98,212 +76,94 @@ time — the two newest distinct `iPhone …` names the runner image actually ha
 `xcrun simctl list devices available -j`. Nothing is pinned, because named devices drift with
 the image's Xcode and a name that matches nothing fails the job outright.
 
-**grantiva is installed unpinned.** The ruling for the CI cleanup asked for
-`brew install grantiva/tap/grantiva@<version>` *if the tap supports versioned formulae*. It
-does not: `grantiva/homebrew-tap` ships a single `Formula/grantiva.rb`, so there is no
-`grantiva@1.6.5` to install and the job takes whatever the tap's HEAD formula points at. A
-grantiva release that changes the CLI can therefore turn this job red without a commit here;
-the friction log below is written against **1.6.5**.
+**grantiva is installed unpinned.** `grantiva/homebrew-tap` ships a single `Formula/grantiva.rb`
+with no versioned formulae, so the job takes whatever the tap's HEAD points at. The script
+depends on 1.7.0 features (`simulator ensure --name`, `run --ready-file`, `run --env`,
+`simulator teardown --udid --force`), so the job prints `grantiva --version` as its own step.
+
+The job is `continue-on-error: true`, but not because the flow cannot pass — it has. It is
+non-gating because GitHub macOS runner capacity is erratic: simulator boots on that image have
+been measured anywhere from 109 s to 577 s.
 
 First things to check when it goes red:
 
-- **grantiva installation.** `brew install grantiva/tap/grantiva` must succeed, and the first
-  `grantiva run` extracts and builds an embedded WebDriverAgent runner — several minutes, and
-  it needs a usable Xcode. `grantiva doctor` in a debug step reports what is missing.
-- **Simulator availability.** If neither `iPhone 16 Pro` nor `iPhone 16` exists on the runner
-  image, the script creates them from the newest installed iOS runtime; if no iOS runtime is
-  installed at all it fails immediately with `no available iOS runtime`.
-- **Port 45541 already bound** by something else on the runner.
+- **grantiva version.** The `grantiva version` step; anything below 1.7.0 will fail on the
+  flags above.
+- **grantiva installation.** `brew install grantiva/tap/grantiva` must succeed, and on a cold
+  machine the first `grantiva run` builds `GrantivaAgent` and a WebDriverAgent runner inside
+  the first flow's clock. `grantiva doctor` reports what is missing.
+- **Simulator availability.** If no iOS runtime is installed at all, `grantiva simulator ensure`
+  has nothing to create the device from and the script fails immediately.
 - **Uploaded artifacts.** The `sim-to-sim-e2e` artifact contains `provider.log` (which side
   connected: `opened central session …` / `opened host session …`), both `report.json`s and
   grantiva's failure screenshots. That is usually enough to tell a BLE failure from a UI one.
 
-## grantiva friction log
+## grantiva notes
 
-Everything below was observed against **grantiva 1.6.5** on macOS 27 / Xcode 27 beta 6 /
-iOS 27.0 simulators while building this test. It is written for grantiva's maintainer.
+### Resolved in grantiva 1.7.0
 
-### 1. Launch arguments arrive with an extra leading dash
+Twelve friction items were logged against **1.6.5** while this test was built, and 1.7.0
+closed all but one of them. Kept here as history, one line each, with what the script and the
+flows now do instead:
 
-The brief's Maestro syntax `arguments: ["--auto-advertise"]` is **rejected** —
-`Error: validation failed with 1 error(s)` — so the map form is mandatory:
+1. **Launch arguments arrived with an extra leading dash.** `"--auto-advertise"` reached the
+   app as `---auto-advertise`, so the flow wrote the key with one dash. 1.7.0 passes a key
+   through verbatim when it already begins with `-`; `advertise.yaml` is back to
+   `"--auto-advertise": true`.
+2. **`visible:` silently dropped `id` when `text` was also given.** The advertiser assertion
+   had to drop the identifier. 1.7.0 ANDs the two; `id: advertise.status` is back alongside
+   `text: "Advertising"`.
+3. **`text:` matching was unanchored and case-insensitive**, so `"Advertising"` matched the
+   app's `"Not advertising"` idle label and the flow passed while nothing advertised. 1.7.0
+   has `exact: true`, which both flows now use — and `AdvertiseView`'s idle label, renamed to
+   `"Idle"` to dodge the collision, reads `"Not advertising"` again.
+4. **No readiness signal for a `--keep-alive` session**, so the script polled the
+   incrementally-rewritten `report.json`. 1.7.0 has `run --ready-file <path>`, written once and
+   atomically after every flow reaches a terminal state; the script waits on that file and
+   reads its `"status"`.
+5. **Killing `grantiva run` stranded its children** — a `grantiva-runner`, a WebDriverAgent
+   `xcodebuild test-without-building` and a `simctl diagnose` — and the strays kept the
+   simulator "owned by another Grantiva run" while the session ledger said it was free. The
+   script reaped them by `pkill` pattern. 1.7.0 has
+   `simulator teardown --udid <UDID> --force`, which reclaims by live process inspection and
+   reconciles the registry; the `pkill` block and the `grantiva runner stop` call are gone.
+6. **Intermittent `Failed to create session for app: <bundle id>`**, always right after a
+   previous session had been killed. Not seen since; presumed to have gone with (5), since it
+   was the same stale-ownership family.
+7. **Concurrent sessions on two different simulators work.** Not a problem then and not one
+   now — it is what makes this test possible.
+8. **`simulator ensure` required `--name`, `--device-type` and `--runtime` together**, so the
+   script used `xcrun simctl` and its own JSON lookup. 1.7.0 accepts `--name` alone and reads
+   the device type out of the name; the simctl lookup is gone.
+9. **Off-screen elements are not found, and `scrollUntilVisible` is the fix.** Not a bug — the
+   accessibility tree genuinely does not expose a `List` row below the fold. Both flows keep
+   their `scrollUntilVisible` steps.
+10. **No way to set an environment variable on the app under test**, which forced the provider
+    onto the port the app already defaulted to (45541). 1.7.0 has `run --env KEY=VALUE`; the
+    provider now binds an ephemeral port and both sessions are given
+    `--env BLESWIFT_LINK=127.0.0.1:<port>`. Two smaller notes from the same item — flows being
+    reported against their temp-dir copy, and the summary table being printed twice — are
+    cosmetic and unchanged. The third, failure screenshots landing in a stray `.grantiva/` in
+    the working directory, is fixed: a run with `--report-dir` now writes only there, and the
+    `.gitignore` entry for `.grantiva/` has been removed.
+11. **Every cold run paid the 5–10 minute `GrantivaAgent` build** inside the first flow's
+    execution, with no progress reaching the caller. Still true on a genuinely cold machine —
+    see the open item below — but 1.7.0 caches the built agent and WebDriverAgent per runtime,
+    so it is paid once rather than per run.
+12. **WebDriverAgent's 90-second startup timeout** was what made this job `continue-on-error`.
+    With the simulator booted to `bootstatus -b` and the app pre-installed, and with 1.7.0's
+    WDA cache, it has not been hit again; the job stays non-gating for runner capacity, not
+    for this.
 
-```yaml
-- launchApp:
-    arguments:
-      "--auto-advertise": true
-```
+### Open
 
-That form is accepted and the flow passes… but the app never sees the flag. `ps` on the
-running app under grantiva shows what actually got passed:
+**Cold-runner first-run WebDriverAgent build.** grantiva's WDA cache covers iOS 26.2 and 26.4.
+GitHub's `macos-latest` image is on 26.2, so CI should now be served from that cache; a local
+machine on iOS 27 falls outside it and rebuilds WebDriverAgent once, the first time a flow runs
+against a 27 simulator. Nothing to work around — it is a one-time cost per runtime — but it is
+the remaining reason a first run looks hung for a few minutes.
 
-```
-…/BLESwiftExplorer.app/BLESwiftExplorer ---auto-advertise true
-```
-
-Three dashes. The runner prepends a `-` to every key (the Maestro `-key value` convention),
-so a key that already starts with `--` becomes `---`. The workaround in `advertise.yaml` is to
-write the key with **one** dash, `"-auto-advertise": true`, which reaches the app as
-`--auto-advertise true`.
-
-*Wish:* pass the key through verbatim when it already begins with `-`, or document the
-prepending. And the failure is silent — the flow passed while the app ran with a mangled flag.
-
-### 2. `visible:` silently drops `id` when `text` is also given
-
-The brief's assertion
-
-```yaml
-- extendedWaitUntil:
-    visible:
-      id: "advertise.status"
-      text: "Advertising"
-```
-
-is echoed by the runner as `extendedWaitUntil: visible text="Advertising"` — the `id` is gone.
-Confirmed by substituting a deliberately bogus id: with `id: "totally.bogus.identifier"` **and**
-`text: "Advertising"` the step still passes, while the same bogus id **alone** fails after the
-timeout (so id matching itself works, and works well — it is only ignored in combination).
-
-*Wish:* AND the two selectors, or at minimum warn that one was discarded.
-
-### 3. `text:` matching is case-insensitive and unanchored
-
-`text: "Advertising"` matched the app's then-current **"Not advertising"** idle label.
-Combined with (1), the advertiser flow passed for two full runs while nothing was advertising
-at all — the provider log showed no `opened host session` line. `text: "^Advertising$"` works,
-and so does removing the collision: `AdvertiseView`'s idle label is now **"Idle"**, so the
-plain `text: "Advertising"` assertion in `advertise.yaml` can only be satisfied by the positive
-state.
-
-*Wish:* an `exact:`/`caseSensitive:` selector, or at least a documented default. A test that
-passes because the *negative* label matched is the worst kind of green.
-
-### 4. No readiness signal for a `--keep-alive` session
-
-A keep-alive session is exactly the tool for "hold app A in state X while I drive app B", but
-the only way to know the flow finished is to poll the report. `report.json` is rewritten
-incrementally (it carries an `updateSeq`), so its mere existence is not a verdict — the script
-polls for a top-level `"status": "passed"` and treats `running`/`pending` as keep-waiting.
-
-*Wish:* `--ready-file <path>` (touched when the flow completes), or a line on stdout that is
-guaranteed to be flushed, or `grantiva run --keep-alive --json` emitting one NDJSON record per
-completed flow.
-
-### 5. Killing `grantiva run` strands its children, and the strays hold the simulator
-
-`kill -INT` on a backgrounded `grantiva run --keep-alive` (the documented "Release with
-Ctrl-C") does not take down the `grantiva-runner` child or the WebDriverAgent
-`xcodebuild test-without-building` it started. They survive, and the next run against that
-simulator fails with:
-
-```
-Error: Simulator <UDID> is already owned by another Grantiva run.
-Use `grantiva simulator ensure --name <unique-name>` and pass that simulator,
-or wait for the active run to finish.
-```
-
-…while `grantiva simulator sessions` says *"No Grantiva-managed simulator sessions."* and
-`~/.grantiva/simulator-capacity/sessions.json` is `[]`. So the ownership check and the session
-ledger disagree: ownership is inferred from the live processes, which nothing had cleaned up.
-`grantiva runner stop` reports "No active session found." and does not help either. The script
-therefore reaps by pattern, per UDID:
-
-```sh
-pkill -f "grantiva-runner .*--device $udid"
-pkill -f "test-without-building .*-destination id=$udid"
-pkill -f "simctl diagnose .*--udid=$udid"
-```
-
-(That last one matters too: each killed WDA `xcodebuild` leaves a `simctl diagnose` collecting
-a 600 s log bundle.)
-
-*Wish:* SIGINT/SIGTERM on `grantiva run` should tear down the whole process group; and
-`grantiva simulator teardown` should have a `--udid`/`--force` mode that releases an
-ownership claim whose owner is gone. Today `--session-id` is useless when the ledger is empty.
-
-### 6. Intermittent `Failed to create session for app: <bundle id>`
-
-Hit three times in ~15 runs, always immediately after a previous session had been killed:
-`launchApp` fails in 460 ms with `Failed to create session for app: com.bleswift.explorer` and
-every later step is skipped. `grantiva runner stop` + a few seconds' wait cleared it every
-time. Probably the same stale-state family as (5).
-
-*Wish:* retry once, or say which precondition failed (agent port busy? WDA session already
-open?).
-
-### 7. Concurrent sessions on two different simulators: **works**
-
-Confirmed, and it is what makes this test possible: a backgrounded `grantiva run --keep-alive`
-on `iPhone 17 Pro` and a foreground `grantiva run` on `iPhone 17` coexist happily, each with
-its own GrantivaAgent port (8540 / 8731). The only sharp edge is (5): the two runs must target
-different simulators, and the first one's strays must be reaped before that simulator is used
-again.
-
-### 8. Provisioning a second simulator by name
-
-`grantiva simulator ensure --name … --device-type … --runtime …` exists but requires all three,
-so it is no shorter than `xcrun simctl create` and does not accept the friendly device-type
-name (`"iPhone 17"`) the way `simctl` does. The script uses `simctl` directly.
-
-*Wish:* `grantiva simulator ensure --name "iPhone 17"` alone — resolve the device type from the
-name and the runtime to the newest installed — would be a genuinely nice one-liner for CI.
-
-### 9. Off-screen elements are not found, and `scrollUntilVisible` is the fix
-
-`tapOn: id="scan.startHeartRate"` failed with `Element not found` purely because the button sat
-below the fold of a SwiftUI `List`; the accessibility tree does not expose it until it is
-scrolled in. `scrollUntilVisible: { element: { id: … }, direction: DOWN }` handles it and is in
-both flows now. Worth calling out in the docs — it is the single most confusing failure mode
-for someone whose selector is provably correct.
-
-### 10. Small things
-
-- **No way to set an environment variable on the app under test.** `launchApp` takes
-  *arguments* only, and the runner launches through its own agent rather than
-  `simctl launch`, so `SIMCTL_CHILD_*` never reaches the app either. Anything the app reads
-  from the environment — here `BLESWIFT_LINK`, which is how a build is pointed at a
-  non-default provider endpoint — is therefore unreachable from a flow, and the host-side
-  service has to sit on the port the app already defaults to. An `env:` map on `launchApp`
-  (or passing the runner's own environment through) would close this.
-- `grantiva run --flow <path>` copies the flow into a temp dir and reports failures against
-  that temp path (`/var/folders/…/grantiva-<UUID>/advertise.yaml`), which is noise when you are
-  trying to open the file you wrote.
-- The summary table is printed twice per run (once per flow, once per device), which makes CI
-  logs harder to scan than they need to be.
-- Failure screenshots go to `.grantiva/captures/` in the working directory even when
-  `--report-dir` is given; only the copies inside the report dir are useful to CI, and the
-  stray `.grantiva/` directory has to be gitignored.
-
-### 11. No warm-up step: every cold run pays the 5-10 minute agent build
-
-The first `grantiva run` on a machine builds `GrantivaAgent` ("This may take 5-10 minutes" in
-its own output) and then a WebDriverAgent runner (~65 s), all *inside* the first flow's
-execution — nothing has run a step yet, and no progress reaches the caller. On CI that is the
-whole cost of the job, paid again on every run, and it was what first blew this script's
-advertiser-readiness bound.
-
-*Wish:* a warm-up command that does only that work and exits (`grantiva runner install
---prebuild`, say), so CI can run it as its own step and see it fail as its own step. And a
-documented cache location for the built agent and runner, so `actions/cache` can restore them
-between runs instead of rebuilding from scratch each time.
-
-### 12. WebDriverAgent's 90-second startup timeout is not configurable
-
-On a GitHub runner every simulator is cold, and the first `grantiva run` against one fails
-before any flow step executes:
-
-```
-Error: failed to create driver: WDA start failed: WDA startup timeout (90s)
-```
-
-Nothing in `grantiva run` exposes that bound — there is no `--wda-timeout`, and no environment
-variable for it — so a machine whose simulator needs longer than 90 seconds to accept a
-WebDriverAgent session simply cannot run a flow. Booting the simulator to `bootstatus -b` and
-pre-installing the app with `simctl install` (both of which `Scripts/sim-to-sim-e2e.sh` now
-does) shortens the runway but does not raise the ceiling, and the E2E job is
-`continue-on-error: true` on CI because of it.
-
-*Wish:* a `--wda-timeout` flag (or `GRANTIVA_WDA_TIMEOUT`), and ideally the same warm-up
-command item #11 asks for, so the WebDriverAgent session is established once as its own step
-rather than inside the first flow's clock.
+**`simulator ensure` prints prose, not a UDID.** Without `--json` it prints
+`Reused iPhone 17 Pro (<UDID>) — Booted`, so a script that wants the UDID has to either scrape
+that line or ask for `--json` (which the script does). Worth a mention in the help text, whose
+summary reads as though the bare command hands back the identifier.

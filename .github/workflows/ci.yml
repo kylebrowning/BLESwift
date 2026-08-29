@@ -102,18 +102,24 @@ jobs:
     name: Sim-to-sim E2E (grantiva)
     runs-on: macos-latest
     timeout-minutes: 25
-    # Informational, not gating: on a GitHub runner every simulator is cold, and grantiva's
-    # WebDriverAgent startup timeout (90 s, not configurable) is exceeded before the first
-    # flow step runs — see friction item #12 in Scripts/e2e/README.md. The script passes
-    # locally and is the documented way to run this end to end, so it stays in CI for its
-    # logs and reports until grantiva has a warm-up or cache story.
+    # Non-gating because GitHub macOS runner capacity is erratic: simulator boots on this
+    # image have taken anywhere from 109 s to 577 s, which is enough on its own to push the
+    # job past its cap on a bad day. The flow itself passes — locally and on CI — so the job
+    # stays for its logs and reports, but it does not block a merge on runner weather.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install grantiva
         # Unpinned: the tap ships a single `grantiva.rb`, with no versioned formulae to pin
-        # to. Noted in Scripts/e2e/README.md.
+        # to, so this installs whatever the tap's HEAD formula points at (1.7.0 or newer).
+        # Noted in Scripts/e2e/README.md.
         run: brew install grantiva/tap/grantiva
+      - name: grantiva version
+        # Printed as its own step: the script's behaviour depends on 1.7.0 features
+        # (`simulator ensure --name`, `run --ready-file`, `run --env`,
+        # `simulator teardown --udid --force`), and a tap that has moved backwards or
+        # forwards is the first thing to check when this job goes red.
+        run: grantiva --version
       - name: Resolve two simulators
         # The two newest *numbered* iPhone models the runner actually has: names are ranked
         # with a numbered model ("iPhone 17 Pro") above an unnumbered or suffixed one

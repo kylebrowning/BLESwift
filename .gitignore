@@ -35,6 +35,3 @@ Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/*
 !Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/xcschemes/
 Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/xcschemes/*
 !Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/xcschemes/BLESwiftExplorer.xcscheme
-
-# grantiva writes failure screenshots into the working directory.
-.grantiva/

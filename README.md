@@ -188,8 +188,8 @@ swift run bleswift-provider --fixture hrm.json   # serve virtual devices from JS
 
 The virtual radio needs no hardware, no entitlements, and no approval — and because a
 simulator's `PeripheralHost` is hosted on it as a device, **two simulators can talk to each
-other** (`Scripts/sim-to-sim-e2e.sh`, which runs locally; CI runs it non-gating for its logs,
-because grantiva's WebDriverAgent startup timeout is exceeded on cold GitHub runners).
+other** (`Scripts/sim-to-sim-e2e.sh`, which runs locally and has passed on CI, where it stays
+non-gating because GitHub macOS runner capacity is erratic).
 `--passthrough` additionally exposes
 your Mac's real radio, and needs a Bluetooth-entitled, signed provider build. See the
 [Running in the iOS Simulator](Sources/BLESwift/BLESwift.docc/SimulatorSupport.md) DocC article

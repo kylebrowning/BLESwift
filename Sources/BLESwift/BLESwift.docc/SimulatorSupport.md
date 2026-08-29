@@ -202,8 +202,9 @@ same app — meet on the virtual radio with no hardware and no entitlements invo
 advertises, the other scans, connects, reads, writes, and subscribes.
 
 `Scripts/sim-to-sim-e2e.sh` runs exactly that, end to end, across two booted simulators and the
-`BLESwiftExplorer` sample app. It runs locally; CI runs it non-gating for its logs, because
-grantiva's WebDriverAgent startup timeout is exceeded on cold GitHub runners. See
+`BLESwiftExplorer` sample app. The provider binds an ephemeral loopback port and both apps are
+pointed at it through `BLESWIFT_LINK`, so nothing is pinned. It runs locally and has passed on
+CI, where it stays non-gating because GitHub macOS runner capacity is erratic. See
 `Scripts/e2e/README.md` for the topology, the
 environment overrides, and what to check when it goes red.
 
