@@ -97,9 +97,11 @@ struct VirtualPeripheralManagerTests {
             }
             return nil
         }
-        // `Peripheral` exposes no public "notifications are armed" signal, so the brief's
-        // permitted fixed-delay fallback stands in for one.
-        try await Task.sleep(for: .milliseconds(100))
+        // `Peripheral` publishes no "notifications are armed" signal of its own, so the wait is
+        // on the radio's own subscription table — the very state the push consults — and on the
+        // host's subscriber list behind it.
+        await waitFor(timeout: .seconds(10)) { await radio.isSubscribed(characteristic: Self.measurement) }
+        await waitFor(timeout: .seconds(10)) { await !host.subscribers(for: Self.measurement).isEmpty }
         #expect(await !host.subscribers(for: Self.measurement).isEmpty)
         try await host.updateValue(Data([0, 99]), for: Self.measurement)
         #expect(try await bounded { try await notifications.value } == Data([0, 99]))
@@ -390,7 +392,8 @@ struct VirtualPeripheralManagerTests {
         _ backend: VirtualCentralBackend,
         on queue: DispatchSerialQueue,
         to identifier: UUID,
-        host: PeripheralHost
+        host: PeripheralHost,
+        radio: VirtualRadio
     ) async throws -> VirtualPeripheralRemote {
         await waitFor { await onQueue(queue) { !backend.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
         let remote = try #require(await onQueue(queue) {
@@ -406,7 +409,13 @@ struct VirtualPeripheralManagerTests {
         }
         await waitFor { await onQueue(queue) { remote.isDiscovered(Self.measurement) } }
         await onQueue(queue) { remote.setNotifyValue(true, for: Self.measurement) }
-        await waitFor { await !host.subscribers(for: Self.measurement).isEmpty }
+        // Both halves of the arming, each on a bound a starved runner cannot outrun: the
+        // radio's own subscription table — which is what a `remove()` or a disconnect walks —
+        // and the host's view of it behind that.
+        await waitFor(timeout: .seconds(10)) {
+            await radio.isSubscribed(session: backend.sessionID, characteristic: Self.measurement)
+        }
+        await waitFor(timeout: .seconds(10)) { await !host.subscribers(for: Self.measurement).isEmpty }
         return remote
     }
 
@@ -423,15 +432,18 @@ struct VirtualPeripheralManagerTests {
 
         let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.DisconnectCentral")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
-        let remote = try await Self.subscribedRemote(backend, on: queue, to: identifier, host: host)
+        let remote = try await Self.subscribedRemote(backend, on: queue, to: identifier, host: host, radio: radio)
         #expect(await host.subscribers(for: Self.measurement).map(\.id) == [backend.sessionID])
 
         // The central goes away without unsubscribing first, exactly as a real one does when
         // its connection is cancelled.
         await Self.onQueue(queue) { backend.cancelPeripheralConnection(remote) }
 
-        await waitFor { await host.subscribers(for: Self.measurement).isEmpty }
+        await waitFor(timeout: .seconds(10)) { await host.subscribers(for: Self.measurement).isEmpty }
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
+        // The log is filled by a task of its own, so the event can still be in flight when the
+        // host's list has already emptied.
+        await waitFor(timeout: .seconds(10)) { log.lastUnsubscribe != nil }
         let departure = try #require(log.lastUnsubscribe)
         #expect(departure.central.id == backend.sessionID)
         #expect(departure.characteristic == Self.measurement)
@@ -455,7 +467,8 @@ struct VirtualPeripheralManagerTests {
             try #require(backend),
             on: queue,
             to: identifier,
-            host: host
+            host: host,
+            radio: radio
         )
         #expect(await host.subscribers(for: Self.measurement).map(\.id) == [session])
 
@@ -465,8 +478,11 @@ struct VirtualPeripheralManagerTests {
         backend = nil
         #expect(remote == nil && backend == nil)
 
-        await waitFor { await host.subscribers(for: Self.measurement).isEmpty }
+        await waitFor(timeout: .seconds(10)) { await host.subscribers(for: Self.measurement).isEmpty }
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
+        // The log is filled by a task of its own, so the event can still be in flight when the
+        // host's list has already emptied.
+        await waitFor(timeout: .seconds(10)) { log.lastUnsubscribe != nil }
         let departure = try #require(log.lastUnsubscribe)
         #expect(departure.central.id == session)
         #expect(departure.characteristic == Self.measurement)
@@ -485,14 +501,17 @@ struct VirtualPeripheralManagerTests {
 
         let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.RemoveCentral")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
-        _ = try await Self.subscribedRemote(backend, on: queue, to: identifier, host: host)
+        _ = try await Self.subscribedRemote(backend, on: queue, to: identifier, host: host, radio: radio)
         #expect(await host.subscribers(for: Self.measurement).map(\.id) == [backend.sessionID])
 
         let generation = try #require(await radio.generation(of: identifier))
         await radio.remove(device: identifier, generation: generation)
 
-        await waitFor { await host.subscribers(for: Self.measurement).isEmpty }
+        await waitFor(timeout: .seconds(10)) { await host.subscribers(for: Self.measurement).isEmpty }
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
+        // The log is filled by a task of its own, so the event can still be in flight when the
+        // host's list has already emptied.
+        await waitFor(timeout: .seconds(10)) { log.lastUnsubscribe != nil }
         let departure = try #require(log.lastUnsubscribe)
         #expect(departure.central.id == backend.sessionID)
         #expect(departure.characteristic == Self.measurement)

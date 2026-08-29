@@ -83,9 +83,11 @@ struct CentralEndToEndTests {
             }
             return nil
         }
-        // `Peripheral` exposes no public "notifications are armed" signal, so a fixed delay
-        // stands in for one, exactly as the virtual-radio tests do.
-        try await Task.sleep(for: .milliseconds(100))
+        // `Peripheral` publishes no "notifications are armed" signal of its own, so the wait is
+        // on the provider radio's own subscription table — the state the push consults — rather
+        // than on a delay a starved runner can outrun.
+        await waitFor(timeout: .seconds(10)) { await provider.radio.isSubscribed(characteristic: Self.control) }
+        #expect(await provider.radio.isSubscribed(characteristic: Self.control))
         try await peripheral.write(Data([0x3C]), to: Self.control)
         #expect(try await bounded { try await notified.value } == Data([0x3C]))
 
@@ -140,8 +142,11 @@ struct CentralEndToEndTests {
                 if count == 500 { return }
             }
         }
-        // See `endToEnd()` — no public arming signal, so a fixed delay stands in for one.
-        try await Task.sleep(for: .milliseconds(100))
+        // See `endToEnd()` — no public arming signal, so the wait is on the radio's own
+        // subscription table. Getting this wrong is what made this test receive [] on a
+        // starved runner: every one of the 500 pushes below went out with nothing subscribed.
+        await waitFor(timeout: .seconds(10)) { await provider.radio.isSubscribed(characteristic: Self.control) }
+        #expect(await provider.radio.isSubscribed(characteristic: Self.control))
 
         let expected = (0..<500).map { Data([UInt8($0 % 256), UInt8($0 / 256)]) }
         let start = ContinuousClock.now

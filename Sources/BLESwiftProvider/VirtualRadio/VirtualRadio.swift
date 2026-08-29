@@ -359,6 +359,26 @@ public actor VirtualRadio {
         subscriptions[device]?[characteristic]?.count ?? 0
     }
 
+    /// Whether `characteristic` currently has a subscriber — `session` when one is named, any
+    /// session otherwise, on any device this radio hosts.
+    ///
+    /// Not API: it is the "notifications are armed" signal a test waits on. A `Central`
+    /// publishes no such signal of its own, so tests stood a fixed delay in for one and a
+    /// starved runner could pass the delay with nothing yet subscribed — the notifications
+    /// that followed then had no subscriber to reach. This is the state the push itself
+    /// consults, so a wait on it cannot be early.
+    package func isSubscribed(session: UUID? = nil, characteristic: CharacteristicIdentifier) -> Bool {
+        for perCharacteristic in subscriptions.values {
+            guard let subscribers = perCharacteristic[characteristic] else { continue }
+            guard let session else {
+                if !subscribers.isEmpty { return true }
+                continue
+            }
+            if subscribers.contains(session) { return true }
+        }
+        return false
+    }
+
     /// Stops `session`'s scan, if any.
     func stopScan(session: UUID) {
         sessions[session]?.scanner?.repeater?.cancel()

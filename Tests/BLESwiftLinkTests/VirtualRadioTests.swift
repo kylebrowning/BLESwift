@@ -108,7 +108,7 @@ struct VirtualRadioTests {
 
     @Test("Connect, read a static value, write, and get notified")
     func gatt() async throws {
-        let (central, _, _) = try await makeRig()
+        let (central, radio, _) = try await makeRig()
         let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
         let peripheral = try await central.connect(PeripheralIdentifier(uuid: id, name: "Fixture HRM"))
         let measured: Data = try await peripheral.read(from: Self.measurement)
@@ -120,9 +120,10 @@ struct VirtualRadioTests {
             }
             return nil
         }
-        // `Peripheral` exposes no public "notifications are armed" signal, so the brief's
-        // permitted fixed-delay fallback stands in for one.
-        try await Task.sleep(for: .milliseconds(100))
+        // `Peripheral` publishes no "notifications are armed" signal of its own, so the wait is
+        // on the radio's own subscription table — the state the push consults.
+        await waitFor(timeout: .seconds(10)) { await radio.isSubscribed(characteristic: Self.control) }
+        #expect(await radio.isSubscribed(characteristic: Self.control))
         try await peripheral.write(Data([0x2A]), to: Self.control)
         #expect(try await bounded { try await notifications.value } == Data([0x2A]))
         let readBack: Data = try await peripheral.read(from: Self.control)
@@ -359,7 +360,7 @@ struct VirtualRadioTests {
 
     @Test("Handle-driven notifications reach subscribed centrals")
     func handleNotify() async throws {
-        let (central, _, handle) = try await makeRig()
+        let (central, radio, handle) = try await makeRig()
         let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
         let peripheral = try await central.connect(PeripheralIdentifier(uuid: id, name: nil))
         let task = Task { () -> Data? in
@@ -368,8 +369,10 @@ struct VirtualRadioTests {
             }
             return nil
         }
-        // See `gatt()` — no public arming signal, so the brief's fixed-delay fallback stands in.
-        try await Task.sleep(for: .milliseconds(100))
+        // See `gatt()` — no public arming signal, so the wait is on the radio's own
+        // subscription table.
+        await waitFor(timeout: .seconds(10)) { await radio.isSubscribed(characteristic: Self.measurement) }
+        #expect(await radio.isSubscribed(characteristic: Self.measurement))
         await handle.notify(Data([0, 99]), for: Self.measurement, to: nil)
         #expect(try await bounded { try await task.value } == Data([0, 99]))
     }
