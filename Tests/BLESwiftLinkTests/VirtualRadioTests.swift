@@ -958,6 +958,49 @@ struct VirtualRadioTests {
         #expect(modified.withLock { $0 } == [[Self.service]])
     }
 
+    @Test("An invalidated service takes its subscriptions with it, and re-subscribing reports again")
+    func droppedServiceDropsItsSubscriptions() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let handler = RecordingHandler()
+        let handle = await radio.register(
+            VirtualDevice(
+                descriptor: VirtualDeviceDescriptor(
+                    identifier: identifier,
+                    name: "two",
+                    advertisement: AdvertisementData(serviceUUIDs: [Self.service], isConnectable: true),
+                    services: Self.twoServices
+                ),
+                handler: handler
+            )
+        )
+        let session = UUID()
+        await radio.attach(session: session, centralSink: { _ in })
+        #expect(await radio.connect(session: session, device: identifier, sink: { _ in }).error == nil)
+        #expect(
+            await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session)
+                .isNotifying
+        )
+        #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 1)
+        #expect(handler.reported == [true])
+
+        // The heart-rate service goes: the subscription under it goes with it, and the host is
+        // told it lost that subscriber rather than being left holding a ghost.
+        await handle.setServices([Self.twoServices[1]])
+        #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
+        #expect(handler.reported == [true, false])
+
+        // Re-added and re-subscribed, the transition is reported again — which the stale set
+        // entry would have swallowed, leaving the central armed and the host unaware.
+        await handle.setServices(Self.twoServices)
+        #expect(
+            await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session)
+                .isNotifying
+        )
+        #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 1)
+        #expect(handler.reported == [true, false, true])
+    }
+
     @Test("A static value is refused when its characteristic declares no read or notify")
     func staticValueHonorsTheReadPermission() async throws {
         let radio = VirtualRadio()

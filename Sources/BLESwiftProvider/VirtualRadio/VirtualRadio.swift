@@ -230,14 +230,31 @@ public actor VirtualRadio {
     /// handles it discovered are gone and must be discovered again. Nothing is reported for a
     /// database that only gained services: CoreBluetooth's callback names what was
     /// *invalidated*, and a purely additive change invalidates nothing.
-    func setServices(_ services: [GATTService], device: UUID, generation: UInt64) {
+    ///
+    /// **A subscription under an invalidated service goes with it**, and is reported to the
+    /// device's handler as an unsubscribe, exactly as ``disconnect(session:device:)`` and
+    /// ``remove(device:generation:)`` report theirs — CoreBluetooth delivers
+    /// `didUnsubscribeFrom` when a published service is removed. Left standing, the entry was
+    /// a subscriber a link-hosted `PeripheralHost` could never lose, and it also poisoned
+    /// re-subscription: re-adding the service and subscribing again found the session already
+    /// in the set, so no transition was reported and the host — which starts notifying on
+    /// `didSubscribe` — was never told, while the central sat waiting on a stream that reported
+    /// itself armed.
+    func setServices(_ services: [GATTService], device: UUID, generation: UInt64) async {
         guard isCurrent(device, generation: generation, operation: "setServices") else { return }
         let before = Set(devices[device]?.descriptor.services.map(\.identifier) ?? [])
         devices[device]?.descriptor.services = services
         let invalidated = before.subtracting(services.map(\.identifier))
         guard !invalidated.isEmpty else { return }
-        for session in sessions.values where session.connections.contains(device) {
+        var dropped: [(session: UUID, characteristics: [CharacteristicIdentifier])] = []
+        for (sessionID, session) in sessions where session.connections.contains(device) {
             session.peripheralSinks[device]?(.didModifyServices(Array(invalidated)))
+            dropped.append((sessionID, dropSubscriptions(session: sessionID, device: device, under: invalidated)))
+        }
+        // Every table is settled before the first `await`, as in ``detach(session:)``, so a
+        // handler that calls back into the radio cannot observe a half-applied database.
+        for entry in dropped {
+            await reportUnsubscribed(entry.characteristics, device: device, session: entry.session)
         }
     }
 
@@ -458,14 +475,20 @@ public actor VirtualRadio {
         await reportUnsubscribed(dropped, device: device, session: session)
     }
 
-    /// Removes every subscription `session` holds on `device`.
+    /// Removes every subscription `session` holds on `device` — or, when `services` is given,
+    /// only those under one of those services.
     ///
     /// - Returns: The characteristics `session` really was subscribed to, so exactly those —
     ///   and no others — are reported to the device's handler.
-    private func dropSubscriptions(session: UUID, device: UUID) -> [CharacteristicIdentifier] {
+    private func dropSubscriptions(
+        session: UUID,
+        device: UUID,
+        under services: Set<ServiceIdentifier>? = nil
+    ) -> [CharacteristicIdentifier] {
         guard var perCharacteristic = subscriptions[device] else { return [] }
         var dropped: [CharacteristicIdentifier] = []
         for characteristic in Array(perCharacteristic.keys) {
+            if let services, !services.contains(characteristic.service) { continue }
             guard perCharacteristic[characteristic]?.remove(session) != nil else { continue }
             dropped.append(characteristic)
             if perCharacteristic[characteristic]?.isEmpty == true {

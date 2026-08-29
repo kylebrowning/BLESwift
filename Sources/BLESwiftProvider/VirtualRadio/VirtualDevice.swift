@@ -170,8 +170,12 @@ public final class VirtualDeviceHandle: Sendable {
     }
 
     /// Replaces the device's GATT database — including the static values the radio answers
-    /// reads from. Already-discovered centrals keep their discovery cache; this is a
-    /// database update, not a service-change indication.
+    /// reads from.
+    ///
+    /// A service the new database drops is reported to every connected central as
+    /// `PeripheralEvent.didModifyServices`, and every subscription held under it is dropped and
+    /// reported to this device's handler as an unsubscribe. A purely additive change
+    /// invalidates nothing and is reported to nobody.
     ///
     /// - Parameter services: The device's new services.
     public func setServices(_ services: [GATTService]) async {
