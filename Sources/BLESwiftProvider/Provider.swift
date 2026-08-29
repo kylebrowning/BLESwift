@@ -343,9 +343,7 @@ public actor Provider {
                 backend: makePeripheralBackend(
                     queue: queue,
                     clientName: hello.clientName,
-                    // The client's own identity when it sent one, so its reconnect re-registers
-                    // the device it had rather than a new one; a fresh identifier otherwise.
-                    identifier: hello.hostIdentifier ?? UUID()
+                    identifier: hostedIdentifier(for: hello)
                 ),
                 queue: queue,
                 ordinal: sessionOrdinal,
@@ -355,6 +353,27 @@ public actor Provider {
             )
             configuration.log?("opened host session \(sessionOrdinal) for \(hello.clientName)")
         }
+    }
+
+    /// The identity to host one peripheral client's device under: the one it asked for in its
+    /// ``BLESwiftLink/ClientHello``, so its reconnect is the same device to every central that
+    /// had seen it, or a fresh `UUID` when it asked for nothing.
+    ///
+    /// **An identifier the radio already has is refused.** A client picks its own
+    /// `hostIdentifier` and the provider cannot vouch for it: one that names a fixture — by
+    /// mistake, or on purpose — would otherwise re-register over that fixture, replacing its
+    /// database with the client's own and leaving the provider's own handle for it stale. The
+    /// collision is answered the way the missing case is, with a fresh identifier, so the
+    /// client is still hosted; only its choice of identity is refused.
+    private func hostedIdentifier(for hello: ClientHello) -> UUID {
+        guard let requested = hello.hostIdentifier else { return UUID() }
+        guard radio.knownDeviceIDs.withLock({ $0.contains(requested) }) else { return requested }
+        let replacement = UUID()
+        configuration.log?(
+            "\(hello.clientName) asked to be hosted as \(requested), which is already registered; "
+                + "hosting it as \(replacement)"
+        )
+        return replacement
     }
 
     /// Drops a connection that has reached a terminal state, closing its session if it had

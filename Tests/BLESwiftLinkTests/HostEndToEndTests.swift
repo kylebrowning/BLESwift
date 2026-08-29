@@ -7,7 +7,7 @@
 import BLESwift
 import BLESwiftCore
 import BLESwiftLink
-import BLESwiftProvider
+@testable import BLESwiftProvider
 import BLESwiftSimulatorLink
 import Dispatch
 import Foundation
@@ -574,6 +574,68 @@ struct HostEndToEndTests {
 
         hostLink.shutdown()
         centralLink.shutdown()
+        await provider.stop()
+    }
+
+    @Test("A host client claiming a fixture's identifier is hosted under a fresh one")
+    func collidingHostIdentifierIsRefused() async throws {
+        let fixtureJSON = """
+        { "devices": [ { "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8", "name": "Fixture HRM",
+          "advertisedServices": ["180D"], "services": [ { "uuid": "180D", "characteristics": [
+            { "uuid": "2A37", "properties": ["read", "notify"], "value": "AEg=" } ] } ] } ] }
+        """
+        let fixtureID = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.fixtures = try FixtureDocument.parse(Data(fixtureJSON.utf8)).devices
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        #expect(await provider.radio.services(of: fixtureID, matching: nil) == [Self.heartRate])
+
+        // A peripheral-role client asking to be hosted under the fixture's own identifier.
+        // Driven from a raw connection because no honest client can produce this: a
+        // `LinkPeripheralManager` mints its identity itself.
+        let connection = LinkConnection.connect(
+            to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "host.e2e.collision")
+        )
+        let accepted = Mutex<Bool?>(nil)
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(
+                protocolVersion: LinkProtocol.version,
+                role: .peripheral,
+                clientName: "collider",
+                hostIdentifier: fixtureID
+            )))
+        }
+        connection.onMessage = { message in
+            guard case .serverHello(let hello) = message else { return }
+            accepted.withLock { $0 = hello.accepted }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { accepted.withLock { $0 } != nil }
+
+        // The client is served — only its choice of identity was refused — and its own device
+        // is registered under some other identifier.
+        #expect(accepted.withLock { $0 } == true)
+        await waitFor(timeout: .seconds(5)) { provider.radio.knownDeviceIDs.withLock { $0.count } == 2 }
+        #expect(provider.radio.knownDeviceIDs.withLock { $0.count } == 2)
+
+        // The fixture is untouched: still its own database, and still driven by the handle the
+        // provider registered it with — a re-registration would have staled that handle, and
+        // every mutation through it would have been ignored from then on.
+        #expect(await provider.radio.services(of: fixtureID, matching: nil) == [Self.heartRate])
+        let handle = try #require(await provider.handle(for: fixtureID))
+        await handle.setServices([Self.service])
+        #expect(await provider.radio.services(of: fixtureID, matching: nil) == [Self.heartRate])
+        await handle.setServices([])
+        #expect(await provider.radio.services(of: fixtureID, matching: nil) == [])
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
         await provider.stop()
     }
 
