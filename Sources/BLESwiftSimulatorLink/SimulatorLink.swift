@@ -95,19 +95,58 @@ public enum SimulatorLink {
     /// - Parameters:
     ///   - endpoint: The provider's host and port. `nil` resolves the same way
     ///     ``install(endpoint:clientName:codec:)`` does.
-    ///   - timeout: How long to wait for the provider to accept the handshake before giving up.
-    /// - Returns: `true` if a provider accepted the handshake within `timeout`; `false` on any
-    ///   failure or timeout. Never throws.
+    ///   - timeout: How long to keep trying before giving up. A dial that fails without an
+    ///     answer is retried until this budget is spent — the local stack refusing to open a
+    ///     socket (an `EADDRINUSE` from a busy machine, say) says nothing about whether a
+    ///     provider is listening, and neither does a dial that lost a race with the
+    ///     provider's own startup.
+    /// - Returns: `true` if a provider accepted the handshake within `timeout`; `false` if a
+    ///   provider answered and refused, or if the budget ran out. Never throws.
     public static func isProviderReachable(
         _ endpoint: LinkEndpoint? = nil,
         timeout: Duration = .seconds(2)
     ) async -> Bool {
         let resolvedEndpoint = endpoint ?? LinkEndpoint.fromEnvironment() ?? .default
+        let deadline = ContinuousClock.now + timeout
+        while !Task.isCancelled {
+            let remaining = deadline - ContinuousClock.now
+            guard remaining > .zero else { return false }
+            switch await attemptHandshake(with: resolvedEndpoint, within: remaining) {
+            case .accepted:
+                return true
+            case .refused:
+                // A provider answered and said no. Retrying cannot change that answer.
+                return false
+            case .unanswered:
+                let left = deadline - ContinuousClock.now
+                guard left > .zero else { return false }
+                try? await Task.sleep(for: min(.milliseconds(50), left))
+            }
+        }
+        return false
+    }
+
+    /// What one dial of ``isProviderReachable(_:timeout:)`` established.
+    private enum HandshakeOutcome: Sendable {
+        /// A provider answered and accepted the hello.
+        case accepted
+        /// A provider answered and refused, or answered with something that is not a hello.
+        case refused
+        /// Nobody answered within the attempt's budget: the dial failed, the connection was
+        /// cancelled, or the host accepted the socket and stayed silent.
+        case unanswered
+    }
+
+    /// Dials `endpoint` once and completes the link handshake, giving up after `budget`.
+    private static func attemptHandshake(
+        with endpoint: LinkEndpoint,
+        within budget: Duration
+    ) async -> HandshakeOutcome {
         let queue = DispatchSerialQueue(label: "bleswift.simulatorlink.probe")
-        let connection = LinkConnection.connect(to: resolvedEndpoint, codec: .binaryPropertyList, queue: queue)
+        let connection = LinkConnection.connect(to: endpoint, codec: .binaryPropertyList, queue: queue)
         defer { connection.cancel() }
 
-        return await withTaskGroup(of: Bool.self) { group in
+        return await withTaskGroup(of: HandshakeOutcome.self) { group in
             group.addTask {
                 // Cancellation (from `group.cancelAll()` below, once the sleep task wins the
                 // race) only flags this task — it does nothing to the in-flight `NWConnection`
@@ -118,9 +157,9 @@ public enum SimulatorLink {
                 // `timeout`. Cancelling `connection` here publishes a terminal `.cancelled`
                 // state, which `onStateChange` below turns into a `resumeOnce(false)`.
                 await withTaskCancellationHandler {
-                    await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                    await withCheckedContinuation { (continuation: CheckedContinuation<HandshakeOutcome, Never>) in
                         let resumed = Mutex(false)
-                        @Sendable func resumeOnce(_ value: Bool) {
+                        @Sendable func resumeOnce(_ value: HandshakeOutcome) {
                             let shouldResume = resumed.withLock { flag -> Bool in
                                 guard !flag else { return false }
                                 flag = true
@@ -138,17 +177,17 @@ public enum SimulatorLink {
                                     )
                                 )
                             case .failed, .cancelled:
-                                resumeOnce(false)
+                                resumeOnce(.unanswered)
                             case .idle, .connecting:
                                 break
                             }
                         }
                         connection.onMessage = { message in
                             guard case .serverHello(let hello) = message else {
-                                resumeOnce(false)
+                                resumeOnce(.refused)
                                 return
                             }
-                            resumeOnce(hello.accepted)
+                            resumeOnce(hello.accepted ? .accepted : .refused)
                         }
                         connection.start()
                         // If this task was already cancelled when it reached
@@ -160,7 +199,7 @@ public enum SimulatorLink {
                         // continuation. Re-check the state now that a handler exists; the
                         // one-shot `resumeOnce` makes an overlap with the handler harmless.
                         switch connection.state {
-                        case .failed, .cancelled: resumeOnce(false)
+                        case .failed, .cancelled: resumeOnce(.unanswered)
                         case .idle, .connecting, .ready: break
                         }
                     }
@@ -169,10 +208,10 @@ public enum SimulatorLink {
                 }
             }
             group.addTask {
-                try? await Task.sleep(for: timeout)
-                return false
+                try? await Task.sleep(for: budget)
+                return .unanswered
             }
-            let result = await group.next() ?? false
+            let result = await group.next() ?? .unanswered
             group.cancelAll()
             return result
         }

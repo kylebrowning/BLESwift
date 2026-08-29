@@ -67,9 +67,9 @@ struct SimulatorLinkInstallTests {
     { "devices": [] }
     """
 
-    private func makeProvider() async throws -> Provider {
+    private func makeProvider(port: UInt16 = 0) async throws -> Provider {
         var configuration = ProviderConfiguration()
-        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: port)
         configuration.fixtures = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices
         let provider = Provider(configuration: configuration)
         try await provider.start()
@@ -96,8 +96,12 @@ struct SimulatorLinkInstallTests {
     @Test("isProviderReachable is true against a running provider and false against a closed port")
     func isProviderReachable() async throws {
         let provider = try await makeProvider()
+        // A budget, not a deadline for one dial: on a machine running several test bundles at
+        // once a loopback dial can fail outright (`EADDRINUSE` from the local stack), which
+        // says nothing about the provider — the probe retries inside this window.
         let reachable = await SimulatorLink.isProviderReachable(
-            LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+            LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            timeout: .seconds(10)
         )
         #expect(reachable)
 
@@ -135,6 +139,25 @@ struct SimulatorLinkInstallTests {
 
         #expect(!reachable)
         #expect(elapsed < .seconds(1))
+    }
+
+    @Test("isProviderReachable keeps trying until a provider appears within its timeout")
+    func isProviderReachableWaitsForALateProvider() async throws {
+        // The port is taken and released, so the first dials have nowhere to land; the
+        // provider binds it a moment later. A probe that gave up on its first failed dial
+        // would report false here.
+        let port = try closedPort()
+        let appearing = Task {
+            try await Task.sleep(for: .milliseconds(300))
+            return try await makeProvider(port: port)
+        }
+        let reachable = await SimulatorLink.isProviderReachable(
+            LinkEndpoint(host: "127.0.0.1", port: port),
+            timeout: .seconds(10)
+        )
+        let provider = try await bounded(seconds: 10) { try await appearing.value }
+        #expect(reachable)
+        await provider.stop()
     }
 
     @Test("isProviderReachable returns false at once when its task is already cancelled")
