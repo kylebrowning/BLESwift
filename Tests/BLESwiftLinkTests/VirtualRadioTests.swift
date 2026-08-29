@@ -474,7 +474,7 @@ struct VirtualRadioTests {
         #expect(reported.count == 1)
         #expect(reported.first?.peripheral == target)
         #expect(reported.first?.error?.domain == "BLESwiftProvider")
-        #expect(reported.first?.error?.code == 7)
+        #expect(reported.first?.error?.code == 8)
         // Refused before the radio was ever asked, so the stale remote never left `.disconnected`.
         #expect(await Self.onQueue(queue) { stale.connectionState } == .disconnected)
     }

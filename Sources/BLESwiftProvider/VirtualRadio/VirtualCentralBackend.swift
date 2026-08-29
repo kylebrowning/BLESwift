@@ -374,10 +374,14 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
 
     /// The error a connect fails with when the remote it was handed is no longer the one this
     /// backend has filed for that identifier.
+    ///
+    /// Code 8, not 7: 7 is already
+    /// `CentralSession.l2capCreditRejected` in this same `BLESwiftProvider` domain, and two
+    /// distinct failures sharing a code cannot be told apart by a caller that switches on it.
     public static var stalePeripheralHandleError: NSError {
         NSError(
             domain: "BLESwiftProvider",
-            code: 7,
+            code: 8,
             userInfo: [NSLocalizedDescriptionKey: "stale peripheral handle"]
         )
     }
