@@ -126,6 +126,12 @@ public actor VirtualRadio {
         }
     }
 
+    /// Replaces a registered device's advertisement. See
+    /// ``VirtualDeviceHandle/setAdvertisement(_:)``.
+    func setAdvertisement(_ advertisement: AdvertisementData, device: UUID) {
+        devices[device]?.descriptor.advertisement = advertisement
+    }
+
     /// Replaces a registered device's GATT database. See
     /// ``VirtualDeviceHandle/setServices(_:)``.
     func setServices(_ services: [GATTService], device: UUID) {

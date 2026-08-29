@@ -145,6 +145,14 @@ public final class VirtualDeviceHandle: Sendable {
         await radio.setAdvertising(advertising, device: identifier)
     }
 
+    /// Replaces the advertisement the device broadcasts. Takes effect for every sighting
+    /// reported from now on; already-reported sightings are not revised.
+    ///
+    /// - Parameter advertisement: The device's new advertisement.
+    public func setAdvertisement(_ advertisement: AdvertisementData) async {
+        await radio.setAdvertisement(advertisement, device: identifier)
+    }
+
     /// Replaces the device's GATT database — including the static values the radio answers
     /// reads from. Already-discovered centrals keep their discovery cache; this is a
     /// database update, not a service-change indication.
