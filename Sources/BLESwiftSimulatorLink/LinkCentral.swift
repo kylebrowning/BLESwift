@@ -354,6 +354,15 @@ public final class LinkCentral: CentralManaging, Sendable {
         return channel
     }
 
+    /// How many peripheral mirrors this central currently holds. Must be read on ``queue``.
+    ///
+    /// A test hook: a malformed event must cost the session without filing a mirror for the
+    /// peripheral it named.
+    package var peripheralCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _peripherals.count
+    }
+
     /// How many L2CAP channels this central currently has filed — the client halves of
     /// opens that are either live or still awaiting their completion.
     ///
@@ -471,6 +480,14 @@ public final class LinkCentral: CentralManaging, Sendable {
 
     /// Translates one ``CentralWireEvent`` into mirror-cache updates (applied inline) and the
     /// `CentralEvent`/`PeripheralEvent` it stands for (delivered on the next queue tick).
+    ///
+    /// **Every field is validated before `peripheral(for:)` is called.** A throw from this
+    /// method drops the session, so anything the mirror table was given first outlives the
+    /// event that never happened: `peripheral(for:)` *mints* an entry for an unknown
+    /// identifier, and a `.disconnected` mirror filed for a malformed event is then kept —
+    /// and reported to the caller — across the reconnect that follows, and can evict a real
+    /// one on its way in. So each case below reads its identifiers, lengths, and
+    /// advertisements into locals first, and only then asks for the mirror to apply them to.
     private func handle(_ event: CentralWireEvent) throws {
         dispatchPrecondition(condition: .onQueue(queue))
         switch event {
@@ -485,10 +502,7 @@ public final class LinkCentral: CentralManaging, Sendable {
             deliver(.didUpdateState(state.state))
 
         case .didDiscover(let uuid, let name, let advertisement, let rssi):
-            // Validated before the mirror table is touched: a sighting carrying an identifier
-            // no BLESwift type can hold costs the session, and filing a peripheral for it
-            // first would leave the table holding an entry for a discovery that never
-            // happened — kept, and reported to the caller, across the reconnect that follows.
+            // Validated before the mirror table is touched — see the note above the switch.
             let data = try advertisement.advertisementData
             let target = peripheral(for: uuid, name: name)
             deliver(.didDiscover(
@@ -534,12 +548,12 @@ public final class LinkCentral: CentralManaging, Sendable {
             deliver(.didUpdateANCSAuthorization(peripheral: uuid, authorized: authorized))
 
         case .didDiscoverServices(let uuid, let services, let error):
+            let discovered = try services.map { ServiceIdentifier(uuid: try WireIdentifierValidation.validated($0)) }
             let target = peripheral(for: uuid)
-            target.replaceServices(try services.map { ServiceIdentifier(uuid: try WireIdentifierValidation.validated($0)) })
+            target.replaceServices(discovered)
             target.deliver(.didDiscoverServices(error: error?.nsError))
 
         case .didDiscoverCharacteristics(let uuid, let service, let characteristics, let error):
-            let target = peripheral(for: uuid)
             let serviceIdentifier = ServiceIdentifier(uuid: try WireIdentifierValidation.validated(service))
             var discovered: [CharacteristicIdentifier: CharacteristicProperties] = [:]
             // Built by subscript, deliberately: two wire entries whose UUID strings differ
@@ -553,25 +567,25 @@ public final class LinkCentral: CentralManaging, Sendable {
                 )
                 discovered[identifier] = CharacteristicProperties(rawValue: characteristic.properties)
             }
+            let target = peripheral(for: uuid)
             target.replaceCharacteristics(discovered, for: serviceIdentifier)
             target.deliver(.didDiscoverCharacteristics(service: serviceIdentifier, error: error?.nsError))
 
         case .didDiscoverDescriptors(let uuid, let characteristic, let descriptors, let error):
-            let target = peripheral(for: uuid)
             let characteristicIdentifier = try characteristic.identifier
-            target.replaceDescriptors(
-                try descriptors.map {
-                    DescriptorIdentifier(
-                        uuid: try WireIdentifierValidation.validated($0),
-                        characteristic: characteristicIdentifier
-                    )
-                },
-                for: characteristicIdentifier
-            )
+            let discovered = try descriptors.map {
+                DescriptorIdentifier(
+                    uuid: try WireIdentifierValidation.validated($0),
+                    characteristic: characteristicIdentifier
+                )
+            }
+            let target = peripheral(for: uuid)
+            target.replaceDescriptors(discovered, for: characteristicIdentifier)
             target.deliver(.didDiscoverDescriptors(characteristic: characteristicIdentifier, error: error?.nsError))
 
         case .didWriteValue(let uuid, let characteristic, let error):
-            peripheral(for: uuid).deliver(.didWriteValue(characteristic: try characteristic.identifier, error: error?.nsError))
+            let identifier = try characteristic.identifier
+            peripheral(for: uuid).deliver(.didWriteValue(characteristic: identifier, error: error?.nsError))
 
         case .writeWithoutResponseAccepted(let uuid, let sequence):
             let target = peripheral(for: uuid)
@@ -580,34 +594,37 @@ public final class LinkCentral: CentralManaging, Sendable {
             }
 
         case .didUpdateValue(let uuid, let characteristic, let value, let error):
+            let identifier = try characteristic.identifier
             peripheral(for: uuid).deliver(.didUpdateValue(
-                characteristic: try characteristic.identifier,
+                characteristic: identifier,
                 value: value,
                 error: error?.nsError
             ))
 
         case .didUpdateNotificationState(let uuid, let characteristic, let isNotifying, let error):
-            let target = peripheral(for: uuid)
             let identifier = try characteristic.identifier
+            let target = peripheral(for: uuid)
             target.setNotifying(isNotifying, for: identifier)
             target.deliver(.didUpdateNotificationState(characteristic: identifier, isNotifying: isNotifying, error: error?.nsError))
 
         case .didUpdateValueForDescriptor(let uuid, let descriptor, let value, let error):
+            let identifier = try descriptor.identifier
             peripheral(for: uuid).deliver(.didUpdateValueForDescriptor(
-                descriptor: try descriptor.identifier,
+                descriptor: identifier,
                 value: value,
                 error: error?.nsError
             ))
 
         case .didWriteValueForDescriptor(let uuid, let descriptor, let error):
-            peripheral(for: uuid).deliver(.didWriteValueForDescriptor(descriptor: try descriptor.identifier, error: error?.nsError))
+            let identifier = try descriptor.identifier
+            peripheral(for: uuid).deliver(.didWriteValueForDescriptor(descriptor: identifier, error: error?.nsError))
 
         case .didReadRSSI(let uuid, let rssi, let error):
             peripheral(for: uuid).deliver(.didReadRSSI(rssi, error: error?.nsError))
 
         case .didModifyServices(let uuid, let invalidated):
-            let target = peripheral(for: uuid)
             let services = try invalidated.map { ServiceIdentifier(uuid: try WireIdentifierValidation.validated($0)) }
+            let target = peripheral(for: uuid)
             target.invalidate(services: services)
             target.deliver(.didModifyServices(services))
 

@@ -101,6 +101,94 @@ struct LinkCentralTests {
         }.count
     }
 
+    /// Every event whose fields the client validates, made malformed — one per `handle(_:)`
+    /// case that names a peripheral *and* carries an identifier of its own.
+    ///
+    /// The identifier is the same one in each: what matters is that it never reaches the
+    /// mirror table, so the test can name it and then prove nothing was filed under it.
+    static let malformedEvents: [(name: String, event: CentralWireEvent)] = {
+        let peripheral = UUID(uuidString: "1F2E3D4C-5B6A-4798-8877-665544332211")!
+        let badCharacteristic = WireCharacteristicRef(service: "180D", uuid: "zz")
+        let badDescriptor = WireDescriptorRef(service: "180D", characteristic: "2A37", uuid: "zz")
+        return [
+            ("didDiscoverServices", .didDiscoverServices(peripheral: peripheral, services: ["zz"], error: nil)),
+            ("didDiscoverCharacteristics", .didDiscoverCharacteristics(
+                peripheral: peripheral,
+                service: "zz",
+                characteristics: [],
+                error: nil
+            )),
+            ("didDiscoverDescriptors", .didDiscoverDescriptors(
+                peripheral: peripheral,
+                characteristic: badCharacteristic,
+                descriptors: [],
+                error: nil
+            )),
+            ("didWriteValue", .didWriteValue(peripheral: peripheral, characteristic: badCharacteristic, error: nil)),
+            ("didUpdateValue", .didUpdateValue(
+                peripheral: peripheral,
+                characteristic: badCharacteristic,
+                value: Data([1]),
+                error: nil
+            )),
+            ("didUpdateNotificationState", .didUpdateNotificationState(
+                peripheral: peripheral,
+                characteristic: badCharacteristic,
+                isNotifying: true,
+                error: nil
+            )),
+            ("didUpdateValueForDescriptor", .didUpdateValueForDescriptor(
+                peripheral: peripheral,
+                descriptor: badDescriptor,
+                value: Data([1]),
+                error: nil
+            )),
+            ("didWriteValueForDescriptor", .didWriteValueForDescriptor(
+                peripheral: peripheral,
+                descriptor: badDescriptor,
+                error: nil
+            )),
+            ("didModifyServices", .didModifyServices(peripheral: peripheral, invalidated: ["zz"])),
+            ("didDiscover", .didDiscover(
+                peripheral: peripheral,
+                name: nil,
+                advertisement: WireAdvertisement(
+                    localName: nil,
+                    serviceUUIDs: ["zz"],
+                    manufacturerData: nil,
+                    serviceData: nil,
+                    txPowerLevel: nil,
+                    isConnectable: true,
+                    overflowServiceUUIDs: nil,
+                    solicitedServiceUUIDs: nil
+                ),
+                rssi: -50
+            )),
+        ]
+    }()
+
+    @Test(
+        "A malformed event costs the session without filing a mirror for the peripheral it named",
+        arguments: malformedEvents.map(\.name).indices
+    )
+    func malformedEventFilesNoMirror(index: Int) async throws {
+        let (_, link, provider) = try await makeRig()
+        defer { provider.stop(); link.shutdown() }
+        let queue = link.queue
+        #expect(await onQueue(queue) { link.peripheralCount } == 0)
+        #expect(provider.helloCount.withLock { $0 } == 1)
+
+        provider.emit(Self.malformedEvents[index].event)
+
+        // The session is dropped and redialed: the provider is faulty, not merely unlucky.
+        await waitFor(timeout: .seconds(30)) { provider.helloCount.withLock { $0 } >= 2 }
+        #expect(provider.helloCount.withLock { $0 } >= 2, "\(Self.malformedEvents[index].name)")
+        // And the mirror table never heard of the peripheral it named. A mirror minted for an
+        // event that then threw is `.disconnected`, so it survives the reconnect, is reported
+        // to the caller as a peripheral this central knows, and can evict a real one.
+        #expect(await onQueue(queue) { link.peripheralCount } == 0, "\(Self.malformedEvents[index].name)")
+    }
+
     @Test("Reports .unsupported until the provider is reachable, then the provider's state")
     func stateBeforeAndAfterConnect() async throws {
         let queue = DispatchSerialQueue(label: "state")
