@@ -167,6 +167,21 @@ package final class LinkClientSession: Sendable {
         connection?.send(message)
     }
 
+    /// Drops the current connection because the provider sent something the protocol does not
+    /// allow — a malformed identifier, say.
+    ///
+    /// The same path a transport failure takes: the connection is cancelled, ``onDisconnected``
+    /// reports `LinkError.providerDisconnected`, and the session redials. A provider that keeps
+    /// sending nonsense keeps losing its sessions, which is the loudest a client can be about
+    /// a fault it cannot repair. Does nothing when the session is stopped or has no connection.
+    package func dropConnection() {
+        let connection = state.withLock { state -> LinkConnection? in
+            guard !state.stopped else { return nil }
+            return state.connection
+        }
+        connection?.cancel()
+    }
+
     // MARK: - Connecting
 
     /// Creates, stores, and starts a connection. Called from ``start()`` and from the retry timer.

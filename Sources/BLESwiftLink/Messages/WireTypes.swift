@@ -137,9 +137,17 @@ public struct WireCharacteristicRef: Codable, Sendable, Equatable {
         self.uuid = id.uuidString
     }
 
-    /// Converts back to a `CharacteristicIdentifier`.
+    /// Converts back to a `CharacteristicIdentifier`, rejecting either UUID string that a
+    /// `CharacteristicIdentifier` could not represent.
+    ///
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` — see
+    ///   ``WireIdentifierValidation``.
     public var identifier: CharacteristicIdentifier {
-        CharacteristicIdentifier(uuid: uuid, service: ServiceIdentifier(uuid: service))
+        get throws {
+            try WireIdentifierValidation.validated(service)
+            try WireIdentifierValidation.validated(uuid)
+            return CharacteristicIdentifier(uuid: uuid, service: ServiceIdentifier(uuid: service))
+        }
     }
 }
 
@@ -170,12 +178,21 @@ public struct WireDescriptorRef: Codable, Sendable, Equatable {
         self.uuid = id.uuidString
     }
 
-    /// Converts back to a `DescriptorIdentifier`.
+    /// Converts back to a `DescriptorIdentifier`, rejecting any of the three UUID strings
+    /// that a `DescriptorIdentifier` could not represent.
+    ///
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` — see
+    ///   ``WireIdentifierValidation``.
     public var identifier: DescriptorIdentifier {
-        DescriptorIdentifier(
-            uuid: uuid,
-            characteristic: CharacteristicIdentifier(uuid: characteristic, service: ServiceIdentifier(uuid: service))
-        )
+        get throws {
+            try WireIdentifierValidation.validated(service)
+            try WireIdentifierValidation.validated(characteristic)
+            try WireIdentifierValidation.validated(uuid)
+            return DescriptorIdentifier(
+                uuid: uuid,
+                characteristic: CharacteristicIdentifier(uuid: characteristic, service: ServiceIdentifier(uuid: service))
+            )
+        }
     }
 }
 
@@ -241,9 +258,18 @@ public struct WireAdvertisement: Codable, Sendable, Equatable {
         self.solicitedServiceUUIDs = data.solicitedServiceUUIDs?.map(\.uuidString)
     }
 
-    /// Converts back to `AdvertisementData`.
+    /// Converts back to `AdvertisementData`, rejecting any service UUID string a
+    /// `ServiceIdentifier` could not represent.
+    ///
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` — see
+    ///   ``WireIdentifierValidation``.
     public var advertisementData: AdvertisementData {
-        AdvertisementData(
+        get throws {
+            try serviceUUIDs?.forEach { try WireIdentifierValidation.validated($0) }
+            try serviceData?.keys.forEach { try WireIdentifierValidation.validated($0) }
+            try overflowServiceUUIDs?.forEach { try WireIdentifierValidation.validated($0) }
+            try solicitedServiceUUIDs?.forEach { try WireIdentifierValidation.validated($0) }
+            return AdvertisementData(
             localName: localName,
             serviceUUIDs: serviceUUIDs?.map { ServiceIdentifier(uuid: $0) },
             manufacturerData: manufacturerData,
@@ -253,8 +279,9 @@ public struct WireAdvertisement: Codable, Sendable, Equatable {
             txPowerLevel: txPowerLevel,
             isConnectable: isConnectable,
             overflowServiceUUIDs: overflowServiceUUIDs?.map { ServiceIdentifier(uuid: $0) },
-            solicitedServiceUUIDs: solicitedServiceUUIDs?.map { ServiceIdentifier(uuid: $0) }
-        )
+                solicitedServiceUUIDs: solicitedServiceUUIDs?.map { ServiceIdentifier(uuid: $0) }
+            )
+        }
     }
 }
 
@@ -309,8 +336,12 @@ public struct WireGATTCharacteristic: Codable, Sendable, Equatable {
     }
 
     /// Converts back to a `GATTCharacteristic`, scoped to `service`.
-    public func gattCharacteristic(service: ServiceIdentifier) -> GATTCharacteristic {
-        GATTCharacteristic(
+    ///
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if ``uuid`` is not one a
+    ///   `CharacteristicIdentifier` could represent.
+    public func gattCharacteristic(service: ServiceIdentifier) throws -> GATTCharacteristic {
+        try WireIdentifierValidation.validated(uuid)
+        return GATTCharacteristic(
             identifier: CharacteristicIdentifier(uuid: uuid, service: service),
             properties: CharacteristicProperties(rawValue: properties),
             permissions: AttributePermissions(rawValue: permissions),
@@ -345,14 +376,21 @@ public struct WireGATTService: Codable, Sendable, Equatable {
         self.characteristics = service.characteristics.map(WireGATTCharacteristic.init)
     }
 
-    /// Converts back to a `GATTService`.
+    /// Converts back to a `GATTService`, rejecting its own UUID string — or any of its
+    /// characteristics' — that BLESwift's identifiers could not represent.
+    ///
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` — see
+    ///   ``WireIdentifierValidation``.
     public var gattService: GATTService {
-        let identifier = ServiceIdentifier(uuid: uuid)
-        return GATTService(
-            identifier: identifier,
-            isPrimary: isPrimary,
-            characteristics: characteristics.map { $0.gattCharacteristic(service: identifier) }
-        )
+        get throws {
+            try WireIdentifierValidation.validated(uuid)
+            let identifier = ServiceIdentifier(uuid: uuid)
+            return GATTService(
+                identifier: identifier,
+                isPrimary: isPrimary,
+                characteristics: try characteristics.map { try $0.gattCharacteristic(service: identifier) }
+            )
+        }
     }
 }
 
@@ -415,13 +453,18 @@ public struct WireReadRequest: Codable, Sendable, Equatable {
     }
 
     /// Converts back to a `ReadRequest`.
+    ///
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if the characteristic it names
+    ///   is not one BLESwift's identifiers could represent.
     public var readRequest: ReadRequest {
-        ReadRequest(
-            token: RequestToken(rawValue: token),
-            central: central.subscriber,
-            characteristic: characteristic.identifier,
-            offset: offset
-        )
+        get throws {
+            ReadRequest(
+                token: RequestToken(rawValue: token),
+                central: central.subscriber,
+                characteristic: try characteristic.identifier,
+                offset: offset
+            )
+        }
     }
 }
 
@@ -457,13 +500,18 @@ public struct WireWriteEntry: Codable, Sendable, Equatable {
     }
 
     /// Converts back to a `WriteRequest.Entry`.
+    ///
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if the characteristic it names
+    ///   is not one BLESwift's identifiers could represent.
     public var entry: WriteRequest.Entry {
-        WriteRequest.Entry(
-            central: central.subscriber,
-            characteristic: characteristic.identifier,
-            offset: offset,
-            value: value
-        )
+        get throws {
+            WriteRequest.Entry(
+                central: central.subscriber,
+                characteristic: try characteristic.identifier,
+                offset: offset,
+                value: value
+            )
+        }
     }
 }
 
@@ -489,8 +537,13 @@ public struct WireWriteRequest: Codable, Sendable, Equatable {
     }
 
     /// Converts back to a `WriteRequest`.
+    ///
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if any entry names a
+    ///   characteristic BLESwift's identifiers could not represent.
     public var writeRequest: WriteRequest {
-        WriteRequest(token: RequestToken(rawValue: token), entries: entries.map(\.entry))
+        get throws {
+            WriteRequest(token: RequestToken(rawValue: token), entries: try entries.map { try $0.entry })
+        }
     }
 }
 

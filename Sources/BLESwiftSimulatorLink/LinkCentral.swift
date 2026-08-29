@@ -360,14 +360,21 @@ public final class LinkCentral: CentralManaging, Sendable {
     private func handle(_ message: LinkMessage) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard case .centralEvent(let event) = message else { return }
-        handle(event)
+        do {
+            try handle(event)
+        } catch {
+            // A provider that puts an identifier no BLESwift type can hold on the wire is
+            // faulty, not merely unlucky: the session is dropped and redialed rather than
+            // trapping this process on the provider's behalf.
+            session.dropConnection()
+        }
     }
 
     // MARK: - Wire events
 
     /// Translates one ``CentralWireEvent`` into mirror-cache updates (applied inline) and the
     /// `CentralEvent`/`PeripheralEvent` it stands for (delivered on the next queue tick).
-    private func handle(_ event: CentralWireEvent) {
+    private func handle(_ event: CentralWireEvent) throws {
         dispatchPrecondition(condition: .onQueue(queue))
         switch event {
 
@@ -384,7 +391,7 @@ public final class LinkCentral: CentralManaging, Sendable {
             let target = peripheral(for: uuid, name: name)
             deliver(.didDiscover(
                 peripheral: target.peripheralIdentifier,
-                advertisement: advertisement.advertisementData,
+                advertisement: try advertisement.advertisementData,
                 rssi: rssi
             ))
 
@@ -420,15 +427,18 @@ public final class LinkCentral: CentralManaging, Sendable {
 
         case .didDiscoverServices(let uuid, let services, let error):
             let target = peripheral(for: uuid)
-            target.replaceServices(services.map { ServiceIdentifier(uuid: $0) })
+            target.replaceServices(try services.map { ServiceIdentifier(uuid: try WireIdentifierValidation.validated($0)) })
             target.deliver(.didDiscoverServices(error: error?.nsError))
 
         case .didDiscoverCharacteristics(let uuid, let service, let characteristics, let error):
             let target = peripheral(for: uuid)
-            let serviceIdentifier = ServiceIdentifier(uuid: service)
+            let serviceIdentifier = ServiceIdentifier(uuid: try WireIdentifierValidation.validated(service))
             var discovered: [CharacteristicIdentifier: CharacteristicProperties] = [:]
             for characteristic in characteristics {
-                let identifier = CharacteristicIdentifier(uuid: characteristic.uuid, service: serviceIdentifier)
+                let identifier = CharacteristicIdentifier(
+                    uuid: try WireIdentifierValidation.validated(characteristic.uuid),
+                    service: serviceIdentifier
+                )
                 discovered[identifier] = CharacteristicProperties(rawValue: characteristic.properties)
             }
             target.replaceCharacteristics(discovered, for: serviceIdentifier)
@@ -436,15 +446,20 @@ public final class LinkCentral: CentralManaging, Sendable {
 
         case .didDiscoverDescriptors(let uuid, let characteristic, let descriptors, let error):
             let target = peripheral(for: uuid)
-            let characteristicIdentifier = characteristic.identifier
+            let characteristicIdentifier = try characteristic.identifier
             target.replaceDescriptors(
-                descriptors.map { DescriptorIdentifier(uuid: $0, characteristic: characteristicIdentifier) },
+                try descriptors.map {
+                    DescriptorIdentifier(
+                        uuid: try WireIdentifierValidation.validated($0),
+                        characteristic: characteristicIdentifier
+                    )
+                },
                 for: characteristicIdentifier
             )
             target.deliver(.didDiscoverDescriptors(characteristic: characteristicIdentifier, error: error?.nsError))
 
         case .didWriteValue(let uuid, let characteristic, let error):
-            peripheral(for: uuid).deliver(.didWriteValue(characteristic: characteristic.identifier, error: error?.nsError))
+            peripheral(for: uuid).deliver(.didWriteValue(characteristic: try characteristic.identifier, error: error?.nsError))
 
         case .writeWithoutResponseAccepted(let uuid, _):
             let target = peripheral(for: uuid)
@@ -454,33 +469,33 @@ public final class LinkCentral: CentralManaging, Sendable {
 
         case .didUpdateValue(let uuid, let characteristic, let value, let error):
             peripheral(for: uuid).deliver(.didUpdateValue(
-                characteristic: characteristic.identifier,
+                characteristic: try characteristic.identifier,
                 value: value,
                 error: error?.nsError
             ))
 
         case .didUpdateNotificationState(let uuid, let characteristic, let isNotifying, let error):
             let target = peripheral(for: uuid)
-            let identifier = characteristic.identifier
+            let identifier = try characteristic.identifier
             target.setNotifying(isNotifying, for: identifier)
             target.deliver(.didUpdateNotificationState(characteristic: identifier, isNotifying: isNotifying, error: error?.nsError))
 
         case .didUpdateValueForDescriptor(let uuid, let descriptor, let value, let error):
             peripheral(for: uuid).deliver(.didUpdateValueForDescriptor(
-                descriptor: descriptor.identifier,
+                descriptor: try descriptor.identifier,
                 value: value,
                 error: error?.nsError
             ))
 
         case .didWriteValueForDescriptor(let uuid, let descriptor, let error):
-            peripheral(for: uuid).deliver(.didWriteValueForDescriptor(descriptor: descriptor.identifier, error: error?.nsError))
+            peripheral(for: uuid).deliver(.didWriteValueForDescriptor(descriptor: try descriptor.identifier, error: error?.nsError))
 
         case .didReadRSSI(let uuid, let rssi, let error):
             peripheral(for: uuid).deliver(.didReadRSSI(rssi, error: error?.nsError))
 
         case .didModifyServices(let uuid, let invalidated):
             let target = peripheral(for: uuid)
-            let services = invalidated.map { ServiceIdentifier(uuid: $0) }
+            let services = try invalidated.map { ServiceIdentifier(uuid: try WireIdentifierValidation.validated($0)) }
             target.invalidate(services: services)
             target.deliver(.didModifyServices(services))
 

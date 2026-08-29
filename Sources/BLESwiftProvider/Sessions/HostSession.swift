@@ -102,7 +102,13 @@ final class HostSession: Sendable {
         }
         install { [weak self] message in
             guard let self, case .hostRequest(let request) = message else { return }
-            self.queue.async { self.perform(request) }
+            self.queue.async {
+                do {
+                    try self.perform(request)
+                } catch {
+                    self.failProtocol(error)
+                }
+            }
         }
     }
 
@@ -135,7 +141,11 @@ final class HostSession: Sendable {
     // MARK: - Requests
 
     /// Applies one request to the backend. Must be called on ``queue``.
-    private func perform(_ request: HostRequest) {
+    ///
+    /// - Throws: ``BLESwiftLink/WireDecodingError`` for a request carrying a field no
+    ///   BLESwift type can represent — a malformed UUID string, say. The caller treats it as
+    ///   a protocol violation and drops the connection.
+    private func perform(_ request: HostRequest) throws {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !isClosed else { return }
         switch request {
@@ -143,14 +153,14 @@ final class HostSession: Sendable {
         case .startAdvertising(let localName, let services):
             backend.startAdvertising(PeripheralAdvertisement(
                 localName: localName,
-                serviceUUIDs: services.map(ServiceIdentifier.init(uuid:))
+                serviceUUIDs: try services.map { ServiceIdentifier(uuid: try WireIdentifierValidation.validated($0)) }
             ))
 
         case .stopAdvertising:
             backend.stopAdvertising()
 
         case .addService(let service):
-            backend.add(service.gattService)
+            backend.add(try service.gattService)
 
         case .removeAllServices:
             backend.removeAllHostedServices()
@@ -166,7 +176,7 @@ final class HostSession: Sendable {
             pendingUpdates.append(PendingUpdate(
                 sequence: sequence,
                 value: value,
-                characteristic: characteristic.identifier,
+                characteristic: try characteristic.identifier,
                 // The client sends identifiers only; the maximum a real subscriber reports is
                 // not carried on the wire, so the ATT ceiling stands in for it. Backends match
                 // subscribers by `id`, which round-trips exactly.
@@ -174,6 +184,14 @@ final class HostSession: Sendable {
             ))
             drainUpdates()
         }
+    }
+
+    /// Drops the client's link because it sent something the protocol does not allow. The
+    /// provider's own termination path then closes this session. Must be called on ``queue``.
+    private func failProtocol(_ error: some Error) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        log?("\(label): protocol violation (\(error)); closing the connection")
+        connection.cancel()
     }
 
     /// The `maximumUpdateValueLength` reported for a subscriber reconstructed from the wire:

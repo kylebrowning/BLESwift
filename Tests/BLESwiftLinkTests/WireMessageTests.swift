@@ -132,9 +132,9 @@ struct WireMessageTests {
     }
 
     @Test("Advertisement round-trips through Core")
-    func advertisement() {
+    func advertisement() throws {
         let original = AdvertisementData(localName: "n", serviceUUIDs: [Self.service], manufacturerData: Data([1]), serviceData: [Self.service: Data([2])], txPowerLevel: 3, isConnectable: false, overflowServiceUUIDs: [Self.service], solicitedServiceUUIDs: nil)
-        let back = WireAdvertisement(original).advertisementData
+        let back = try WireAdvertisement(original).advertisementData
         #expect(back.localName == "n")
         #expect(back.serviceUUIDs == [Self.service])
         #expect(back.manufacturerData == Data([1]))
@@ -146,19 +146,19 @@ struct WireMessageTests {
     }
 
     @Test("GATT service, refs, subscribers, and requests round-trip through Core")
-    func gattConversions() {
+    func gattConversions() throws {
         let service = GATTService(identifier: Self.service, isPrimary: false, characteristics: [
             GATTCharacteristic(identifier: Self.characteristic, properties: [.write, .indicate], permissions: [.writeable], value: nil)
         ])
-        #expect(WireGATTService(service).gattService == service)
-        #expect(WireCharacteristicRef(Self.characteristic).identifier == Self.characteristic)
-        #expect(WireDescriptorRef(Self.descriptor).identifier == Self.descriptor)
+        #expect(try WireGATTService(service).gattService == service)
+        #expect(try WireCharacteristicRef(Self.characteristic).identifier == Self.characteristic)
+        #expect(try WireDescriptorRef(Self.descriptor).identifier == Self.descriptor)
         let subscriber = Subscriber(id: Self.id, maximumUpdateValueLength: 180)
         #expect(WireSubscriber(subscriber).subscriber == subscriber)
         let read = ReadRequest(token: RequestToken(rawValue: Self.id), central: subscriber, characteristic: Self.characteristic, offset: 4)
-        #expect(WireReadRequest(read).readRequest == read)
+        #expect(try WireReadRequest(read).readRequest == read)
         let write = WriteRequest(token: RequestToken(rawValue: Self.id), entries: [WriteRequest.Entry(central: subscriber, characteristic: Self.characteristic, offset: 0, value: Data([1]))])
-        #expect(WireWriteRequest(write).writeRequest == write)
+        #expect(try WireWriteRequest(write).writeRequest == write)
         #expect(WireCentralState(.poweredOn).state == .poweredOn)
         #expect(WireWriteType(.withoutResponse).writeType == .withoutResponse)
         let options = WarningOptions(notifyOnConnection: true, notifyOnDisconnection: true, notifyOnNotification: false)

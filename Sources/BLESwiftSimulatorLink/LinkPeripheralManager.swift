@@ -277,7 +277,13 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     private func handle(_ message: LinkMessage) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard case .hostEvent(let event) = message else { return }
-        handle(event)
+        do {
+            try handle(event)
+        } catch {
+            // See `LinkCentral.handle(_:)`: a malformed identifier from the provider is a
+            // provider fault, answered by dropping the session and redialing.
+            session.dropConnection()
+        }
     }
 
     // MARK: - Wire events
@@ -285,7 +291,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// Translates one ``BLESwiftLink/HostWireEvent`` into the state updates it implies
     /// (applied inline) and the `PeripheralHostEvent` it stands for (delivered on the next
     /// queue tick).
-    private func handle(_ event: HostWireEvent) {
+    private func handle(_ event: HostWireEvent) throws {
         dispatchPrecondition(condition: .onQueue(queue))
         switch event {
 
@@ -312,19 +318,19 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
             deliver(.didStartAdvertising(error: error?.nsError))
 
         case .didAddService(let service, let error):
-            deliver(.didAddService(ServiceIdentifier(uuid: service), error: error?.nsError))
+            deliver(.didAddService(ServiceIdentifier(uuid: try WireIdentifierValidation.validated(service)), error: error?.nsError))
 
         case .didReceiveRead(let request):
-            deliver(.didReceiveRead(request.readRequest))
+            deliver(.didReceiveRead(try request.readRequest))
 
         case .didReceiveWrite(let request):
-            deliver(.didReceiveWrite(request.writeRequest))
+            deliver(.didReceiveWrite(try request.writeRequest))
 
         case .didSubscribe(let central, let characteristic):
-            deliver(.didSubscribe(central: central.subscriber, characteristic: characteristic.identifier))
+            deliver(.didSubscribe(central: central.subscriber, characteristic: try characteristic.identifier))
 
         case .didUnsubscribe(let central, let characteristic):
-            deliver(.didUnsubscribe(central: central.subscriber, characteristic: characteristic.identifier))
+            deliver(.didUnsubscribe(central: central.subscriber, characteristic: try characteristic.identifier))
 
         case .updateValueDelivered:
             // Consumed, never forwarded: `readyToUpdateSubscribers` is synthesized here from

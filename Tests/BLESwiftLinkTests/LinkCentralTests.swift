@@ -16,6 +16,9 @@ import Testing
 final class ScriptedProvider: Sendable {
     let listener: LinkListener
     let requests = Mutex<[CentralRequest]>([])
+    /// How many client hellos this provider has answered — one per dial, so a test can tell a
+    /// client that reconnected from one that merely stayed put.
+    let helloCount = Mutex<Int>(0)
     private let connection = Mutex<LinkConnection?>(nil)
 
     init() throws {
@@ -27,6 +30,7 @@ final class ScriptedProvider: Sendable {
                 guard let self else { return }
                 switch message {
                 case .clientHello:
+                    self.helloCount.withLock { $0 += 1 }
                     link.send(.serverHello(ServerHello(protocolVersion: LinkProtocol.version, accepted: true, reason: nil, providerName: "scripted")))
                     link.send(.centralEvent(.didUpdateState(.poweredOn)))
                 case .centralRequest(let request):

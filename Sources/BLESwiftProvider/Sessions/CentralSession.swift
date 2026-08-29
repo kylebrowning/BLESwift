@@ -136,7 +136,13 @@ final class CentralSession: Sendable {
         // Weak, because the session owns the connection and a strong capture would be a cycle.
         install { [weak self] message in
             guard let self, case .centralRequest(let request) = message else { return }
-            self.queue.async { self.perform(request) }
+            self.queue.async {
+                do {
+                    try self.perform(request)
+                } catch {
+                    self.failProtocol(error)
+                }
+            }
         }
     }
 
@@ -170,14 +176,18 @@ final class CentralSession: Sendable {
     // MARK: - Requests
 
     /// Applies one request to the backend. Must be called on ``queue``.
-    private func perform(_ request: CentralRequest) {
+    ///
+    /// - Throws: ``BLESwiftLink/WireDecodingError`` for a request carrying a field no
+    ///   BLESwift type can represent — a malformed UUID string, say. The caller treats it as
+    ///   a protocol violation and drops the connection.
+    private func perform(_ request: CentralRequest) throws {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !isClosed else { return }
         switch request {
 
         case .scan(let services, let allowDuplicates):
             backend.scanForPeripherals(
-                withServices: services?.map(ServiceIdentifier.init(uuid:)),
+                withServices: try services?.map(Self.service(_:)),
                 options: ScanOptions(allowDuplicates: allowDuplicates)
             )
 
@@ -204,57 +214,68 @@ final class CentralSession: Sendable {
 
         case .registerForConnectionEvents(let services, let peripherals):
             backend.registerForConnectionEvents(
-                services: services?.map(ServiceIdentifier.init(uuid:)),
+                services: try services?.map(Self.service(_:)),
                 peripherals: peripherals
             )
 
         case .unregisterForConnectionEvents:
             backend.unregisterForConnectionEvents()
 
+        // Each of these converts *before* looking the remote up: a malformed identifier is a
+        // protocol violation whether or not this session happens to know the peripheral it
+        // was sent for, and a client that gets away with it for an unknown peripheral would
+        // simply be told nothing.
         case .discoverServices(let peripheral, let services):
+            let requested = try services?.map(Self.service(_:))
             guard let remote = self.remote(peripheral, for: "discoverServices") else { return }
-            remote.discoverServices(services?.map(ServiceIdentifier.init(uuid:)))
+            remote.discoverServices(requested)
 
         case .discoverCharacteristics(let peripheral, let service, let characteristics):
+            let identifier = try Self.service(service)
+            let requested = try characteristics?.map {
+                CharacteristicIdentifier(uuid: try WireIdentifierValidation.validated($0), service: identifier)
+            }
             guard let remote = self.remote(peripheral, for: "discoverCharacteristics") else { return }
-            let identifier = ServiceIdentifier(uuid: service)
-            remote.discoverCharacteristics(
-                characteristics?.map { CharacteristicIdentifier(uuid: $0, service: identifier) },
-                for: identifier
-            )
+            remote.discoverCharacteristics(requested, for: identifier)
 
         case .readValue(let peripheral, let characteristic):
+            let identifier = try characteristic.identifier
             guard let remote = self.remote(peripheral, for: "readValue") else { return }
-            remote.readValue(for: characteristic.identifier)
+            remote.readValue(for: identifier)
 
         case .writeValue(let peripheral, let characteristic, let value, let type, let sequence):
+            let identifier = try characteristic.identifier
             guard let remote = self.remote(peripheral, for: "writeValue") else { return }
             guard type == .withoutResponse else {
                 // A `.withResponse` write is acknowledged by `didWriteValue`, so it needs no
                 // flow control of its own.
-                remote.writeValue(value, for: characteristic.identifier, type: .withResponse)
+                remote.writeValue(value, for: identifier, type: .withResponse)
                 return
             }
             pendingWrites[peripheral, default: []].append(
-                PendingWrite(sequence: sequence, characteristic: characteristic.identifier, value: value)
+                PendingWrite(sequence: sequence, characteristic: identifier, value: value)
             )
             drainWrites(for: peripheral)
 
         case .setNotifyValue(let peripheral, let characteristic, let enabled):
+            let identifier = try characteristic.identifier
             guard let remote = self.remote(peripheral, for: "setNotifyValue") else { return }
-            remote.setNotifyValue(enabled, for: characteristic.identifier)
+            remote.setNotifyValue(enabled, for: identifier)
 
         case .discoverDescriptors(let peripheral, let characteristic):
+            let identifier = try characteristic.identifier
             guard let remote = self.remote(peripheral, for: "discoverDescriptors") else { return }
-            remote.discoverDescriptors(for: characteristic.identifier)
+            remote.discoverDescriptors(for: identifier)
 
         case .readDescriptor(let peripheral, let descriptor):
+            let identifier = try descriptor.identifier
             guard let remote = self.remote(peripheral, for: "readDescriptor") else { return }
-            remote.readValue(for: descriptor.identifier)
+            remote.readValue(for: identifier)
 
         case .writeDescriptor(let peripheral, let descriptor, let value):
+            let identifier = try descriptor.identifier
             guard let remote = self.remote(peripheral, for: "writeDescriptor") else { return }
-            remote.writeValue(value, for: descriptor.identifier)
+            remote.writeValue(value, for: identifier)
 
         case .readRSSI(let peripheral):
             guard let remote = self.remote(peripheral, for: "readRSSI") else { return }
@@ -274,6 +295,22 @@ final class CentralSession: Sendable {
         case .l2capClose(let channel):
             closeChannel(channel)
         }
+    }
+
+    /// `uuid` as a `ServiceIdentifier`, rejecting a string no `ServiceIdentifier` could
+    /// represent rather than trapping on it.
+    private static func service(_ uuid: String) throws -> ServiceIdentifier {
+        ServiceIdentifier(uuid: try WireIdentifierValidation.validated(uuid))
+    }
+
+    /// Drops the client's link because it sent something the protocol does not allow — a
+    /// malformed identifier, or more queued writes than the window can ever have permitted.
+    /// The provider's own termination path then closes this session. Must be called on
+    /// ``queue``.
+    private func failProtocol(_ error: some Error) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        log?("\(label): protocol violation (\(error)); closing the connection")
+        connection.cancel()
     }
 
     /// The remote for `peripheral`, or `nil` — with a log line — if this session has never
