@@ -450,6 +450,36 @@ final class CentralSession: Sendable {
         return !channels.values.contains { $0.peripheral == identifier }
     }
 
+    /// The write maximum to put on the wire for `peripheral`, given what the backend reported.
+    ///
+    /// The client applies ``BLESwiftLink/WireLengthValidation`` to whatever arrives, and a
+    /// maximum it refuses costs it the whole session — so the same rule is applied here,
+    /// before the value is sent, and a backend that reports an unusable one costs this
+    /// connection its negotiated maxima instead. A non-positive maximum is one no caller
+    /// could divide a payload by, so the conservative default stands in for it; an
+    /// implausibly large one is clamped, exactly as the client clamps it.
+    ///
+    /// - Parameters:
+    ///   - reported: What the remote reported, or `nil` when this session has no remote.
+    ///   - fallback: The default for this write type.
+    ///   - type: The write type's name, for the log line.
+    ///   - peripheral: The peripheral the maximum was reported for, for the log line.
+    /// - Returns: A maximum the client will accept. Must be called on ``queue``.
+    private func reportableMaximum(
+        _ reported: Int?,
+        default fallback: Int,
+        for type: String,
+        peripheral: UUID
+    ) -> Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let reported else { return fallback }
+        guard reported > 0 else {
+            log?("peripheral \(peripheral) reported \(type) maximum \(reported); reporting the default")
+            return fallback
+        }
+        return min(reported, WireLengthValidation.maximumLength)
+    }
+
     /// The remote for `peripheral`, or `nil` — with a log line — if this session has never
     /// connected it. Must be called on ``queue``.
     private func remote(_ peripheral: UUID, for request: String) -> (any PeripheralRemote)? {
@@ -507,10 +537,18 @@ final class CentralSession: Sendable {
             send(.didConnect(
                 peripheral: peripheral.uuid,
                 name: remote?.name ?? peripheral.name,
-                maximumWriteWithResponse: remote?.maximumWriteValueLength(for: .withResponse)
-                    ?? Self.defaultMaximumWriteWithResponse,
-                maximumWriteWithoutResponse: remote?.maximumWriteValueLength(for: .withoutResponse)
-                    ?? Self.defaultMaximumWriteWithoutResponse
+                maximumWriteWithResponse: reportableMaximum(
+                    remote?.maximumWriteValueLength(for: .withResponse),
+                    default: Self.defaultMaximumWriteWithResponse,
+                    for: "withResponse",
+                    peripheral: peripheral.uuid
+                ),
+                maximumWriteWithoutResponse: reportableMaximum(
+                    remote?.maximumWriteValueLength(for: .withoutResponse),
+                    default: Self.defaultMaximumWriteWithoutResponse,
+                    for: "withoutResponse",
+                    peripheral: peripheral.uuid
+                )
             ))
 
         case .didFailToConnect(let peripheral, let error):

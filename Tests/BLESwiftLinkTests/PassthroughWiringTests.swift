@@ -244,6 +244,39 @@ struct PassthroughWiringTests {
         await tearDown(link: link, provider: provider)
     }
 
+    @Test("A backend reporting an unusable write maximum costs the connection its maxima, not the session")
+    func unusableWriteMaximumFallsBackToTheDefaults() async throws {
+        let box = FakeBox<FakeCentral>()
+        let provider = try await makeProvider(centralFactory: { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            let peripheral = FakePeripheral(identifier: Self.realDeviceID, name: "Real HRM", queue: queue)
+            // A maximum no caller could divide a payload by. The client refuses it outright,
+            // so an unclamped one here would cost the whole session.
+            peripheral.scriptedMaximumWriteValueLength = 0
+            fake.retrievablePeripherals[Self.realDeviceID] = peripheral
+            fake.connectBehavior = .succeed
+            box.store(fake)
+            return fake
+        })
+        let (link, queue) = makeLink(port: await provider.port, label: "passthrough.maxima")
+        let central = Central(backend: link, queue: queue)
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+
+        let peripheral = try await bounded {
+            try await central.connect(PeripheralIdentifier(uuid: Self.realDeviceID, name: "Real HRM"))
+        }
+
+        // `CentralSession`'s own defaults — 182 for `.withResponse`, the conservative 20 for
+        // `.withoutResponse` — stood in for the unusable pair.
+        #expect(await peripheral.maximumWriteValueLength(for: .withResponse) == 182)
+        #expect(await peripheral.maximumWriteValueLength(for: .withoutResponse) == 20)
+        // The connection cost nothing: the session is the one the client dialed.
+        #expect(await provider.sessionCount == 1)
+        #expect(link.isProviderConnected)
+
+        await tearDown(link: link, provider: provider)
+    }
+
     // MARK: - Peripheral role
 
     /// A `PeripheralHost` linked to `provider`, plus its link.
