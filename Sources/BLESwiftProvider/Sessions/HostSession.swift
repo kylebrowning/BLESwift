@@ -27,7 +27,9 @@ import Foundation
 /// **Notification back-pressure.** Pushes are queued FIFO and offered to the backend one at
 /// a time. Each one the backend accepts is acknowledged to the client with
 /// `updateValueDelivered`, which is what advances the client's own window; a refusal parks
-/// the drain until the backend reports `readyToUpdateSubscribers`.
+/// the drain until the backend reports `readyToUpdateSubscribers`. The queue is bounded at
+/// ``maximumPendingUpdates``: a client that keeps pushing past the window it agreed to loses
+/// its link rather than the provider losing its memory.
 ///
 /// - Note: The session holds its ``BLESwiftLink/LinkConnection`` strongly, for the same
 ///   reason ``CentralSession`` does.
@@ -40,6 +42,17 @@ final class HostSession: Sendable {
         let characteristic: CharacteristicIdentifier
         let centrals: [Subscriber]?
     }
+
+    /// How many unsent `updateValue` pushes this session holds before it stops believing the
+    /// client.
+    ///
+    /// Four times the window the client agreed to honor, for the same reason
+    /// ``CentralSession/maximumPendingWrites`` is: a client that has stopped waiting for
+    /// `updateValueDelivered` can otherwise grow this queue — and the provider's memory —
+    /// without bound, and a backend that never reports `readyToUpdateSubscribers` would let
+    /// it. The factor of four is slack for the acknowledgements still in flight, not a second
+    /// window.
+    static let maximumPendingUpdates = 4 * LinkFlowControl.updateValueWindow
 
     /// The connection this session serves, held strongly for its whole lifetime.
     private let connection: LinkConnection
@@ -173,6 +186,12 @@ final class HostSession: Sendable {
             )
 
         case .updateValue(let sequence, let value, let characteristic, let centrals):
+            // A client that keeps queueing past the window it agreed to has stopped following
+            // the protocol; the link goes rather than this session's memory.
+            guard pendingUpdates.count < Self.maximumPendingUpdates else {
+                failProtocol(ProtocolViolation.updateWindowExceeded)
+                return
+            }
             pendingUpdates.append(PendingUpdate(
                 sequence: sequence,
                 value: value,
@@ -186,8 +205,17 @@ final class HostSession: Sendable {
         }
     }
 
-    /// Drops the client's link because it sent something the protocol does not allow. The
-    /// provider's own termination path then closes this session. Must be called on ``queue``.
+    /// What a client can do that this session refuses to serve.
+    enum ProtocolViolation: Error, Equatable {
+        /// More `updateValue` pushes were queued than ``maximumPendingUpdates`` allows — the
+        /// client has ignored its flow-control window.
+        case updateWindowExceeded
+    }
+
+    /// Drops the client's link because it sent something the protocol does not allow — a
+    /// malformed identifier, or more queued pushes than the window can ever have permitted.
+    /// The provider's own termination path then closes this session. Must be called on
+    /// ``queue``.
     private func failProtocol(_ error: some Error) {
         dispatchPrecondition(condition: .onQueue(queue))
         log?("\(label): protocol violation (\(error)); closing the connection")
