@@ -50,6 +50,12 @@ jobs:
         run: xcodebuild build -scheme BLESwiftProfiles -destination 'generic/platform=${{ matrix.platform }}'
       - name: Build BLESwiftTestSupport
         run: xcodebuild build -scheme BLESwiftTestSupport -destination 'generic/platform=${{ matrix.platform }}'
+      # The link and its simulator-side backends are declared for every platform too, and
+      # nothing else in CI compiles them off macOS.
+      - name: Build BLESwiftLink
+        run: xcodebuild build -scheme BLESwiftLink -destination 'generic/platform=${{ matrix.platform }}'
+      - name: Build BLESwiftSimulatorLink
+        run: xcodebuild build -scheme BLESwiftSimulatorLink -destination 'generic/platform=${{ matrix.platform }}'
 
   sample-app:
     # Build (only) the BLESwiftExplorer SwiftUI sample for iOS and macOS on every commit,
