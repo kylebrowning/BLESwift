@@ -112,7 +112,7 @@ struct LinkCentralTests {
         }
         await waitFor { provider.requests.withLock { $0 }.contains(.scan(services: ["180D"], allowDuplicates: false)) }
         provider.emit(.didDiscover(peripheral: id, name: "HRM", advertisement: WireAdvertisement(AdvertisementData(localName: "HRM", serviceUUIDs: [Self.service])), rssi: -42))
-        let discovery = try await task.value
+        let discovery = try await bounded { try await task.value }
         #expect(discovery?.peripheral.uuid == id)
         #expect(discovery?.peripheral.name == "HRM")
         #expect(discovery?.rssi == -42)
@@ -130,7 +130,7 @@ struct LinkCentralTests {
         let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: "HRM")) }
         await waitFor { provider.requests.withLock { $0 }.contains { if case .connect(let p, _, _) = $0 { return p == id }; return false } }
         provider.emit(.didConnect(peripheral: id, name: "HRM", maximumWriteWithResponse: 200, maximumWriteWithoutResponse: 100))
-        let peripheral = try await connectTask.value
+        let peripheral = try await bounded { try await connectTask.value }
 
         // Discovery is driven by the read: the provider must answer both discovery steps.
         let readTask = Task { () -> Data in try await peripheral.read(from: Self.measurement) }
@@ -140,13 +140,13 @@ struct LinkCentralTests {
         provider.emit(.didDiscoverCharacteristics(peripheral: id, service: "180D", characteristics: [WireDiscoveredCharacteristic(uuid: "2A37", properties: CharacteristicProperties([.read, .write, .notify, .writeWithoutResponse]).rawValue)], error: nil))
         await waitFor { provider.requests.withLock { $0 }.contains(.readValue(peripheral: id, characteristic: ref)) }
         provider.emit(.didUpdateValue(peripheral: id, characteristic: ref, value: Data([0, 72]), error: nil))
-        #expect(try await readTask.value == Data([0, 72]))
+        #expect(try await bounded { try await readTask.value } == Data([0, 72]))
 
         // Write with response.
         let writeTask = Task { try await peripheral.write(Data([1]), to: Self.measurement) }
         await waitFor { provider.requests.withLock { $0 }.contains { if case .writeValue(id, ref, Data([1]), .withResponse, _) = $0 { return true }; return false } }
         provider.emit(.didWriteValue(peripheral: id, characteristic: ref, error: nil))
-        try await writeTask.value
+        try await bounded { try await writeTask.value }
 
         // Notification.
         let notifyTask = Task { () -> Data? in
@@ -157,13 +157,13 @@ struct LinkCentralTests {
         await waitFor { provider.requests.withLock { $0 }.contains(.setNotifyValue(peripheral: id, characteristic: ref, enabled: true)) }
         provider.emit(.didUpdateNotificationState(peripheral: id, characteristic: ref, isNotifying: true, error: nil))
         provider.emit(.didUpdateValue(peripheral: id, characteristic: ref, value: Data([9]), error: nil))
-        #expect(try await notifyTask.value == Data([9]))
+        #expect(try await bounded { try await notifyTask.value } == Data([9]))
 
         // Disconnect.
         let disconnectTask = Task { try await central.disconnect(peripheral.id) }
         await waitFor { provider.requests.withLock { $0 }.contains(.cancelConnection(peripheral: id)) }
         provider.emit(.didDisconnect(peripheral: id, error: nil))
-        try await disconnectTask.value
+        try await bounded { try await disconnectTask.value }
     }
 
     @Test("Provider drop disconnects connected peripherals and reports .unsupported")
@@ -174,7 +174,7 @@ struct LinkCentralTests {
         let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: nil)) }
         await waitFor { !provider.requests.withLock { $0 }.isEmpty }
         provider.emit(.didConnect(peripheral: id, name: "x", maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
-        _ = try await connectTask.value
+        _ = try await bounded { try await connectTask.value }
         let events = Task { () -> ConnectionEvent? in
             for await event in await central.connectionEvents() {
                 if case .disconnected = event { return event }
@@ -182,7 +182,7 @@ struct LinkCentralTests {
             return nil
         }
         provider.stop()
-        let event = await events.value
+        let event = try await bounded { await events.value }
         #expect(event != nil)
         await waitFor { central.state == .unsupported }
         #expect(central.state == .unsupported)

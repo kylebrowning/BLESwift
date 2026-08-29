@@ -68,7 +68,7 @@ struct VirtualRadioTests {
         // permitted fixed-delay fallback stands in for one.
         try await Task.sleep(for: .milliseconds(100))
         try await peripheral.write(Data([0x2A]), to: Self.control)
-        #expect(try await notifications.value == Data([0x2A]))
+        #expect(try await bounded { try await notifications.value } == Data([0x2A]))
         let readBack: Data = try await peripheral.read(from: Self.control)
         #expect(readBack == Data([0x2A]))
         try await central.disconnect(peripheral.id)
@@ -142,7 +142,7 @@ struct VirtualRadioTests {
             return .none
         }
         await handle.remove()
-        let reported = try #require(await events.value)
+        let reported = try #require(try await bounded { await events.value })
         let nsError = try #require(reported) as NSError
         #expect(nsError.domain == "BLESwiftProvider")
         #expect(nsError.code == 2)
@@ -232,7 +232,7 @@ struct VirtualRadioTests {
         // See `gatt()` — no public arming signal, so the brief's fixed-delay fallback stands in.
         try await Task.sleep(for: .milliseconds(100))
         await handle.notify(Data([0, 99]), for: Self.measurement, to: nil)
-        #expect(try await task.value == Data([0, 99]))
+        #expect(try await bounded { try await task.value } == Data([0, 99]))
     }
 }
 #endif

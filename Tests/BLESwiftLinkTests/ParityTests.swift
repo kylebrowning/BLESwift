@@ -92,48 +92,24 @@ struct ParityTests {
         let description: String
     }
 
-    /// Where a bounded step parks its result, so the waiter never has to `await` a task it
-    /// cannot cancel.
-    private final class Outcome<T: Sendable>: Sendable {
-        private let storage = Mutex<(value: T?, failure: String?)>((nil, nil))
-
-        var settled: (value: T?, failure: String?)? {
-            storage.withLock { $0.value == nil && $0.failure == nil ? nil : $0 }
-        }
-
-        func succeed(_ value: T) { storage.withLock { $0 = (value, nil) } }
-
-        func fail(_ description: String) { storage.withLock { $0 = (nil, description) } }
-    }
-
-    /// Runs `operation` and gives up after ten seconds with a recorded failure instead of
-    /// hanging the suite.
+    /// Runs `operation` under the shared ten-second bound, giving up with a recorded failure
+    /// instead of hanging the suite.
     ///
     /// Every step of this scenario simulates its stimulus exactly once, so a link that
     /// dropped or reordered that one message must surface as a timeout here — never as a
-    /// silent retry that papers over the loss. The result is parked in an ``Outcome`` and
-    /// polled rather than awaited: `await task.value` is not cancellable, so racing it
-    /// against a sleep would hang forever on exactly the failure this bound exists to catch.
+    /// silent retry that papers over the loss.
     private static func bounded<T: Sendable>(
         _ step: String,
         _ operation: @escaping @Sendable () async throws -> T
     ) async throws -> T? {
-        let outcome = Outcome<T>()
-        let work = Task {
-            do {
-                outcome.succeed(try await operation())
-            } catch {
-                outcome.fail(String(describing: error))
-            }
-        }
-        await waitFor(timeout: .seconds(10)) { outcome.settled != nil }
-        work.cancel()
-        guard let settled = outcome.settled else {
-            Issue.record("\(step) did not complete within 10 s")
+        do {
+            return try await BLESwiftLinkTests.bounded(step, operation)
+        } catch let timeout as TimedOut {
+            Issue.record("\(timeout)")
             return nil
+        } catch {
+            throw ParityFailure(description: "\(step): \(String(describing: error))")
         }
-        if let failure = settled.failure { throw ParityFailure(description: "\(step): \(failure)") }
-        return settled.value
     }
 
     // MARK: - The scenario

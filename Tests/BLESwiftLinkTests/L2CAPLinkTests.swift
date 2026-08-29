@@ -202,7 +202,7 @@ struct L2CAPLinkTests {
             }
             return accumulated
         }
-        let collected = try await collector.value
+        let collected = try await bounded { try await collector.value }
         #expect(collected == expected)
 
         await tearDown(rig)
@@ -226,7 +226,7 @@ struct L2CAPLinkTests {
         }
         await channel.close()
 
-        #expect(await finished.value == nil)
+        #expect(try await bounded { await finished.value } == nil)
         await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.isClosed } }
         #expect(await fake.onQueue { fake.isClosed })
 
@@ -249,7 +249,7 @@ struct L2CAPLinkTests {
         }
         fake.close(error: nil)
 
-        #expect(await finished.value == nil)
+        #expect(try await bounded { await finished.value } == nil)
         await tearDown(rig)
     }
 
@@ -269,7 +269,7 @@ struct L2CAPLinkTests {
         }
         fake.close(error: NSError(domain: "L2CAPLinkTests", code: 7))
 
-        let error = try #require(await finished.value) as NSError
+        let error = try #require(try await bounded { await finished.value }) as NSError
         #expect(error.domain == "L2CAPLinkTests")
         #expect(error.code == 7)
 

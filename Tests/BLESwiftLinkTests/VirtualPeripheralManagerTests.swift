@@ -101,7 +101,7 @@ struct VirtualPeripheralManagerTests {
         try await Task.sleep(for: .milliseconds(100))
         #expect(await !host.subscribers(for: Self.measurement).isEmpty)
         try await host.updateValue(Data([0, 99]), for: Self.measurement)
-        #expect(try await notifications.value == Data([0, 99]))
+        #expect(try await bounded { try await notifications.value } == Data([0, 99]))
 
         try await central.disconnect(peripheral.id)
 

@@ -86,7 +86,7 @@ struct CentralEndToEndTests {
         // stands in for one, exactly as the virtual-radio tests do.
         try await Task.sleep(for: .milliseconds(100))
         try await peripheral.write(Data([0x3C]), to: Self.control)
-        #expect(try await notified.value == Data([0x3C]))
+        #expect(try await bounded { try await notified.value } == Data([0x3C]))
 
         #expect(try await peripheral.readRSSI() == -50)
 
