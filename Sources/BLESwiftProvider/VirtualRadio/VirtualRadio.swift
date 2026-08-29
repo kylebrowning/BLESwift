@@ -176,9 +176,14 @@ public actor VirtualRadio {
 
     /// Removes a registered device, disconnecting every central attached to it. See
     /// ``VirtualDeviceHandle/remove()``.
-    func remove(device: UUID) {
+    ///
+    /// Every subscription the device still had is reported to its handler as an
+    /// unsubscribe before the device goes, so a hosted `PeripheralHost` is left holding no
+    /// subscriber it can never notify again — CoreBluetooth reports `didUnsubscribe` when a
+    /// subscribed central goes away, and so does this radio.
+    func remove(device: UUID) async {
         guard let state = devices.removeValue(forKey: device) else { return }
-        subscriptions.removeValue(forKey: device)
+        let departing = subscriptions.removeValue(forKey: device) ?? [:]
         knownDeviceIDs.withLock { (known: inout Set<UUID>) -> Void in
             known.remove(device)
         }
@@ -191,6 +196,11 @@ public actor VirtualRadio {
             guard sessions[sessionID]?.connections.contains(device) == true else { continue }
             sessions[sessionID]?.connections.remove(device)
             sessions[sessionID]?.centralSink(.didDisconnect(identifier, error: Self.deviceRemovedError))
+        }
+        for (characteristic, subscribers) in departing {
+            for sessionID in subscribers {
+                await state.handler.subscriptionChanged(characteristic, central: subscriber(sessionID), isSubscribed: false)
+            }
         }
     }
 
@@ -222,12 +232,19 @@ public actor VirtualRadio {
     }
 
     /// Detaches a backend, cancelling its scan and dropping its connections, its per-device
-    /// sinks — the whole session record goes — and its subscriptions.
-    func detach(session: UUID) {
+    /// sinks — the whole session record goes — and its subscriptions. Each dropped
+    /// subscription is reported to its device's handler as an unsubscribe.
+    func detach(session: UUID) async {
         guard let removed = sessions.removeValue(forKey: session) else { return }
         removed.scanner?.repeater?.cancel()
+        var dropped: [(device: UUID, characteristics: [CharacteristicIdentifier])] = []
         for device in removed.connections {
-            dropSubscriptions(session: session, device: device)
+            dropped.append((device, dropSubscriptions(session: session, device: device)))
+        }
+        // Every table is settled before the first `await`, so a handler that calls back into
+        // the radio cannot observe a half-detached session.
+        for entry in dropped {
+            await reportUnsubscribed(entry.characteristics, device: entry.device, session: session)
         }
     }
 
@@ -325,28 +342,53 @@ public actor VirtualRadio {
         return (nil, state.descriptor.name)
     }
 
-    /// Disconnects `session` from `device`, dropping its subscriptions. The backend
-    /// delivers the resulting `didDisconnect` itself, mirroring CoreBluetooth's
-    /// `cancelPeripheralConnection(_:)`.
-    func disconnect(session: UUID, device: UUID) {
+    /// Disconnects `session` from `device`, dropping its subscriptions and reporting each of
+    /// them to the device's handler as an unsubscribe. The backend delivers the resulting
+    /// `didDisconnect` itself, mirroring CoreBluetooth's `cancelPeripheralConnection(_:)`.
+    func disconnect(session: UUID, device: UUID) async {
         sessions[session]?.connections.remove(device)
         // Goes with the connection: the sink was registered by ``connect(session:device:sink:)``
         // and the backend delivers the `didDisconnect` itself, so nothing is left to route
         // through it.
         sessions[session]?.peripheralSinks.removeValue(forKey: device)
-        dropSubscriptions(session: session, device: device)
+        let dropped = dropSubscriptions(session: session, device: device)
+        await reportUnsubscribed(dropped, device: device, session: session)
     }
 
     /// Removes every subscription `session` holds on `device`.
-    private func dropSubscriptions(session: UUID, device: UUID) {
-        guard var perCharacteristic = subscriptions[device] else { return }
+    ///
+    /// - Returns: The characteristics `session` really was subscribed to, so exactly those —
+    ///   and no others — are reported to the device's handler.
+    private func dropSubscriptions(session: UUID, device: UUID) -> [CharacteristicIdentifier] {
+        guard var perCharacteristic = subscriptions[device] else { return [] }
+        var dropped: [CharacteristicIdentifier] = []
         for characteristic in Array(perCharacteristic.keys) {
-            perCharacteristic[characteristic]?.remove(session)
+            guard perCharacteristic[characteristic]?.remove(session) != nil else { continue }
+            dropped.append(characteristic)
             if perCharacteristic[characteristic]?.isEmpty == true {
                 perCharacteristic.removeValue(forKey: characteristic)
             }
         }
         subscriptions[device] = perCharacteristic.isEmpty ? nil : perCharacteristic
+        return dropped
+    }
+
+    /// Tells `device`'s handler that `session` is no longer subscribed to `characteristics`.
+    ///
+    /// This is what keeps a hosted `PeripheralHost` — fixture, code-defined, or link-hosted —
+    /// from holding a ghost subscriber after the central behind it disconnected, cancelled,
+    /// or had its backend detached. CoreBluetooth reports `didUnsubscribe` in exactly those
+    /// cases.
+    private func reportUnsubscribed(
+        _ characteristics: [CharacteristicIdentifier],
+        device: UUID,
+        session: UUID
+    ) async {
+        guard !characteristics.isEmpty, let handler = devices[device]?.handler else { return }
+        let central = subscriber(session)
+        for characteristic in characteristics {
+            await handler.subscriptionChanged(characteristic, central: central, isSubscribed: false)
+        }
     }
 
     // MARK: - GATT

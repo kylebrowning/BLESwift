@@ -6,7 +6,7 @@
 #if os(macOS)
 import BLESwift
 import BLESwiftCore
-import BLESwiftProvider
+@testable import BLESwiftProvider
 import Dispatch
 import Foundation
 import Synchronization
@@ -264,6 +264,164 @@ struct VirtualPeripheralManagerTests {
         let discovery = try #require(found)
         #expect(discovery.peripheral.name == "Renamed")
         #expect(discovery.advertisement.localName == "Renamed")
+    }
+
+    // MARK: - Departing subscribers
+
+    /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.
+    private static func onQueue<T: Sendable>(
+        _ queue: DispatchSerialQueue,
+        _ body: @escaping @Sendable () -> T
+    ) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async { continuation.resume(returning: body()) }
+        }
+    }
+
+    /// Collects a host's subscription events off its actor. A `Mutex` is noncopyable, so it
+    /// is wrapped rather than passed around bare.
+    private final class SubscriptionLog: Sendable {
+        private let events = Mutex<[SubscriptionEvent]>([])
+
+        func append(_ event: SubscriptionEvent) { events.withLock { $0.append(event) } }
+
+        /// The subscriber and characteristic of the last recorded `.unsubscribed`, or `nil`
+        /// when the last event was not one.
+        var lastUnsubscribe: (central: Subscriber, characteristic: CharacteristicIdentifier)? {
+            guard case .unsubscribed(let central, let characteristic) = events.withLock({ $0.last }) else { return nil }
+            return (central, characteristic)
+        }
+    }
+
+    /// A hosted `PeripheralHost` on `radio` publishing ``service``, with an observer already
+    /// attached to its subscription events.
+    ///
+    /// The stream is created *before* this returns — `subscriptionEvents()` does not replay,
+    /// so an observer started behind the first subscribe would miss it.
+    private static func hostRig(
+        radio: VirtualRadio,
+        label: String,
+        identifier: UUID
+    ) async throws -> (host: PeripheralHost, log: SubscriptionLog, observer: Task<Void, Never>) {
+        let hostQueue = DispatchSerialQueue(label: label)
+        let host = PeripheralHost(
+            backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier),
+            queue: hostQueue
+        )
+        try await host.add(Self.service)
+        let log = SubscriptionLog()
+        let stream = await host.subscriptionEvents()
+        let observer = Task { for await event in stream { log.append(event) } }
+        return (host, log, observer)
+    }
+
+    /// Connects `backend` to `identifier` and subscribes it to ``measurement``, returning the
+    /// remote so each test can control exactly how that central departs.
+    ///
+    /// The backend is driven directly rather than through a `Central`: a notification stream
+    /// unsubscribes when it terminates, which is the one thing these tests must *not* do.
+    private static func subscribedRemote(
+        _ backend: VirtualCentralBackend,
+        on queue: DispatchSerialQueue,
+        to identifier: UUID,
+        host: PeripheralHost
+    ) async throws -> VirtualPeripheralRemote {
+        await waitFor { await onQueue(queue) { !backend.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
+        let remote = try #require(await onQueue(queue) {
+            backend.retrievePeripherals(withIdentifiers: [identifier]).first as? VirtualPeripheralRemote
+        })
+        await onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
+        await waitFor { await onQueue(queue) { remote.connectionState == .connected } }
+        await onQueue(queue) { remote.setNotifyValue(true, for: Self.measurement) }
+        await waitFor { await !host.subscribers(for: Self.measurement).isEmpty }
+        return remote
+    }
+
+    @Test("A subscribed central's disconnect reaches the host as an unsubscribe")
+    func disconnectUnsubscribesTheHost() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let (host, log, observer) = try await Self.hostRig(
+            radio: radio,
+            label: "VirtualPeripheralManagerTests.DisconnectHost",
+            identifier: identifier
+        )
+        defer { observer.cancel() }
+
+        let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.DisconnectCentral")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        let remote = try await Self.subscribedRemote(backend, on: queue, to: identifier, host: host)
+        #expect(await host.subscribers(for: Self.measurement).map(\.id) == [backend.sessionID])
+
+        // The central goes away without unsubscribing first, exactly as a real one does when
+        // its connection is cancelled.
+        await Self.onQueue(queue) { backend.cancelPeripheralConnection(remote) }
+
+        await waitFor { await host.subscribers(for: Self.measurement).isEmpty }
+        #expect(await host.subscribers(for: Self.measurement).isEmpty)
+        let departure = try #require(log.lastUnsubscribe)
+        #expect(departure.central.id == backend.sessionID)
+        #expect(departure.characteristic == Self.measurement)
+    }
+
+    @Test("A subscribed central's backend going away reaches the host as an unsubscribe")
+    func detachedBackendUnsubscribesTheHost() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let (host, log, observer) = try await Self.hostRig(
+            radio: radio,
+            label: "VirtualPeripheralManagerTests.DetachHost",
+            identifier: identifier
+        )
+        defer { observer.cancel() }
+
+        let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.DetachCentral")
+        var backend: VirtualCentralBackend? = VirtualCentralBackend(radio: radio, queue: queue)
+        let session = try #require(backend?.sessionID)
+        var remote: VirtualPeripheralRemote? = try await Self.subscribedRemote(
+            try #require(backend),
+            on: queue,
+            to: identifier,
+            host: host
+        )
+        #expect(await host.subscribers(for: Self.measurement).map(\.id) == [session])
+
+        // Released, not cancelled: `deinit` detaches the session from the radio, and the
+        // subscriptions that go with it must still reach the host.
+        remote = nil
+        backend = nil
+        #expect(remote == nil && backend == nil)
+
+        await waitFor { await host.subscribers(for: Self.measurement).isEmpty }
+        #expect(await host.subscribers(for: Self.measurement).isEmpty)
+        let departure = try #require(log.lastUnsubscribe)
+        #expect(departure.central.id == session)
+        #expect(departure.characteristic == Self.measurement)
+    }
+
+    @Test("Removing the hosted device reaches the host as an unsubscribe")
+    func removedDeviceUnsubscribesTheHost() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let (host, log, observer) = try await Self.hostRig(
+            radio: radio,
+            label: "VirtualPeripheralManagerTests.RemoveHost",
+            identifier: identifier
+        )
+        defer { observer.cancel() }
+
+        let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.RemoveCentral")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        _ = try await Self.subscribedRemote(backend, on: queue, to: identifier, host: host)
+        #expect(await host.subscribers(for: Self.measurement).map(\.id) == [backend.sessionID])
+
+        await radio.remove(device: identifier)
+
+        await waitFor { await host.subscribers(for: Self.measurement).isEmpty }
+        #expect(await host.subscribers(for: Self.measurement).isEmpty)
+        let departure = try #require(log.lastUnsubscribe)
+        #expect(departure.central.id == backend.sessionID)
+        #expect(departure.characteristic == Self.measurement)
     }
 }
 #endif
