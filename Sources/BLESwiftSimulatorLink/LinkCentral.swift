@@ -645,7 +645,9 @@ public final class LinkCentral: CentralManaging, Sendable {
             target.deliver(.didOpenL2CAPChannel(channel: entry.channel, error: nil))
 
         case .l2capData(let identifier, let data):
-            _channels[identifier]?.channel.receive(data)
+            // A throw here drops the session — the frame was larger than the chunk size both
+            // ends agreed on, which no honest provider sends.
+            try _channels[identifier]?.channel.receive(data)
 
         case .l2capCredit(let identifier, let bytes):
             _channels[identifier]?.channel.addCredit(bytes: bytes)

@@ -20,6 +20,10 @@ enum LinkL2CAPError: Error, Equatable {
     /// the whole window, or one that would overflow it. The channel is closed rather than
     /// carried on with a window that could go negative.
     case invalidCredit(Int)
+
+    /// The provider sent an inbound frame larger than the chunk size both ends split their
+    /// writes into. The session is dropped rather than the frame buffered.
+    case frameTooLarge(Int)
 }
 
 /// The client half of an L2CAP channel tunnelled over the link: an
@@ -205,7 +209,19 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
     /// wire: crediting it would send `l2capCredit` with `0` bytes, which the provider treats
     /// as a protocol violation and answers by closing the channel. Nothing is yielded for it
     /// either — an empty element is not a byte a consumer can read.
-    func receive(_ data: Data) {
+    ///
+    /// **One frame is bounded.** A frame larger than ``maximumChunk`` is larger than the chunk
+    /// size both ends split their writes into, so no honest provider can produce one — the
+    /// mirror of the provider's own cap on an inbound `l2capData`. It is a protocol violation,
+    /// and it is thrown rather than buffered: the caller drops the session, which closes every
+    /// channel on it, instead of letting a peer that has left the scheme behind name this
+    /// client's buffer size.
+    ///
+    /// - Throws: ``LinkL2CAPError/frameTooLarge(_:)`` for an over-large frame.
+    func receive(_ data: Data) throws {
+        guard data.count <= Self.maximumChunk else {
+            throw LinkL2CAPError.frameTooLarge(data.count)
+        }
         guard !data.isEmpty else { return }
         enum Delivery {
             case buffered

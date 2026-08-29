@@ -344,7 +344,7 @@ struct L2CAPLinkTests {
         }
 
         // Open: bytes land, and the provider is credited for them at once.
-        channel.receive(Data([1, 2, 3]))
+        try channel.receive(Data([1, 2, 3]))
         #expect(sent.withLock { $0.count } == 1)
         if case .l2capCredit(let identifier, let bytes) = sent.withLock({ $0[0] }) {
             #expect(identifier == 7)
@@ -358,7 +358,7 @@ struct L2CAPLinkTests {
         // will never read another byte.
         channel.remoteClosed(error: nil)
         sent.withLock { $0.removeAll() }
-        channel.receive(Data([4, 5, 6, 7]))
+        try channel.receive(Data([4, 5, 6, 7]))
         #expect(sent.withLock { $0 }.isEmpty)
     }
 
@@ -373,12 +373,12 @@ struct L2CAPLinkTests {
 
         // A zero-length frame: crediting it would put `l2capCredit(bytes: 0)` on the wire,
         // which the provider rejects as a protocol violation and answers by closing.
-        channel.receive(Data())
+        try channel.receive(Data())
         #expect(sent.withLock { $0 }.isEmpty)
 
         // And the channel is untouched: the next real frame is delivered and credited, and a
         // write still goes out — neither would happen on a channel that had been torn down.
-        channel.receive(Data([1, 2, 3]))
+        try channel.receive(Data([1, 2, 3]))
         #expect(sent.withLock { $0 } == [.l2capCredit(channel: 11, bytes: 3)])
         channel.addCredit(bytes: 8)
         try await channel.write(Data([9]))
@@ -390,6 +390,30 @@ struct L2CAPLinkTests {
             return nil
         }
         #expect(first == Data([1, 2, 3]))
+    }
+
+    @Test("An inbound frame larger than the chunk size is a protocol violation")
+    func oversizedInboundFrameIsRejected() async throws {
+        // The client half on its own, as `closedChannelCreditsNothing` drives it.
+        let sent = Mutex<[CentralRequest]>([])
+        let channel = LinkL2CAPChannel(channel: 13, psm: Self.psm) { request in
+            sent.withLock { $0.append(request) }
+        }
+
+        // Exactly the chunk size is what an honest provider's largest frame is: accepted, and
+        // credited for every byte.
+        let limit = LinkFlowControl.l2capInitialCredit / 4
+        try channel.receive(Data(repeating: 0x11, count: limit))
+        #expect(sent.withLock { $0 } == [.l2capCredit(channel: 13, bytes: limit)])
+
+        // One byte more than both ends agreed to split their writes into. The throw is what
+        // `LinkCentral` turns into a dropped session; nothing is buffered, and nothing is
+        // credited, so the peer gets no window back for bytes this client refused.
+        sent.withLock { $0.removeAll() }
+        #expect(throws: LinkL2CAPError.frameTooLarge(limit + 1)) {
+            try channel.receive(Data(repeating: 0x22, count: limit + 1))
+        }
+        #expect(sent.withLock { $0 }.isEmpty)
     }
 
     // MARK: - Credit validation
