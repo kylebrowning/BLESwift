@@ -96,7 +96,15 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// Detaches from the radio behind whatever work is still queued.
+    /// Detaches from the radio, immediately and then again behind whatever work is still
+    /// queued.
+    ///
+    /// The first detach is unconditional and comes *before* the chain is awaited: it is what
+    /// cancels a duplicate-reporting scan repeater, and a chain still waiting on a radio
+    /// answer that never comes would otherwise leave that repeater running for the life of
+    /// the process. The second detach covers the opposite order — a chain whose `attach` had
+    /// not run yet would re-register the session behind the first detach — and is free when
+    /// the session is already gone, since `detach` is idempotent.
     ///
     /// Reading `_work` off-queue is safe here: `deinit` runs only once every reference is
     /// gone, and every queued delivery holds one.
@@ -105,6 +113,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         let session = sessionID
         let work = _work
         Task {
+            await radio.detach(session: session)
             await work?.value
             await radio.detach(session: session)
         }
