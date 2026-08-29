@@ -317,6 +317,13 @@ struct VirtualPeripheralManagerTests {
         })
         await onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
         await waitFor { await onQueue(queue) { remote.connectionState == .connected } }
+        // Discovered before it is subscribed: a `PeripheralRemote` no-ops a `setNotifyValue`
+        // for a characteristic it has not discovered, exactly as CoreBluetooth does.
+        await onQueue(queue) {
+            remote.discoverServices([Self.heartRate])
+            remote.discoverCharacteristics([Self.measurement], for: Self.heartRate)
+        }
+        await waitFor { await onQueue(queue) { remote.isDiscovered(Self.measurement) } }
         await onQueue(queue) { remote.setNotifyValue(true, for: Self.measurement) }
         await waitFor { await !host.subscribers(for: Self.measurement).isEmpty }
         return remote

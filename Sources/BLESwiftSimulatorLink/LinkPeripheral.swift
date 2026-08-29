@@ -154,9 +154,14 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         ))
     }
 
-    /// Asks the provider to read `characteristic`.
+    /// Asks the provider to read `characteristic`. A no-op for a characteristic the mirror
+    /// cache has not seen discovered, as the seam specifies and the CoreBluetooth shim does:
+    /// CoreBluetooth has no `CBCharacteristic` to read, so nothing is sent and no completion
+    /// arrives — and sending it anyway would have the provider answer for a characteristic
+    /// this client cannot name.
     public func readValue(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard isDiscovered(characteristic) else { return }
         central.send(.readValue(peripheral: identifier, characteristic: WireCharacteristicRef(characteristic)))
     }
 
@@ -167,8 +172,13 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     /// dropping a payload the caller believes was sent would be worse than exceeding the
     /// window. The write is tagged with a monotonic sequence the provider echoes back as
     /// `writeWithoutResponseAccepted`, which reopens the window.
+    ///
+    /// A no-op for a characteristic the mirror cache has not seen discovered, for the same
+    /// reason as ``readValue(for:)-(CharacteristicIdentifier)``. The flow-control sequence is
+    /// not spent either: nothing goes out to be acknowledged.
     public func writeValue(_ data: Data, for characteristic: CharacteristicIdentifier, type: WriteType) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard isDiscovered(characteristic) else { return }
         let sequence = _nextWriteSequence
         _nextWriteSequence &+= 1
         if type == .withoutResponse {
@@ -183,9 +193,12 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         ))
     }
 
-    /// Asks the provider to enable or disable notifications for `characteristic`.
+    /// Asks the provider to enable or disable notifications for `characteristic`. A no-op for
+    /// a characteristic the mirror cache has not seen discovered, for the same reason as
+    /// ``readValue(for:)-(CharacteristicIdentifier)``.
     public func setNotifyValue(_ enabled: Bool, for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard isDiscovered(characteristic) else { return }
         central.send(.setNotifyValue(peripheral: identifier, characteristic: WireCharacteristicRef(characteristic), enabled: enabled))
     }
 

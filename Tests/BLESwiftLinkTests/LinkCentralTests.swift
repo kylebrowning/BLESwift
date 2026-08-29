@@ -273,6 +273,7 @@ struct LinkCentralTests {
         let peripheral = try #require(await onQueue(queue) {
             link.retrievePeripherals(withIdentifiers: [id]).first as? LinkPeripheral
         })
+        await discoverMeasurement(provider, peripheral, for: id, on: queue)
         await Self.fillWindow(peripheral, on: queue, count: window)
         #expect(await onQueue(queue) { !peripheral.canSendWriteWithoutResponse })
         await waitFor(timeout: .seconds(30)) { Self.writeSequences(provider, for: id).count == window }
@@ -293,6 +294,9 @@ struct LinkCentralTests {
         #expect(Self.connectCount(provider, for: id) == 2)
         provider.emit(.didConnect(peripheral: id, name: nil, maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
         _ = try await bounded(seconds: 30) { try await reconnectTask.value }
+        // The disconnect emptied the mirror's discovery cache along with everything else
+        // per-connection, so the second connection discovers again.
+        await discoverMeasurement(provider, peripheral, for: id, on: queue)
         await Self.fillWindow(peripheral, on: queue, count: window)
         #expect(await onQueue(queue) { !peripheral.canSendWriteWithoutResponse })
         await waitFor(timeout: .seconds(30)) { Self.writeSequences(provider, for: id).count == 2 * window }
@@ -322,6 +326,75 @@ struct LinkCentralTests {
 
     /// Issues `count` `.withoutResponse` writes straight at `peripheral`, filling the link's
     /// flow-control window.
+    @Test("A read for a characteristic the mirror has not seen discovered is a no-op")
+    func undiscoveredReadIsANoOp() async throws {
+        let (central, link, provider) = try await makeRig()
+        defer { provider.stop(); link.shutdown() }
+        let queue = link.queue
+        let id = UUID()
+
+        let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: nil)) }
+        await waitFor(timeout: .seconds(30)) { Self.connectCount(provider, for: id) == 1 }
+        provider.emit(.didConnect(peripheral: id, name: nil, maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
+        _ = try await bounded(seconds: 30) { try await connectTask.value }
+
+        let peripheral = try #require(await onQueue(queue) {
+            link.retrievePeripherals(withIdentifiers: [id]).first as? LinkPeripheral
+        })
+        #expect(await onQueue(queue) { !peripheral.isDiscovered(Self.measurement) })
+
+        // Nothing was discovered, so nothing is sent — the same silence CoreBluetooth answers
+        // a read on a characteristic it has no object for.
+        await onQueue(queue) { peripheral.readValue(for: Self.measurement) }
+
+        // A barrier behind it: the link is ordered, so once this request has been recorded the
+        // read would have been too, had one been sent.
+        await onQueue(queue) { peripheral.readRSSI() }
+        await waitFor(timeout: .seconds(30)) { provider.requests.withLock { $0 }.contains(.readRSSI(peripheral: id)) }
+        let reads = provider.requests.withLock { $0 }.filter { request in
+            if case .readValue = request { return true }
+            return false
+        }
+        #expect(reads.isEmpty)
+
+        // Discovered, the very same read goes out: the guard is the cache, not the request.
+        await discoverMeasurement(provider, peripheral, for: id, on: queue)
+        await onQueue(queue) { peripheral.readValue(for: Self.measurement) }
+        await waitFor(timeout: .seconds(30)) {
+            provider.requests.withLock { $0 }.contains(
+                .readValue(peripheral: id, characteristic: WireCharacteristicRef(Self.measurement))
+            )
+        }
+        #expect(provider.requests.withLock { $0 }.contains(
+            .readValue(peripheral: id, characteristic: WireCharacteristicRef(Self.measurement))
+        ))
+    }
+
+    /// Puts ``measurement`` in `peripheral`'s mirror cache, the way a real provider would:
+    /// a `PeripheralRemote` no-ops a write to a characteristic it has not seen discovered, so
+    /// a test that drives one directly has to discover it first.
+    ///
+    /// The events are emitted unprompted — the mirror is updated from whatever the provider
+    /// reports, request or no request — and the wait gates on the cache itself.
+    private func discoverMeasurement(
+        _ provider: ScriptedProvider,
+        _ peripheral: LinkPeripheral,
+        for identifier: UUID,
+        on queue: DispatchSerialQueue
+    ) async {
+        provider.emit(.didDiscoverServices(peripheral: identifier, services: [Self.service.uuidString], error: nil))
+        provider.emit(.didDiscoverCharacteristics(
+            peripheral: identifier,
+            service: Self.service.uuidString,
+            characteristics: [WireDiscoveredCharacteristic(
+                uuid: Self.measurement.uuidString,
+                properties: CharacteristicProperties([.write, .writeWithoutResponse, .notify, .read]).rawValue
+            )],
+            error: nil
+        ))
+        await waitFor(timeout: .seconds(30)) { await onQueue(queue) { peripheral.isDiscovered(Self.measurement) } }
+    }
+
     private static func fillWindow(_ peripheral: LinkPeripheral, on queue: DispatchSerialQueue, count: Int) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async {

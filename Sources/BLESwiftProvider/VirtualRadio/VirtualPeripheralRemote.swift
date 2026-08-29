@@ -172,9 +172,12 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     }
 
     /// Reads `characteristic` through the radio and delivers the result as
-    /// `didUpdateValue`.
+    /// `didUpdateValue`. A no-op for a characteristic this remote has not discovered, as the
+    /// seam specifies and the CoreBluetooth shim does — CoreBluetooth has no object to hand
+    /// its own `readValue(for:)`, so nothing is sent and no completion arrives.
     public func readValue(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard _discoveredCharacteristics.contains(characteristic) else { return }
         enqueue { [radio, identifier, session, queue] in
             let result = await radio.read(device: identifier, characteristic: characteristic, session: session)
             queue.async { [self] in
@@ -190,9 +193,11 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
 
     /// Writes `data` through the radio. A `.withResponse` write delivers `didWriteValue`
     /// when the device's handler has answered; a `.withoutResponse` write delivers nothing,
-    /// exactly as CoreBluetooth does.
+    /// exactly as CoreBluetooth does. A no-op for a characteristic this remote has not
+    /// discovered, for the same reason as ``readValue(for:)-(CharacteristicIdentifier)``.
     public func writeValue(_ data: Data, for characteristic: CharacteristicIdentifier, type: WriteType) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard _discoveredCharacteristics.contains(characteristic) else { return }
         enqueue { [radio, identifier, session, queue] in
             let result = await radio.write(
                 device: identifier,
@@ -214,9 +219,13 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
 
     /// Records the new notification state immediately (so a racing read sees it, as
     /// CoreBluetooth's own `isNotifying` would), forwards the change to the radio, and
-    /// delivers `didUpdateNotificationState` once it lands.
+    /// delivers `didUpdateNotificationState` once it lands. A no-op for a characteristic this
+    /// remote has not discovered, for the same reason as
+    /// ``readValue(for:)-(CharacteristicIdentifier)`` — the notification state is not recorded
+    /// either, since nothing was armed.
     public func setNotifyValue(_ enabled: Bool, for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard _discoveredCharacteristics.contains(characteristic) else { return }
         if enabled {
             _notifying.insert(characteristic)
         } else {

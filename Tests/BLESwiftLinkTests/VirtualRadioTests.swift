@@ -245,6 +245,15 @@ struct VirtualRadioTests {
         }
         await waitFor { await Self.onQueue(queue) { remote.connectionState == .connected } }
 
+        // Discovered first: a `PeripheralRemote` no-ops GATT traffic for a characteristic it
+        // has not discovered, so a test driving one directly has to enumerate it the way
+        // `Central` would.
+        await Self.onQueue(queue) {
+            remote.discoverServices([Self.service])
+            remote.discoverCharacteristics([Self.control], for: Self.service)
+        }
+        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
+
         // Two writes without response issued in one queue block — the `drainWrites` shape.
         // Nothing acknowledges either, so they land on the radio purely as queued work;
         // repeated, because an inversion is scheduler-dependent.
@@ -433,6 +442,46 @@ struct VirtualRadioTests {
         await Self.onQueue(queue) { backend.connect(evicted, options: nil, requiresANCS: false) }
         await waitFor(timeout: .seconds(5)) { events.withLock { $0.contains(other) } }
         #expect(events.withLock { $0.contains(other) })
+    }
+
+    @Test("A read for a characteristic the remote has not discovered is a no-op")
+    func undiscoveredReadIsANoOp() async throws {
+        let radio = VirtualRadio()
+        let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
+        let (device, handler) = VirtualDevice.fixture(fixture)
+        await handler.attach(await radio.register(device))
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.undiscoveredread")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+
+        await waitFor { await Self.onQueue(queue) { !backend.retrievePeripherals(withIdentifiers: [id]).isEmpty } }
+        let remote = try #require(await Self.remote(backend, queue, id))
+        let values = Mutex<[Data]>([])
+        await Self.onQueue(queue) {
+            remote.eventHandler = { event in
+                if case .didUpdateValue(_, let value, _) = event, let value { values.withLock { $0.append(value) } }
+            }
+            backend.connect(remote, options: nil, requiresANCS: false)
+        }
+        await waitFor { await Self.onQueue(queue) { remote.connectionState == .connected } }
+        #expect(await Self.onQueue(queue) { !remote.isDiscovered(Self.control) })
+
+        // Undiscovered: the radio is never asked, so no completion is delivered.
+        await Self.onQueue(queue) { remote.readValue(for: Self.control) }
+
+        // Discovery behind it is the barrier: its own completion cannot land before the read's
+        // would have, since both run on the same serial chain and the same queue.
+        await Self.onQueue(queue) {
+            remote.discoverServices([Self.service])
+            remote.discoverCharacteristics([Self.control], for: Self.service)
+        }
+        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
+        #expect(values.withLock { $0 }.isEmpty)
+
+        // The very same read now answers: the guard is the discovery cache, nothing else.
+        await Self.onQueue(queue) { remote.readValue(for: Self.control) }
+        await waitFor { values.withLock { !$0.isEmpty } }
+        #expect(values.withLock { $0.count } == 1)
     }
 
     /// The remote `backend` vends for `identifier`, fetched on its own queue.
