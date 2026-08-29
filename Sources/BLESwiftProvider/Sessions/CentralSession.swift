@@ -186,7 +186,12 @@ final class CentralSession: Sendable {
 
         case .connect(let peripheral, let options, let requiresANCS):
             guard let remote = backend.retrievePeripherals(withIdentifiers: [peripheral]).first else {
-                log?("no remote for peripheral \(peripheral); ignoring connect")
+                // Answered rather than ignored: the client's `connect` is waiting on an
+                // event, and an identifier no backend knows will never produce one, so
+                // silence would cost it the full connect timeout for a failure that is
+                // already certain.
+                log?("no remote for peripheral \(peripheral); failing the connect")
+                send(.didFailToConnect(peripheral: peripheral, error: WireError(VirtualRadio.unknownDeviceError)))
                 return
             }
             remotes[peripheral] = remote

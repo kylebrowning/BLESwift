@@ -199,6 +199,33 @@ struct CentralEndToEndTests {
         await provider.stop()
     }
 
+    @Test("Connecting to an identifier the provider does not know fails fast")
+    func connectToUnknownIdentifierFailsFast() async throws {
+        let provider = try await makeProvider()
+        let (central, link) = makeCentral(port: await provider.port, label: "e2e.unknownid")
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+        #expect(central.state == .poweredOn)
+
+        // The client vends a remote for any identifier — it cannot know what the provider
+        // holds — so this reaches the session, which has no backend remote for it. Answering
+        // with a failure is what keeps the client from sitting out its whole connect timeout
+        // for an outcome that is already settled.
+        let start = ContinuousClock.now
+        do {
+            _ = try await central.connect(PeripheralIdentifier(uuid: UUID(), name: nil), timeout: .seconds(15))
+            Issue.record("expected the connect to fail")
+        } catch {
+            let nsError = error as NSError
+            #expect(nsError.domain == "BLESwiftProvider")
+            #expect(nsError.code == 1)
+        }
+        #expect(ContinuousClock.now - start < .seconds(1))
+
+        link.shutdown()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
+    }
+
     @Test("A request sent behind the hello, before the session exists, is still served")
     func requestBehindTheHelloIsServed() async throws {
         let provider = try await makeProvider()
