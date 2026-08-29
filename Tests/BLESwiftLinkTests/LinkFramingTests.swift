@@ -62,6 +62,27 @@ struct LinkFramingTests {
         }
     }
 
+    @Test("A frame one byte over the cap is rejected; one exactly at it decodes")
+    func exactlyAtAndOneOverTheCap() throws {
+        let cap = LinkFraming.maximumPayloadLength
+
+        // One byte over: refused on the declared length alone, before the bytes are waited for
+        // — the header is all this needs, so nothing of that size is ever buffered.
+        var oversized = Data([1])
+        withUnsafeBytes(of: UInt32(cap + 1).bigEndian) { oversized.append(contentsOf: $0) }
+        #expect(throws: LinkFramingError.payloadTooLarge(UInt32(cap + 1))) {
+            try LinkFraming.decodeFrames(from: &oversized)
+        }
+        #expect(oversized.count == LinkFraming.headerLength)
+
+        // And the cap itself is a legal length, not an off-by-one refusal.
+        var atCap = LinkFraming.encodeFrame(codec: .json, payload: Data(repeating: 0x5A, count: cap))
+        let frames = try LinkFraming.decodeFrames(from: &atCap)
+        #expect(frames.count == 1)
+        #expect(frames[0].payload.count == cap)
+        #expect(atCap.isEmpty)
+    }
+
     @Test("A declared length above Int32.max is rejected, never converted")
     func tooLargeForA32BitInt() {
         // 0x8000_0000: the smallest length whose `Int(_:)` traps where `Int` is 32 bits

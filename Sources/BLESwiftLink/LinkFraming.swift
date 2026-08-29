@@ -24,7 +24,22 @@ public enum LinkFraming {
     public static let headerLength = 5
 
     /// The largest payload accepted; anything larger is a protocol error.
-    public static let maximumPayloadLength = 16 * 1024 * 1024
+    ///
+    /// One mebibyte, which no legitimate frame comes near: the biggest one this protocol
+    /// carries is an L2CAP chunk, capped at 64 KiB by both ends, and every GATT value,
+    /// advertisement, and fixture database on the wire is smaller again. The cap is a
+    /// hostile-stream bound, not a budget, so it is set just far enough above the real
+    /// traffic to leave encoding overhead room.
+    ///
+    /// **It also bounds what a peer can make a reader hold.** A frame is buffered until it is
+    /// complete, so this is the memory one half-delivered frame costs; the provider holds one
+    /// such buffer per connection it has accepted but not yet handshaken, so its own
+    /// pre-handshake ceiling is this times
+    /// `ProviderConfiguration.maximumPendingConnections`
+    /// (64 by default — 64 MiB), which is separate from, and additional to, the 1 MiB of
+    /// *decoded* messages each entry may queue behind its hello
+    /// (`PendingConnections.maximumQueuedBytes`).
+    public static let maximumPayloadLength = 1024 * 1024
 
     /// Builds one frame.
     public static func encodeFrame(codec: LinkCodec, payload: Data) -> Data {

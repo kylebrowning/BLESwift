@@ -482,7 +482,10 @@ struct PendingConnections {
     /// How many bytes of held messages one entry accumulates before its connection is dropped.
     ///
     /// A count alone does not bound this backlog: a frame carries up to
-    /// ``BLESwiftLink/LinkFraming`` allows, so a couple of hundred of them is gigabytes. A
+    /// ``BLESwiftLink/LinkFraming/maximumPayloadLength`` (1 MiB), so a couple of hundred of
+    /// them is hundreds of megabytes — and this is per entry, on top of the one partial frame
+    /// each of ``ProviderConfiguration/maximumPendingConnections`` connections may be
+    /// buffering at the transport. A
     /// client with a megabyte outstanding behind its own hello is not one whose session is
     /// merely slow to open — it is filling the provider's memory before it has been served at
     /// all — and unlike an over-count it is not answered by dropping the message: the
