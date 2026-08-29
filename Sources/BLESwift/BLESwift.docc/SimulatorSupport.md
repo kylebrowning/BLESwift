@@ -106,6 +106,11 @@ databases. The provider hosts every device in every `--fixture` it is given:
               "uuid": "2A37",
               "properties": ["read", "notify"],
               "value": "AEg="
+            },
+            {
+              "uuid": "2A39",
+              "properties": ["read", "write", "notify"],
+              "value": "AA=="
             }
           ]
         }
@@ -137,8 +142,9 @@ databases. The provider hosts every device in every `--fixture` it is given:
 Fixture devices come with just enough behavior to exercise a real client: reads return the last
 value written (starting from the declared one), writes are permission-checked against the
 declared properties and then stored, and a write to a characteristic declaring `notify` or
-`indicate` is pushed to every subscriber. Write to `2A37` above from one client and every
-subscriber to it — including a *different* simulator — receives the notification.
+`indicate` is pushed to every subscriber. Write to `2A39` above from one client and every
+subscriber to it — including a *different* simulator — receives the notification. `2A37`
+declares no `write`, so it is the read-and-notify half of the pair: writing to it is refused.
 
 `Scripts/e2e/fixtures/hrm.json` in the repository is a ready-made copy of the document above.
 
