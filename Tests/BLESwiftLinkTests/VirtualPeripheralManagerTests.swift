@@ -407,7 +407,8 @@ struct VirtualPeripheralManagerTests {
         _ = try await Self.subscribedRemote(backend, on: queue, to: identifier, host: host)
         #expect(await host.subscribers(for: Self.measurement).map(\.id) == [backend.sessionID])
 
-        await radio.remove(device: identifier)
+        let generation = try #require(await radio.generation(of: identifier))
+        await radio.remove(device: identifier, generation: generation)
 
         await waitFor { await host.subscribers(for: Self.measurement).isEmpty }
         #expect(await host.subscribers(for: Self.measurement).isEmpty)

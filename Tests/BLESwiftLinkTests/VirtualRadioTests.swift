@@ -38,6 +38,62 @@ struct VirtualRadioTests {
         return (central, radio, handle)
     }
 
+    /// A device registered under `identifier`, advertising `name` and hosting `services`.
+    private static func device(identifier: UUID, name: String, services: [GATTService]) -> VirtualDevice {
+        VirtualDevice(
+            descriptor: VirtualDeviceDescriptor(
+                identifier: identifier,
+                name: name,
+                advertisement: AdvertisementData(localName: name, serviceUUIDs: [Self.service], isConnectable: true),
+                services: services
+            ),
+            handler: InertHandler()
+        )
+    }
+
+    @Test("A re-registered identifier ignores every mutation from the handle it replaced")
+    func staleHandleMutationsAreIgnored() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let published = GATTService(identifier: Self.service, characteristics: [
+            GATTCharacteristic(identifier: Self.measurement, properties: [.read], permissions: [.readable])
+        ])
+
+        // Generation 1: the session that is about to be replaced.
+        let first = await radio.register(Self.device(identifier: identifier, name: "first", services: []))
+        // Generation 2: the reconnect, registered under the same stable `hostIdentifier`.
+        let second = await radio.register(Self.device(identifier: identifier, name: "second", services: [published]))
+        #expect(first.generation != second.generation)
+
+        // The old session's teardown, landing *after* its successor registered: exactly the
+        // `stopAdvertising` / `removeAllHostedServices` / `eventHandler = nil` sequence
+        // `HostSession.close()` runs, all of it keyed by the identifier they now share.
+        await first.setAdvertising(false)
+        await first.setServices([])
+        await first.setAdvertisement(AdvertisementData(localName: "first", isConnectable: true))
+        await first.remove()
+
+        // The new registration is untouched: still there, still generation 2's state.
+        #expect(radio.knownDeviceIDs.withLock { $0.contains(identifier) })
+        #expect(await radio.name(of: identifier) == "second")
+        #expect(await radio.services(of: identifier, matching: nil) == [Self.service])
+
+        // And still advertising, so a scan started after the teardown finds it.
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.generation")
+        let central = Central(backend: VirtualCentralBackend(radio: radio, queue: queue), queue: queue)
+        await waitFor { central.state == .poweredOn }
+        var found: Discovery?
+        for try await event in await central.scan(services: [Self.service], timeout: .seconds(2)) {
+            if case .discovered(let discovery) = event { found = discovery; break }
+        }
+        #expect(found?.peripheral.uuid == identifier)
+        #expect(found?.advertisement.localName == "second")
+
+        // The current handle still works, so the guard refuses only the stale one.
+        await second.remove()
+        #expect(radio.knownDeviceIDs.withLock { !$0.contains(identifier) })
+    }
+
     @Test("Scanning discovers an advertising fixture device")
     func scan() async throws {
         let (central, _, _) = try await makeRig()

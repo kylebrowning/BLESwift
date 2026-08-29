@@ -529,6 +529,54 @@ struct HostEndToEndTests {
         await second.stop()
     }
 
+    @Test("A link drop and immediate redial leaves the reconnected host's device on the radio")
+    func redialSurvivesTheOldSessionsTeardown() async throws {
+        let provider = try await makeProvider()
+        let port = await provider.port
+        let (host, hostLink) = makeHost(port: port, label: "host.e2e.redial.host")
+        await waitFor(timeout: .seconds(5)) { host.state == .poweredOn }
+        try await host.add(Self.service)
+        try await host.startAdvertising(
+            PeripheralAdvertisement(localName: "Sim Host", serviceUUIDs: [Self.heartRate])
+        )
+
+        let (central, centralLink) = makeCentral(port: port, label: "host.e2e.redial.central")
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+        let before = try #require(try await Self.firstDiscovery(central))
+
+        // ---- The link drops and redials at once, the provider staying up throughout ----
+        //
+        // The client keeps its `hostIdentifier`, so the new session registers the device the
+        // old one had. The old session's close — `stopAdvertising`, `removeAllHostedServices`,
+        // `eventHandler = nil` — runs asynchronously behind it, all of it keyed by that same
+        // identifier. Without a generation on the handle, that teardown lands on the *new*
+        // session's device and unadvertises, empties, or removes it outright.
+        hostLink.dropLinkForTesting()
+        // The drop and the 50 ms redial behind it are both asynchronous, and neither reports a
+        // completion of its own — polling for the link to go down would race the reconnect
+        // that is the whole point — so the brief's permitted fixed-delay fallback covers the
+        // round trip before the reconnection is waited on.
+        try await Task.sleep(for: .milliseconds(200))
+        await waitFor(timeout: .seconds(10)) { hostLink.isProviderConnected && host.state == .poweredOn }
+
+        // The session that held the GATT database died with the link, so the host republishes.
+        try await host.add(Self.service)
+        try await host.startAdvertising(
+            PeripheralAdvertisement(localName: "Sim Host", serviceUUIDs: [Self.heartRate])
+        )
+
+        // Advertising works after the reconnect: the device is still on the radio, under the
+        // identifier it had, serving the database it just republished.
+        let after = try #require(try await Self.firstDiscovery(central))
+        #expect(after.peripheral.uuid == before.peripheral.uuid)
+        let peripheral = try await bounded { try await central.connect(after.peripheral) }
+        #expect(try await bounded { try await peripheral.discoverServices() } == [Self.heartRate])
+
+        hostLink.shutdown()
+        centralLink.shutdown()
+        await provider.stop()
+    }
+
     /// Runs `make` until the port the previous provider released can be bound again — a
     /// just-closed listener may hold it for a moment.
     private static func rebind(port: UInt16, _ make: () async throws -> Provider) async throws -> Provider {

@@ -6,6 +6,7 @@
 #if os(macOS)
 import BLESwiftCore
 import Foundation
+import Logging
 import Synchronization
 
 /// An in-process BLE radio hosting ``VirtualDevice``s and serving them to any number of
@@ -65,11 +66,21 @@ public actor VirtualRadio {
     /// How often a duplicate-allowing scanner re-reports every matching device.
     private static let duplicateInterval = Duration.seconds(1)
 
-    /// One registered device: its description and whether it is currently advertising.
+    /// Where the radio reports a mutation refused because its handle is stale. Nothing else
+    /// in the radio logs: this is the one event that is silently *not* what its caller asked
+    /// for, and a session teardown that quietly did nothing is worth a line.
+    private static let logger = Logger(label: "BLESwiftProvider.VirtualRadio")
+
+    /// One registered device: its description, whether it is currently advertising, and which
+    /// registration of its identifier it belongs to.
     private struct DeviceState {
         var descriptor: VirtualDeviceDescriptor
         let handler: any VirtualDeviceHandler
         var isAdvertising: Bool
+        /// The generation ``register(_:advertising:)`` stamped this registration with. A
+        /// handle from an earlier registration of the same identifier carries an older one
+        /// and is refused. See ``VirtualDeviceHandle/generation``.
+        let generation: UInt64
     }
 
     /// One backend's active scan.
@@ -88,6 +99,11 @@ public actor VirtualRadio {
 
     private var devices: [UUID: DeviceState] = [:]
     private var sessions: [UUID: Session] = [:]
+
+    /// Stamps every registration, so a handle can be told from one the same identifier was
+    /// re-registered under since. Monotonic across the radio — nothing reads it as a count,
+    /// only as an identity — and never reused.
+    private var lastGeneration: UInt64 = 0
 
     /// The identifiers this radio currently has devices registered for, readable without
     /// awaiting the actor.
@@ -121,10 +137,13 @@ public actor VirtualRadio {
     @discardableResult
     public func register(_ device: VirtualDevice, advertising: Bool = true) -> VirtualDeviceHandle {
         let identifier = device.descriptor.identifier
+        lastGeneration += 1
+        let generation = lastGeneration
         devices[identifier] = DeviceState(
             descriptor: device.descriptor,
             handler: device.handler,
-            isAdvertising: advertising
+            isAdvertising: advertising,
+            generation: generation
         )
         knownDeviceIDs.withLock { (known: inout Set<UUID>) -> Void in
             known.insert(identifier)
@@ -132,7 +151,39 @@ public actor VirtualRadio {
         if advertising {
             reportSightings(of: identifier)
         }
-        return VirtualDeviceHandle(identifier: identifier, radio: self)
+        return VirtualDeviceHandle(identifier: identifier, generation: generation, radio: self)
+    }
+
+    /// Whether the device registered under `device` is the one `generation` was handed out
+    /// for. Must be checked by every mutation a ``VirtualDeviceHandle`` performs.
+    ///
+    /// A registration replaces any earlier one for the same identifier — which is exactly what
+    /// a link client redialing under a stable `hostIdentifier` produces — and the session it
+    /// replaced tears itself down asynchronously afterwards. Keyed by identifier alone, that
+    /// teardown's `remove`, `stopAdvertising`, and `removeAllHostedServices` would land on the
+    /// *new* session's device: the reconnect would come up registered, then be unregistered,
+    /// unadvertised, or emptied a moment later by a session that no longer exists. The
+    /// generation is what tells the two apart.
+    private func isCurrent(_ device: UUID, generation: UInt64, operation: String) -> Bool {
+        guard let state = devices[device] else { return false }
+        guard state.generation == generation else {
+            Self.logger.debug(
+                """
+                Ignoring \(operation) from a stale handle for device \(device): \
+                generation \(generation), current \(state.generation)
+                """
+            )
+            return false
+        }
+        return true
+    }
+
+    /// The generation currently registered under `device`, or `nil` if nothing is.
+    ///
+    /// Not API: it exists so a test can act on a device through the radio when the
+    /// ``VirtualDeviceHandle`` for it belongs to the backend that registered it.
+    package func generation(of device: UUID) -> UInt64? {
+        devices[device]?.generation
     }
 
     /// The name of a registered device, or `nil` if it is unknown or unnamed.
@@ -145,8 +196,9 @@ public actor VirtualRadio {
 
     /// Starts or stops advertising for a registered device. See
     /// ``VirtualDeviceHandle/setAdvertising(_:)``.
-    func setAdvertising(_ advertising: Bool, device: UUID) {
-        guard devices[device] != nil, devices[device]?.isAdvertising != advertising else { return }
+    func setAdvertising(_ advertising: Bool, device: UUID, generation: UInt64) {
+        guard isCurrent(device, generation: generation, operation: "setAdvertising") else { return }
+        guard devices[device]?.isAdvertising != advertising else { return }
         devices[device]?.isAdvertising = advertising
         if advertising {
             reportSightings(of: device)
@@ -161,7 +213,8 @@ public actor VirtualRadio {
     /// discovered from an advertisement carrying a local name reports that name, so a
     /// `PeripheralHost` that advertises under a local name is seen under it. An advertisement
     /// without a local name leaves the existing name alone.
-    func setAdvertisement(_ advertisement: AdvertisementData, device: UUID) {
+    func setAdvertisement(_ advertisement: AdvertisementData, device: UUID, generation: UInt64) {
+        guard isCurrent(device, generation: generation, operation: "setAdvertisement") else { return }
         devices[device]?.descriptor.advertisement = advertisement
         if let localName = advertisement.localName {
             devices[device]?.descriptor.name = localName
@@ -170,7 +223,8 @@ public actor VirtualRadio {
 
     /// Replaces a registered device's GATT database. See
     /// ``VirtualDeviceHandle/setServices(_:)``.
-    func setServices(_ services: [GATTService], device: UUID) {
+    func setServices(_ services: [GATTService], device: UUID, generation: UInt64) {
+        guard isCurrent(device, generation: generation, operation: "setServices") else { return }
         devices[device]?.descriptor.services = services
     }
 
@@ -181,7 +235,8 @@ public actor VirtualRadio {
     /// unsubscribe before the device goes, so a hosted `PeripheralHost` is left holding no
     /// subscriber it can never notify again — CoreBluetooth reports `didUnsubscribe` when a
     /// subscribed central goes away, and so does this radio.
-    func remove(device: UUID) async {
+    func remove(device: UUID, generation: UInt64) async {
+        guard isCurrent(device, generation: generation, operation: "remove") else { return }
         guard let state = devices.removeValue(forKey: device) else { return }
         let departing = subscriptions.removeValue(forKey: device) ?? [:]
         knownDeviceIDs.withLock { (known: inout Set<UUID>) -> Void in
@@ -206,7 +261,14 @@ public actor VirtualRadio {
 
     /// Pushes a notification to every subscribed, connected central. See
     /// ``VirtualDeviceHandle/notify(_:for:to:)``.
-    func notify(device: UUID, characteristic: CharacteristicIdentifier, value: Data, to centrals: [Subscriber]?) {
+    func notify(
+        device: UUID,
+        characteristic: CharacteristicIdentifier,
+        value: Data,
+        to centrals: [Subscriber]?,
+        generation: UInt64
+    ) {
+        guard isCurrent(device, generation: generation, operation: "notify") else { return }
         let allowed = centrals.map { Set($0.map(\.id)) }
         let subscribers = subscriptions[device]?[characteristic] ?? []
         for sessionID in subscribers {

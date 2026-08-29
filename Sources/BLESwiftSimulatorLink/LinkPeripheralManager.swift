@@ -153,6 +153,17 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
+    /// Drops the live link, exactly as a transport failure does, and lets the session redial
+    /// under the same `hostIdentifier`.
+    ///
+    /// Test-only: production code has no reason to drop a healthy link. It exists so a test
+    /// can produce the reconnect that races a provider session's teardown against its
+    /// successor's registration — the one thing a provider restart cannot reproduce, since
+    /// that takes the whole radio with it.
+    package func dropLinkForTesting() {
+        session.dropConnection()
+    }
+
     // MARK: - PeripheralManaging
 
     /// The app's Bluetooth authorization status. Always `.allowedAlways`: authorization is

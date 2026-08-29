@@ -117,12 +117,22 @@ public final class VirtualDeviceHandle: Sendable {
     /// The registered device's identifier.
     public let identifier: UUID
 
+    /// Which registration of ``identifier`` this handle belongs to.
+    ///
+    /// Registering the same identifier again — what a link client redialing under a stable
+    /// `hostIdentifier` produces — replaces the device and mints a newer generation. Every
+    /// method below carries this one to the radio, which applies the mutation only while it
+    /// is still the current registration: the old session's asynchronous teardown then
+    /// cannot remove, unadvertise, or empty the device its own successor just registered.
+    let generation: UInt64
+
     /// The radio hosting the device.
     private let radio: VirtualRadio
 
-    /// Creates a handle bound to `radio`.
-    init(identifier: UUID, radio: VirtualRadio) {
+    /// Creates a handle bound to `radio`, for the registration `generation` identifies.
+    init(identifier: UUID, generation: UInt64, radio: VirtualRadio) {
         self.identifier = identifier
+        self.generation = generation
         self.radio = radio
     }
 
@@ -134,7 +144,13 @@ public final class VirtualDeviceHandle: Sendable {
     ///   - characteristic: The characteristic the value belongs to.
     ///   - centrals: Restricts delivery to these centrals; `nil` notifies every subscriber.
     public func notify(_ value: Data, for characteristic: CharacteristicIdentifier, to centrals: [Subscriber]?) async {
-        await radio.notify(device: identifier, characteristic: characteristic, value: value, to: centrals)
+        await radio.notify(
+            device: identifier,
+            characteristic: characteristic,
+            value: value,
+            to: centrals,
+            generation: generation
+        )
     }
 
     /// Starts or stops advertising this device. Starting advertising reports one sighting
@@ -142,7 +158,7 @@ public final class VirtualDeviceHandle: Sendable {
     ///
     /// - Parameter advertising: Whether the device advertises from now on.
     public func setAdvertising(_ advertising: Bool) async {
-        await radio.setAdvertising(advertising, device: identifier)
+        await radio.setAdvertising(advertising, device: identifier, generation: generation)
     }
 
     /// Replaces the advertisement the device broadcasts. Takes effect for every sighting
@@ -150,7 +166,7 @@ public final class VirtualDeviceHandle: Sendable {
     ///
     /// - Parameter advertisement: The device's new advertisement.
     public func setAdvertisement(_ advertisement: AdvertisementData) async {
-        await radio.setAdvertisement(advertisement, device: identifier)
+        await radio.setAdvertisement(advertisement, device: identifier, generation: generation)
     }
 
     /// Replaces the device's GATT database — including the static values the radio answers
@@ -159,14 +175,16 @@ public final class VirtualDeviceHandle: Sendable {
     ///
     /// - Parameter services: The device's new services.
     public func setServices(_ services: [GATTService]) async {
-        await radio.setServices(services, device: identifier)
+        await radio.setServices(services, device: identifier, generation: generation)
     }
 
     /// Removes the device from the radio. Every central currently connected to it is
     /// disconnected with ``VirtualRadio/deviceRemovedError``, and later connection attempts
     /// fail with ``VirtualRadio/unknownDeviceError``.
+    ///
+    /// A no-op once the identifier has been re-registered: see the `generation` note above.
     public func remove() async {
-        await radio.remove(device: identifier)
+        await radio.remove(device: identifier, generation: generation)
     }
 }
 #endif

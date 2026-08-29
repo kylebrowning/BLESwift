@@ -74,7 +74,11 @@ let package = Package(
         ),
         .target(
             name: "BLESwiftProvider",
-            dependencies: ["BLESwift", "BLESwiftLink"],
+            dependencies: [
+                "BLESwift",
+                "BLESwiftLink",
+                .product(name: "Logging", package: "swift-log")
+            ],
             resources: [.copy("BLESwiftProvider.docc")],
             swiftSettings: sharedSwiftSettings
         ),
