@@ -344,11 +344,18 @@ extension CentralSession {
 
     /// Reports the backend's inbound stream ending — cleanly or on `error` — and drops the
     /// bridge. Called from the pump, off ``CentralSession/queue``.
+    ///
+    /// The write chain goes with it, for ``tearDown(_:)``'s reason: the transport is closing
+    /// under whatever is still queued, so leaving the tail task alive would only keep the
+    /// chain — and the data it captured — around until the write ahead of it fails. The pump
+    /// is dropped rather than cancelled because this *is* the pump reporting its own end.
     private func finishChannel(_ channel: UInt32, error: (any Error)?) {
         queue.async { [self] in
             guard let open = channels.removeValue(forKey: channel) else { return }
             open.releaseWaiter()
             open.pump = nil
+            open.writes?.cancel()
+            open.writes = nil
             open.remote.close(error: nil)
             send(.l2capClosed(channel: channel, error: (error as NSError?).wire))
         }
