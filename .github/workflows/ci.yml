@@ -34,9 +34,14 @@ jobs:
       # Named devices drift with the runner image's Xcode — `iPhone 16` is gone from the
       # current one — and a destination that matches nothing fails the job outright. So the
       # name is resolved from what the runner actually has rather than pinned here.
+      #
+      # Ranked, not sorted alphabetically: a numbered model ("iPhone 17 Pro") outranks an
+      # unnumbered or suffixed one ("iPhone Air", "iPhone 17e"), then the number decides, then
+      # the name. A plain sort hands back "iPhone Air" as the newest, which it is not. Same
+      # ranking as `sim-to-sim-e2e.yml`, which takes the newest two rather than the newest one.
       - name: Resolve a simulator
         run: |
-          SIM=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; names=[x['name'] for r in d for x in d[r] if x['name'].startswith('iPhone')]; print(sorted(names)[-1])")
+          SIM=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; names={x['name'] for r in d for x in d[r] if x['name'].startswith('iPhone')}; rank=lambda n: (1, int(n.split()[1]), n) if len(n.split()) > 1 and n.split()[1].isdigit() else (0, 0, n); print(sorted(names, key=rank)[-1])")
           echo "SIM=$SIM" >> "$GITHUB_ENV"
           echo "Using $SIM"
       - name: Test on iOS Simulator
