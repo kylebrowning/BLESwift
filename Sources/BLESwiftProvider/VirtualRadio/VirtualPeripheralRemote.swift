@@ -358,10 +358,18 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
 
     /// Delivers `didDiscoverDescriptors` with nothing discovered — virtual devices expose
     /// no descriptors.
+    ///
+    /// Answered from the serial chain rather than the next queue turn, though this backend
+    /// asks the radio nothing: a bare `queue.async` runs *before* any radio round-trip already
+    /// in flight, so a `discoverCharacteristics` and the `discoverDescriptors` behind it
+    /// completed in the opposite order to the one they were called in — an ordering
+    /// CoreBluetooth cannot produce. See ``_work``.
     public func discoverDescriptors(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
-        queue.async { [self] in
-            deliver(.didDiscoverDescriptors(characteristic: characteristic, error: nil))
+        enqueue { [queue] in
+            queue.async { [self] in
+                deliver(.didDiscoverDescriptors(characteristic: characteristic, error: nil))
+            }
         }
     }
 
@@ -376,11 +384,14 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
     }
 
-    /// Delivers `didReadRSSI` with ``VirtualRadio/rssi``.
+    /// Delivers `didReadRSSI` with ``VirtualRadio/rssi``, from the serial chain — for
+    /// ``discoverDescriptors(for:)``'s reason.
     public func readRSSI() {
         dispatchPrecondition(condition: .onQueue(queue))
-        queue.async { [self] in
-            deliver(.didReadRSSI(VirtualRadio.rssi, error: nil))
+        enqueue { [queue] in
+            queue.async { [self] in
+                deliver(.didReadRSSI(VirtualRadio.rssi, error: nil))
+            }
         }
     }
 
@@ -439,11 +450,14 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         return []
     }
 
-    /// Fails the attempt — the virtual radio serves GATT only, not L2CAP channels.
+    /// Fails the attempt — the virtual radio serves GATT only, not L2CAP channels. Reported
+    /// from the serial chain, for ``discoverDescriptors(for:)``'s reason.
     public func openL2CAPChannel(_ psm: L2CAPPSM) {
         dispatchPrecondition(condition: .onQueue(queue))
-        queue.async { [self] in
-            deliver(.didOpenL2CAPChannel(channel: nil, error: Self.l2capUnsupportedError))
+        enqueue { [queue] in
+            queue.async { [self] in
+                deliver(.didOpenL2CAPChannel(channel: nil, error: Self.l2capUnsupportedError))
+            }
         }
     }
 

@@ -872,6 +872,38 @@ struct VirtualRadioTests {
         return remote
     }
 
+    @Test("Completions arrive in the order their calls were made, radio round-trip or not")
+    func offChainCompletionsKeepCallOrder() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        _ = await radio.register(Self.device(identifier: identifier, name: "order", services: Self.twoServices))
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.order")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        let remote = try await Self.discoveredRemote(radio: radio, backend: backend, queue: queue, identifier: identifier)
+
+        let events = Mutex<[String]>([])
+        await Self.onQueue(queue) {
+            remote.eventHandler = { event in
+                switch event {
+                case .didDiscoverCharacteristics: events.withLock { $0.append("characteristics") }
+                case .didDiscoverDescriptors: events.withLock { $0.append("descriptors") }
+                case .didReadRSSI: events.withLock { $0.append("rssi") }
+                case .didOpenL2CAPChannel: events.withLock { $0.append("l2cap") }
+                default: break
+                }
+            }
+            // One queue turn: the first needs a radio round-trip, the three behind it do not.
+            // Answered off the chain, each of those overtook it.
+            remote.discoverCharacteristics(nil, for: Self.service)
+            remote.discoverDescriptors(for: Self.measurement)
+            remote.readRSSI()
+            remote.openL2CAPChannel(L2CAPPSM(0x0041))
+        }
+
+        await waitFor { events.withLock { $0.count } == 4 }
+        #expect(events.withLock { $0 } == ["characteristics", "descriptors", "rssi", "l2cap"])
+    }
+
     /// Both services, the heart rate carrying its measurement and control point.
     private static var twoServices: [GATTService] {
         [
