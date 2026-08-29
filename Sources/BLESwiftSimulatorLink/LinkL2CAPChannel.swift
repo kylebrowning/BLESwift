@@ -155,6 +155,11 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
     /// a single huge write can never deadlock against a credit window it could not possibly
     /// fit in.
     ///
+    /// An empty payload is a no-op that succeeds, matching what a `CBL2CAPChannel`'s stream
+    /// does with a zero-length write. Putting it on the wire would not be: the provider
+    /// credits back exactly what it wrote, and a credit of `0` is a protocol violation that
+    /// costs the channel.
+    ///
     /// - Parameter data: The bytes to send.
     /// - Throws: ``LinkL2CAPError/closed`` if the channel is closed before or while the write
     ///   is waiting for credit.
@@ -163,6 +168,7 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
     ///   them yourself when a payload must arrive contiguously. A write waiting for credit is
     ///   not cancellable.
     func write(_ data: Data) async throws {
+        guard !data.isEmpty else { return }
         guard data.count > Self.maximumChunk else {
             try await sendChunk(data)
             return

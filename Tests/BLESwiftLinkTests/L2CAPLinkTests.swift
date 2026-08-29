@@ -210,6 +210,35 @@ struct L2CAPLinkTests {
 
     // MARK: - Close
 
+    @Test("An empty write is a no-op that leaves the channel usable")
+    func emptyWriteIsANoOp() async throws {
+        let (rig, peripheral) = try await makeRig(label: "l2cap.emptyWrite")
+        let channel = try await peripheral.openL2CAPChannel(psm: Self.psm, timeout: .seconds(5))
+        let fake = try await openedChannel(rig)
+
+        // A zero-length payload used to reach the wire, come back as a credit of `0`, and
+        // cost the channel: the client refuses a non-positive credit as a violation.
+        try await channel.write(Data())
+        #expect(await fake.onQueue { fake.writtenData.isEmpty })
+
+        // The channel is still open in both directions, and a real write still lands.
+        try await channel.write(Data([1, 2, 3]))
+        await waitFor(timeout: .seconds(5)) {
+            await fake.onQueue { fake.writtenData.reduce(0) { $0 + $1.count } } == 3
+        }
+        #expect(await fake.onQueue { fake.writtenData.reduce(into: Data()) { $0.append($1) } } == Data([1, 2, 3]))
+        #expect(await fake.onQueue { !fake.isClosed })
+
+        let inbound = Task { () -> Data? in
+            for try await piece in channel.incomingData { return piece }
+            return nil
+        }
+        fake.simulateInbound(Data([9]))
+        #expect(try await bounded { try await inbound.value } == Data([9]))
+
+        await tearDown(rig)
+    }
+
     @Test("Closing from the client closes the provider's channel")
     func clientCloseReachesProvider() async throws {
         let (rig, peripheral) = try await makeRig(label: "l2cap.clientClose")

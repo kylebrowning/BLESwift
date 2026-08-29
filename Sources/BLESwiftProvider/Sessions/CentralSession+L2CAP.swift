@@ -322,6 +322,11 @@ extension CentralSession {
 
     /// Credits the client for a write that has completed on the transport.
     private func creditFromWrite(channel: UInt32, bytes: Int) {
+        // A write of nothing consumed no window, and `0` is not a credit the client would
+        // accept: it treats a non-positive grant as a protocol violation and closes the
+        // channel. Clients do not send empty payloads, but a peer that did should not be
+        // answered with a frame that tears its own channel down.
+        guard bytes > 0 else { return }
         queue.async { [self] in
             guard channels[channel] != nil else { return }
             send(.l2capCredit(channel: channel, bytes: bytes))
