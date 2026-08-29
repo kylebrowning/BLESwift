@@ -141,11 +141,11 @@ databases. The provider hosts every device in every `--fixture` it is given:
   `writeable` if it declares `write` or `writeWithoutResponse`.
 - `isPrimary` on a service defaults to `true`.
 - **Required keys.** A device needs only `id`; a service and a characteristic need only their
-  `uuid`, and a service also needs its `characteristics` — an empty array declares a service
-  with none. Everything else is optional and takes the same default the Swift type does:
-  `name` and `manufacturerData` are absent, `advertisedServices`, `services`, and `properties`
-  are empty, `permissions` is derived, and `isPrimary` is `true`. So `{ "id": "…" }` is a
-  complete device: it advertises nothing but its name-less self and hosts no GATT database.
+  `uuid`. Everything else is optional and takes the same default the Swift type does: `name`
+  and `manufacturerData` are absent, `advertisedServices`, `services`, `characteristics`, and
+  `properties` are empty, `permissions` is derived, and `isPrimary` is `true`. So
+  `{ "id": "…" }` is a complete device — it advertises nothing but its name-less self and
+  hosts no GATT database — and `{ "uuid": "180D" }` is a complete service, hosting none.
 
 Fixture devices come with just enough behavior to exercise a real client: reads return the last
 value written (starting from the declared one), writes are permission-checked against the

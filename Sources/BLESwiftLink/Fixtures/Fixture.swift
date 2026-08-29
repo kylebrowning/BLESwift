@@ -184,12 +184,16 @@ public struct FixtureService: Codable, Sendable, Equatable {
 
     /// Decodes a fixture service, rejecting a ``uuid`` BLESwift's identifiers could not hold
     /// rather than trapping on it later in ``gattService``.
+    ///
+    /// Only `uuid` is required. An absent ``characteristics`` decodes as empty, matching this
+    /// type's memberwise default — the smallest service a fixture can describe is its `uuid`
+    /// alone.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         uuid = try container.decode(String.self, forKey: .uuid)
         try validateFixtureUUID(uuid, forKey: .uuid, in: container)
         isPrimary = try container.decodeIfPresent(Bool.self, forKey: .isPrimary) ?? true
-        characteristics = try container.decode([FixtureCharacteristic].self, forKey: .characteristics)
+        characteristics = try container.decodeIfPresent([FixtureCharacteristic].self, forKey: .characteristics) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {

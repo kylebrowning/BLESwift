@@ -61,6 +61,22 @@ struct FixtureTests {
         #expect(control.value == nil)
     }
 
+    /// A service, like a device and a characteristic, needs only its `uuid`: an omitted
+    /// `characteristics` is the same empty list an explicit `[]` declares.
+    @Test("A minimal service decodes, hosting no characteristics")
+    func minimalService() throws {
+        let json = """
+        { "devices": [{ "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8", "services": [{ "uuid": "180D" }] }] }
+        """
+        let document = try FixtureDocument.parse(Data(json.utf8))
+        let device = try #require(document.devices.first)
+        let service = try #require(device.services.first)
+        #expect(service.uuid == "180D")
+        #expect(service.isPrimary == true)
+        #expect(service.characteristics.isEmpty)
+        #expect(device.gattServices.first?.characteristics.isEmpty == true)
+    }
+
     /// The keys with a memberwise default decode as that default when the JSON omits them, so
     /// the smallest device a fixture can describe is its `id` alone.
     @Test("A minimal device decodes, taking every optional key's default")
