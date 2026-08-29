@@ -59,9 +59,9 @@ public actor Provider {
     ///
     /// It is also the connection's *router*, which is what makes the handshake window safe:
     /// the first message goes to ``handle(_:from:)``, everything behind it is held in the
-    /// entry until the session installs its handler — and is then replayed, in order, under
-    /// the same lock. A client that puts its first request in the same write as its
-    /// `ClientHello` is served rather than dropped.
+    /// entry until the session installs its handler — and is then replayed to it, in order,
+    /// while the entry keeps holding anything newer. A client that puts its first request in
+    /// the same write as its `ClientHello` is served rather than dropped.
     private nonisolated let pending = Mutex(PendingConnections())
 
     /// The live sessions of both roles, keyed by their connection.
@@ -267,8 +267,17 @@ public actor Provider {
         )
         // Installs the session's handler in the connection's entry and replays whatever
         // arrived behind the hello, in order, before any newer message can be delivered.
+        //
+        // The replay runs *outside* the table's lock, one batch at a time: the entry holds
+        // anything that arrives meanwhile — the listener queue keeps routing into it — and the
+        // next turn of this loop picks it up, so ordering is kept without ever calling a
+        // session's handler under the lock. Suspension-free, as this method requires.
         let install: (@escaping @Sendable (LinkMessage) -> Void) -> Void = { handler in
-            self.pending.withLock { $0.install(handler, for: connection) }
+            var batch = self.pending.withLock { $0.beginReplay(handler, for: connection) }
+            while let messages = batch {
+                for message in messages { handler(message) }
+                batch = self.pending.withLock { $0.finishReplay(for: connection) }
+            }
         }
         switch hello.role {
         case .central:
@@ -359,9 +368,15 @@ public actor Provider {
 ///
 /// An entry lives from the moment its connection is accepted until the link ends, and it is
 /// what every message is routed through: the first goes to the actor's handshake, the ones
-/// behind it are held until a session installs its handler, and everything after that is
-/// delivered straight to the session on the listener queue. Nothing between the hello and the
-/// session is dropped, and no message can overtake one that arrived before it.
+/// behind it are held until a session installs its handler and the replay has drained them,
+/// and everything after that is delivered straight to the session on the listener queue.
+/// Nothing between the hello and the session is dropped, and no message can overtake one that
+/// arrived before it.
+///
+/// **Nothing is called while the lock is held.** Routing and installing both only *decide*;
+/// the caller delivers afterwards, on its own. That is what lets a session's handler do
+/// whatever it likes — including reaching back into this table — without deadlocking against
+/// the one `Mutex` every connection shares.
 struct PendingConnections {
 
     /// Where one message goes, decided synchronously on the listener queue.
@@ -390,7 +405,12 @@ struct PendingConnections {
         var isClaimed = false
         /// The session's message handler, once it has one.
         var handler: (@Sendable (LinkMessage) -> Void)?
-        /// Messages that arrived behind the hello, held in order until ``handler`` exists.
+        /// Whether the backlog is being replayed to ``handler`` right now. A message that
+        /// arrives during the replay joins ``queued`` instead of being delivered, so it
+        /// cannot overtake the backlog it arrived behind; the replaying caller picks it up.
+        var isReplaying = false
+        /// Messages that arrived behind the hello — or during the replay — held in order
+        /// until ``handler`` has been given them.
         var queued: [LinkMessage] = []
     }
 
@@ -414,7 +434,7 @@ struct PendingConnections {
     mutating func route(_ message: LinkMessage, from connection: LinkConnection) -> Routing {
         let key = ObjectIdentifier(connection)
         guard var entry = entries[key], !entry.isTerminated else { return .drop }
-        if let handler = entry.handler { return .deliver(handler) }
+        if let handler = entry.handler, !entry.isReplaying { return .deliver(handler) }
         defer { entries[key] = entry }
         guard entry.didRouteHello else {
             entry.didRouteHello = true
@@ -424,24 +444,47 @@ struct PendingConnections {
         return .drop
     }
 
-    /// Hands `connection`'s messages to `handler` and replays everything held for it, in
-    /// order.
+    /// Installs `handler` as `connection`'s destination and takes the backlog held for it.
     ///
-    /// The replay happens here, while the table is still locked, so a message arriving on the
-    /// listener queue cannot slip past the backlog: it blocks on the lock and is delivered
-    /// behind it. `handler` must therefore not reach back into this table — the session's
-    /// does nothing but hop onto its own queue.
+    /// The backlog is *returned*, not delivered: nothing is called while the table is locked,
+    /// which is what keeps a session's handler — and anything it in turn calls — off this
+    /// lock's critical section. Ordering is preserved by the entry's replaying flag instead of
+    /// by the lock's duration: from here until ``finishReplay(for:)`` says otherwise, a
+    /// message arriving on the listener queue joins the queue rather than being delivered, so
+    /// it cannot overtake the backlog it arrived behind. The caller must drain to completion —
+    /// see ``Provider/handle(_:from:)``'s installer.
     ///
-    /// Nothing is installed for a connection whose link has already ended: its session is
-    /// about to be closed.
-    mutating func install(_ handler: @escaping @Sendable (LinkMessage) -> Void, for connection: LinkConnection) {
+    /// - Returns: The messages to replay, oldest first, or `nil` for a connection whose link
+    ///   has already ended — its session is about to be closed, and nothing is installed.
+    mutating func beginReplay(_ handler: @escaping @Sendable (LinkMessage) -> Void, for connection: LinkConnection) -> [LinkMessage]? {
         let key = ObjectIdentifier(connection)
-        guard var entry = entries[key], !entry.isTerminated else { return }
+        guard var entry = entries[key], !entry.isTerminated else { return nil }
         entry.handler = handler
+        entry.isReplaying = true
         let queued = entry.queued
         entry.queued = []
         entries[key] = entry
-        for message in queued { handler(message) }
+        return queued
+    }
+
+    /// Takes whatever arrived while the previous batch was being replayed.
+    ///
+    /// - Returns: The next batch to replay, oldest first, or `nil` when there is none left —
+    ///   at which point the entry stops holding messages and routes them to its handler
+    ///   directly. `nil` is also the answer for a connection whose link ended mid-replay:
+    ///   nothing more is delivered to a session that is about to be closed.
+    mutating func finishReplay(for connection: LinkConnection) -> [LinkMessage]? {
+        let key = ObjectIdentifier(connection)
+        guard var entry = entries[key], !entry.isTerminated else { return nil }
+        guard !entry.queued.isEmpty else {
+            entry.isReplaying = false
+            entries[key] = entry
+            return nil
+        }
+        let queued = entry.queued
+        entry.queued = []
+        entries[key] = entry
+        return queued
     }
 
     /// Whether `connection` is still awaiting a handshake and has not terminated — so a hello

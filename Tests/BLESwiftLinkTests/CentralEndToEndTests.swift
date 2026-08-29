@@ -9,6 +9,7 @@ import BLESwiftCore
 import BLESwiftLink
 import BLESwiftProvider
 import BLESwiftSimulatorLink
+import BLESwiftTestSupport
 import Dispatch
 import Foundation
 import Synchronization
@@ -266,6 +267,74 @@ struct CentralEndToEndTests {
         await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
         #expect(await provider.sessionCount == 0)
         await provider.stop()
+    }
+
+    @Test("Requests sent behind the hello reach the backend in the order they were sent")
+    func requestsBehindTheHelloKeepTheirOrder() async throws {
+        // The backlog is replayed to the session outside the connection table's lock, so the
+        // table has to keep holding what arrives during the replay. A `FakeCentral` records
+        // the order the provider's session actually drove it in.
+        let fakeBox = FakeCentralBox()
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            fakeBox.store(fake)
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+
+        // Every frame leaves in the one `.ready` callback, so they are all on the wire before
+        // the handshake has hopped onto the actor and built a session: the whole run is
+        // backlog, replayed, and must arrive in this order.
+        let rounds = 32
+        let last = ServiceIdentifier(uuid: "FFFF")
+        let connection = LinkConnection.connect(
+            to: endpoint,
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "e2e.behindhello.order")
+        )
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(
+                protocolVersion: LinkProtocol.version,
+                role: .central,
+                clientName: "behind-hello-order"
+            )))
+            for round in 0..<rounds {
+                connection?.send(.centralRequest(.scan(services: [String(format: "%04X", round)], allowDuplicates: false)))
+                connection?.send(.centralRequest(.stopScan))
+            }
+            connection?.send(.centralRequest(.scan(services: [last.uuidString], allowDuplicates: false)))
+        }
+        connection.start()
+
+        await waitFor(timeout: .seconds(5)) { fakeBox.fake != nil }
+        let fake = try #require(fakeBox.fake)
+        await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.scanCallCount } == rounds + 1 }
+
+        // One scan more than the stops, and the *last* thing the backend saw is the scan that
+        // was sent last — not a `stopScan` that overtook it during the replay.
+        #expect(await fake.onQueue { fake.scanCallCount } == rounds + 1)
+        #expect(await fake.onQueue { fake.stopScanCallCount } == rounds)
+        #expect(await fake.onQueue { fake.lastScanServices ?? nil } == [last])
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
+    }
+
+    /// A `Sendable` hand-off for the `FakeCentral` the backend factory builds on the session's
+    /// queue.
+    private final class FakeCentralBox: Sendable {
+        private let storage = Mutex<FakeCentral?>(nil)
+        var fake: FakeCentral? { storage.withLock { $0 } }
+        func store(_ fake: FakeCentral) { storage.withLock { $0 = fake } }
     }
 
     @Test("A hello arriving after stop() opens no session")
