@@ -57,9 +57,21 @@ struct LinkFramingTests {
     @Test("Oversized payload length throws before waiting for bytes")
     func tooLarge() {
         var buffer = Data([1, 0xFF, 0xFF, 0xFF, 0xFF])
-        #expect(throws: LinkFramingError.payloadTooLarge(Int(UInt32.max))) {
+        #expect(throws: LinkFramingError.payloadTooLarge(UInt32.max)) {
             try LinkFraming.decodeFrames(from: &buffer)
         }
+    }
+
+    @Test("A declared length above Int32.max is rejected, never converted")
+    func tooLargeForA32BitInt() {
+        // 0x8000_0000: the smallest length whose `Int(_:)` traps where `Int` is 32 bits
+        // (watchOS's arm64_32). Decoding must compare it as the `UInt32` it was read as, so
+        // this is a thrown error on every platform rather than a trap on one.
+        var buffer = Data([1, 0x80, 0x00, 0x00, 0x00])
+        #expect(throws: LinkFramingError.payloadTooLarge(0x8000_0000)) {
+            try LinkFraming.decodeFrames(from: &buffer)
+        }
+        #expect(buffer.count == 5)
     }
 
     @Test("A header shorter than 5 bytes yields nothing and keeps the bytes")

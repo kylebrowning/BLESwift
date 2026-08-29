@@ -110,6 +110,21 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         queue.sync { attachChildren() }
     }
 
+    /// Creates a composite over `backends` **from `queue` itself**, attaching the children
+    /// without hopping — the peripheral-role counterpart to
+    /// ``CompositeCentral/init(backends:onQueue:)``, and the one way to build both children
+    /// and the composite over them inside a single `queue.sync`.
+    ///
+    /// - Parameters:
+    ///   - backends: The children, in priority order. Must all be confined to `queue`.
+    ///   - queue: The shared queue, which this call must already be running on.
+    package init(backends: [any PeripheralManaging], onQueue queue: DispatchSerialQueue) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        self.backends = backends
+        self.queue = queue
+        attachChildren()
+    }
+
     /// Installs this composite as every child's event sink. Idempotent; must be called on
     /// ``queue``.
     private func attachChildren() {

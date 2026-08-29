@@ -34,7 +34,9 @@ import Foundation
 ///   the composite's own `dispatchPrecondition`.
 ///
 /// - Important: ``init(backends:queue:)`` installs the children's event handlers with
-///   `queue.sync`, so it must not be called from `queue` itself.
+///   `queue.sync`, so it must not be called from `queue` itself. Code already running on
+///   `queue` — which is where a real `CBCentralManager` has to be built and wired without
+///   yielding — uses ``init(backends:onQueue:)`` instead.
 public final class CompositeCentral: CentralManaging, Sendable {
 
     /// The queue every method, property access, and event delivery is confined to — and
@@ -75,6 +77,24 @@ public final class CompositeCentral: CentralManaging, Sendable {
         self.backends = backends
         self.queue = queue
         queue.sync { attachChildren() }
+    }
+
+    /// Creates a composite over `backends` **from `queue` itself**, attaching the children
+    /// without hopping.
+    ///
+    /// The one way to build both children and the composite over them inside a single
+    /// `queue.sync`, so the queue never yields between a child's construction and the moment
+    /// its `eventHandler` exists — which is what ``CoreBluetoothBackends`` requires of a real
+    /// `CBCentralManager`, whose opening `didUpdateState` is otherwise delivered to no one.
+    ///
+    /// - Parameters:
+    ///   - backends: The children, in priority order. Must all be confined to `queue`.
+    ///   - queue: The shared queue, which this call must already be running on.
+    package init(backends: [any CentralManaging], onQueue queue: DispatchSerialQueue) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        self.backends = backends
+        self.queue = queue
+        attachChildren()
     }
 
     /// Installs this composite as every child's event sink. Idempotent; must be called on

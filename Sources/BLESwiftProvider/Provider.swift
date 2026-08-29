@@ -312,12 +312,19 @@ public actor Provider {
 
     /// Builds the backend for one central-role session, on that session's own queue.
     private func makeCentralBackend(queue: DispatchSerialQueue) -> any CentralManaging {
-        let virtual = queue.sync { VirtualCentralBackend(radio: radio, queue: queue) }
-        guard configuration.passthrough else { return virtual }
+        guard configuration.passthrough else {
+            return queue.sync { VirtualCentralBackend(radio: radio, queue: queue) }
+        }
         // The host's own CoreBluetooth by default; an injected factory overrides it.
         let factory = configuration.centralBackendFactory ?? CoreBluetoothBackends.makeCentral
-        let real = queue.sync { factory(queue) }
-        return CompositeCentral(backends: [virtual, real], queue: queue)
+        // One hop, not three: a real `CBCentralManager` delivers its opening `didUpdateState`
+        // as soon as the queue yields, so the composite must be wired onto it before this
+        // block returns — see ``CoreBluetoothBackends``.
+        return queue.sync {
+            let virtual = VirtualCentralBackend(radio: radio, queue: queue)
+            let real = factory(queue)
+            return CompositeCentral(backends: [virtual, real], onQueue: queue)
+        }
     }
 
     /// Builds the backend for one peripheral-role session, on that session's own queue.
@@ -326,14 +333,21 @@ public actor Provider {
     /// the client — so a central-role session's scan sees the remote `PeripheralHost` exactly
     /// as it sees a fixture.
     private func makePeripheralBackend(queue: DispatchSerialQueue, clientName: String) -> any PeripheralManaging {
-        let virtual = queue.sync {
-            VirtualPeripheralManagerBackend(radio: radio, queue: queue, identifier: UUID(), name: clientName)
+        guard configuration.passthrough else {
+            return queue.sync {
+                VirtualPeripheralManagerBackend(radio: radio, queue: queue, identifier: UUID(), name: clientName)
+            }
         }
-        guard configuration.passthrough else { return virtual }
         // The host's own CoreBluetooth by default; an injected factory overrides it.
         let factory = configuration.peripheralManagerBackendFactory ?? CoreBluetoothBackends.makePeripheralManager
-        let real = queue.sync { factory(queue) }
-        return CompositePeripheralManager(backends: [virtual, real], queue: queue)
+        // Built and attached in one hop, for the reason `makeCentralBackend` gives.
+        return queue.sync {
+            let virtual = VirtualPeripheralManagerBackend(
+                radio: radio, queue: queue, identifier: UUID(), name: clientName
+            )
+            let real = factory(queue)
+            return CompositePeripheralManager(backends: [virtual, real], onQueue: queue)
+        }
     }
 }
 

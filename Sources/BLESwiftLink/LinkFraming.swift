@@ -11,7 +11,10 @@ public enum LinkFramingError: Error, Equatable {
     /// The codec byte at the front of a frame did not match any ``LinkCodec`` case.
     case unknownCodec(UInt8)
     /// The frame's declared payload length exceeded ``LinkFraming/maximumPayloadLength``.
-    case payloadTooLarge(Int)
+    /// Carried as the `UInt32` read off the wire: a declared length is compared — and
+    /// reported — before any conversion to `Int`, which would trap on a 32-bit `Int`
+    /// platform such as watchOS's arm64_32.
+    case payloadTooLarge(UInt32)
 }
 
 /// Length-prefixed framing: `[codec: UInt8][length: UInt32 big-endian][payload]`.
@@ -42,8 +45,14 @@ public enum LinkFraming {
             let codecByte = buffer[start]
             guard let codec = LinkCodec(rawValue: codecByte) else { throw LinkFramingError.unknownCodec(codecByte) }
             let lengthBytes = buffer[start + 1 ..< start + 5]
-            let length = Int(lengthBytes.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) })
-            guard length <= maximumPayloadLength else { throw LinkFramingError.payloadTooLarge(length) }
+            // Compared as the `UInt32` it was read as: `Int(_:)` traps on a length above
+            // `Int.max`, which on watchOS's 32-bit `Int` is any length from 2 GiB up — and a
+            // corrupt or hostile stream can declare one.
+            let declared = lengthBytes.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            guard declared <= UInt32(maximumPayloadLength) else {
+                throw LinkFramingError.payloadTooLarge(declared)
+            }
+            let length = Int(declared)
             guard buffer.count >= headerLength + length else { break }
             let payload = Data(buffer[start + headerLength ..< start + headerLength + length])
             frames.append((codec, payload))
