@@ -6,6 +6,7 @@
 #if os(macOS)
 import BLESwift
 import BLESwiftCore
+import BLESwiftLink
 @testable import BLESwiftProvider
 import Dispatch
 import Foundation
@@ -195,6 +196,86 @@ struct VirtualPeripheralManagerTests {
         #expect(seen.withLock { $0 } == 2)
 
         readResponder.cancel()
+    }
+
+    @Test("A hosted host that never answers closes the write window, and answering reopens it once")
+    func writeWithoutResponseWindowBoundsTheChain() async throws {
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.WindowHost")
+        // Long enough that nothing times out while the window is being filled and asserted —
+        // the subject here is the window, not the ATT timeout — but far short of the 30 s
+        // default, which would leave the writes this test holds parked for the rest of the run.
+        let backend = VirtualPeripheralManagerBackend(
+            radio: radio,
+            queue: hostQueue,
+            identifier: identifier,
+            attTimeout: .seconds(10)
+        )
+        let host = PeripheralHost(backend: backend, queue: hostQueue)
+        try await host.add(Self.service)
+
+        // A hosted host that is merely slow: every write is held, unanswered, until this test
+        // decides to answer it.
+        let answering = Mutex<Bool>(false)
+        let held = Mutex<[WriteRequest]>([])
+        let writeResponder = Task { @Sendable in
+            for await request in await host.writeRequests() {
+                if answering.withLock({ $0 }) {
+                    await host.respond(to: request, with: .success(()))
+                } else {
+                    held.withLock { $0.append(request) }
+                }
+            }
+        }
+        defer { writeResponder.cancel() }
+
+        // The backend is driven directly: `Peripheral`'s own writer honors the window, and the
+        // window itself is what is under test.
+        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.WindowCentral")
+        let central = VirtualCentralBackend(radio: radio, queue: centralQueue)
+        await waitFor { await Self.onQueue(centralQueue) { !central.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
+        let remote = try #require(await Self.onQueue(centralQueue) {
+            central.retrievePeripherals(withIdentifiers: [identifier]).first as? VirtualPeripheralRemote
+        })
+        let ready = Mutex<Int>(0)
+        await Self.onQueue(centralQueue) {
+            remote.eventHandler = { event in
+                if case .isReadyToSendWriteWithoutResponse = event { ready.withLock { $0 += 1 } }
+            }
+            central.connect(remote, options: nil, requiresANCS: false)
+        }
+        await waitFor { await Self.onQueue(centralQueue) { remote.connectionState == .connected } }
+        await Self.onQueue(centralQueue) {
+            remote.discoverServices([Self.heartRate])
+            remote.discoverCharacteristics([Self.control], for: Self.heartRate)
+        }
+        await waitFor { await Self.onQueue(centralQueue) { remote.isDiscovered(Self.control) } }
+
+        // ---- Fill the window: the slots are taken synchronously, so this is exact ----
+        let window = LinkFlowControl.writeWithoutResponseWindow
+        await Self.onQueue(centralQueue) {
+            #expect(remote.canSendWriteWithoutResponse)
+            for _ in 0..<window {
+                remote.writeValue(Data([0x01]), for: Self.control, type: .withoutResponse)
+            }
+        }
+        // The window is shut, so the 65th write parks in `CentralSession.drainWrites` rather
+        // than joining an unbounded chain behind a host that has answered none of the first 64.
+        #expect(await Self.onQueue(centralQueue) { !remote.canSendWriteWithoutResponse })
+        #expect(ready.withLock { $0 } == 0)
+
+        // ---- The host starts answering: the chain drains and the window reopens ----
+        answering.withLock { $0 = true }
+        await waitFor(timeout: .seconds(10)) {
+            for request in held.withLock({ let pending = $0; $0 = []; return pending }) {
+                await host.respond(to: request, with: .success(()))
+            }
+            return await Self.onQueue(centralQueue) { remote.canSendWriteWithoutResponse }
+        }
+        #expect(await Self.onQueue(centralQueue) { remote.canSendWriteWithoutResponse })
+        // Once, on the transition that reopened it — not once per write answered.
+        #expect(ready.withLock { $0 } == 1)
     }
 
     @Test("A host's ATT failure surfaces to the central as a CBATTErrorDomain error")

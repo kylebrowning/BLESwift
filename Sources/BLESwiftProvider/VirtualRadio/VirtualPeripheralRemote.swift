@@ -5,6 +5,7 @@
 
 #if os(macOS)
 import BLESwiftCore
+import BLESwiftLink
 import Dispatch
 import Foundation
 import Synchronization
@@ -38,6 +39,10 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _discoveredCharacteristics: Set<CharacteristicIdentifier> = []
     nonisolated(unsafe) private var _properties: [CharacteristicIdentifier: CharacteristicProperties] = [:]
     nonisolated(unsafe) private var _notifying: Set<CharacteristicIdentifier> = []
+
+    /// How many `.withoutResponse` writes this remote has handed the radio and not yet seen
+    /// answered — the transmit queue a real `CBPeripheral` reports back-pressure from.
+    nonisolated(unsafe) private var _inFlightWrites = 0
 
     /// The serial chain of radio work this remote has queued. Swift guarantees no ordering
     /// between independent `Task`s, so two back-to-back writes — or a `setNotifyValue(true)`
@@ -145,10 +150,20 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         return false
     }
 
-    /// Always `true` — the virtual radio applies no write-without-response back-pressure.
+    /// Whether fewer than `LinkFlowControl.writeWithoutResponseWindow` `.withoutResponse`
+    /// writes are still waiting on the radio.
+    ///
+    /// **A virtual radio does apply back-pressure.** Reporting `true` unconditionally was the
+    /// obvious reading of "no transmit queue to fill" and the wrong one: a hosted
+    /// `PeripheralHost` answers each write over its own link, and each one parks for up to
+    /// ``VirtualRadio/attTimeout`` waiting for that answer. With nothing ever refused, a
+    /// central session's `drainWrites` hands every queued write straight through and the
+    /// serial chain behind this remote grows without bound against a host that is merely slow
+    /// — the one thing `maximumPendingWrites` exists to bound, and which it could never reach.
+    /// The same window the link's own clients honor bounds it here.
     public var canSendWriteWithoutResponse: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
-        return true
+        return _inFlightWrites < LinkFlowControl.writeWithoutResponseWindow
     }
 
     /// Asks the radio for `services` (or every service, when `nil`) and delivers
@@ -205,9 +220,16 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// when the device's handler has answered; a `.withoutResponse` write delivers nothing,
     /// exactly as CoreBluetooth does. A no-op for a characteristic this remote has not
     /// discovered, for the same reason as ``readValue(for:)-(CharacteristicIdentifier)``.
+    ///
+    /// A `.withoutResponse` write occupies a slot in this remote's window until the radio has
+    /// answered it; the slot's release raises
+    /// `PeripheralEvent.isReadyToSendWriteWithoutResponse`, which is the
+    /// signal the seam's contract says a caller waits on when
+    /// ``canSendWriteWithoutResponse`` is `false`.
     public func writeValue(_ data: Data, for characteristic: CharacteristicIdentifier, type: WriteType) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard _discoveredCharacteristics.contains(characteristic) else { return }
+        if type == .withoutResponse { _inFlightWrites += 1 }
         enqueue { [radio, identifier, session, queue] in
             let result = await radio.write(
                 device: identifier,
@@ -215,8 +237,11 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
                 value: data,
                 session: session
             )
-            guard type == .withResponse else { return }
             queue.async { [self] in
+                guard type == .withResponse else {
+                    releaseWriteSlot()
+                    return
+                }
                 switch result {
                 case .success:
                     deliver(.didWriteValue(characteristic: characteristic, error: nil))
@@ -224,6 +249,21 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
                     deliver(.didWriteValue(characteristic: characteristic, error: Self.error(for: attError)))
                 }
             }
+        }
+    }
+
+    /// Releases the window slot one answered `.withoutResponse` write held, raising
+    /// `isReadyToSendWriteWithoutResponse` on the transition that reopens the
+    /// window. Must be called on ``queue``.
+    ///
+    /// Only the transition raises it — a slot released while the window was already open is
+    /// not news, and CoreBluetooth raises the event when a full queue drains, not per write.
+    private func releaseWriteSlot() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard _inFlightWrites > 0 else { return }
+        _inFlightWrites -= 1
+        if _inFlightWrites == LinkFlowControl.writeWithoutResponseWindow - 1 {
+            deliver(.isReadyToSendWriteWithoutResponse)
         }
     }
 
