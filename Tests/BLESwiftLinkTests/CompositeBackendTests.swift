@@ -767,6 +767,44 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { real.updateValueCalls.isEmpty })
     }
 
+    @Test("With no powered-on child, updateValue is refused until one powers on")
+    func updateValueIsRefusedWithNoOnlineChild() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.pushAllOff")
+        let first = FakePeripheralManager(queue: queue, state: .poweredOff)
+        let second = FakePeripheralManager(queue: queue, state: .unauthorized)
+        let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
+
+        let ready = Mutex<Int>(0)
+        await onQueue(queue) {
+            composite.eventHandler = { event in
+                if case .readyToUpdateSubscribers = event { ready.withLock { $0 += 1 } }
+            }
+        }
+
+        // No radio could carry it, so reporting it as delivered or queued would be a lie —
+        // the same one `add` and `startAdvertising` refuse to tell with no powered-on child.
+        #expect(await onQueue(queue) {
+            composite.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil)
+        } == false)
+        // And a refused push reaches nothing: the caller's re-offer is its only delivery.
+        #expect(await onQueue(queue) { first.updateValueCalls.isEmpty })
+        #expect(await onQueue(queue) { second.updateValueCalls.isEmpty })
+        #expect(ready.withLock { $0 } == 0)
+
+        // The first child to power on is what reopens the window: nothing was ever queued for
+        // it, so no child of its own accord would ever say it is ready.
+        first.simulateStateChange(.poweredOn)
+        await waitFor { ready.withLock { $0 } == 1 }
+        #expect(ready.withLock { $0 } == 1)
+
+        // The re-offer now goes through, exactly once.
+        #expect(await onQueue(queue) {
+            composite.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil)
+        })
+        #expect(await onQueue(queue) { first.updateValueCalls.count } == 1)
+        #expect(await onQueue(queue) { second.updateValueCalls.isEmpty })
+    }
+
     @Test("A child powering on later is caught up with the services and the advertisement")
     func aChildPoweringOnIsCaughtUp() async {
         let queue = DispatchSerialQueue(label: "CompositeBackendTests.powerUp")

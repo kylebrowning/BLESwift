@@ -355,6 +355,10 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
             _swallowedAdvertisements[index] += 1
             backends[index].startAdvertising(advertisement)
         }
+        // A window that closed because *nothing* was powered on has a radio to reopen on now,
+        // and this is the only event that can reopen it: a child that was never queued for
+        // will not raise a `readyToUpdateSubscribers` of its own.
+        reopenWindowIfPossible()
     }
 
     /// Emits the one `readyToUpdateSubscribers` the host is owed, if the window it closed can
@@ -596,16 +600,27 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// here compares payloads or infers a retry. A child that is not powered on refuses every
     /// push and can never drain, so it is skipped outright rather than queued for.
     ///
+    /// **With no powered-on child the push is refused.** Every child would be skipped, so the
+    /// value would reach no radio at all — and `true` says it was delivered or queued, which
+    /// is the same lie ``add(_:)`` and ``startAdvertising(_:)`` refuse to tell by completing
+    /// with ``noPoweredOnBackendError``. The composite's window closes instead, and the first
+    /// child to power on raises the `readyToUpdateSubscribers` the caller re-offers on.
+    ///
     /// - Returns: `true` when every powered-on child either took the value or queued it.
-    ///   `false` — the composite's window closing — only when some powered-on child has
-    ///   already fallen a full `queueLimit` behind, in which case *nothing* is pushed or
-    ///   queued, so the caller's re-offer after the next `readyToUpdateSubscribers` is the
-    ///   value's first and only delivery.
+    ///   `false` — the composite's window closing — when some powered-on child has already
+    ///   fallen a full `queueLimit` behind, or when no child is powered on at all. In both
+    ///   cases *nothing* is pushed or queued, so the caller's re-offer after the next
+    ///   `readyToUpdateSubscribers` is the value's first and only delivery.
     public func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         // Checked before anything is delivered: a push that is refused must reach no child at
         // all, or the caller's re-offer of it would notify some subscribers twice.
         guard !isAnyQueueFull else {
+            _windowClosed = true
+            return false
+        }
+        guard !onlineIndices.isEmpty else {
+            for index in backends.indices { noteOffline(index, operation: "updateValue") }
             _windowClosed = true
             return false
         }
