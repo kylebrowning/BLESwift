@@ -99,6 +99,12 @@ jobs:
   sim-to-sim-e2e:
     # Two simulator apps talk BLE to each other through bleswift-provider's virtual radio,
     # driven by grantiva. No hardware, no entitlements.
+    #
+    # The grantiva version this job runs is not pinned, and cannot be today: the tap ships a
+    # single `grantiva.rb` and no versioned formulae, so there is no `grantiva@1.7.0` to ask
+    # brew for. The `grantiva --version` step below is the signal instead — it prints what the
+    # tap's HEAD formula actually installed, and is the first line to read when this job goes
+    # red after passing. Pin the install here the day the tap publishes versioned formulae.
     name: Sim-to-sim E2E (grantiva)
     runs-on: macos-latest
     timeout-minutes: 25

@@ -94,12 +94,54 @@ trap cleanup EXIT INT TERM
 #
 # `--json`, not the plain output: without it `ensure` prints a human sentence
 # ("Reused iPhone 17 Pro (<UDID>) — Booted") that would have to be scraped.
+#
+# One case `ensure` refuses outright: a machine with two simulators of the same name, which it
+# answers with `Multiple simulators are named "<name>"; delete duplicates or use a unique
+# name`. GitHub's runner image ships three "iPhone 17 Pro Max" devices, so this is not
+# hypothetical. Deleting a runner's devices is not this script's business, so the duplicate is
+# resolved here instead: pick one device of that name out of `simctl list devices available`,
+# preferring one already booted, and carry on by UDID — which is what every command past this
+# point takes anyway. Warned about, never silent.
+duplicate_named_udid() {
+    xcrun simctl list devices available -j | python3 -c '
+import json, sys
+name = sys.argv[1]
+devices = json.load(sys.stdin)["devices"]
+matches = [d for runtime in devices for d in devices[runtime] if d["name"] == name]
+booted = [d for d in matches if d.get("state") == "Booted"]
+chosen = (booted or matches)
+print(chosen[0]["udid"] if chosen else "")
+' "$1"
+}
+
 ensure_simulator() {
     local name="$1"
     local start=$SECONDS
-    local udid
-    udid="$(grantiva simulator ensure --name "$name" --json \
-        | python3 -c 'import json, sys; print(json.load(sys.stdin).get("udid", ""))')"
+    local udid output errors status errors_file
+    # stderr kept apart from stdout: the JSON `--json` promises is on stdout, and folding a
+    # warning line into it would break the parse on the very path that succeeded.
+    errors_file="$(mktemp)"
+    set +e
+    output="$(grantiva simulator ensure --name "$name" --json 2>"$errors_file")"
+    status=$?
+    set -e
+    errors="$(cat "$errors_file")"
+    rm -f "$errors_file"
+    if (( status != 0 )); then
+        if [[ "$output$errors" == *"Multiple simulators are named"* ]]; then
+            log "WARNING: grantiva refuses \"$name\" as ambiguous (this machine has more than one simulator of that name); selecting one directly"
+            udid="$(duplicate_named_udid "$name")"
+            [[ -n "$udid" ]] || { echo "no available simulator named \"$name\"" >&2; exit 1; }
+            log "WARNING: using \"$name\" ($udid), booting it without grantiva's ensure"
+            xcrun simctl boot "$udid" >/dev/null 2>&1 || true
+        else
+            printf '%s\n%s\n' "$output" "$errors" >&2
+            echo "grantiva simulator ensure --name \"$name\" failed" >&2
+            exit 1
+        fi
+    else
+        udid="$(printf '%s' "$output" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("udid", ""))')"
+    fi
     [[ -n "$udid" ]] || { echo "grantiva simulator ensure --name \"$name\" returned no UDID" >&2; exit 1; }
     # Belt and braces on top of `ensure`'s own boot: `bootstatus -b` blocks until the device
     # reports itself fully booted, so nothing downstream races a half-started simulator. The

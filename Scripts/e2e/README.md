@@ -163,6 +163,16 @@ machine on iOS 27 falls outside it and rebuilds WebDriverAgent once, the first t
 against a 27 simulator. Nothing to work around — it is a one-time cost per runtime — but it is
 the remaining reason a first run looks hung for a few minutes.
 
+**`simulator ensure --name` refuses a duplicated name.** A machine with two simulators of the
+same name gets `Multiple simulators are named "<name>"; delete duplicates or use a unique
+name` and a non-zero exit — and GitHub's runner image ships three "iPhone 17 Pro Max" devices,
+so a name the runner picks can genuinely be ambiguous. There is no `--udid` on `ensure` to
+disambiguate with, and deleting a runner's devices is not this script's business, so
+`ensure_simulator` catches that one error and falls back to `xcrun simctl list devices
+available -j`: it picks a device of that name (preferring one already booted), boots it, and
+logs a warning. Everything downstream already runs by UDID, so nothing else changes. The
+fallback goes away the day `ensure` accepts a UDID or picks a device itself.
+
 **`simulator ensure` prints prose, not a UDID.** Without `--json` it prints
 `Reused iPhone 17 Pro (<UDID>) — Booted`, so a script that wants the UDID has to either scrape
 that line or ask for `--json` (which the script does). Worth a mention in the help text, whose
