@@ -260,11 +260,18 @@ extension CentralSession {
         for open in doomed.values { tearDown(open) }
     }
 
-    /// Cancels a bridge's pump, releases anything waiting on its credit, and closes the
-    /// transport.
+    /// Cancels a bridge's pump and its outbound write chain, releases anything waiting on its
+    /// credit, and closes the transport.
+    ///
+    /// The write chain goes with the pump: a write still queued behind another one has a
+    /// transport that is about to close under it, and leaving the tail task alive would keep
+    /// the chain — and the data it captured — around for as long as the write ahead of it
+    /// takes to fail.
     private func tearDown(_ open: OpenChannel) {
         open.pump?.cancel()
         open.pump = nil
+        open.writes?.cancel()
+        open.writes = nil
         open.releaseWaiter()
         open.remote.close(error: nil)
     }

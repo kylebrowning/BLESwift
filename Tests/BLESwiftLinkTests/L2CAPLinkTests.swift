@@ -8,7 +8,7 @@ import BLESwift
 import BLESwiftCore
 import BLESwiftLink
 import BLESwiftProvider
-import BLESwiftSimulatorLink
+@testable import BLESwiftSimulatorLink
 import BLESwiftTestSupport
 import Dispatch
 import Foundation
@@ -274,6 +274,63 @@ struct L2CAPLinkTests {
         #expect(error.code == 7)
 
         await tearDown(rig)
+    }
+
+    @Test("Closing with writes still in flight tears the bridge down cleanly")
+    func closeWithWritesInFlight() async throws {
+        let (rig, peripheral) = try await makeRig(label: "l2cap.closeMidWrite")
+        let channel = try await peripheral.openL2CAPChannel(psm: Self.psm, timeout: .seconds(5))
+        let fake = try await openedChannel(rig)
+
+        // A burst deep enough that the provider still has writes chained behind the one it is
+        // performing when the close arrives — the chain `tearDown` has to cancel along with
+        // the pump, or it outlives the transport it was writing to.
+        let payload = Data(repeating: 0x7E, count: 4096)
+        let writer = Task {
+            for _ in 0..<32 { try await channel.write(payload) }
+        }
+        await channel.close()
+        // The writer either finished or was refused by the closed channel; neither hangs.
+        _ = try? await bounded { try await writer.value }
+
+        await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.isClosed } }
+        #expect(await fake.onQueue { fake.isClosed })
+        // Every byte the fake did take arrived whole — a cancelled chain truncates the stream,
+        // it never corrupts it.
+        let written = await fake.onQueue { fake.writtenData }
+        #expect(written.allSatisfy { $0 == payload })
+
+        await tearDown(rig)
+    }
+
+    // MARK: - Inbound credit
+
+    @Test("Bytes arriving after the channel closed are dropped, and dropped bytes earn no credit")
+    func closedChannelCreditsNothing() async throws {
+        // The client half on its own: the provider's frames are what `LinkCentral` would feed
+        // it, and `sent` is the link it would put its own requests on.
+        let sent = Mutex<[CentralRequest]>([])
+        let channel = LinkL2CAPChannel(channel: 7, psm: Self.psm) { request in
+            sent.withLock { $0.append(request) }
+        }
+
+        // Open: bytes land, and the provider is credited for them at once.
+        channel.receive(Data([1, 2, 3]))
+        #expect(sent.withLock { $0.count } == 1)
+        if case .l2capCredit(let identifier, let bytes) = sent.withLock({ $0[0] }) {
+            #expect(identifier == 7)
+            #expect(bytes == 3)
+        } else {
+            Issue.record("expected an l2capCredit, got \(sent.withLock { $0 })")
+        }
+
+        // Closed by the provider, then a frame that was already in flight arrives. It is
+        // dropped — so crediting it would hand the provider back a window on a channel that
+        // will never read another byte.
+        channel.remoteClosed(error: nil)
+        sent.withLock { $0.removeAll() }
+        channel.receive(Data([4, 5, 6, 7]))
+        #expect(sent.withLock { $0 }.isEmpty)
     }
 
     // MARK: - Open failure

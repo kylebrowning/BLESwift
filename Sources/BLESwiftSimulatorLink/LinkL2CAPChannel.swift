@@ -179,16 +179,32 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
     /// Delivers `data` from the provider to the inbound stream and immediately credits the
     /// provider for it — the client buffers on the consumer's behalf, so the bytes are
     /// "consumed" the moment they land.
+    ///
+    /// A closed channel takes neither: the bytes are dropped, and dropped bytes are not
+    /// credited — crediting them would re-open the provider's window on a channel that will
+    /// never read another byte.
     func receive(_ data: Data) {
-        let continuation = state.withLock { state -> AsyncThrowingStream<Data, Error>.Continuation? in
-            guard !state.isClosed else { return nil }
+        enum Delivery {
+            case buffered
+            case yield(AsyncThrowingStream<Data, Error>.Continuation)
+            case closed
+        }
+        let delivery = state.withLock { state -> Delivery in
+            guard !state.isClosed else { return .closed }
             guard let continuation = state.continuation else {
                 state.pending.append(data)
-                return nil
+                return .buffered
             }
-            return continuation
+            return .yield(continuation)
         }
-        continuation?.yield(data)
+        switch delivery {
+        case .closed:
+            return
+        case .buffered:
+            break
+        case .yield(let continuation):
+            continuation.yield(data)
+        }
         send(.l2capCredit(channel: channel, bytes: data.count))
     }
 
