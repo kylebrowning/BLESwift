@@ -69,11 +69,40 @@ public struct ServerHello: Codable, Sendable, Equatable {
     /// A human-readable name for the provider, for logging on the client side.
     public var providerName: String
 
+    /// The identity the provider actually hosted a `.peripheral` client's device under.
+    ///
+    /// Normally the `ClientHello.hostIdentifier` the client asked for. It differs when the
+    /// provider refused that choice — an identifier one of its *own* devices already owns —
+    /// and minted a fresh one instead, which is the one thing a client cannot work out for
+    /// itself: its reconnect will keep asking for an identity it is not being hosted under,
+    /// and every central will keep seeing a different device. Reporting it here is what lets
+    /// the client say so.
+    ///
+    /// `nil` for a rejected handshake, for a `.central` client (which hosts nothing), and for
+    /// a provider that predates the field. Optional, so a hello encoded without the key still
+    /// decodes.
+    public var assignedHostIdentifier: UUID?
+
     /// Creates a `ServerHello`.
-    public init(protocolVersion: Int, accepted: Bool, reason: String?, providerName: String) {
+    ///
+    /// - Parameters:
+    ///   - protocolVersion: The wire protocol version the provider speaks.
+    ///   - accepted: Whether the provider accepted this client's handshake.
+    ///   - reason: A human-readable explanation of a refusal.
+    ///   - providerName: A human-readable name for the provider.
+    ///   - assignedHostIdentifier: The identity a `.peripheral` client's device was hosted
+    ///     under. Defaults to `nil`, which is what every other case sends.
+    public init(
+        protocolVersion: Int,
+        accepted: Bool,
+        reason: String?,
+        providerName: String,
+        assignedHostIdentifier: UUID? = nil
+    ) {
         self.protocolVersion = protocolVersion
         self.accepted = accepted
         self.reason = reason
         self.providerName = providerName
+        self.assignedHostIdentifier = assignedHostIdentifier
     }
 }

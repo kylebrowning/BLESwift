@@ -71,7 +71,11 @@ let package = Package(
         ),
         .target(
             name: "BLESwiftSimulatorLink",
-            dependencies: ["BLESwiftCore", "BLESwiftLink"],
+            dependencies: [
+                "BLESwiftCore",
+                "BLESwiftLink",
+                .product(name: "Logging", package: "swift-log")
+            ],
             resources: [.copy("BLESwiftSimulatorLink.docc")],
             swiftSettings: sharedSwiftSettings
         ),

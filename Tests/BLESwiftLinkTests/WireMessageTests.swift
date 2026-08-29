@@ -22,6 +22,7 @@ struct WireMessageTests {
         .clientHello(ClientHello(protocolVersion: 1, role: .central, clientName: "app")),
         .clientHello(ClientHello(protocolVersion: 1, role: .peripheral, clientName: "app", hostIdentifier: id)),
         .serverHello(ServerHello(protocolVersion: 1, accepted: false, reason: "old", providerName: "p")),
+        .serverHello(ServerHello(protocolVersion: 1, accepted: true, reason: nil, providerName: "p", assignedHostIdentifier: id)),
         .centralRequest(.scan(services: ["180D"], allowDuplicates: true)),
         .centralRequest(.stopScan),
         .centralRequest(.connect(peripheral: id, options: WireConnectOptions(notifyOnConnection: true, notifyOnDisconnection: false, notifyOnNotification: true), requiresANCS: true)),
@@ -131,6 +132,19 @@ struct WireMessageTests {
             return
         }
         #expect(hello.hostIdentifier == nil)
+    }
+
+    @Test("A server hello with no assignedHostIdentifier decodes, leaving the field nil")
+    func serverHelloWithoutAnAssignedIdentifierDecodes() throws {
+        // The shape a provider that predates the field puts on the wire; still readable.
+        let json = Data(#"{"serverHello":{"_0":{"protocolVersion":1,"accepted":true,"providerName":"old"}}}"#.utf8)
+        let decoded = try LinkCodec.json.decode(LinkMessage.self, from: json)
+        #expect(decoded == .serverHello(ServerHello(protocolVersion: 1, accepted: true, reason: nil, providerName: "old")))
+        guard case .serverHello(let hello) = decoded else {
+            Issue.record("expected a serverHello, got \(decoded)")
+            return
+        }
+        #expect(hello.assignedHostIdentifier == nil)
     }
 
     @Test("WireError ↔ NSError preserves domain, code, description")

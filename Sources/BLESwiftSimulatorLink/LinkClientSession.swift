@@ -41,7 +41,7 @@ package final class LinkClientSession: Sendable {
         /// Dials scheduled since the session started or since the last link dropped. The
         /// first `fastRetryAttempts` of them are the fast burst.
         var retriesSinceConnected = 0
-        var onConnected: (@Sendable () -> Void)?
+        var onConnected: (@Sendable (ServerHello) -> Void)?
         var onDisconnected: (@Sendable (NSError?) -> Void)?
         var onMessage: (@Sendable (LinkMessage) -> Void)?
         /// See `LinkClientSession.onDial`.
@@ -109,8 +109,10 @@ package final class LinkClientSession: Sendable {
         self.retryInterval = retryInterval
     }
 
-    /// Called on `queue` once a provider has accepted the handshake, for every connection.
-    package var onConnected: (@Sendable () -> Void)? {
+    /// Called on `queue` once a provider has accepted the handshake, for every connection,
+    /// with the `ServerHello` that accepted it — which is where the provider reports the
+    /// identity it actually hosted a `.peripheral` client under.
+    package var onConnected: (@Sendable (ServerHello) -> Void)? {
         get { state.withLock { $0.onConnected } }
         set { state.withLock { $0.onConnected = newValue } }
     }
@@ -290,7 +292,7 @@ package final class LinkClientSession: Sendable {
     }
 
     private func complete(handshake hello: ServerHello, over connection: LinkConnection) {
-        let outcome = state.withLock { state -> (HandshakeOutcome, (@Sendable () -> Void)?, (@Sendable (NSError?) -> Void)?) in
+        let outcome = state.withLock { state -> (HandshakeOutcome, (@Sendable (ServerHello) -> Void)?, (@Sendable (NSError?) -> Void)?) in
             guard !state.stopped, state.connection === connection else { return (.ignored, nil, nil) }
             guard hello.protocolVersion == LinkProtocol.version else {
                 state.versionMismatch = true
@@ -312,7 +314,7 @@ package final class LinkClientSession: Sendable {
             break
         case .accepted:
             if let handler = outcome.1 {
-                dispatchCallback { handler() }
+                dispatchCallback { handler(hello) }
             }
         case .rejected(let error):
             if let handler = outcome.2 {

@@ -7,6 +7,7 @@ import BLESwiftCore
 import BLESwiftLink
 import Dispatch
 import Foundation
+import Logging
 
 /// A `PeripheralManaging` backed by a provider process rather than a local
 /// `CBPeripheralManager`: every call is encoded as a `HostRequest` and sent
@@ -55,6 +56,14 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
 
     /// The client session this manager owns; held strongly for its whole lifetime.
     private let session: LinkClientSession
+
+    /// The identity this manager asks every provider to host its device under. Minted once,
+    /// per instance, and sent on every hello — the opening one and every reconnect's.
+    private let hostIdentifier: UUID
+
+    /// Where a provider that refused ``hostIdentifier`` is reported. The only thing worth
+    /// saying here: nothing else in this manager has an outcome the caller cannot already see.
+    private static let logger = Logger(label: "BLESwiftSimulatorLink.LinkPeripheralManager")
 
     nonisolated(unsafe) private var _eventHandler: ((PeripheralHostEvent) -> Void)?
     nonisolated(unsafe) private var _radioState: CentralState = .unsupported
@@ -119,17 +128,33 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         // One identity per manager, sent on every hello this session makes: the provider hosts
         // the device under it, so a link drop and its reconnect leave the same device on the
         // radio rather than a fresh one every central would have to rediscover.
+        let hostIdentifier = UUID()
+        self.hostIdentifier = hostIdentifier
         self.session = LinkClientSession(
             endpoint: endpoint,
             role: .peripheral,
             clientName: clientName,
-            hostIdentifier: UUID(),
+            hostIdentifier: hostIdentifier,
             codec: codec,
             queue: queue,
             retryInterval: retryInterval
         )
         // Weak captures: the session is owned by this manager, so a strong capture would be a
         // cycle and `deinit` — which stops the session — would never run.
+        session.onConnected = { hello in
+            // A provider that hosted this device under something other than what was asked for
+            // has refused the identity — because one of its own devices holds it — and every
+            // reconnect will ask again and be refused again. The client cannot repair that, so
+            // it says so: to every central this host looks like a device that keeps changing
+            // its identifier, and this line is the only place that is explained.
+            guard let assigned = hello.assignedHostIdentifier, assigned != hostIdentifier else { return }
+            Self.logger.warning(
+                """
+                The provider refused host identifier \(hostIdentifier) and is hosting this \
+                peripheral as \(assigned); centrals will see it as a different device
+                """
+            )
+        }
         session.onDisconnected = { [weak self] _ in self?.handleLinkDropped() }
         session.onMessage = { [weak self] message in self?.handle(message) }
         session.start()

@@ -70,6 +70,20 @@ public actor Provider {
     /// The handles of the fixture devices ``start()`` registered, keyed by device id.
     private var fixtures: [UUID: VirtualDeviceHandle] = [:]
 
+    /// The identifiers of the devices the *provider itself* put on the radio — its fixtures,
+    /// and everything ``addVirtualDevice(_:advertising:)`` registered.
+    ///
+    /// The set ``hostedIdentifier(for:)`` refuses a client's chosen identity against. It is
+    /// deliberately not ``VirtualRadio/knownDeviceIDs``: that set also holds the devices
+    /// *clients* are hosted under, and a client redialing faster than its old session's
+    /// asynchronous removal completes would find its own identifier still in it and be
+    /// re-hosted under a fresh `UUID` — silently becoming a new device to every central that
+    /// had seen it. Only the provider's own devices are the provider's to defend; a
+    /// peripheral-role client re-registering *its own* identifier is exactly the reconnect the
+    /// stable `hostIdentifier` exists for, and ``VirtualDeviceHandle``'s generation guard is
+    /// what keeps the old session's teardown off the new registration.
+    private var providerOwnedIdentifiers: Set<UUID> = []
+
     /// Numbers the per-session queue labels.
     private var sessionOrdinal = 0
 
@@ -88,7 +102,8 @@ public actor Provider {
     /// - Returns: The handle for pushing notifications and mutating the device afterwards.
     @discardableResult
     public func addVirtualDevice(_ device: VirtualDevice, advertising: Bool = true) async -> VirtualDeviceHandle {
-        await radio.register(device, advertising: advertising)
+        providerOwnedIdentifiers.insert(device.descriptor.identifier)
+        return await radio.register(device, advertising: advertising)
     }
 
     /// The handle of the fixture device registered under `identifier`, or `nil` if
@@ -115,6 +130,7 @@ public actor Provider {
             let handle = await radio.register(device)
             await handler.attach(handle)
             fixtures[fixture.id] = handle
+            providerOwnedIdentifiers.insert(fixture.id)
         }
         let listener = try LinkListener(
             endpoint: configuration.endpoint,
@@ -338,16 +354,21 @@ public actor Provider {
         case .peripheral:
             sessionOrdinal += 1
             let queue = DispatchSerialQueue(label: "bleswift-provider.host.\(sessionOrdinal)")
+            // Reported back in the hello: the client asked to be hosted under an identity, and
+            // only the provider knows whether it got it.
+            let identifier = hostedIdentifier(for: hello)
+            var hosted = accepted
+            hosted.assignedHostIdentifier = identifier
             sessions[key] = HostSession(
                 connection: connection,
                 backend: makePeripheralBackend(
                     queue: queue,
                     clientName: hello.clientName,
-                    identifier: hostedIdentifier(for: hello)
+                    identifier: identifier
                 ),
                 queue: queue,
                 ordinal: sessionOrdinal,
-                hello: accepted,
+                hello: hosted,
                 install: install,
                 log: configuration.log
             )
@@ -359,19 +380,29 @@ public actor Provider {
     /// ``BLESwiftLink/ClientHello``, so its reconnect is the same device to every central that
     /// had seen it, or a fresh `UUID` when it asked for nothing.
     ///
-    /// **An identifier the radio already has is refused.** A client picks its own
-    /// `hostIdentifier` and the provider cannot vouch for it: one that names a fixture — by
-    /// mistake, or on purpose — would otherwise re-register over that fixture, replacing its
-    /// database with the client's own and leaving the provider's own handle for it stale. The
-    /// collision is answered the way the missing case is, with a fresh identifier, so the
+    /// **An identifier one of the provider's *own* devices holds is refused.** A client picks
+    /// its own `hostIdentifier` and the provider cannot vouch for it: one that names a fixture
+    /// — by mistake, or on purpose — would otherwise re-register over that fixture, replacing
+    /// its database with the client's own and leaving the provider's own handle for it stale.
+    /// The collision is answered the way the missing case is, with a fresh identifier, so the
     /// client is still hosted; only its choice of identity is refused.
+    ///
+    /// **Another client's identifier is not refused, and neither is this client's own.** The
+    /// test is ``providerOwnedIdentifiers``, not ``VirtualRadio/knownDeviceIDs``. A
+    /// peripheral-role client whose link drops and redials at once arrives while its previous
+    /// session's device removal — which is asynchronous, and behind the new registration in
+    /// the queue — has not run yet; refusing on the radio's whole membership made that race
+    /// decide whether a reconnect kept its identity, so a client could silently come back as a
+    /// new device to every central that had seen it. Re-registering an identifier a client
+    /// already owns is safe: the registration mints a newer generation, and the old session's
+    /// teardown is ignored by ``VirtualRadio``'s generation guard.
     private func hostedIdentifier(for hello: ClientHello) -> UUID {
         guard let requested = hello.hostIdentifier else { return UUID() }
-        guard radio.knownDeviceIDs.withLock({ $0.contains(requested) }) else { return requested }
+        guard providerOwnedIdentifiers.contains(requested) else { return requested }
         let replacement = UUID()
         configuration.log?(
-            "\(hello.clientName) asked to be hosted as \(requested), which is already registered; "
-                + "hosting it as \(replacement)"
+            "\(hello.clientName) asked to be hosted as \(requested), which the provider hosts "
+                + "itself; hosting it as \(replacement)"
         )
         return replacement
     }

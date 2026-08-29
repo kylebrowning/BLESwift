@@ -600,7 +600,7 @@ struct HostEndToEndTests {
             codec: .binaryPropertyList,
             queue: DispatchQueue(label: "host.e2e.collision")
         )
-        let accepted = Mutex<Bool?>(nil)
+        let answer = Mutex<ServerHello?>(nil)
         connection.onStateChange = { [weak connection] state in
             guard case .ready = state else { return }
             connection?.send(.clientHello(ClientHello(
@@ -612,14 +612,17 @@ struct HostEndToEndTests {
         }
         connection.onMessage = { message in
             guard case .serverHello(let hello) = message else { return }
-            accepted.withLock { $0 = hello.accepted }
+            answer.withLock { $0 = hello }
         }
         connection.start()
-        await waitFor(timeout: .seconds(5)) { accepted.withLock { $0 } != nil }
+        await waitFor(timeout: .seconds(5)) { answer.withLock { $0 } != nil }
 
         // The client is served — only its choice of identity was refused — and its own device
-        // is registered under some other identifier.
-        #expect(accepted.withLock { $0 } == true)
+        // is registered under some other identifier, which the hello reports so the client can
+        // say the provider overrode it.
+        #expect(answer.withLock { $0?.accepted } == true)
+        let assigned = try #require(answer.withLock { $0?.assignedHostIdentifier })
+        #expect(assigned != fixtureID)
         await waitFor(timeout: .seconds(5)) { provider.radio.knownDeviceIDs.withLock { $0.count } == 2 }
         #expect(provider.radio.knownDeviceIDs.withLock { $0.count } == 2)
 
@@ -636,6 +639,62 @@ struct HostEndToEndTests {
         connection.onStateChange = nil
         connection.onMessage = nil
         connection.cancel()
+        await provider.stop()
+    }
+
+    @Test("A redial reaching the provider before its old session was torn down keeps its identity")
+    func aRedialBeforeTheOldSessionIsGoneKeepsItsIdentifier() async throws {
+        let provider = try await makeProvider()
+        let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+        let wanted = UUID()
+
+        // Two peripheral-role sessions asking for the *same* identity, the second opened while
+        // the first is still live — the extreme of a fast redial, where the old session's
+        // asynchronous device removal has not merely lost the race but has not been started.
+        // Driven from raw connections because a `LinkPeripheralManager` reconnect can only
+        // *probably* produce this ordering, and the point is that the answer never depends on
+        // which side wins.
+        func handshake(_ label: String) async throws -> (LinkConnection, ServerHello) {
+            let connection = LinkConnection.connect(
+                to: endpoint,
+                codec: .binaryPropertyList,
+                queue: DispatchQueue(label: "host.e2e.redial.\(label)")
+            )
+            let answer = Mutex<ServerHello?>(nil)
+            connection.onStateChange = { [weak connection] state in
+                guard case .ready = state else { return }
+                connection?.send(.clientHello(ClientHello(
+                    protocolVersion: LinkProtocol.version,
+                    role: .peripheral,
+                    clientName: "redialer",
+                    hostIdentifier: wanted
+                )))
+            }
+            connection.onMessage = { message in
+                guard case .serverHello(let hello) = message else { return }
+                answer.withLock { $0 = hello }
+            }
+            connection.start()
+            await waitFor(timeout: .seconds(5)) { answer.withLock { $0 } != nil }
+            return (connection, try #require(answer.withLock { $0 }))
+        }
+
+        let (first, firstHello) = try await handshake("first")
+        #expect(firstHello.assignedHostIdentifier == wanted)
+        await waitFor(timeout: .seconds(5)) { provider.radio.knownDeviceIDs.withLock { $0.contains(wanted) } }
+
+        let (second, secondHello) = try await handshake("second")
+        // The identity is kept, and it is the client's own — not a fresh one minted because
+        // the radio still held the device the first session registered.
+        #expect(secondHello.assignedHostIdentifier == wanted)
+        #expect(provider.radio.knownDeviceIDs.withLock { $0.contains(wanted) })
+        #expect(provider.radio.knownDeviceIDs.withLock { $0.count } == 1)
+
+        for connection in [first, second] {
+            connection.onStateChange = nil
+            connection.onMessage = nil
+            connection.cancel()
+        }
         await provider.stop()
     }
 

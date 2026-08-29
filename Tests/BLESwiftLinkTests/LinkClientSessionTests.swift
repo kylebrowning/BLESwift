@@ -199,7 +199,7 @@ struct LinkClientSessionTests {
         let queue = DispatchSerialQueue(label: "client")
         let session = LinkClientSession(endpoint: LinkEndpoint(host: "127.0.0.1", port: listener.port), role: .central, clientName: "unit", queue: queue, retryInterval: .milliseconds(50))
         let connects = Mutex(0), disconnects = Mutex(0)
-        session.onConnected = { connects.withLock { $0 += 1 } }
+        session.onConnected = { _ in connects.withLock { $0 += 1 } }
         session.onDisconnected = { _ in disconnects.withLock { $0 += 1 } }
         session.start()
         await waitFor { connects.withLock { $0 } == 1 }
