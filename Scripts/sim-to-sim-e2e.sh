@@ -11,7 +11,10 @@
 # Usage: Scripts/sim-to-sim-e2e.sh
 #   ADVERTISER_SIM   simulator name for the peripheral  (default "iPhone 17 Pro")
 #   SCANNER_SIM      simulator name for the central     (default "iPhone 17")
-#   PORT             provider listen port               (default 45541)
+#
+# The port is fixed at 45541, `LinkEndpoint.default`. Nothing can set
+# `BLESWIFT_LINK` on an app driven by the UI runner, so both simulators dial the
+# default and a provider listening anywhere else would simply never be found.
 #
 # See Scripts/e2e/README.md.
 
@@ -19,7 +22,8 @@ set -euo pipefail
 
 ADVERTISER_SIM="${ADVERTISER_SIM:-iPhone 17 Pro}"
 SCANNER_SIM="${SCANNER_SIM:-iPhone 17}"
-PORT="${PORT:-45541}"
+# `LinkEndpoint.default`, and not overridable — see the header.
+readonly PORT=45541
 BUNDLE_ID="com.bleswift.explorer"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,7 +40,9 @@ ADVERTISER_PID=""
 ADVERTISER_UDID=""
 SCANNER_UDID=""
 
-log() { printf '\n==> %s\n' "$*"; }
+# stderr, so a `log` inside a function whose stdout is being captured (see
+# `ensure_simulator`) cannot end up glued to the value that function returns.
+log() { printf '\n==> %s\n' "$*" >&2; }
 
 cleanup() {
     local status=$?

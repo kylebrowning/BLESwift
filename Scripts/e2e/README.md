@@ -31,13 +31,13 @@ Environment overrides:
 | --- | --- | --- |
 | `ADVERTISER_SIM` | `iPhone 17 Pro` | Simulator that hosts the peripheral |
 | `SCANNER_SIM` | `iPhone 17` | Simulator that scans |
-| `PORT` | `45541` | `bleswift-provider` listen port |
 
-`PORT` is only useful together with the app: the Explorer resolves its endpoint from
-`BLESWIFT_LINK` or `LinkEndpoint.default` (`127.0.0.1:45541`), and neither Maestro nor
-GrantivaAgent can set an environment variable on the app under test, so a non-default `PORT`
-would leave both apps dialing 45541. Leave it alone unless you also arrange for the app to see
-`BLESWIFT_LINK`.
+**The port is fixed at 45541** and the script has no knob for it. The Explorer resolves its
+endpoint from `BLESWIFT_LINK` or `LinkEndpoint.default` (`127.0.0.1:45541`), and the runner
+offers no way to put an environment variable in front of the app under test — `grantiva run`
+takes launch *arguments* only, and `SIMCTL_CHILD_*` reaches a `simctl launch` the runner never
+performs — so a provider on any other port would simply never be dialed. It used to be a
+`PORT` variable that quietly did nothing; see friction item #10.
 
 The script:
 
@@ -235,6 +235,13 @@ for someone whose selector is provably correct.
 
 ### 10. Small things
 
+- **No way to set an environment variable on the app under test.** `launchApp` takes
+  *arguments* only, and the runner launches through its own agent rather than
+  `simctl launch`, so `SIMCTL_CHILD_*` never reaches the app either. Anything the app reads
+  from the environment — here `BLESWIFT_LINK`, which is how a build is pointed at a
+  non-default provider endpoint — is therefore unreachable from a flow, and the host-side
+  service has to sit on the port the app already defaults to. An `env:` map on `launchApp`
+  (or passing the runner's own environment through) would close this.
 - `grantiva run --flow <path>` copies the flow into a temp dir and reports failures against
   that temp path (`/var/folders/…/grantiva-<UUID>/advertise.yaml`), which is noise when you are
   trying to open the file you wrote.
