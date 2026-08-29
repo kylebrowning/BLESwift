@@ -139,7 +139,12 @@ print(runtimes[-1]["identifier"] if runtimes else "")
         [[ -n "$runtime" ]] || { echo "no available iOS runtime" >&2; exit 1; }
         udid="$(xcrun simctl create "$name" "$name" "$runtime")"
     fi
+    # `bootstatus -b` boots the device if it is down and blocks until it reports itself fully
+    # booted, so nothing downstream races a half-started simulator. The elapsed line is what
+    # makes a cold CI runner's boot cost visible: it is minutes there and near-zero locally.
+    local boot_start=$SECONDS
     xcrun simctl bootstatus "$udid" -b >/dev/null 2>&1 || xcrun simctl boot "$udid" >/dev/null 2>&1 || true
+    log "\"$name\" ready after $((SECONDS - boot_start))s"
     echo "$udid"
 }
 
@@ -184,6 +189,17 @@ xcodebuild build \
 APP="$(find .build/e2e-dd -name BLESwiftExplorer.app -path '*iphonesimulator*' | head -1)"
 [[ -n "$APP" ]] || { echo "BLESwiftExplorer.app not found under .build/e2e-dd" >&2; exit 1; }
 echo "app: $APP"
+
+# Installed here, before either grantiva session starts. grantiva's own `--app-file` install
+# then finds the app already present, and WebDriverAgent comes up against a simulator that has
+# already paid for its first install — on a cold CI runner that install is part of what pushes
+# WDA past its 90-second startup timeout (friction item #12).
+for udid in "$ADVERTISER_UDID" "$SCANNER_UDID"; do
+    log "Installing $BUNDLE_ID on $udid"
+    install_start=$SECONDS
+    xcrun simctl install "$udid" "$APP"
+    echo "installed in $((SECONDS - install_start))s"
+done
 
 # --- Advertiser (keep-alive, background) ------------------------------------
 log "Advertiser session on \"$ADVERTISER_SIM\" ($ADVERTISER_UDID)"

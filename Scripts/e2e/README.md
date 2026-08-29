@@ -287,3 +287,23 @@ advertiser-readiness bound.
 --prebuild`, say), so CI can run it as its own step and see it fail as its own step. And a
 documented cache location for the built agent and runner, so `actions/cache` can restore them
 between runs instead of rebuilding from scratch each time.
+
+### 12. WebDriverAgent's 90-second startup timeout is not configurable
+
+On a GitHub runner every simulator is cold, and the first `grantiva run` against one fails
+before any flow step executes:
+
+```
+Error: failed to create driver: WDA start failed: WDA startup timeout (90s)
+```
+
+Nothing in `grantiva run` exposes that bound — there is no `--wda-timeout`, and no environment
+variable for it — so a machine whose simulator needs longer than 90 seconds to accept a
+WebDriverAgent session simply cannot run a flow. Booting the simulator to `bootstatus -b` and
+pre-installing the app with `simctl install` (both of which `Scripts/sim-to-sim-e2e.sh` now
+does) shortens the runway but does not raise the ceiling, and the E2E job is
+`continue-on-error: true` on CI because of it.
+
+*Wish:* a `--wda-timeout` flag (or `GRANTIVA_WDA_TIMEOUT`), and ideally the same warm-up
+command item #11 asks for, so the WebDriverAgent session is established once as its own step
+rather than inside the first flow's clock.
