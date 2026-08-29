@@ -273,6 +273,15 @@ is broken.
   backend produces them, mirroring CoreBluetooth's unbounded delegate delivery, so a client
   that stops draining its notification stream accumulates them in the transport rather than
   slowing the peripheral down.
+- **A dropped link empties a hosted `PeripheralHost`.** The provider's session owns the GATT
+  database and the advertising state of the device it hosts for a peripheral-role client, and
+  it takes both with it when the link drops — the parity CoreBluetooth has with a power bounce,
+  where a `CBPeripheralManager` that comes back `.poweredOn` has neither its services nor its
+  advertisement. Your host must re-`add(_:)` its services and call `startAdvertising(_:)` again
+  on the next `.poweredOn` it sees; nothing is replayed for it. What *is* preserved is the
+  device's identifier: a link-hosted host keeps one identity for the life of the
+  `PeripheralHost`, so a central that noted its `PeripheralIdentifier` before the drop can
+  connect to it again once the host has republished.
 - **Initial radio state.** A link-backed ``Central`` reports ``CentralState/unsupported`` until
   the provider answers — the same state the Simulator reports today, so an app that waits for
   `.poweredOn` simply waits — and then reports whatever state the provider does. If the provider

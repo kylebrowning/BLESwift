@@ -116,10 +116,14 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         retryInterval: Duration = .seconds(2)
     ) {
         self.queue = queue
+        // One identity per manager, sent on every hello this session makes: the provider hosts
+        // the device under it, so a link drop and its reconnect leave the same device on the
+        // radio rather than a fresh one every central would have to rediscover.
         self.session = LinkClientSession(
             endpoint: endpoint,
             role: .peripheral,
             clientName: clientName,
+            hostIdentifier: UUID(),
             codec: codec,
             queue: queue,
             retryInterval: retryInterval

@@ -20,6 +20,7 @@ struct WireMessageTests {
     /// Every `LinkMessage` case with a non-trivial payload. Extend when a case is added.
     static let samples: [LinkMessage] = [
         .clientHello(ClientHello(protocolVersion: 1, role: .central, clientName: "app")),
+        .clientHello(ClientHello(protocolVersion: 1, role: .peripheral, clientName: "app", hostIdentifier: id)),
         .serverHello(ServerHello(protocolVersion: 1, accepted: false, reason: "old", providerName: "p")),
         .centralRequest(.scan(services: ["180D"], allowDuplicates: true)),
         .centralRequest(.stopScan),
@@ -116,6 +117,20 @@ struct WireMessageTests {
             let message = LinkMessage.clientHello(ClientHello(protocolVersion: 1, role: role, clientName: "app"))
             #expect(try codec.decode(LinkMessage.self, from: codec.encode(message)) == message, "\(role)")
         }
+    }
+
+    @Test("A client hello with no hostIdentifier decodes, leaving the field nil")
+    func helloWithoutAHostIdentifierDecodes() throws {
+        // Written by hand rather than by encoding a `ClientHello`: this is the shape a client
+        // that predates the field puts on the wire, and it must still be readable.
+        let json = Data(#"{"clientHello":{"_0":{"protocolVersion":1,"role":"peripheral","clientName":"old"}}}"#.utf8)
+        let decoded = try LinkCodec.json.decode(LinkMessage.self, from: json)
+        #expect(decoded == .clientHello(ClientHello(protocolVersion: 1, role: .peripheral, clientName: "old")))
+        guard case .clientHello(let hello) = decoded else {
+            Issue.record("expected a clientHello, got \(decoded)")
+            return
+        }
+        #expect(hello.hostIdentifier == nil)
     }
 
     @Test("WireError ↔ NSError preserves domain, code, description")

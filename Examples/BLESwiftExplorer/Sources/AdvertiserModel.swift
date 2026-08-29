@@ -39,6 +39,7 @@ final class AdvertiserModel {
     // construction. Kept across `stop()`/`start()` cycles for reuse.
     private var host: PeripheralHost?
     private var didAddService = false
+    private var isPublishing = false
     private var streamTasks: [Task<Void, Never>] = []
     private var startTask: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
@@ -82,7 +83,20 @@ final class AdvertiserModel {
         // published — `add(_:)` awaits a CoreBluetooth callback that never comes otherwise.
         for await state in await host.stateEvents() where state == .poweredOn { break }
         guard isAdvertising, !Task.isCancelled else { return }
+        await publish(on: host)
+    }
 
+    /// Publishes the GATT database (once per power cycle) and starts advertising.
+    ///
+    /// Called both from the opening `start()` and from every later `.poweredOn` — a simulator
+    /// link that drops takes the provider's copy of the database and the advertisement with it,
+    /// exactly as a CoreBluetooth power bounce does, so the reconnect has to republish both.
+    /// The reentrancy guard is what keeps the two callers from racing into a double `add(_:)`
+    /// on the very first `.poweredOn`, which they both observe.
+    private func publish(on host: PeripheralHost) async {
+        guard isAdvertising, !isPublishing else { return }
+        isPublishing = true
+        defer { isPublishing = false }
         do {
             if !didAddService {
                 try await host.add(Self.service)
@@ -95,6 +109,7 @@ final class AdvertiserModel {
                 )
             )
             append("Advertising as \(Self.localName)")
+            tickTask?.cancel()
             tickTask = Task { [weak self] in await self?.tick(host) }
         } catch {
             append("Advertise failed: \(error)")
@@ -131,6 +146,14 @@ final class AdvertiserModel {
     private func consumeStateEvents(_ host: PeripheralHost) async {
         for await state in await host.stateEvents() {
             stateText = String(describing: state)
+            guard state == .poweredOn else {
+                // Anything else means the radio — or, in the Simulator, the provider's session
+                // — is gone, and the hosted database went with it. The latch is dropped so the
+                // next `.poweredOn` re-adds rather than assuming the service is still there.
+                didAddService = false
+                continue
+            }
+            await publish(on: host)
         }
     }
 

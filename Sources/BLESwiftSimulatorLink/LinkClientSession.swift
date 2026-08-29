@@ -58,6 +58,12 @@ package final class LinkClientSession: Sendable {
     private let endpoint: LinkEndpoint
     private let role: LinkRole
     private let clientName: String
+
+    /// The identity this client asks the provider to host its device under, sent on every
+    /// hello — the opening one and every reconnect's — so a dropped link comes back as the
+    /// same device rather than a new one. `nil` for a central-role client, which hosts
+    /// nothing.
+    private let hostIdentifier: UUID?
     private let codec: LinkCodec
     private let queue: DispatchSerialQueue
     private let retryInterval: Duration
@@ -69,6 +75,9 @@ package final class LinkClientSession: Sendable {
     ///   - endpoint: The provider's host and port.
     ///   - role: Which side of the link this client drives.
     ///   - clientName: A human-readable name sent in the hello, for provider-side logging.
+    ///   - hostIdentifier: The identity a `.peripheral` client asks the provider to host its
+    ///     device under, kept across reconnects. `nil` — the default, and the only value a
+    ///     central-role client has — leaves the provider to mint one per session.
     ///   - codec: The codec used to encode outgoing messages.
     ///   - queue: The serial queue every callback is delivered on — the owning actor's queue.
     ///   - retryInterval: How long to wait before redialing after a failure, once the
@@ -86,6 +95,7 @@ package final class LinkClientSession: Sendable {
         endpoint: LinkEndpoint,
         role: LinkRole,
         clientName: String,
+        hostIdentifier: UUID? = nil,
         codec: LinkCodec = .binaryPropertyList,
         queue: DispatchSerialQueue,
         retryInterval: Duration = .seconds(2)
@@ -93,6 +103,7 @@ package final class LinkClientSession: Sendable {
         self.endpoint = endpoint
         self.role = role
         self.clientName = clientName
+        self.hostIdentifier = hostIdentifier
         self.codec = codec
         self.queue = queue
         self.retryInterval = retryInterval
@@ -219,7 +230,12 @@ package final class LinkClientSession: Sendable {
     private func sendHello(over connection: LinkConnection) {
         let isCurrent = state.withLock { state in !state.stopped && state.connection === connection }
         guard isCurrent else { return }
-        connection.send(.clientHello(ClientHello(protocolVersion: LinkProtocol.version, role: role, clientName: clientName)))
+        connection.send(.clientHello(ClientHello(
+            protocolVersion: LinkProtocol.version,
+            role: role,
+            clientName: clientName,
+            hostIdentifier: hostIdentifier
+        )))
     }
 
     /// Ends the session's interest in `connection`, reporting a disconnect if the link had been

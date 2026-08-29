@@ -328,7 +328,13 @@ public actor Provider {
             let queue = DispatchSerialQueue(label: "bleswift-provider.host.\(sessionOrdinal)")
             sessions[key] = HostSession(
                 connection: connection,
-                backend: makePeripheralBackend(queue: queue, clientName: hello.clientName),
+                backend: makePeripheralBackend(
+                    queue: queue,
+                    clientName: hello.clientName,
+                    // The client's own identity when it sent one, so its reconnect re-registers
+                    // the device it had rather than a new one; a fresh identifier otherwise.
+                    identifier: hello.hostIdentifier ?? UUID()
+                ),
                 queue: queue,
                 ordinal: sessionOrdinal,
                 hello: accepted,
@@ -368,13 +374,24 @@ public actor Provider {
 
     /// Builds the backend for one peripheral-role session, on that session's own queue.
     ///
-    /// The virtual half registers a device on ``radio`` under a fresh identifier, named after
-    /// the client — so a central-role session's scan sees the remote `PeripheralHost` exactly
-    /// as it sees a fixture.
-    private func makePeripheralBackend(queue: DispatchSerialQueue, clientName: String) -> any PeripheralManaging {
+    /// The virtual half registers a device on ``radio`` under `identifier`, named after the
+    /// client — so a central-role session's scan sees the remote `PeripheralHost` exactly as it
+    /// sees a fixture.
+    ///
+    /// - Parameters:
+    ///   - queue: The session's own serial queue.
+    ///   - clientName: The name the hosted device advertises itself under.
+    ///   - identifier: The identity to host the device under — the one the client asked for in
+    ///     its ``BLESwiftLink/ClientHello``, so its reconnect is the same device to every
+    ///     central that had seen it.
+    private func makePeripheralBackend(
+        queue: DispatchSerialQueue,
+        clientName: String,
+        identifier: UUID
+    ) -> any PeripheralManaging {
         guard configuration.passthrough else {
             return queue.sync {
-                VirtualPeripheralManagerBackend(radio: radio, queue: queue, identifier: UUID(), name: clientName)
+                VirtualPeripheralManagerBackend(radio: radio, queue: queue, identifier: identifier, name: clientName)
             }
         }
         // The host's own CoreBluetooth by default; an injected factory overrides it.
@@ -382,7 +399,7 @@ public actor Provider {
         // Built and attached in one hop, for the reason `makeCentralBackend` gives.
         return queue.sync {
             let virtual = VirtualPeripheralManagerBackend(
-                radio: radio, queue: queue, identifier: UUID(), name: clientName
+                radio: radio, queue: queue, identifier: identifier, name: clientName
             )
             let real = factory(queue)
             return CompositePeripheralManager(backends: [virtual, real], onQueue: queue, log: configuration.log)

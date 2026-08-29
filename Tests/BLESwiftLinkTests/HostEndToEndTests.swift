@@ -475,6 +475,60 @@ struct HostEndToEndTests {
         centralLink.shutdown()
     }
 
+    /// The first peripheral `central` sights advertising ``heartRate``, or `nil` if the scan
+    /// ends without one.
+    private static func firstDiscovery(_ central: Central) async throws -> Discovery? {
+        for try await event in await central.scan(services: [Self.heartRate], timeout: .seconds(5)) {
+            if case .discovered(let discovery) = event { return discovery }
+        }
+        return nil
+    }
+
+    @Test("A hosted device keeps its identifier across a provider drop and reconnect")
+    func hostedDeviceKeepsItsIdentifierAcrossAReconnect() async throws {
+        let first = try await makeProvider()
+        let port = await first.port
+        let (host, hostLink) = makeHost(port: port, label: "host.e2e.identity.host")
+        await waitFor(timeout: .seconds(5)) { host.state == .poweredOn }
+        try await host.add(Self.service)
+        try await host.startAdvertising(
+            PeripheralAdvertisement(localName: "Sim Host", serviceUUIDs: [Self.heartRate])
+        )
+
+        let (central, centralLink) = makeCentral(port: port, label: "host.e2e.identity.central")
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+        let before = try #require(try await Self.firstDiscovery(central))
+
+        // ---- The provider goes away, and a fresh one takes its port ----
+        await first.stop()
+        await waitFor(timeout: .seconds(5)) { host.state != .poweredOn }
+        let second = try await Self.rebind(port: port) { try await self.makeProvider(port: port) }
+        await waitFor(timeout: .seconds(10)) { host.state == .poweredOn }
+        await waitFor(timeout: .seconds(10)) { central.state == .poweredOn }
+
+        // The session that held the GATT database died with the provider, so the host
+        // republishes — the same thing a CoreBluetooth host does after a power bounce. What it
+        // does *not* have to do is tell anyone it is a new device, because it is not one.
+        try await host.add(Self.service)
+        try await host.startAdvertising(
+            PeripheralAdvertisement(localName: "Sim Host", serviceUUIDs: [Self.heartRate])
+        )
+
+        let after = try #require(try await Self.firstDiscovery(central))
+        #expect(after.peripheral.uuid == before.peripheral.uuid)
+
+        // And the identifier the central noted before the drop still reaches it: a connect by
+        // the *old* identifier lands on the republished host.
+        let peripheral = try await bounded { try await central.connect(before.peripheral) }
+        #expect(peripheral.id.uuid == before.peripheral.uuid)
+        // Serving the republished database, not an empty shell of the device it used to be.
+        #expect(try await bounded { try await peripheral.discoverServices() } == [Self.heartRate])
+
+        hostLink.shutdown()
+        centralLink.shutdown()
+        await second.stop()
+    }
+
     /// Runs `make` until the port the previous provider released can be bound again — a
     /// just-closed listener may hold it for a moment.
     private static func rebind(port: UInt16, _ make: () async throws -> Provider) async throws -> Provider {
