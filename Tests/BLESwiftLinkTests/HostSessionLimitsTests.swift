@@ -102,6 +102,60 @@ struct HostSessionLimitsTests {
         await provider.stop()
     }
 
+    @Test("A client that publishes past the hosted-service cap loses its session")
+    func hostedServiceOverrunClosesTheSession() async throws {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+
+        // Straight down the link, behind `LinkPeripheralManager`'s back: an honest client
+        // publishes a handful of services, not a fresh one per frame forever.
+        let connection = LinkConnection.connect(
+            to: endpoint,
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "hostsession.services")
+        )
+        let accepted = Mutex(false)
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(
+                protocolVersion: LinkProtocol.version,
+                role: .peripheral,
+                clientName: "greedy-publisher"
+            )))
+        }
+        connection.onMessage = { message in
+            guard case .serverHello(let hello) = message, hello.accepted else { return }
+            accepted.withLock { $0 = true }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { accepted.withLock { $0 } }
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
+        #expect(await provider.sessionCount == 1)
+
+        // One more distinct service than the session will hold.
+        for index in 0...HostSession.maximumHostedServices {
+            let service = GATTService(
+                identifier: ServiceIdentifier(uuid: UUID().uuidString),
+                characteristics: [
+                    GATTCharacteristic(identifier: Self.measurement, properties: [.read], permissions: [.readable])
+                ]
+            )
+            connection.send(.hostRequest(.addService(WireGATTService(service))))
+        }
+
+        // The session goes, rather than the provider's memory.
+        await waitFor(timeout: .seconds(10)) { await provider.sessionCount == 0 }
+        #expect(await provider.sessionCount == 0)
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+        await provider.stop()
+    }
+
     @Test("A respond carrying an ATT code no ATTError holds loses the session")
     func unknownATTErrorClosesTheSession() async throws {
         var configuration = ProviderConfiguration()

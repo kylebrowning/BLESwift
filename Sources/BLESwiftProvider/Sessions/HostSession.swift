@@ -29,7 +29,8 @@ import Foundation
 /// `updateValueDelivered`, which is what advances the client's own window; a refusal parks
 /// the drain until the backend reports `readyToUpdateSubscribers`. The queue is bounded at
 /// ``maximumPendingUpdates``: a client that keeps pushing past the window it agreed to loses
-/// its link rather than the provider losing its memory.
+/// its link rather than the provider losing its memory. The hosted database is bounded the
+/// same way, at ``maximumHostedServices``.
 ///
 /// - Note: The session holds its ``BLESwiftLink/LinkConnection`` strongly, for the same
 ///   reason ``CentralSession`` does.
@@ -54,6 +55,18 @@ final class HostSession: Sendable {
     /// window.
     static let maximumPendingUpdates = 4 * LinkFlowControl.updateValueWindow
 
+    /// How many services one client may publish before this session stops believing it.
+    ///
+    /// `addService` is the client's other unbounded lever on the provider's memory: each one
+    /// is appended to the backend's database — after a linear duplicate scan, so the cost is
+    /// quadratic — and every frame may carry up to
+    /// ``BLESwiftLink/LinkFraming/maximumPayloadLength`` of characteristic values. Sixty-four
+    /// is far past what any real peripheral publishes (CoreBluetooth peripherals run to a
+    /// handful) and far short of what a client looping fresh UUIDs would reach in a second.
+    /// A client past it has left the protocol behind, and the link goes rather than this
+    /// session's memory.
+    static let maximumHostedServices = 64
+
     /// The connection this session serves, held strongly for its whole lifetime.
     private let connection: LinkConnection
 
@@ -73,6 +86,10 @@ final class HostSession: Sendable {
 
     nonisolated(unsafe) private var pendingUpdates: [PendingUpdate] = []
     nonisolated(unsafe) private var isClosed = false
+
+    /// How many services this client has published, against ``maximumHostedServices``. Reset
+    /// by a `removeAllServices`, which empties the database it counts. Session ``queue`` only.
+    nonisolated(unsafe) private var hostedServices = 0
 
     /// Creates a session serving `connection` from `backend`.
     ///
@@ -174,9 +191,19 @@ final class HostSession: Sendable {
             backend.stopAdvertising()
 
         case .addService(let service):
-            backend.add(try service.gattService)
+            // Bounded like every other client-driven queue in this session. Counted here
+            // rather than read back from the backend: a composite's children answer for their
+            // own databases, and this is the count of what *this client* has published.
+            guard hostedServices < Self.maximumHostedServices else {
+                failProtocol(ProtocolViolation.hostedServiceLimitExceeded)
+                return
+            }
+            let published = try service.gattService
+            backend.add(published)
+            hostedServices += 1
 
         case .removeAllServices:
+            hostedServices = 0
             backend.removeAllHostedServices()
 
         case .respond(let token, let value, let attError):
@@ -220,6 +247,10 @@ final class HostSession: Sendable {
 
         /// A `respond` carried an ATT error code no `ATTError` represents, carried verbatim.
         case unknownATTError(Int)
+
+        /// More services were published than ``maximumHostedServices`` allows — the client is
+        /// growing the provider's hosted database without bound.
+        case hostedServiceLimitExceeded
     }
 
     /// Drops the client's link because it sent something the protocol does not allow — a
