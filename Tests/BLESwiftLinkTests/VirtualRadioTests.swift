@@ -130,6 +130,36 @@ struct VirtualRadioTests {
         #expect(try await central.knownPeripherals(withIdentifiers: [identifier]).map(\.uuid) == [identifier])
     }
 
+    @Test("A device registered a moment ago is retrievable with no waiting at all")
+    func registrationIsVisibleWithoutWaiting() async throws {
+        // The shape the provider's own sessions have: register a device, then build a backend
+        // and look the identifier up in one synchronous flow, with no `waitFor` and no chance
+        // for any hop to have run. A pushed known-devices snapshot could not be there yet, so
+        // this used to depend on the scheduler — and lost the race under CI load.
+        let radio = VirtualRadio()
+        let identifier = UUID()
+        let (device, handler) = VirtualDevice.fixture(
+            FixtureDevice(id: identifier, name: "Immediate", advertisedServices: [], services: [])
+        )
+        let handle = await radio.register(device)
+        await handler.attach(handle)
+
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.immediate")
+        let retrieved = queue.sync { () -> [UUID] in
+            let backend = VirtualCentralBackend(radio: radio, queue: queue)
+            return backend.retrievePeripherals(withIdentifiers: [identifier]).map(\.identifier)
+        }
+        #expect(retrieved == [identifier])
+
+        // And a removal is just as immediate in the other direction.
+        await handle.remove()
+        let afterRemoval = queue.sync { () -> [UUID] in
+            let backend = VirtualCentralBackend(radio: radio, queue: queue)
+            return backend.retrievePeripherals(withIdentifiers: [identifier]).map(\.identifier)
+        }
+        #expect(afterRemoval.isEmpty)
+    }
+
     @Test("Removing a connected device disconnects the central with provider code 2")
     func removal() async throws {
         let (central, _, handle) = try await makeRig()
@@ -167,7 +197,7 @@ struct VirtualRadioTests {
         await handler.attach(handle)
         let identifier = fixture.id
         let session = UUID()
-        await radio.attach(session: session, centralSink: { _ in }, knownDevicesSink: { _ in })
+        await radio.attach(session: session, centralSink: { _ in })
 
         // Ended by the central: the sink goes with the connection that registered it.
         weak var afterDisconnect: Probe?

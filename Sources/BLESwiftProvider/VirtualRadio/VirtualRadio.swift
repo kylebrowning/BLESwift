@@ -6,6 +6,7 @@
 #if os(macOS)
 import BLESwiftCore
 import Foundation
+import Synchronization
 
 /// An in-process BLE radio hosting ``VirtualDevice``s and serving them to any number of
 /// ``VirtualCentralBackend``s — fixture devices and simulator-to-simulator BLE with no
@@ -80,7 +81,6 @@ public actor VirtualRadio {
     /// Everything the radio holds on behalf of one attached backend.
     private struct Session {
         let centralSink: @Sendable (CentralEvent) -> Void
-        let knownDevicesSink: @Sendable (Set<UUID>) -> Void
         var peripheralSinks: [UUID: @Sendable (PeripheralEvent) -> Void] = [:]
         var scanner: Scanner?
         var connections: Set<UUID> = []
@@ -88,6 +88,18 @@ public actor VirtualRadio {
 
     private var devices: [UUID: DeviceState] = [:]
     private var sessions: [UUID: Session] = [:]
+
+    /// The identifiers ``devices`` currently holds, readable without awaiting the actor.
+    ///
+    /// A backend has to answer `retrievePeripherals(withIdentifiers:)` **synchronously**, on
+    /// its own queue, so it cannot ask the radio. Pushing a snapshot to it instead was the
+    /// obvious alternative and the wrong one: the push costs an actor hop plus a queue hop, so
+    /// a client that registers a device and connects to it in the same synchronous flow — the
+    /// provider's own sessions do exactly that — could look the identifier up before the
+    /// snapshot arrived and be told no such device exists. This is the same set, written
+    /// inside ``register(_:advertising:)`` and ``remove(device:)`` before either returns, so a
+    /// registration is visible to every backend the instant it has happened.
+    public nonisolated let knownDeviceIDs = Mutex<Set<UUID>>([])
 
     /// Notification subscriptions, keyed by device, then characteristic, to the set of
     /// session identifiers currently subscribed.
@@ -113,7 +125,9 @@ public actor VirtualRadio {
             handler: device.handler,
             isAdvertising: advertising
         )
-        announceKnownDevices()
+        knownDeviceIDs.withLock { (known: inout Set<UUID>) -> Void in
+            known.insert(identifier)
+        }
         if advertising {
             reportSightings(of: identifier)
         }
@@ -164,7 +178,9 @@ public actor VirtualRadio {
     func remove(device: UUID) {
         guard let state = devices.removeValue(forKey: device) else { return }
         subscriptions.removeValue(forKey: device)
-        announceKnownDevices()
+        knownDeviceIDs.withLock { (known: inout Set<UUID>) -> Void in
+            known.remove(device)
+        }
         let identifier = PeripheralIdentifier(uuid: device, name: state.descriptor.name)
         for sessionID in Array(sessions.keys) {
             // Dropped for every session, connected or not: the sink routes events *from* this
@@ -192,27 +208,16 @@ public actor VirtualRadio {
     // MARK: - Backend attachment
 
     /// Attaches a backend under `session`, routing radio-initiated ``BLESwiftCore/CentralEvent``s
-    /// to `centralSink` and the set of registered device identifiers to `knownDevicesSink`.
-    /// Both sinks are responsible for hopping onto the backend's queue.
+    /// to `centralSink`, which is responsible for hopping onto the backend's queue.
     ///
-    /// `knownDevicesSink` is called once immediately, with the radio's current devices, and
-    /// again on every registration and removal — it is how a backend knows which identifiers
-    /// it may vend a remote for.
+    /// Which identifiers a backend may vend a remote for is *not* pushed here: it reads
+    /// ``knownDeviceIDs`` live, so a device registered a moment ago is retrievable without
+    /// waiting on this actor. See ``knownDeviceIDs``.
     func attach(
         session: UUID,
-        centralSink: @escaping @Sendable (CentralEvent) -> Void,
-        knownDevicesSink: @escaping @Sendable (Set<UUID>) -> Void
+        centralSink: @escaping @Sendable (CentralEvent) -> Void
     ) {
-        sessions[session] = Session(centralSink: centralSink, knownDevicesSink: knownDevicesSink)
-        knownDevicesSink(Set(devices.keys))
-    }
-
-    /// Pushes the current registered-device set to every attached backend.
-    private func announceKnownDevices() {
-        let known = Set(devices.keys)
-        for session in sessions.values {
-            session.knownDevicesSink(known)
-        }
+        sessions[session] = Session(centralSink: centralSink)
     }
 
     /// Detaches a backend, cancelling its scan and dropping its connections, its per-device
