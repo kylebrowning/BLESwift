@@ -23,9 +23,7 @@ import Synchronization
 ///
 /// Every handler is invoked on the `queue` supplied at initialization, which is also the queue
 /// the underlying connection delivers on, so callbacks arrive in order and never reentrantly.
-///
-/// - Note: Not API; public for testing.
-public final class LinkClientSession: Sendable {
+package final class LinkClientSession: Sendable {
 
     /// Everything mutable, guarded by one lock.
     private struct State {
@@ -68,7 +66,7 @@ public final class LinkClientSession: Sendable {
     ///   - codec: The codec used to encode outgoing messages.
     ///   - queue: The serial queue every callback is delivered on — the owning actor's queue.
     ///   - retryInterval: How long to wait before redialing after a failure.
-    public init(
+    package init(
         endpoint: LinkEndpoint,
         role: LinkRole,
         clientName: String,
@@ -85,7 +83,7 @@ public final class LinkClientSession: Sendable {
     }
 
     /// Called on `queue` once a provider has accepted the handshake, for every connection.
-    public var onConnected: (@Sendable () -> Void)? {
+    package var onConnected: (@Sendable () -> Void)? {
         get { state.withLock { $0.onConnected } }
         set { state.withLock { $0.onConnected = newValue } }
     }
@@ -93,23 +91,23 @@ public final class LinkClientSession: Sendable {
     /// Called on `queue` when a connected link drops — with `LinkError.providerDisconnected` —
     /// or when a provider refuses the handshake, with the refusal's error. A dial that never
     /// completed a handshake does not report a disconnect; it is simply retried.
-    public var onDisconnected: (@Sendable (NSError?) -> Void)? {
+    package var onDisconnected: (@Sendable (NSError?) -> Void)? {
         get { state.withLock { $0.onDisconnected } }
         set { state.withLock { $0.onDisconnected = newValue } }
     }
 
     /// Called on `queue` for every message received after the handshake completed.
-    public var onMessage: (@Sendable (LinkMessage) -> Void)? {
+    package var onMessage: (@Sendable (LinkMessage) -> Void)? {
         get { state.withLock { $0.onMessage } }
         set { state.withLock { $0.onMessage = newValue } }
     }
 
     /// Whether a provider has accepted the handshake and the link is live.
-    public var isConnected: Bool { state.withLock { $0.isConnected } }
+    package var isConnected: Bool { state.withLock { $0.isConnected } }
 
     /// Dials the endpoint and begins the connect-and-retry loop. Calling this more than once has
     /// no additional effect, and it does nothing after ``stop()``.
-    public func start() {
+    package func start() {
         let shouldDial = state.withLock { state -> Bool in
             guard !state.didStart, !state.stopped else { return false }
             state.didStart = true
@@ -121,7 +119,7 @@ public final class LinkClientSession: Sendable {
 
     /// Tears the session down: the current connection is cancelled, no retry is scheduled, and no
     /// further callback is delivered. Idempotent.
-    public func stop() {
+    package func stop() {
         let connection = state.withLock { state -> LinkConnection? in
             state.stopped = true
             state.isConnected = false
@@ -136,7 +134,7 @@ public final class LinkClientSession: Sendable {
     ///
     /// Messages sent while the session is not connected are dropped silently: the link is a
     /// best-effort transport, and every caller already handles a dropped link.
-    public func send(_ message: LinkMessage) {
+    package func send(_ message: LinkMessage) {
         let connection = state.withLock { state -> LinkConnection? in
             guard state.isConnected, !state.stopped else { return nil }
             return state.connection

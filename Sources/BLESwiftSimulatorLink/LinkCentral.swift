@@ -9,7 +9,7 @@ import Dispatch
 import Foundation
 
 /// A `CentralManaging` backed by a provider process rather than a local `CBCentralManager`:
-/// every call is encoded as a ``CentralRequest`` and sent over one ``LinkClientSession``,
+/// every call is encoded as a ``CentralRequest`` and sent over one `LinkClientSession`,
 /// and every ``CentralWireEvent`` the provider sends back is translated into a `CentralEvent`
 /// or a ``LinkPeripheral``'s `PeripheralEvent`.
 ///

@@ -10,7 +10,7 @@ import Foundation
 
 /// A `PeripheralManaging` backed by a provider process rather than a local
 /// `CBPeripheralManager`: every call is encoded as a ``BLESwiftLink/HostRequest`` and sent
-/// over one ``LinkClientSession``, and every ``BLESwiftLink/HostWireEvent`` the provider
+/// over one `LinkClientSession`, and every ``BLESwiftLink/HostWireEvent`` the provider
 /// sends back is translated into a `PeripheralHostEvent`.
 ///
 /// Hand one to `PeripheralHost(backend:queue:)`, passing the *same* `DispatchSerialQueue`:

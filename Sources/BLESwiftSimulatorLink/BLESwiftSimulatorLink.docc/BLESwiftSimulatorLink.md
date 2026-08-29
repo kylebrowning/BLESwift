@@ -20,4 +20,3 @@ process on the host Mac, and a one-line `SimulatorLink.install()` that routes ev
 - ``LinkCentral``
 - ``LinkPeripheral``
 - ``LinkPeripheralManager``
-- ``LinkClientSession``
