@@ -755,4 +755,63 @@ struct VirtualRadioTests {
         }
     }
 }
+/// ``FixtureDeviceHandler``'s read path: what a fixture device answers, and what it refuses.
+@Suite("Fixture device reads")
+struct FixtureDeviceReadTests {
+
+    private static let json = """
+    { "devices": [ { "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8", "services": [ { "uuid": "180D",
+      "characteristics": [
+        { "uuid": "2A37", "properties": ["read"], "value": "AQIDBAU=" },
+        { "uuid": "2A38", "properties": ["notify"], "value": "AQI=" },
+        { "uuid": "2A39", "properties": ["write"] } ] } ] } ] }
+    """
+    private static let service = ServiceIdentifier(uuid: "180D")
+    private static let readable = CharacteristicIdentifier(uuid: "2A37", service: service)
+    private static let notifying = CharacteristicIdentifier(uuid: "2A38", service: service)
+    private static let writeOnly = CharacteristicIdentifier(uuid: "2A39", service: service)
+    private static let undeclared = CharacteristicIdentifier(uuid: "2A3A", service: service)
+    private static let central = Subscriber(id: UUID(), maximumUpdateValueLength: 20)
+
+    private func makeHandler() throws -> FixtureDeviceHandler {
+        FixtureDeviceHandler(device: try FixtureDocument.parse(Data(Self.json.utf8)).devices[0])
+    }
+
+    @Test("A characteristic the fixture never declared reads as .attributeNotFound")
+    func undeclaredCharacteristicIsNotFound() async throws {
+        let handler = try makeHandler()
+        let result = await handler.read(Self.undeclared, offset: 0, from: Self.central)
+        #expect(result == .failure(.attributeNotFound))
+    }
+
+    @Test("A characteristic declaring neither read nor notify reads as .readNotPermitted")
+    func writeOnlyCharacteristicIsNotReadable() async throws {
+        let handler = try makeHandler()
+        let result = await handler.read(Self.writeOnly, offset: 0, from: Self.central)
+        #expect(result == .failure(.readNotPermitted))
+    }
+
+    @Test("A notify-only characteristic is readable — notify implies a value worth reading")
+    func notifyOnlyCharacteristicIsReadable() async throws {
+        let handler = try makeHandler()
+        let result = await handler.read(Self.notifying, offset: 0, from: Self.central)
+        #expect(result == .success(Data([1, 2])))
+    }
+
+    @Test("A read honors its offset, slicing the stored value")
+    func readHonorsOffset() async throws {
+        let handler = try makeHandler()
+        #expect(await handler.read(Self.readable, offset: 0, from: Self.central) == .success(Data([1, 2, 3, 4, 5])))
+        #expect(await handler.read(Self.readable, offset: 2, from: Self.central) == .success(Data([3, 4, 5])))
+        // At the end: legal, and empty — how a long read learns it is done.
+        #expect(await handler.read(Self.readable, offset: 5, from: Self.central) == .success(Data()))
+    }
+
+    @Test("An offset past the end of the value — or a negative one — is .invalidOffset")
+    func offsetBeyondTheValueIsRejected() async throws {
+        let handler = try makeHandler()
+        #expect(await handler.read(Self.readable, offset: 6, from: Self.central) == .failure(.invalidOffset))
+        #expect(await handler.read(Self.readable, offset: -1, from: Self.central) == .failure(.invalidOffset))
+    }
+}
 #endif

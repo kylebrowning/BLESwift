@@ -154,6 +154,13 @@ declared properties and then stored, and a write to a characteristic declaring `
 subscriber to it — including a *different* simulator — receives the notification. `2A37`
 declares no `write`, so it is the read-and-notify half of the pair: writing to it is refused.
 
+Reads are permission-checked the same way, and answer with the ATT errors real hardware does:
+a characteristic the fixture never declared reads as `attributeNotFound`; one that declares
+none of `read`, `notify`, or `indicate` reads as `readNotPermitted`; and a read whose `offset`
+is past the end of the stored value — a long read that overran it — as `invalidOffset`. An
+offset within the value answers with that value from the offset on, and an offset exactly at
+its end answers with nothing.
+
 `Scripts/e2e/fixtures/hrm.json` in the repository is a ready-made copy of the document above.
 
 ## Declaring virtual devices in Swift

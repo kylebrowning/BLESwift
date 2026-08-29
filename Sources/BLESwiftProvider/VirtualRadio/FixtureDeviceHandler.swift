@@ -55,18 +55,26 @@ public actor FixtureDeviceHandler: VirtualDeviceHandler {
         self.handle = handle
     }
 
-    /// Answers a read from the store.
+    /// Answers a read from the store, honoring `offset`.
     ///
-    /// - Returns: The stored value (empty `Data` if the characteristic has never held one),
-    ///   or `ATTError.readNotPermitted` if the fixture declares no such
-    ///   characteristic.
+    /// - Returns: The stored value from `offset` on (empty `Data` if the characteristic has
+    ///   never held one), or a failure: `ATTError.attributeNotFound` if the fixture declares
+    ///   no such characteristic — the same answer the radio gives for a handle it cannot find;
+    ///   `ATTError.readNotPermitted` if it declares one that is neither readable nor
+    ///   notifiable, so nothing was ever meant to be read from it; `ATTError.invalidOffset`
+    ///   if `offset` is negative or past the end of the stored value.
     public func read(
         _ characteristic: CharacteristicIdentifier,
         offset: Int,
         from central: Subscriber
     ) async -> Result<Data, ATTError> {
-        guard properties[characteristic] != nil else { return .failure(.readNotPermitted) }
-        return .success(values[characteristic] ?? Data())
+        guard let declared = properties[characteristic] else { return .failure(.attributeNotFound) }
+        guard declared.contains(.read) || declared.isNotifiable else { return .failure(.readNotPermitted) }
+        let value = values[characteristic] ?? Data()
+        // An offset *at* the end is legal and answers with nothing — how a long read learns it
+        // has reached the end of the value.
+        guard offset >= 0, offset <= value.count else { return .failure(.invalidOffset) }
+        return .success(Data(value.dropFirst(offset)))
     }
 
     /// Applies a batch of writes, all-or-nothing: every entry is permission-checked first,

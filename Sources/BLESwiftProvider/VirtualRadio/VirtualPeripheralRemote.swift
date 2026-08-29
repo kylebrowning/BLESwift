@@ -204,7 +204,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         guard _discoveredCharacteristics.contains(characteristic) else { return }
         enqueue { [radio, identifier, session, queue] in
-            let result = await radio.read(device: identifier, characteristic: characteristic, session: session)
+            let result = await radio.read(device: identifier, characteristic: characteristic, offset: 0, session: session)
             queue.async { [self] in
                 switch result {
                 case .success(let value):

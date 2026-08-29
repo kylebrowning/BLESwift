@@ -500,15 +500,24 @@ public actor VirtualRadio {
         sessions[session]?.connections.contains(device) == true
     }
 
-    /// Reads `characteristic`. A characteristic with a static value is answered from the
-    /// database; every other read reaches the device's handler. A session that is not
-    /// connected to `device` is refused with `ATTError.invalidHandle`.
-    func read(device: UUID, characteristic: CharacteristicIdentifier, session: UUID) async -> Result<Data, ATTError> {
+    /// Reads `characteristic` from `offset` on. A characteristic with a static value is
+    /// answered from the database; every other read reaches the device's handler. A session
+    /// that is not connected to `device` is refused with `ATTError.invalidHandle`, and an
+    /// `offset` past the end of a static value with `ATTError.invalidOffset`.
+    func read(
+        device: UUID,
+        characteristic: CharacteristicIdentifier,
+        offset: Int = 0,
+        session: UUID
+    ) async -> Result<Data, ATTError> {
         guard isConnected(session: session, to: device) else { return .failure(.invalidHandle) }
         guard let state = devices[device] else { return .failure(.invalidHandle) }
         guard let definition = definition(of: characteristic, in: state) else { return .failure(.attributeNotFound) }
-        if let value = definition.value { return .success(value) }
-        return await state.handler.read(characteristic, offset: 0, from: subscriber(session))
+        if let value = definition.value {
+            guard offset >= 0, offset <= value.count else { return .failure(.invalidOffset) }
+            return .success(Data(value.dropFirst(offset)))
+        }
+        return await state.handler.read(characteristic, offset: offset, from: subscriber(session))
     }
 
     /// Writes `value` to `characteristic` through the device's handler. A session that is not
