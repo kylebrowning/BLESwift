@@ -362,6 +362,36 @@ struct L2CAPLinkTests {
         #expect(sent.withLock { $0 }.isEmpty)
     }
 
+    @Test("An empty inbound frame earns no credit and leaves the channel open")
+    func emptyInboundFrameCreditsNothing() async throws {
+        // The client half on its own, as `closedChannelCreditsNothing` drives it.
+        let sent = Mutex<[CentralRequest]>([])
+        let channel = LinkL2CAPChannel(channel: 11, psm: Self.psm) { request in
+            sent.withLock { $0.append(request) }
+        }
+        let stream = channel.inbound()
+
+        // A zero-length frame: crediting it would put `l2capCredit(bytes: 0)` on the wire,
+        // which the provider rejects as a protocol violation and answers by closing.
+        channel.receive(Data())
+        #expect(sent.withLock { $0 }.isEmpty)
+
+        // And the channel is untouched: the next real frame is delivered and credited, and a
+        // write still goes out — neither would happen on a channel that had been torn down.
+        channel.receive(Data([1, 2, 3]))
+        #expect(sent.withLock { $0 } == [.l2capCredit(channel: 11, bytes: 3)])
+        channel.addCredit(bytes: 8)
+        try await channel.write(Data([9]))
+        #expect(sent.withLock { $0 }.contains(.l2capData(channel: 11, data: Data([9]))))
+
+        // The consumer saw the real bytes and nothing for the empty frame.
+        let first = try await bounded(seconds: 5) { () -> Data? in
+            for try await value in stream { return value }
+            return nil
+        }
+        #expect(first == Data([1, 2, 3]))
+    }
+
     // MARK: - Credit validation
 
     @Test("A credit the scheme does not permit closes the client's channel", arguments: [0, -1, -8192, LinkFlowControl.l2capInitialCredit + 1, Int.max])

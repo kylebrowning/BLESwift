@@ -200,7 +200,13 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
     /// A closed channel takes neither: the bytes are dropped, and dropped bytes are not
     /// credited — crediting them would re-open the provider's window on a channel that will
     /// never read another byte.
+    ///
+    /// An empty frame is dropped for the same reason ``write(_:)`` never puts one on the
+    /// wire: crediting it would send `l2capCredit` with `0` bytes, which the provider treats
+    /// as a protocol violation and answers by closing the channel. Nothing is yielded for it
+    /// either — an empty element is not a byte a consumer can read.
     func receive(_ data: Data) {
+        guard !data.isEmpty else { return }
         enum Delivery {
             case buffered
             case yield(AsyncThrowingStream<Data, Error>.Continuation)
