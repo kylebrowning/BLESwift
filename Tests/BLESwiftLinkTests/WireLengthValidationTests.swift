@@ -56,6 +56,56 @@ struct WireLengthValidationTests {
         )
     }
 
+    // MARK: - Offsets
+
+    private static let service = ServiceIdentifier(uuid: "180D")
+    private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
+    private static var central: WireSubscriber { WireSubscriber(id: UUID(), maximumUpdateValueLength: 20) }
+
+    @Test("A read request whose offset is negative fails conversion, and a plausible one converts")
+    func readRequestOffsetIsValidated() throws {
+        func request(offset: Int) -> WireReadRequest {
+            WireReadRequest(
+                token: UUID(),
+                central: Self.central,
+                characteristic: WireCharacteristicRef(Self.measurement),
+                offset: offset
+            )
+        }
+        // A handler slices its value at the offset, so a negative one would trap the client.
+        #expect(throws: WireDecodingError.invalidOffset(-1)) { try request(offset: -1).readRequest }
+        #expect(throws: WireDecodingError.invalidOffset(Int.min)) { try request(offset: Int.min).readRequest }
+        #expect(try request(offset: 0).readRequest.offset == 0)
+        #expect(try request(offset: 7).readRequest.offset == 7)
+        // An absurd one is clamped rather than refused, exactly as an absurd length is.
+        #expect(try request(offset: WireLengthValidation.maximumOffset + 1).readRequest.offset
+            == WireLengthValidation.maximumOffset)
+        #expect(try request(offset: Int.max).readRequest.offset == WireLengthValidation.maximumOffset)
+    }
+
+    @Test("A write entry whose offset is negative fails conversion, and a plausible one converts")
+    func writeEntryOffsetIsValidated() throws {
+        func entry(offset: Int) -> WireWriteEntry {
+            WireWriteEntry(
+                central: Self.central,
+                characteristic: WireCharacteristicRef(Self.measurement),
+                offset: offset,
+                value: Data([1])
+            )
+        }
+        #expect(throws: WireDecodingError.invalidOffset(-1)) { try entry(offset: -1).entry }
+        #expect(throws: WireDecodingError.invalidOffset(Int.min)) { try entry(offset: Int.min).entry }
+        #expect(try entry(offset: 0).entry.offset == 0)
+        #expect(try entry(offset: 7).entry.offset == 7)
+        #expect(try entry(offset: WireLengthValidation.maximumOffset + 1).entry.offset
+            == WireLengthValidation.maximumOffset)
+        #expect(try entry(offset: Int.max).entry.offset == WireLengthValidation.maximumOffset)
+        // And a batch carrying one is refused whole.
+        #expect(throws: WireDecodingError.invalidOffset(-1)) {
+            try WireWriteRequest(token: UUID(), entries: [entry(offset: -1)]).writeRequest
+        }
+    }
+
 #if !targetEnvironment(simulator)
     // Sockets in a CI simulator are unreliable; the simulator-side path is covered by the
     // two-simulator E2E on real simulators.

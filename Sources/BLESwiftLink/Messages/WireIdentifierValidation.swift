@@ -30,6 +30,10 @@ public enum WireDecodingError: Error, Equatable, Sendable {
     /// A negotiated maximum payload length that no CoreBluetooth stack could report and no
     /// caller could use — zero or negative — carried verbatim. See ``WireLengthValidation``.
     case invalidMaximumLength(Int)
+
+    /// An attribute offset no CoreBluetooth stack could report and no caller could slice a
+    /// payload at — a negative one — carried verbatim. See ``WireLengthValidation``.
+    case invalidOffset(Int)
 }
 
 /// The wire boundary's copy of the UUID rule BLESwift's identifiers enforce.

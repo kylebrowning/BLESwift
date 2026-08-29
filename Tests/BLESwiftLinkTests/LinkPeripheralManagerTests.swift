@@ -88,6 +88,49 @@ struct LinkPeripheralManagerTests {
         }
     }
 
+    @Test("A read request carrying a negative offset drops the session instead of trapping")
+    func negativeReadOffsetDropsTheSession() async throws {
+        let provider = try ScriptedHostProvider()
+        try await provider.start()
+        let queue = DispatchSerialQueue(label: "linkperipheralmanager.badoffset")
+        let link = LinkPeripheralManager(
+            endpoint: provider.endpoint,
+            queue: queue,
+            clientName: "badoffset",
+            codec: .json,
+            retryInterval: .milliseconds(50)
+        )
+        defer { provider.stop(); link.shutdown() }
+
+        let states = Mutex<[CentralState]>([])
+        let reads = Mutex<Int>(0)
+        await onQueue(queue) {
+            link.eventHandler = { event in
+                switch event {
+                case .didUpdateState(let state): states.withLock { $0.append(state) }
+                case .didReceiveRead: reads.withLock { $0 += 1 }
+                default: break
+                }
+            }
+        }
+        await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .poweredOn } }
+
+        // An offset a handler would slice its value at — `value[offset...]` — and trap on.
+        // It is refused at the boundary instead: the session goes, and the client redials.
+        provider.emit(.didReceiveRead(WireReadRequest(
+            token: UUID(),
+            central: WireSubscriber(id: UUID(), maximumUpdateValueLength: 20),
+            characteristic: WireCharacteristicRef(Self.measurement),
+            offset: -1
+        )))
+
+        await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .unsupported } }
+        await waitFor(timeout: .seconds(10)) { states.withLock { $0.last == .poweredOn } }
+        #expect(states.withLock { $0.last } == .poweredOn)
+        // The malformed request never reached the host.
+        #expect(reads.withLock { $0 } == 0)
+    }
+
     @Test("A stale update acknowledgement cannot open the next session's window")
     func staleUpdateAcknowledgementIsIgnored() async throws {
         let provider = try ScriptedHostProvider()

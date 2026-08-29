@@ -481,14 +481,14 @@ public struct WireReadRequest: Codable, Sendable, Equatable {
     /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if the characteristic it names
     ///   is not one BLESwift's identifiers could represent, or
     ///   ``WireDecodingError/invalidMaximumLength(_:)`` if the central's update length is
-    ///   unusable.
+    ///   unusable, or ``WireDecodingError/invalidOffset(_:)`` if ``offset`` is negative.
     public var readRequest: ReadRequest {
         get throws {
             ReadRequest(
                 token: RequestToken(rawValue: token),
                 central: try central.subscriber,
                 characteristic: try characteristic.identifier,
-                offset: offset
+                offset: try WireLengthValidation.validatedOffset(offset)
             )
         }
     }
@@ -530,13 +530,13 @@ public struct WireWriteEntry: Codable, Sendable, Equatable {
     /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if the characteristic it names
     ///   is not one BLESwift's identifiers could represent, or
     ///   ``WireDecodingError/invalidMaximumLength(_:)`` if the central's update length is
-    ///   unusable.
+    ///   unusable, or ``WireDecodingError/invalidOffset(_:)`` if ``offset`` is negative.
     public var entry: WriteRequest.Entry {
         get throws {
             WriteRequest.Entry(
                 central: try central.subscriber,
                 characteristic: try characteristic.identifier,
-                offset: offset,
+                offset: try WireLengthValidation.validatedOffset(offset),
                 value: value
             )
         }
@@ -569,7 +569,8 @@ public struct WireWriteRequest: Codable, Sendable, Equatable {
     /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if any entry names a
     ///   characteristic BLESwift's identifiers could not represent, or
     ///   ``WireDecodingError/invalidMaximumLength(_:)`` if an entry's central reports an
-    ///   unusable update length.
+    ///   unusable update length, or ``WireDecodingError/invalidOffset(_:)`` if an entry's
+    ///   offset is negative.
     public var writeRequest: WriteRequest {
         get throws {
             WriteRequest(token: RequestToken(rawValue: token), entries: try entries.map { try $0.entry })

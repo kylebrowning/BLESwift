@@ -36,4 +36,25 @@ public enum WireLengthValidation {
         guard length > 0 else { throw WireDecodingError.invalidMaximumLength(length) }
         return min(length, maximumLength)
     }
+
+    /// The largest attribute offset a peer may report, past which offsets are clamped.
+    ///
+    /// 65535: an ATT attribute value is at most that long, so no real stack reports a larger
+    /// offset into one.
+    public static let maximumOffset = 65535
+
+    /// Returns `offset` clamped to ``maximumOffset`` once it is known to be usable.
+    ///
+    /// An offset is arithmetic in the same way a maximum length is: a handler slices its
+    /// value at it — `value[offset...]` — and a negative one traps whichever process took the
+    /// request. CoreBluetooth cannot produce one, so it is refused at the boundary. The upper
+    /// end is clamped rather than refused, for the reason the type's own note gives.
+    ///
+    /// - Parameter offset: The attribute offset, as it arrived on the wire.
+    /// - Returns: `offset`, or ``maximumOffset`` if it exceeds it.
+    /// - Throws: ``WireDecodingError/invalidOffset(_:)`` if `offset` is negative.
+    public static func validatedOffset(_ offset: Int) throws -> Int {
+        guard offset >= 0 else { throw WireDecodingError.invalidOffset(offset) }
+        return min(offset, maximumOffset)
+    }
 }
