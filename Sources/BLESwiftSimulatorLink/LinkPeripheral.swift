@@ -144,9 +144,11 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     }
 
     /// Asks the provider to discover `characteristics` (or every characteristic, if `nil`)
-    /// of `service`.
+    /// of `service`. A no-op for a service the mirror cache has not seen discovered, for the
+    /// same reason as ``readValue(for:)-(CharacteristicIdentifier)``.
     public func discoverCharacteristics(_ characteristics: [CharacteristicIdentifier]?, for service: ServiceIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard isDiscovered(service) else { return }
         central.send(.discoverCharacteristics(
             peripheral: identifier,
             service: service.uuidString,
@@ -202,21 +204,30 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         central.send(.setNotifyValue(peripheral: identifier, characteristic: WireCharacteristicRef(characteristic), enabled: enabled))
     }
 
-    /// Asks the provider to discover `characteristic`'s descriptors.
+    /// Asks the provider to discover `characteristic`'s descriptors. A no-op for a
+    /// characteristic the mirror cache has not seen discovered, for the same reason as
+    /// ``readValue(for:)-(CharacteristicIdentifier)``.
     public func discoverDescriptors(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard isDiscovered(characteristic) else { return }
         central.send(.discoverDescriptors(peripheral: identifier, characteristic: WireCharacteristicRef(characteristic)))
     }
 
-    /// Asks the provider to read `descriptor`.
+    /// Asks the provider to read `descriptor`. A no-op for a descriptor the mirror cache has
+    /// not seen discovered, for the same reason as
+    /// ``readValue(for:)-(CharacteristicIdentifier)``.
     public func readValue(for descriptor: DescriptorIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard isDiscovered(descriptor) else { return }
         central.send(.readDescriptor(peripheral: identifier, descriptor: WireDescriptorRef(descriptor)))
     }
 
-    /// Asks the provider to write `data` to `descriptor`.
+    /// Asks the provider to write `data` to `descriptor`. A no-op for a descriptor the mirror
+    /// cache has not seen discovered, for the same reason as
+    /// ``readValue(for:)-(CharacteristicIdentifier)``.
     public func writeValue(_ data: Data, for descriptor: DescriptorIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard isDiscovered(descriptor) else { return }
         central.send(.writeDescriptor(peripheral: identifier, descriptor: WireDescriptorRef(descriptor), value: data))
     }
 

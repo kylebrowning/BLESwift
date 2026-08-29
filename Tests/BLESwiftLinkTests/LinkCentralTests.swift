@@ -370,6 +370,77 @@ struct LinkCentralTests {
         ))
     }
 
+    /// The descriptor the descriptor-side guards are exercised with — never discovered, so
+    /// the mirror cache has no record of it or of the characteristic under it.
+    private static let configuration = DescriptorIdentifier(uuid: "2902", characteristic: measurement)
+
+    /// Runs `body` against a connected peripheral whose mirror cache is empty, puts a
+    /// `readRSSI` barrier behind it, and returns every request the provider saw.
+    ///
+    /// The link is ordered, so once the barrier has been recorded, whatever `body` would have
+    /// sent has been recorded too — the absence that follows is real, not a race.
+    private func requestsAfterUndiscovered(
+        _ body: @Sendable @escaping (LinkPeripheral) -> Void
+    ) async throws -> [CentralRequest] {
+        let (central, link, provider) = try await makeRig()
+        defer { provider.stop(); link.shutdown() }
+        let queue = link.queue
+        let id = UUID()
+
+        let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: nil)) }
+        await waitFor(timeout: .seconds(30)) { Self.connectCount(provider, for: id) == 1 }
+        provider.emit(.didConnect(peripheral: id, name: nil, maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
+        _ = try await bounded(seconds: 30) { try await connectTask.value }
+
+        let peripheral = try #require(await onQueue(queue) {
+            link.retrievePeripherals(withIdentifiers: [id]).first as? LinkPeripheral
+        })
+        #expect(await onQueue(queue) { !peripheral.isDiscovered(Self.service) })
+        #expect(await onQueue(queue) { !peripheral.isDiscovered(Self.measurement) })
+        #expect(await onQueue(queue) { !peripheral.isDiscovered(Self.configuration) })
+
+        await onQueue(queue) { body(peripheral) }
+        await onQueue(queue) { peripheral.readRSSI() }
+        await waitFor(timeout: .seconds(30)) { provider.requests.withLock { $0 }.contains(.readRSSI(peripheral: id)) }
+        return provider.requests.withLock { $0 }
+    }
+
+    @Test("A characteristic discovery for a service the mirror has not seen discovered is a no-op")
+    func undiscoveredCharacteristicDiscoveryIsANoOp() async throws {
+        let requests = try await requestsAfterUndiscovered { $0.discoverCharacteristics(nil, for: Self.service) }
+        #expect(requests.allSatisfy { request in
+            if case .discoverCharacteristics = request { return false }
+            return true
+        })
+    }
+
+    @Test("A descriptor discovery for a characteristic the mirror has not seen discovered is a no-op")
+    func undiscoveredDescriptorDiscoveryIsANoOp() async throws {
+        let requests = try await requestsAfterUndiscovered { $0.discoverDescriptors(for: Self.measurement) }
+        #expect(requests.allSatisfy { request in
+            if case .discoverDescriptors = request { return false }
+            return true
+        })
+    }
+
+    @Test("A read of a descriptor the mirror has not seen discovered is a no-op")
+    func undiscoveredDescriptorReadIsANoOp() async throws {
+        let requests = try await requestsAfterUndiscovered { $0.readValue(for: Self.configuration) }
+        #expect(requests.allSatisfy { request in
+            if case .readDescriptor = request { return false }
+            return true
+        })
+    }
+
+    @Test("A write to a descriptor the mirror has not seen discovered is a no-op")
+    func undiscoveredDescriptorWriteIsANoOp() async throws {
+        let requests = try await requestsAfterUndiscovered { $0.writeValue(Data([1]), for: Self.configuration) }
+        #expect(requests.allSatisfy { request in
+            if case .writeDescriptor = request { return false }
+            return true
+        })
+    }
+
     /// Puts ``measurement`` in `peripheral`'s mirror cache, the way a real provider would:
     /// a `PeripheralRemote` no-ops a write to a characteristic it has not seen discovered, so
     /// a test that drives one directly has to discover it first.
