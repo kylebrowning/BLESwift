@@ -390,6 +390,14 @@ final class CentralSession: Sendable {
         /// More `openL2CAPChannel` completions were outstanding for one peripheral than
         /// ``maximumPendingOpens`` allows — the client has stopped consuming them.
         case openWindowExceeded(peripheral: UUID)
+
+        /// A `l2capData` frame was larger than the chunk size both ends chunk to — see
+        /// ``maximumChunk``.
+        case l2capFrameTooLarge(channel: UInt32, bytes: Int)
+
+        /// More client-written bytes were unwritten on one channel than
+        /// ``maximumOutstandingWrites`` allows — the client has ignored its credit window.
+        case l2capWriteWindowExceeded(channel: UInt32)
     }
 
     /// `uuid` as a `ServiceIdentifier`, rejecting a string no `ServiceIdentifier` could
@@ -401,8 +409,8 @@ final class CentralSession: Sendable {
     /// Drops the client's link because it sent something the protocol does not allow — a
     /// malformed identifier, or more queued writes than the window can ever have permitted.
     /// The provider's own termination path then closes this session. Must be called on
-    /// ``queue``.
-    private func failProtocol(_ error: some Error) {
+    /// ``queue``. Internal so the L2CAP bridge can refuse a client on the same terms.
+    func failProtocol(_ error: some Error) {
         dispatchPrecondition(condition: .onQueue(queue))
         log?("\(label): protocol violation (\(error)); closing the connection")
         connection.cancel()

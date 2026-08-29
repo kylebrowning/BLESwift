@@ -52,6 +52,14 @@ final class OpenChannel: Sendable {
     /// order the client sent them. Session queue only.
     nonisolated(unsafe) var writes: Task<Void, Never>?
 
+    /// How many client-written bytes are sitting in ``writes`` without having reached
+    /// ``remote`` yet — the client's outstanding window in this direction.
+    ///
+    /// Raised when a `l2capData` frame joins the chain and lowered when that write completes,
+    /// which is the same moment the client is credited for it. Session queue only, like
+    /// ``writes`` itself.
+    nonisolated(unsafe) var outstanding = 0
+
     /// Creates a bridge over `remote`, owned by `peripheral`.
     init(remote: any L2CAPChannelRemote, peripheral: UUID) {
         self.remote = remote
@@ -128,9 +136,19 @@ final class OpenChannel: Sendable {
 /// transport's back-pressure rather than filling a queue here.
 extension CentralSession {
 
-    /// The largest `l2capData` payload the provider puts on the wire, matching the client's
-    /// own chunking.
-    private static var maximumChunk: Int { LinkFlowControl.l2capInitialCredit / 4 }
+    /// The largest `l2capData` payload either end puts on the wire — the provider's own
+    /// chunking, and the size a client's frame may not exceed.
+    static var maximumChunk: Int { LinkFlowControl.l2capInitialCredit / 4 }
+
+    /// How many client-written bytes one channel may have unwritten before this session stops
+    /// believing the client.
+    ///
+    /// A whole credit window, plus one chunk of slack for the frame that was already on the
+    /// wire when the window closed. A client honoring the scheme waits for `l2capCredit`
+    /// before it exceeds this; one that does not can otherwise grow the write chain — and the
+    /// provider's memory — without bound, because inbound `l2capData` is the one queue a
+    /// client fills entirely at its own pace.
+    static var maximumOutstandingWrites: Int { LinkFlowControl.l2capInitialCredit + maximumChunk }
 
     // MARK: - Open
 
@@ -220,12 +238,27 @@ extension CentralSession {
     /// Writes are chained per channel so they reach the transport in the order the client
     /// sent them, however long any one of them takes. Must be called on
     /// ``CentralSession/queue``.
+    ///
+    /// **The chain is bounded, and so is one frame.** A frame larger than ``maximumChunk`` is
+    /// larger than the chunk size both ends agreed on, and a client with more than
+    /// ``maximumOutstandingWrites`` bytes unwritten has stopped waiting for the credit that
+    /// paces it. Either is a peer that has left the scheme behind, and the link goes rather
+    /// than this session's memory.
     func write(_ data: Data, to channel: UInt32) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let open = channels[channel] else {
             log?("no L2CAP channel \(channel); ignoring l2capData")
             return
         }
+        guard data.count <= Self.maximumChunk else {
+            failProtocol(ProtocolViolation.l2capFrameTooLarge(channel: channel, bytes: data.count))
+            return
+        }
+        guard open.outstanding + data.count <= Self.maximumOutstandingWrites else {
+            failProtocol(ProtocolViolation.l2capWriteWindowExceeded(channel: channel))
+            return
+        }
+        open.outstanding += data.count
         let previous = open.writes
         open.writes = Task { [weak self] in
             await previous?.value
@@ -323,15 +356,17 @@ extension CentralSession {
         }
     }
 
-    /// Credits the client for a write that has completed on the transport.
+    /// Releases a completed write's share of the channel's outstanding window and credits the
+    /// client for it.
     private func creditFromWrite(channel: UInt32, bytes: Int) {
-        // A write of nothing consumed no window, and `0` is not a credit the client would
-        // accept: it treats a non-positive grant as a protocol violation and closes the
-        // channel. Clients do not send empty payloads, but a peer that did should not be
-        // answered with a frame that tears its own channel down.
-        guard bytes > 0 else { return }
         queue.async { [self] in
-            guard channels[channel] != nil else { return }
+            guard let open = channels[channel] else { return }
+            open.outstanding -= bytes
+            // A write of nothing consumed no window, and `0` is not a credit the client would
+            // accept: it treats a non-positive grant as a protocol violation and closes the
+            // channel. Clients do not send empty payloads, but a peer that did should not be
+            // answered with a frame that tears its own channel down.
+            guard bytes > 0 else { return }
             send(.l2capCredit(channel: channel, bytes: bytes))
         }
     }

@@ -143,6 +143,96 @@ struct CentralSessionLimitsTests {
         await provider.stop()
     }
 
+    /// A provider serving one `FakePeripheral` over a `FakeCentral`, a linked `Central`
+    /// already connected to it, and one open L2CAP channel.
+    ///
+    /// Ids are allocated from 1, so the single channel these tests open is channel `1` — which
+    /// is what lets them address it from behind `Peripheral`'s back.
+    private func makeL2CAPRig(
+        label: String,
+        clientName: String
+    ) async throws -> (provider: Provider, link: LinkCentral, channel: L2CAPChannel, fake: FakeL2CAPChannel) {
+        let fakeBox = PeripheralBox()
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            let peripheral = FakePeripheral(identifier: Self.deviceID, name: "Fake", queue: queue)
+            fake.retrievablePeripherals[Self.deviceID] = peripheral
+            fake.connectBehavior = .succeed
+            fakeBox.store(peripheral)
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let queue = DispatchSerialQueue(label: label)
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            queue: queue,
+            clientName: clientName,
+            retryInterval: .seconds(30)
+        )
+        let central = Central(backend: link, queue: queue)
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+        let peripheral = try await central.connect(PeripheralIdentifier(uuid: Self.deviceID, name: "Fake"))
+        let channel = try await peripheral.openL2CAPChannel(psm: L2CAPPSM(0x0041), timeout: .seconds(5))
+        let fakePeripheral = try #require(fakeBox.peripheral)
+        await waitFor(timeout: .seconds(5)) {
+            await fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel != nil }
+        }
+        let fake = try #require(await fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel })
+        return (provider, link, channel, fake)
+    }
+
+    @Test("A client that writes past the L2CAP credit window loses its session")
+    func l2capWriteWindowOverrunClosesTheSession() async throws {
+        let rig = try await makeL2CAPRig(label: "centralsession.l2capwindow", clientName: "greedy-writer")
+        let fake = rig.fake
+        // Nothing the client writes ever reaches the transport, so the session's outstanding
+        // count only grows — exactly the back-pressure a client is supposed to wait out.
+        await fake.onQueue { fake.writeBehavior = .hold }
+
+        // One chunk more than the window plus its slack, straight down the link behind
+        // `L2CAPChannel`'s back: its own writer waits for credit, which is the whole point.
+        let chunk = Data(repeating: 0x5A, count: CentralSession.maximumChunk)
+        let overrun = CentralSession.maximumOutstandingWrites / CentralSession.maximumChunk + 1
+        let link = rig.link
+        link.queue.async {
+            for _ in 0..<overrun { link.send(.l2capData(channel: 1, data: chunk)) }
+        }
+
+        // The session goes, rather than the provider's memory.
+        await waitFor(timeout: .seconds(10)) { await rig.provider.sessionCount == 0 }
+        #expect(await rig.provider.sessionCount == 0)
+
+        withExtendedLifetime(rig.channel) {}
+        rig.link.shutdown()
+        await rig.provider.stop()
+    }
+
+    @Test("A single oversized L2CAP frame loses the client its session")
+    func l2capOversizedFrameClosesTheSession() async throws {
+        let rig = try await makeL2CAPRig(label: "centralsession.l2capframe", clientName: "greedy-framer")
+
+        // One byte past the chunk size both ends agreed on. No honest client produces it: its
+        // own writer splits everything it sends at exactly that size.
+        let oversized = Data(repeating: 0x5A, count: CentralSession.maximumChunk + 1)
+        let link = rig.link
+        link.queue.async { link.send(.l2capData(channel: 1, data: oversized)) }
+
+        await waitFor(timeout: .seconds(10)) { await rig.provider.sessionCount == 0 }
+        #expect(await rig.provider.sessionCount == 0)
+        // Refused before it was ever handed to the transport.
+        let fake = rig.fake
+        #expect(await fake.onQueue { fake.writtenData }.isEmpty)
+
+        withExtendedLifetime(rig.channel) {}
+        rig.link.shutdown()
+        await rig.provider.stop()
+    }
+
     @Test("A connect is still tracked when every remote the session already holds is busy")
     func connectSurvivesATableOfBusyRemotes() async throws {
         let busy = UUID()
