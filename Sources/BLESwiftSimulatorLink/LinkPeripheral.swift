@@ -7,6 +7,7 @@ import BLESwiftCore
 import BLESwiftLink
 import Dispatch
 import Foundation
+import Synchronization
 
 /// A `PeripheralRemote` whose GATT operations travel over the link to a provider's real
 /// `CBPeripheral`, backed by a local mirror of that peripheral's discovery state.
@@ -29,7 +30,9 @@ import Foundation
 /// `nonisolated(unsafe)`, safe only because every `PeripheralRemote` method and property
 /// accessor asserts `dispatchPrecondition(condition: .onQueue(queue))` and touches state
 /// inline: the serial queue itself is the synchronization, exactly as for `FakePeripheral`
-/// and a real `CBPeripheral`. Event delivery is always `queue.async`, never inline.
+/// and a real `CBPeripheral`. Event delivery is always `queue.async`, never inline. The one
+/// exception is ``name``, which callers read off-queue — `Central(backend:connectedPeripherals:)`
+/// does — so it is `Mutex`-protected, matching `VirtualPeripheralRemote`.
 public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     /// The identifier the provider's CoreBluetooth stack uses for this peripheral.
@@ -45,7 +48,9 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     /// to — the same queue the owning `Central` was constructed with.
     private let queue: DispatchSerialQueue
 
-    nonisolated(unsafe) private var _name: String?
+    /// The last name the provider reported. `Mutex`-protected rather than queue-confined:
+    /// ``name`` is read off-queue, and every writer already runs on ``queue``.
+    private let nameBox: Mutex<String?>
     nonisolated(unsafe) private var _connectionState: PeripheralConnectionState = .disconnected
     nonisolated(unsafe) private var _ancsAuthorized = false
     nonisolated(unsafe) private var _eventHandler: ((PeripheralEvent) -> Void)?
@@ -67,7 +72,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     ///   - queue: The central's serial queue.
     init(identifier: UUID, name: String?, central: LinkCentral, queue: DispatchSerialQueue) {
         self.identifier = identifier
-        self._name = name
+        self.nameBox = Mutex(name)
         self.central = central
         self.queue = queue
     }
@@ -75,9 +80,10 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     // MARK: - PeripheralRemote state
 
     /// The peripheral's advertised or cached name, as last reported by the provider.
+    /// `Mutex`-backed, so it is readable from any context — `Central`'s
+    /// `connectedPeripherals` adoption reads it off ``queue``.
     public var name: String? {
-        dispatchPrecondition(condition: .onQueue(queue))
-        return _name
+        nameBox.withLock { $0 }
     }
 
     /// The peripheral's current connection state, mirrored from the provider.
@@ -266,13 +272,14 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     /// This peripheral's identity, for the `CentralEvent`s that carry one.
     var peripheralIdentifier: PeripheralIdentifier {
         dispatchPrecondition(condition: .onQueue(queue))
-        return PeripheralIdentifier(uuid: identifier, name: _name)
+        return PeripheralIdentifier(uuid: identifier, name: name)
     }
 
     /// Records a name the provider reported outside a connection (a scan sighting).
     func record(name: String?) {
         dispatchPrecondition(condition: .onQueue(queue))
-        if let name { _name = name }
+        guard let name else { return }
+        nameBox.withLock { $0 = name }
     }
 
     /// Marks a connection attempt as under way, mirroring `CBPeripheral.state`.
@@ -294,7 +301,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     func markConnected(name: String?, maximumWriteWithResponse: Int, maximumWriteWithoutResponse: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectionState = .connected
-        if let name { _name = name }
+        if let name { nameBox.withLock { $0 = name } }
         _maximumWriteWithResponse = maximumWriteWithResponse
         _maximumWriteWithoutResponse = maximumWriteWithoutResponse
     }

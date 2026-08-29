@@ -58,6 +58,14 @@ struct LinkCentralTests {
     private static let service = ServiceIdentifier(uuid: "180D")
     private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
 
+    /// Hops onto `queue` to run `body` and returns its result — the door for off-queue test
+    /// code to touch queue-confined state.
+    private func onQueue<T: Sendable>(_ queue: DispatchSerialQueue, _ body: @Sendable @escaping () -> T) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async { continuation.resume(returning: body()) }
+        }
+    }
+
     private func makeRig() async throws -> (Central, LinkCentral, ScriptedProvider) {
         let provider = try ScriptedProvider()
         try await provider.start()
@@ -191,4 +199,29 @@ struct LinkCentralTests {
         await waitFor { central.state == .unsupported }
         #expect(central.state == .unsupported)
     }
+
+    @Test("A peripheral's name is readable off the central's queue")
+    func nameIsReadableOffQueue() async throws {
+        let provider = try ScriptedProvider()
+        try await provider.start()
+        let queue = DispatchSerialQueue(label: "LinkCentralTests.name")
+        let link = LinkCentral(endpoint: provider.endpoint, queue: queue, clientName: "test", retryInterval: .milliseconds(50))
+        let central = Central(backend: link, queue: queue)
+        defer { provider.stop(); link.shutdown() }
+        await waitFor { central.state == .poweredOn }
+
+        let id = UUID()
+        let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: nil)) }
+        await waitFor { !provider.requests.withLock { $0 }.isEmpty }
+        provider.emit(.didConnect(peripheral: id, name: "Named", maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
+        _ = try await bounded { try await connectTask.value }
+
+        let peripheral = await onQueue(queue) {
+            link.retrievePeripherals(withIdentifiers: [id]).first as? LinkPeripheral
+        }
+        // Read from the test's own context, off `queue`, exactly as
+        // `Central(backend:connectedPeripherals:)` reads it while adopting a peripheral.
+        #expect(peripheral?.name == "Named")
+    }
+
 }
