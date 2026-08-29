@@ -611,6 +611,11 @@ final class CentralSession: Sendable {
         guard !isClosed, let remote = remotes[peripheral] else { return }
         switch event {
 
+        // The backend's whole service cache, not the answer to the request that produced this
+        // completion: `discoveredServices` is `CBPeripheral.services` for the passthrough
+        // backend and the union cache for the virtual one, so a filtered discovery reports
+        // every service known — which is what the client's own filtered-joins rule then folds
+        // into its mirror, leaving the two halves of the seam agreeing on the same list.
         case .didDiscoverServices(let error):
             send(.didDiscoverServices(
                 peripheral: peripheral,

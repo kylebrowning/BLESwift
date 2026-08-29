@@ -81,6 +81,13 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _outstandingWithoutResponse: [UInt64] = []
     nonisolated(unsafe) private var _nextWriteSequence: UInt64 = 0
 
+    /// Whether each service discovery this peripheral has sent and not yet been answered for
+    /// named the services it wanted, oldest first — the flag
+    /// `recordDiscoveredServices(_:)` needs and the wire event does not carry. The provider
+    /// answers a peripheral's requests in the order they arrive, so the oldest entry belongs
+    /// to the answer landing now.
+    nonisolated(unsafe) private var _pendingServiceDiscoveryFilters: [Bool] = []
+
     /// Creates a peripheral mirror. `LinkCentral` is the only caller.
     ///
     /// - Parameters:
@@ -137,9 +144,12 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     // MARK: - PeripheralRemote requests
 
-    /// Asks the provider to discover `services` (or every service, if `nil`).
+    /// Asks the provider to discover `services` (or every service, if `nil`), remembering
+    /// whether the request was filtered so `recordDiscoveredServices(_:)` can apply the
+    /// right rule to the answer.
     public func discoverServices(_ services: [ServiceIdentifier]?) {
         dispatchPrecondition(condition: .onQueue(queue))
+        _pendingServiceDiscoveryFilters.append(services != nil)
         central.send(.discoverServices(peripheral: identifier, services: services?.map(\.uuidString)))
     }
 
@@ -363,15 +373,37 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         _descriptors = [:]
         _notifying = []
         _outstandingWithoutResponse = []
+        _pendingServiceDiscoveryFilters = []
         _maximumWriteWithResponse = 512
         _maximumWriteWithoutResponse = 20
         _ancsAuthorized = false
     }
 
-    /// Replaces the mirrored service list.
-    func replaceServices(_ services: [ServiceIdentifier]) {
+    /// Records the answer to a service discovery in the mirror.
+    ///
+    /// **A filtered request's answer joins the mirror; an unfiltered request's answer replaces
+    /// it**, the same rule `VirtualPeripheralRemote.recordServices(_:filtered:)` applies on
+    /// the provider's side of the seam. The answer to `discoverServices([x])` describes `x`
+    /// and nothing else, so dropping the services missing from it would discard services the
+    /// device still has — and `GATTCompatibility.discovery` defaults to `.filtered`, so
+    /// `Central` asks for exactly one service at a time. An answer with no request behind it
+    /// is treated as unfiltered: a provider volunteering a service list is describing the
+    /// whole database.
+    ///
+    /// The invalidation paths are unchanged: `didModifyServices` prunes through
+    /// ``invalidate(services:)`` and a disconnect empties the mirror outright.
+    ///
+    /// - Parameter services: The services the provider reported.
+    func recordDiscoveredServices(_ services: [ServiceIdentifier]) {
         dispatchPrecondition(condition: .onQueue(queue))
-        _services = services
+        let filtered = _pendingServiceDiscoveryFilters.isEmpty ? false : _pendingServiceDiscoveryFilters.removeFirst()
+        guard filtered else {
+            _services = services
+            return
+        }
+        for service in services where !_services.contains(service) {
+            _services.append(service)
+        }
     }
 
     /// Replaces `service`'s mirrored characteristics and their properties.

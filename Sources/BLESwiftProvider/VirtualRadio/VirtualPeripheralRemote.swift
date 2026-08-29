@@ -125,11 +125,30 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         }
     }
 
-    /// Replaces the discovered-service cache with `services`, dropping everything beneath a
-    /// service that is no longer there. Must be called on ``queue``.
-    private func replaceServices(_ services: [ServiceIdentifier]) {
+    /// Records the answer to a service discovery. Must be called on ``queue``.
+    ///
+    /// **A filtered answer joins the cache; only an unfiltered one replaces it.** The answer
+    /// to `discoverServices([x])` describes `x` and says nothing whatever about any other
+    /// service, so pruning on it discards services the device still has — and with them the
+    /// characteristics discovered beneath them. `GATTCompatibility.discovery` defaults to
+    /// `.filtered`, so `Central` asks for exactly one service at a time: a read under a
+    /// second service left the first one's characteristics pruned here while the client's own
+    /// cache still held them, and the next read under the first service was dropped by
+    /// ``readValue(for:)-(CharacteristicIdentifier)``'s discovery guard and never answered.
+    /// The answer to `discoverServices(nil)` does describe the whole database, so a service
+    /// missing from it really is gone and is pruned. `didModifyServices` and disconnection
+    /// prune as they always have.
+    ///
+    /// - Parameters:
+    ///   - services: The services the radio answered with.
+    ///   - filtered: Whether the request named the services it wanted.
+    private func recordServices(_ services: [ServiceIdentifier], filtered: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         let discovered = Set(services)
+        guard !filtered else {
+            _discoveredServices.formUnion(discovered)
+            return
+        }
         let departed = _discoveredServices.subtracting(discovered)
         _discoveredServices = discovered
         prune(departed)
@@ -197,18 +216,16 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// Asks the radio for `services` (or every service, when `nil`) and delivers
     /// `didDiscoverServices` once the answer lands.
     ///
-    /// **The answer replaces the cache rather than joining it**, exactly as
-    /// `LinkPeripheral.replaceServices(_:)` does with the same answer arriving over the link.
-    /// A union kept reporting a service the device has since dropped as discovered, so a read
-    /// or a `setNotifyValue(_:for:)` under it passed the discovery guard and reached a radio
-    /// with no such attribute — and the two backends behind one seam disagreed about what the
-    /// same device had.
+    /// **A filtered request's answer joins the cache; an unfiltered request's answer replaces
+    /// it**, exactly as `LinkPeripheral` does with the same answer arriving over the link.
+    /// See `recordServices(_:filtered:)`.
     public func discoverServices(_ services: [ServiceIdentifier]?) {
         dispatchPrecondition(condition: .onQueue(queue))
+        let filtered = services != nil
         enqueue { [radio, identifier, queue] in
             let found = await radio.services(of: identifier, matching: services)
             queue.async { [self] in
-                replaceServices(found)
+                recordServices(found, filtered: filtered)
                 deliver(.didDiscoverServices(error: nil))
             }
         }

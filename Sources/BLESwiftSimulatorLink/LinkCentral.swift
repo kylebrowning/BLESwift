@@ -567,7 +567,7 @@ public final class LinkCentral: CentralManaging, Sendable {
         case .didDiscoverServices(let uuid, let services, let error):
             let discovered = try services.map { ServiceIdentifier(uuid: try WireIdentifierValidation.validated($0)) }
             let target = peripheral(for: uuid)
-            target.replaceServices(discovered)
+            target.recordDiscoveredServices(discovered)
             target.deliver(.didDiscoverServices(error: error?.nsError))
 
         case .didDiscoverCharacteristics(let uuid, let service, let characteristics, let error):

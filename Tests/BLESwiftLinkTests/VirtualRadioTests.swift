@@ -8,6 +8,7 @@ import BLESwift
 import BLESwiftCore
 import BLESwiftLink
 @testable import BLESwiftProvider
+@testable import BLESwiftSimulatorLink
 import Dispatch
 import Foundation
 import Synchronization
@@ -1068,11 +1069,11 @@ struct VirtualRadioTests {
         ]
     }
 
-    @Test("A narrower discovery replaces the caches rather than adding to them")
-    func discoveryReplacesTheCaches() async throws {
+    @Test("A narrowed discovery joins the caches; an unfiltered one replaces them")
+    func filteredDiscoveryJoinsTheCaches() async throws {
         let radio = VirtualRadio()
         let identifier = UUID()
-        _ = await radio.register(Self.device(identifier: identifier, name: "two", services: Self.twoServices))
+        let handle = await radio.register(Self.device(identifier: identifier, name: "two", services: Self.twoServices))
         let queue = DispatchSerialQueue(label: "VirtualRadioTests.replace")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         let remote = try await Self.discoveredRemote(radio: radio, backend: backend, queue: queue, identifier: identifier)
@@ -1080,27 +1081,45 @@ struct VirtualRadioTests {
         #expect(await Self.onQueue(queue) { Set(remote.discoveredServices) } == [Self.service, Self.batteryService])
         #expect(await Self.onQueue(queue) { Set(remote.discoveredCharacteristics(for: Self.service)) } == [Self.measurement, Self.control])
 
-        // A discovery narrowed to one service leaves exactly that one discovered — the answer
-        // is the cache, not an addition to it, which is what `LinkPeripheral` does with the
-        // same answer arriving over the link.
-        await Self.onQueue(queue) { remote.discoverServices([Self.batteryService]) }
-        await waitFor { await Self.onQueue(queue) { !remote.isDiscovered(Self.service) } }
-        #expect(await Self.onQueue(queue) { remote.discoveredServices } == [Self.batteryService])
-        // And the heart rate's characteristics went with it.
-        #expect(await Self.onQueue(queue) { remote.discoveredCharacteristics(for: Self.service).isEmpty })
-        #expect(await Self.onQueue(queue) { remote.properties(of: Self.measurement) } == [])
+        // Every service discovery this test issues is awaited on the completion it delivers,
+        // since one that changes nothing about the cache changes nothing to poll for either.
+        let discoveries = Mutex<Int>(0)
+        await Self.onQueue(queue) {
+            remote.eventHandler = { event in
+                if case .didDiscoverServices = event { discoveries.withLock { $0 += 1 } }
+            }
+        }
+        @Sendable func discover(_ services: [ServiceIdentifier]?) async {
+            let before = discoveries.withLock { $0 }
+            await Self.onQueue(queue) { remote.discoverServices(services) }
+            await waitFor { discoveries.withLock { $0 } > before }
+        }
 
-        // Narrowing a characteristic discovery replaces that service's entries the same way.
-        await Self.onQueue(queue) { remote.discoverServices(nil) }
-        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
-        await Self.onQueue(queue) { remote.discoverCharacteristics(nil, for: Self.service) }
-        await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
+        // A discovery narrowed to one service says nothing about any other, so it joins the
+        // cache rather than replacing it: `GATTCompatibility.discovery` defaults to
+        // `.filtered`, and pruning here left the heart rate's characteristics discovered on
+        // the client and gone on the provider — a read under them never answered.
+        await discover([Self.batteryService])
+        #expect(await Self.onQueue(queue) { Set(remote.discoveredServices) } == [Self.service, Self.batteryService])
+        #expect(await Self.onQueue(queue) { Set(remote.discoveredCharacteristics(for: Self.service)) } == [Self.measurement, Self.control])
+        #expect(await Self.onQueue(queue) { remote.properties(of: Self.measurement) } == [.read, .notify])
+
+        // Narrowing a *characteristic* discovery still replaces that service's entries: that
+        // answer does describe the whole of the one service it was asked about.
         await Self.onQueue(queue) { remote.discoverCharacteristics([Self.measurement], for: Self.service) }
         await waitFor { await Self.onQueue(queue) { !remote.isDiscovered(Self.control) } }
         #expect(await Self.onQueue(queue) { remote.discoveredCharacteristics(for: Self.service) } == [Self.measurement])
         // The battery service, discovered in the same sweep, is untouched: the replacement is
         // per service.
         #expect(await Self.onQueue(queue) { remote.isDiscovered(Self.batteryService) })
+
+        // An unfiltered discovery does describe the whole database, so a service that has
+        // since disappeared from it is no longer reported as discovered.
+        await handle.setServices([Self.twoServices[0]])
+        await discover(nil)
+        #expect(await Self.onQueue(queue) { remote.discoveredServices } == [Self.service])
+        #expect(await Self.onQueue(queue) { remote.discoveredCharacteristics(for: Self.batteryService).isEmpty })
+        #expect(await Self.onQueue(queue) { remote.properties(of: Self.batteryLevel) } == [])
     }
 
     @Test("Dropping a service from the database invalidates it on every connected remote")
@@ -1288,6 +1307,111 @@ struct FixtureDeviceReadTests {
         let handler = try makeHandler()
         #expect(await handler.read(Self.readable, offset: 6, from: Self.central) == .failure(.invalidOffset))
         #expect(await handler.read(Self.readable, offset: -1, from: Self.central) == .failure(.invalidOffset))
+    }
+}
+
+/// Per-service (filtered) discovery over the link, against a two-service fixture device.
+///
+/// `GATTCompatibility.discovery` defaults to `.filtered`, so `Central` asks for one service
+/// at a time — the shape a virtual device is overwhelmingly likely to be driven in, and the
+/// one that a discovery answer replacing the cache rather than joining it silently breaks.
+@Suite("Filtered service discovery over the link")
+struct FilteredDiscoveryTests {
+
+    /// A heart-rate service and a battery service on one device, so a per-service discovery
+    /// of either leaves the other one already discovered.
+    private static let fixtureJSON = """
+    { "devices": [ { "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8", "name": "Fixture Multi",
+      "advertisedServices": ["180D"], "services": [
+        { "uuid": "180D", "characteristics": [
+          { "uuid": "2A37", "properties": ["read", "notify"], "value": "AEg=" } ] },
+        { "uuid": "180F", "characteristics": [
+          { "uuid": "2A19", "properties": ["read"], "value": "ZA==" } ] } ] } ] }
+    """
+    private static let deviceID = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+    private static let heartRate = ServiceIdentifier(uuid: "180D")
+    private static let battery = ServiceIdentifier(uuid: "180F")
+    private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: heartRate)
+    private static let batteryLevel = CharacteristicIdentifier(uuid: "2A19", service: battery)
+
+    /// A provider serving the two-service fixture on a system-assigned loopback port.
+    private func makeProvider() async throws -> Provider {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.fixtures = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        return provider
+    }
+
+    /// A real `Central` on a `LinkCentral` dialing `provider`, already powered on and
+    /// connected to the fixture device.
+    private func connect(to provider: Provider, label: String) async throws -> (Central, LinkCentral, Peripheral) {
+        let queue = DispatchSerialQueue(label: label)
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            queue: queue,
+            clientName: "filtered",
+            retryInterval: .milliseconds(50)
+        )
+        let central = Central(backend: link, queue: queue)
+        await waitFor(timeout: .seconds(10)) { central.state == .poweredOn }
+        var found: Discovery?
+        for try await event in await central.scan(services: [Self.heartRate], timeout: .seconds(10)) {
+            if case .discovered(let discovery) = event {
+                found = discovery
+                break
+            }
+        }
+        let discovered = try #require(found)
+        let peripheral = try await central.connect(discovered.peripheral)
+        return (central, link, peripheral)
+    }
+
+    @Test("Reading under a second service leaves the first service's characteristics readable")
+    func filteredDiscoveryKeepsTheEarlierService() async throws {
+        let provider = try await makeProvider()
+        let (_, link, peripheral) = try await connect(to: provider, label: "filtered.read")
+
+        let first: Data = try await bounded("read A") { try await peripheral.read(from: Self.measurement) }
+        #expect(first == Data([0, 0x48]))
+
+        // Discovering the battery service must not evict the heart rate service — or anything
+        // discovered beneath it — from either half of the seam.
+        let level: Data = try await bounded("read B") { try await peripheral.read(from: Self.batteryLevel) }
+        #expect(level == Data([0x64]))
+
+        // The read that used to time out: `Central` re-discovers the service (cheap) but
+        // skips characteristic discovery, because its client-side cache never lost the
+        // characteristic — so the read reaches a provider that had pruned it and is dropped.
+        let again: Data = try await bounded("read A again") { try await peripheral.read(from: Self.measurement) }
+        #expect(again == Data([0, 0x48]))
+
+        link.shutdown()
+        await provider.stop()
+    }
+
+    @Test("Subscribing under a service discovered before a second one still arms")
+    func filteredDiscoveryKeepsTheEarlierServiceSubscribable() async throws {
+        let provider = try await makeProvider()
+        let (_, link, peripheral) = try await connect(to: provider, label: "filtered.notify")
+
+        _ = try await bounded("read A") { try await peripheral.read(from: Self.measurement) as Data }
+        _ = try await bounded("read B") { try await peripheral.read(from: Self.batteryLevel) as Data }
+
+        let notifications: AsyncThrowingStream<Data, Error> = peripheral.notifications(for: Self.measurement)
+        let armed = Task { () -> Data? in
+            for try await value in notifications { return value }
+            return nil
+        }
+        // The radio's own subscription table is the state the push consults, so it stands in
+        // for the "armed" signal `Peripheral` does not publish.
+        await waitFor(timeout: .seconds(10)) { await provider.radio.isSubscribed(characteristic: Self.measurement) }
+        #expect(await provider.radio.isSubscribed(characteristic: Self.measurement))
+
+        armed.cancel()
+        link.shutdown()
+        await provider.stop()
     }
 }
 #endif
