@@ -11,16 +11,16 @@ import Testing
 struct LinkFramingTests {
 
     @Test("Encodes codec byte, big-endian length, payload")
-    func encodeLayout() {
-        let frame = LinkFraming.encodeFrame(codec: .json, payload: Data([9, 8, 7]))
+    func encodeLayout() throws {
+        let frame = try LinkFraming.encodeFrame(codec: .json, payload: Data([9, 8, 7]))
         #expect(Array(frame) == [2, 0, 0, 0, 3, 9, 8, 7])
     }
 
     @Test("Decodes several complete frames and leaves a partial tail")
     func decodeMultiple() throws {
-        var buffer = LinkFraming.encodeFrame(codec: .binaryPropertyList, payload: Data([1]))
-        buffer += LinkFraming.encodeFrame(codec: .json, payload: Data([2, 2]))
-        let partial = LinkFraming.encodeFrame(codec: .json, payload: Data([3, 3, 3]))
+        var buffer = try LinkFraming.encodeFrame(codec: .binaryPropertyList, payload: Data([1]))
+        buffer += try LinkFraming.encodeFrame(codec: .json, payload: Data([2, 2]))
+        let partial = try LinkFraming.encodeFrame(codec: .json, payload: Data([3, 3, 3]))
         buffer += partial.prefix(6)
 
         let frames = try LinkFraming.decodeFrames(from: &buffer)
@@ -40,7 +40,7 @@ struct LinkFramingTests {
 
     @Test("Empty payload is a valid frame")
     func emptyPayload() throws {
-        var buffer = LinkFraming.encodeFrame(codec: .json, payload: Data())
+        var buffer = try LinkFraming.encodeFrame(codec: .json, payload: Data())
         let frames = try LinkFraming.decodeFrames(from: &buffer)
         #expect(frames.count == 1)
         #expect(frames[0].payload.isEmpty)
@@ -76,11 +76,22 @@ struct LinkFramingTests {
         #expect(oversized.count == LinkFraming.headerLength)
 
         // And the cap itself is a legal length, not an off-by-one refusal.
-        var atCap = LinkFraming.encodeFrame(codec: .json, payload: Data(repeating: 0x5A, count: cap))
+        var atCap = try LinkFraming.encodeFrame(codec: .json, payload: Data(repeating: 0x5A, count: cap))
         let frames = try LinkFraming.decodeFrames(from: &atCap)
         #expect(frames.count == 1)
         #expect(frames[0].payload.count == cap)
         #expect(atCap.isEmpty)
+    }
+
+    @Test("A payload past the cap is refused before it can be framed")
+    func encodingRefusesAnOversizedPayload() {
+        // The encoder's own bound, and the one `LinkConnection.send(_:)` fails a connection
+        // on: a frame this end cannot legally send is never written, and the length is never
+        // converted to the `UInt32` the header carries.
+        let oversized = Data(repeating: 0x5A, count: LinkFraming.maximumPayloadLength + 1)
+        #expect(throws: LinkFramingError.payloadTooLarge(UInt32(LinkFraming.maximumPayloadLength + 1))) {
+            try LinkFraming.encodeFrame(codec: .json, payload: oversized)
+        }
     }
 
     @Test("A declared length above Int32.max is rejected, never converted")
@@ -103,12 +114,12 @@ struct LinkFramingTests {
         let count = 10_000
         var buffer = Data()
         for index in 0..<count {
-            buffer += LinkFraming.encodeFrame(
+            buffer += try LinkFraming.encodeFrame(
                 codec: index.isMultiple(of: 2) ? .json : .binaryPropertyList,
                 payload: Data([UInt8(index & 0xFF), UInt8((index >> 8) & 0xFF)])
             )
         }
-        let trailing = LinkFraming.encodeFrame(codec: .json, payload: Data([1, 2, 3]))
+        let trailing = try LinkFraming.encodeFrame(codec: .json, payload: Data([1, 2, 3]))
         buffer += trailing.prefix(4)
 
         let started = ContinuousClock.now

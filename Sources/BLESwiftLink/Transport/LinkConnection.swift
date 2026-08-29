@@ -5,6 +5,7 @@
 
 import Dispatch
 import Foundation
+import Logging
 import Network
 import Synchronization
 
@@ -48,6 +49,11 @@ public final class LinkConnection: Sendable {
     /// Held across the whole of ``send(_:)`` so frames reach the socket in call order. Separate
     /// from ``storage`` so a send never blocks a state read.
     private struct SendGate {}
+
+    /// Where a message this end refused to frame is reported. Nothing else in the transport
+    /// logs: a send that fails locally is the one outcome with no wire event and no completion
+    /// of its own, and the size that caused it is what a caller needs to see.
+    private static let logger = Logger(label: "BLESwiftLink.LinkConnection")
 
     private let connection: NWConnection
     private let codec: LinkCodec
@@ -119,6 +125,12 @@ public final class LinkConnection: Sendable {
     ///
     /// Messages sent while the connection is not ``State/ready`` are dropped silently: the link
     /// is a best-effort transport and every caller already handles a dropped link.
+    ///
+    /// A message whose encoded payload is past ``LinkFraming/maximumPayloadLength`` is a
+    /// different matter: nothing is written, and this end fails with
+    /// ``LinkFramingError/payloadTooLarge(_:)``. The alternative was to write a frame whose
+    /// declared length the peer refuses as a protocol violation, which drops the link anyway —
+    /// from the far end, with no local record of what caused it. Failing here logs the size.
     public func send(_ message: LinkMessage) {
         let encodeFailure: (any Error)? = sendGate.withLock { _ in
             let isReady = storage.withLock { storage -> Bool in
@@ -127,16 +139,23 @@ public final class LinkConnection: Sendable {
             }
             guard isReady else { return nil }
             do {
-                let frame = LinkFraming.encodeFrame(codec: codec, payload: try codec.encode(message))
+                let frame = try LinkFraming.encodeFrame(codec: codec, payload: try codec.encode(message))
                 connection.send(content: frame, completion: .contentProcessed { _ in })
                 return nil
             } catch {
                 return error
             }
         }
-        if let encodeFailure {
-            fail(with: encodeFailure)
+        guard let encodeFailure else { return }
+        if case LinkFramingError.payloadTooLarge(let size) = encodeFailure {
+            Self.logger.error(
+                """
+                Refusing to send a \(size)-byte payload: the frame cap is \
+                \(LinkFraming.maximumPayloadLength) bytes. Failing the connection.
+                """
+            )
         }
+        fail(with: encodeFailure)
     }
 
     /// Closes the connection. Idempotent; the state becomes ``State/cancelled`` unless the

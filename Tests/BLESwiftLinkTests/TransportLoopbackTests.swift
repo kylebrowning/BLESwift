@@ -72,6 +72,48 @@ struct TransportLoopbackTests {
         client.cancel()
     }
 
+    @Test("A message past the frame cap fails the connection without sending anything")
+    func oversizedMessageFailsLocally() async throws {
+        let listener = try await makeListener()
+        defer { listener.cancel() }
+        let serverReceived = Mutex<[LinkMessage]>([])
+        // Held: the listener does not retain what it accepts, and a server side that went away
+        // would read as "nothing was sent" whatever the client did.
+        let serverSide = Mutex<LinkConnection?>(nil)
+        listener.onConnection = { connection in
+            serverSide.withLock { $0 = connection }
+            connection.onMessage = { message in serverReceived.withLock { $0.append(message) } }
+        }
+
+        let client = LinkConnection.connect(
+            to: LinkEndpoint(host: "127.0.0.1", port: listener.port),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "client")
+        )
+        client.start()
+        await waitFor { if case .ready = client.state { return true }; return false }
+
+        // A small message first: the link works, so what follows is refused for its size and
+        // not because nothing was ever getting through.
+        client.send(.centralRequest(.stopScan))
+        await waitFor(timeout: .seconds(5)) { serverReceived.withLock { $0.count } == 1 }
+
+        let oversized = LinkMessage.centralRequest(.l2capData(
+            channel: 1,
+            data: Data(repeating: 0x5A, count: LinkFraming.maximumPayloadLength + 1)
+        ))
+        client.send(oversized)
+
+        await waitFor(timeout: .seconds(5)) { client.state.isTerminal }
+        guard case .failed(let error) = client.state else {
+            Issue.record("expected .failed, got \(client.state)")
+            return
+        }
+        #expect(error.domain == "BLESwiftLink.LinkFramingError")
+        // Nothing of it reached the wire: the server saw the small message and no more.
+        #expect(serverReceived.withLock { $0 } == [.centralRequest(.stopScan)])
+    }
+
     @Test("Server cancel is observed by the client as a state change")
     func serverClose() async throws {
         let listener = try await makeListener()

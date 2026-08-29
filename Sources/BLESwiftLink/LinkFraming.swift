@@ -5,15 +5,16 @@
 
 import Foundation
 
-/// Errors from ``LinkFraming/decodeFrames(from:)``. Either one means the stream is corrupt;
-/// the connection must be closed.
+/// Errors from ``LinkFraming/decodeFrames(from:)`` and ``LinkFraming/encodeFrame(codec:payload:)``.
+/// Either one means the connection cannot carry what it was asked to and must be closed.
 public enum LinkFramingError: Error, Equatable {
     /// The codec byte at the front of a frame did not match any ``LinkCodec`` case.
     case unknownCodec(UInt8)
-    /// The frame's declared payload length exceeded ``LinkFraming/maximumPayloadLength``.
-    /// Carried as the `UInt32` read off the wire: a declared length is compared — and
-    /// reported — before any conversion to `Int`, which would trap on a 32-bit `Int`
-    /// platform such as watchOS's arm64_32.
+    /// A payload length exceeded ``LinkFraming/maximumPayloadLength`` — declared by an
+    /// inbound frame's header, or reached by an outbound payload this end encoded.
+    /// Carried as a `UInt32`: an inbound length is compared — and reported — before any
+    /// conversion to `Int`, which would trap on a 32-bit `Int` platform such as watchOS's
+    /// arm64_32, and an outbound length is clamped into one for the same reason.
     case payloadTooLarge(UInt32)
 }
 
@@ -42,7 +43,16 @@ public enum LinkFraming {
     public static let maximumPayloadLength = 1024 * 1024
 
     /// Builds one frame.
-    public static func encodeFrame(codec: LinkCodec, payload: Data) -> Data {
+    ///
+    /// - Throws: ``LinkFramingError/payloadTooLarge(_:)`` for a payload past
+    ///   ``maximumPayloadLength``. The cap is checked here rather than left to the peer's
+    ///   decoder: a frame this end cannot legally send is one the far end would answer by
+    ///   closing the stream as corrupt, and `UInt32(payload.count)` would trap on a payload
+    ///   past 4 GiB before it ever reached the wire.
+    public static func encodeFrame(codec: LinkCodec, payload: Data) throws -> Data {
+        guard payload.count <= maximumPayloadLength else {
+            throw LinkFramingError.payloadTooLarge(UInt32(clamping: payload.count))
+        }
         var frame = Data(capacity: headerLength + payload.count)
         frame.append(codec.rawValue)
         let length = UInt32(payload.count).bigEndian
