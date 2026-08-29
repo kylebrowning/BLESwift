@@ -291,7 +291,7 @@ struct CompositeBackendTests {
         #expect(added.withLock { $0.first ?? nil } == failure)
     }
 
-    @Test("startAdvertising emits exactly one didStartAdvertising; isAdvertising is allSatisfy")
+    @Test("startAdvertising emits exactly one didStartAdvertising; isAdvertising follows the children")
     func startAdvertisingEmitsOnce() async {
         let queue = DispatchSerialQueue(label: "CompositeBackendTests.advertise")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
@@ -320,6 +320,37 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { composite.isAdvertising } == false)
         #expect(await onQueue(queue) { first.stopAdvertisingCallCount } == 1)
         #expect(await onQueue(queue) { second.stopAdvertisingCallCount } == 1)
+    }
+
+    @Test("isAdvertising ignores a child that is not powered on")
+    func isAdvertisingIgnoresAnOfflineChild() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.advertise.offline")
+        let online = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let offline = FakePeripheralManager(queue: queue, state: .poweredOff)
+        let composite = CompositePeripheralManager(backends: [online, offline], queue: queue)
+
+        let started = Mutex<[NSError?]>([])
+        await onQueue(queue) {
+            composite.eventHandler = { event in
+                if case .didStartAdvertising(let error) = event { started.withLock { $0.append(error) } }
+            }
+        }
+
+        await onQueue(queue) {
+            composite.startAdvertising(PeripheralAdvertisement(localName: "Composite", serviceUUIDs: [Self.heartRate]))
+        }
+        await waitFor { started.withLock { !$0.isEmpty } }
+        _ = await onQueue(queue) { true }
+
+        // The powered-off child was skipped, never asked to advertise, and could not report —
+        // so the composite is advertising exactly as much as it can be.
+        #expect(await onQueue(queue) { offline.isAdvertising } == false)
+        #expect(await onQueue(queue) { online.isAdvertising })
+        #expect(await onQueue(queue) { composite.isAdvertising })
+
+        // And a stop still takes it back down: nothing online is advertising any more.
+        await onQueue(queue) { composite.stopAdvertising() }
+        #expect(await onQueue(queue) { composite.isAdvertising } == false)
     }
 
     @Test("Every child is offered every push, and a refusal does not stop the fan-out")

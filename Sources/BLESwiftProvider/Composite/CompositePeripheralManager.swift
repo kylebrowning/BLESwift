@@ -454,11 +454,19 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         computedState
     }
 
-    /// `true` only when *every* child is advertising — the composite advertises as a whole
-    /// or not at all. Vacuously `true` with no children.
+    /// `true` when any *powered-on* child is advertising — the same children
+    /// ``startAdvertising(_:)`` fans out to. `false` with no children, and `false` while every
+    /// child is off.
+    ///
+    /// Read over every child instead, this reported `false` for exactly the arrangement
+    /// `--passthrough` is normally in: a virtual child happily advertising beside a real
+    /// `CBPeripheralManager` whose Bluetooth is turned off. That child is skipped by
+    /// ``startAdvertising(_:)`` — it could never report a completion — and picks the
+    /// advertisement up when it powers on, so counting it as not-advertising made the
+    /// composite deny an advertisement it really is broadcasting.
     public var isAdvertising: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
-        return backends.allSatisfy(\.isAdvertising)
+        return onlineIndices.contains { backends[$0].isAdvertising }
     }
 
     /// Starts advertising on every powered-on child. A single `didStartAdvertising` follows
