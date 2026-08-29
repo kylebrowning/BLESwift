@@ -57,5 +57,11 @@ public enum HostWireEvent: Codable, Sendable, Equatable {
     case didUnsubscribe(central: WireSubscriber, characteristic: WireCharacteristicRef)
 
     /// The `updateValue` request tagged with `sequence` was delivered.
+    ///
+    /// The client matches `sequence` against the pushes it still has outstanding and reopens
+    /// the window only for one it recognizes: a sequence it never sent, one it has already
+    /// been acknowledged for, or one belonging to a session that has since dropped is
+    /// ignored, so a late or duplicated acknowledgement cannot open the *next* session's
+    /// window early.
     case updateValueDelivered(sequence: UInt64)
 }

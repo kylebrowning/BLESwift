@@ -62,9 +62,12 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// The sequence number the next ``updateValue(_:for:onSubscribed:)`` is tagged with.
     nonisolated(unsafe) private var _nextSequence: UInt64 = 0
 
-    /// How many pushes have been sent but not yet acknowledged — the occupied part of the
-    /// window.
-    nonisolated(unsafe) private var _outstandingUpdates = 0
+    /// The sequences of the pushes this manager has sent and not yet been acknowledged for,
+    /// oldest first — the occupied part of the window. An array rather than a `Set`, for
+    /// `LinkPeripheral`'s reasons: it never holds more than a window's worth, order makes a
+    /// stale acknowledgement obvious in a debugger, and a linear scan of that many elements is
+    /// cheaper than hashing.
+    nonisolated(unsafe) private var _outstandingUpdates: [UInt64] = []
 
     /// Whether the window was full when the link dropped, so the owning `PeripheralHost` is
     /// waiting on a `readyToUpdateSubscribers` that the dead session's acknowledgements can
@@ -225,10 +228,10 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         onSubscribed centrals: [Subscriber]?
     ) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard _outstandingUpdates < LinkFlowControl.updateValueWindow else { return false }
+        guard _outstandingUpdates.count < LinkFlowControl.updateValueWindow else { return false }
         let sequence = _nextSequence
         _nextSequence &+= 1
-        _outstandingUpdates += 1
+        _outstandingUpdates.append(sequence)
         send(.updateValue(
             sequence: sequence,
             value: value,
@@ -265,8 +268,8 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         _isAdvertising = false
         _isAwaitingReconnect = true
-        if _outstandingUpdates >= LinkFlowControl.updateValueWindow { _wasBlockedAtDrop = true }
-        _outstandingUpdates = 0
+        if _outstandingUpdates.count >= LinkFlowControl.updateValueWindow { _wasBlockedAtDrop = true }
+        _outstandingUpdates.removeAll()
         guard _radioState != .unsupported else { return }
         _radioState = .unsupported
         deliver(.didUpdateState(.unsupported))
@@ -307,9 +310,9 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
                 // here too. A host blocked by either can push again, but only a
                 // `readyToUpdateSubscribers` will tell it so.
                 _isAwaitingReconnect = false
-                let wasBlocked = _outstandingUpdates >= LinkFlowControl.updateValueWindow || _wasBlockedAtDrop
+                let wasBlocked = _outstandingUpdates.count >= LinkFlowControl.updateValueWindow || _wasBlockedAtDrop
                 _wasBlockedAtDrop = false
-                _outstandingUpdates = 0
+                _outstandingUpdates.removeAll()
                 if wasBlocked { deliver(.readyToUpdateSubscribers) }
             }
 
@@ -332,13 +335,21 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         case .didUnsubscribe(let central, let characteristic):
             deliver(.didUnsubscribe(central: central.subscriber, characteristic: try characteristic.identifier))
 
-        case .updateValueDelivered:
+        case .updateValueDelivered(let sequence):
             // Consumed, never forwarded: `readyToUpdateSubscribers` is synthesized here from
             // the acknowledgement that reopens a full window, exactly as `LinkCentral`
             // synthesizes write-without-response readiness.
-            let wasFull = _outstandingUpdates >= LinkFlowControl.updateValueWindow
-            _outstandingUpdates = max(0, _outstandingUpdates - 1)
-            if wasFull, _outstandingUpdates < LinkFlowControl.updateValueWindow {
+            //
+            // Matched against the sequences still outstanding, exactly as `LinkPeripheral`
+            // matches a write acknowledgement. A sequence this manager never sent, one it has
+            // already been acknowledged for, or one from before a drop — the drop and the
+            // reconnect both empty the set, and the dead session's acknowledgements may still
+            // be on the wire when they do — is ignored, rather than crediting the window the
+            // *next* session is filling.
+            guard let index = _outstandingUpdates.firstIndex(of: sequence) else { return }
+            let wasFull = _outstandingUpdates.count >= LinkFlowControl.updateValueWindow
+            _outstandingUpdates.remove(at: index)
+            if wasFull, _outstandingUpdates.count < LinkFlowControl.updateValueWindow {
                 deliver(.readyToUpdateSubscribers)
             }
         }
