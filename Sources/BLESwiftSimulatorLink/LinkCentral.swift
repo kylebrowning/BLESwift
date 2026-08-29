@@ -447,6 +447,12 @@ public final class LinkCentral: CentralManaging, Sendable {
                 kept.append(identifier)
                 continue
             }
+            // Detached before it goes, exactly as `CentralSession` and
+            // `VirtualCentralBackend` detach the remotes their own caps evict: an owner still
+            // holding this mirror keeps its handler alive with it, and the mirror is no longer
+            // this central's to deliver through — a later event for the same identifier
+            // reaches the fresh mirror minted in its place, and this one must stay silent.
+            candidate.detachEventHandler()
             _peripherals.removeValue(forKey: identifier)
             overflow -= 1
         }

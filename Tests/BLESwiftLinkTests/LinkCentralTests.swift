@@ -631,6 +631,34 @@ struct LinkCentralTests {
         #expect(survived == false)
     }
 
+    @Test("An evicted mirror is detached from its event handler before it is forgotten")
+    func peripheralCapDetachesTheMirrorItEvicts() async throws {
+        let queue = DispatchSerialQueue(label: "LinkCentralTests.evictDetach")
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: try closedPort()),
+            queue: queue,
+            clientName: "test",
+            retryInterval: .seconds(60),
+            maximumPeripherals: 1
+        )
+        defer { link.shutdown() }
+
+        let oldest = UUID()
+        let newest = UUID()
+        let detached = await onQueue(queue) { () -> Bool in
+            guard let first = link.retrievePeripherals(withIdentifiers: [oldest]).first as? LinkPeripheral else {
+                return false
+            }
+            // What `Central` installs on a mirror it is holding.
+            first.eventHandler = { _ in }
+            // One over the cap: the older, disconnected mirror is the one to go — and its
+            // owner may well still be holding it.
+            _ = link.retrievePeripherals(withIdentifiers: [newest])
+            return first.eventHandler == nil
+        }
+        #expect(detached)
+    }
+
     @Test("A table full of busy mirrors cannot make the cap evict the mirror it is minting")
     func peripheralCapNeverEvictsTheMirrorItJustCreated() async throws {
         let queue = DispatchSerialQueue(label: "LinkCentralTests.reserve")
