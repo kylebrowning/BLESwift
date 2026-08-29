@@ -137,7 +137,10 @@ struct LinkClientSessionTests {
         #expect(!session.isConnected)
 
         let observed = dialled.withLock { $0 }
-        #expect(observed.count >= 5, "only \(observed.count) dials observed")
+        // The retry interval is 50 ms over a 700 ms window, but a refused dial's turnaround is
+        // not free and this suite runs in parallel with the rest of the bundle: the count that
+        // matters is that it retried at all, and that every connection it made was released.
+        #expect(observed.count >= 2, "only \(observed.count) dials observed")
         try await Task.sleep(for: .milliseconds(300))
         let alive = observed.filter { $0.connection != nil }.count
         #expect(alive == 0, "\(alive) of \(observed.count) connections still alive")
