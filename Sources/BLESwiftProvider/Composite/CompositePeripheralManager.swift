@@ -47,7 +47,10 @@ import Foundation
 /// So every value reaches every such child exactly once, in the order it was pushed, and
 /// nothing is ever inferred from a payload or from the *position* of a push in the caller's
 /// sequence. The composite refuses a push — closing its window — only when some powered-on
-/// child's FIFO is full. See ``updateValue(_:for:onSubscribed:)``.
+/// child that has *proved* it serves pushes has a full FIFO. A child that has never taken a
+/// push and never raised a readiness of its own — a real `CBPeripheralManager` refusing for a
+/// characteristic with no live handle — could never drain, so it never closes the window; its
+/// FIFO is capped instead, oldest first. See ``updateValue(_:for:onSubscribed:)``.
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``CompositeCentral``, including the requirement that **every child be confined to the
@@ -91,7 +94,9 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
 
     /// What each child still owes its subscribers, oldest first — one FIFO per child, indexed
     /// like ``backends``. A child's queue grows when it refuses a push and drains, in order,
-    /// on its `readyToUpdateSubscribers`.
+    /// on its `readyToUpdateSubscribers`. Bounded at ``queueLimit``: a *proven* child's FIFO
+    /// stops growing because the composite's window closes on it, an unproven child's because
+    /// its oldest entry is dropped. See ``_proven``.
     nonisolated(unsafe) private var _queues: [[PendingPush]] = []
 
     /// Each child's last observed ``BLESwiftCore/CentralState``, indexed like ``backends`` —
@@ -121,6 +126,24 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// The children already reported as skipped for being powered off — the skip is logged
     /// once per child, not once per operation.
     nonisolated(unsafe) private var _loggedOffline: Set<Int> = []
+
+    /// Whether each child has *proved*, in its current power cycle, that its refusals are real
+    /// back-pressure: it has either taken a push or raised a `readyToUpdateSubscribers` of its
+    /// own. Indexed like ``backends``; reset by ``powerDown(child:)`` and ``powerUp(child:)``.
+    ///
+    /// The per-child FIFO rests on "a child that returned `false` will raise
+    /// `readyToUpdateSubscribers`", and a real `CBPeripheralManager` breaks that promise: it
+    /// refuses a push for a characteristic with no live handle — never added, or removed —
+    /// without reaching CoreBluetooth at all, and no readiness ever follows. Nothing drains
+    /// that child's FIFO, so counting it in ``isAnyQueueFull`` latched the composite's window
+    /// shut for the life of the session, killing notifications for *every* characteristic on
+    /// *every* child. A child that has never taken anything therefore never closes the window;
+    /// see ``updateValue(_:for:onSubscribed:)``.
+    nonisolated(unsafe) private var _proven: [Bool] = []
+
+    /// The children already reported as dropping queued pushes, so an unproven child that
+    /// refuses forever costs one line per power cycle rather than one per push.
+    nonisolated(unsafe) private var _loggedDropping: Set<Int> = []
 
     /// Whether the composite has told its host the window is closed and owes it one
     /// `readyToUpdateSubscribers` — set by the `false` that closed it, cleared by the single
@@ -175,6 +198,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         self.queue = queue
         self.log = log
         self._queues = Array(repeating: [], count: backends.count)
+        self._proven = Array(repeating: false, count: backends.count)
         self._swallowedAdds = Array(repeating: 0, count: backends.count)
         self._swallowedAdvertisements = Array(repeating: 0, count: backends.count)
         queue.sync { attachChildren() }
@@ -200,6 +224,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         self.queue = queue
         self.log = log
         self._queues = Array(repeating: [], count: backends.count)
+        self._proven = Array(repeating: false, count: backends.count)
         self._swallowedAdds = Array(repeating: 0, count: backends.count)
         self._swallowedAdvertisements = Array(repeating: 0, count: backends.count)
         attachChildren()
@@ -297,6 +322,10 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     private func powerDown(child index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         _queues[index].removeAll()
+        // A radio that went away proved nothing about the one that comes back: the handles it
+        // was serving pushes over are gone with it.
+        _proven[index] = false
+        _loggedDropping.remove(index)
 
         for (identifier, batches) in _pendingAdds {
             var remaining: [Pending] = []
@@ -347,6 +376,9 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     private func powerUp(child index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         _loggedOffline.remove(index)
+        // A fresh power cycle: this child has proved nothing yet.
+        _proven[index] = false
+        _loggedDropping.remove(index)
         for service in _services {
             _swallowedAdds[index] += 1
             backends[index].add(service)
@@ -379,6 +411,9 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// every other event is. Must be called on ``queue``.
     private func resume(child index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
+        // A readiness of its own is the child proving it serves pushes at all, whether or not
+        // it has taken one yet.
+        markProven(index)
         drain(child: index)
         guard _windowClosed else {
             _eventHandler?(.readyToUpdateSubscribers)
@@ -399,16 +434,36 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
             guard backends[index].updateValue(next.value, for: next.characteristic, onSubscribed: next.subscribers) else {
                 return
             }
+            markProven(index)
             _queues[index].removeFirst()
         }
     }
 
-    /// Whether any powered-on child has fallen a whole ``queueLimit`` behind. A child that is
-    /// not powered on is never queued for, and so never closes the window. Must be called on
-    /// ``queue``.
+    /// Whether any powered-on, *proven* child has fallen a whole ``queueLimit`` behind. A child
+    /// that is not powered on is never queued for, and so never closes the window; neither does
+    /// one that has never taken a push or raised a readiness of its own, whose FIFO is capped
+    /// by ``updateValue(_:for:onSubscribed:)`` instead. Must be called on ``queue``.
     private var isAnyQueueFull: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
-        return _queues.indices.contains { isOnline($0) && _queues[$0].count >= Self.queueLimit }
+        return _queues.indices.contains { isOnline($0) && _proven[$0] && _queues[$0].count >= Self.queueLimit }
+    }
+
+    /// How many pushes child `index` still owes its subscribers.
+    ///
+    /// Not API: it exists so a test can assert that an unproven child's FIFO stays bounded
+    /// rather than growing without limit, and that a proven one's drains. Must be called on
+    /// ``queue``.
+    package func queuedCountForTesting(child index: Int) -> Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _queues[index].count
+    }
+
+    /// Records that child `index` really is serving pushes — it took one, or raised a
+    /// `readyToUpdateSubscribers` of its own — so its refusals from here on are back-pressure
+    /// the composite may close its window for. Must be called on ``queue``.
+    private func markProven(_ index: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _proven[index] = true
     }
 
     /// Settles one child's `didAddService`, emitting the aggregate once the last child owing
@@ -600,6 +655,18 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// here compares payloads or infers a retry. A child that is not powered on refuses every
     /// push and can never drain, so it is skipped outright rather than queued for.
     ///
+    /// **A child that has never taken anything cannot close the window.** The FIFO rests on
+    /// CoreBluetooth's promise that a refusal is followed by a `readyToUpdateSubscribers`, and
+    /// a real `CBPeripheralManager` breaks it for a characteristic with no live handle: it
+    /// refuses without reaching CoreBluetooth at all, and no readiness ever follows. Such a
+    /// child is queued for exactly as any other is, but until it has proved itself — by taking
+    /// a push, or raising a readiness of its own — its FIFO is not counted by
+    /// ``isAnyQueueFull``, and the entry that would take it past ``queueLimit`` displaces its
+    /// oldest instead. So one dead handle costs that child the pushes it could not take,
+    /// rather than latching the composite's window shut for every characteristic on every
+    /// child for the life of the session, and the child still catches up in order if it comes
+    /// to life. Powering down and back up clears the flag: a fresh radio has proved nothing.
+    ///
     /// **With no powered-on child the push is refused.** Every child would be skipped, so the
     /// value would reach no radio at all — and `true` says it was delivered or queued, which
     /// is the same lie ``add(_:)`` and ``startAdvertising(_:)`` refuse to tell by completing
@@ -632,9 +699,27 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
             }
             if _queues[index].isEmpty,
                backends[index].updateValue(value, for: characteristic, onSubscribed: centrals) {
+                markProven(index)
                 continue
             }
             _queues[index].append(pending)
+            guard _proven[index] else {
+                // A child that has never taken anything owes no readiness, so nothing may
+                // ever drain this FIFO. Keep the newest ``queueLimit`` pushes — so the child
+                // still catches up in order if it comes to life — and drop the oldest rather
+                // than growing without bound. One line per child per power cycle: which
+                // child, and on what, is the whole diagnosis.
+                if _queues[index].count > Self.queueLimit {
+                    _queues[index].removeFirst()
+                    if _loggedDropping.insert(index).inserted {
+                        log?(
+                            "composite child \(index) has taken no update on \(characteristic) and raised no "
+                                + "readiness; dropping its oldest queued update(s) rather than closing the window"
+                        )
+                    }
+                }
+                continue
+            }
             // Reported on the transition only: the push that fills a FIFO is the last one
             // this composite accepts until that child drains, so a child that never comes
             // back — the one case worth diagnosing — costs exactly one line, not one per

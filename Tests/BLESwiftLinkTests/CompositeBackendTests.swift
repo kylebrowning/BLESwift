@@ -492,6 +492,13 @@ struct CompositeBackendTests {
         let refusing = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [accepting, refusing], queue: queue)
 
+        // A live child with a real transmit queue: it raises a readiness of its own before it
+        // ever refuses, which is what tells the composite its later refusals are back-pressure
+        // and not a dead handle. Done before the counter below is installed, so the host hears
+        // only the readiness the window's reopening owes it.
+        refusing.simulateReadyToUpdate()
+        await onQueue(queue) {}
+
         let ready = Mutex<Int>(0)
         await onQueue(queue) {
             composite.eventHandler = { event in
@@ -539,6 +546,11 @@ struct CompositeBackendTests {
             log: { line in lines.withLock { $0.append(line) } }
         )
 
+        // A live child, as above: it raises a readiness of its own, so the composite counts
+        // its FIFO against the window.
+        refusing.simulateReadyToUpdate()
+        await onQueue(queue) {}
+
         // The second child refuses everything, permanently: nothing drains its FIFO.
         let window = LinkFlowControl.updateValueWindow
         await onQueue(queue) { refusing.scriptedUpdateValueReturns = Array(repeating: false, count: window + 8) }
@@ -559,6 +571,56 @@ struct CompositeBackendTests {
         let line = logged.first ?? ""
         #expect(line.contains("child 1"))
         #expect(line.contains(Self.measurement.uuidString))
+    }
+
+    @Test("A child that never takes a push cannot latch the composite's window shut")
+    func aChildWithADeadHandleNeverClosesTheWindow() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.deadHandle")
+        let healthy = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let dead = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let lines = Mutex<[String]>([])
+        let composite = CompositePeripheralManager(
+            backends: [healthy, dead],
+            queue: queue,
+            log: { line in lines.withLock { $0.append(line) } }
+        )
+        let ready = Mutex<Int>(0)
+        await onQueue(queue) {
+            composite.eventHandler = { event in
+                if case .readyToUpdateSubscribers = event { ready.withLock { $0 += 1 } }
+            }
+        }
+
+        // The real `CBPeripheralManager`'s dead-handle behavior: every push refused without
+        // reaching the radio, and no `readyToUpdateSubscribers` ever raised.
+        let window = LinkFlowControl.updateValueWindow
+        let pushes = window + 8
+        #expect(pushes >= 40)
+        await onQueue(queue) { dead.scriptedUpdateValueReturns = Array(repeating: false, count: pushes * 2) }
+        for index in 0..<pushes {
+            #expect(await onQueue(queue) {
+                composite.updateValue(Data([UInt8(index % 256)]), for: Self.measurement, onSubscribed: nil)
+            }, "push \(index) must not be refused on a child that has taken nothing")
+        }
+
+        // The healthy child got every one of them, and the window never closed.
+        #expect(await onQueue(queue) { healthy.updateValueCalls.count } == pushes)
+        #expect(await onQueue(queue) { healthy.updateValueCalls.map(\.value) } == (0..<pushes).map { Data([UInt8($0 % 256)]) })
+        #expect(ready.withLock { $0 } == 0)
+        // And the dead child's FIFO stayed bounded, holding the newest window of pushes.
+        #expect(await onQueue(queue) { composite.queuedCountForTesting(child: 1) } == window)
+        #expect(lines.withLock { $0.count } == 1)
+        #expect(lines.withLock { $0.first ?? "" }.contains("child 1"))
+
+        // It comes to life: the readiness proves it, its FIFO drains in order, and from here
+        // it is a child the composite will close its window for again.
+        await onQueue(queue) { dead.scriptedUpdateValueReturns = [] }
+        let before = await onQueue(queue) { dead.updateValueCalls.count }
+        dead.simulateReadyToUpdate()
+        await waitFor { ready.withLock { $0 } == 1 }
+        #expect(await onQueue(queue) { composite.queuedCountForTesting(child: 1) } == 0)
+        let drained = await onQueue(queue) { Array(dead.updateValueCalls.map(\.value).dropFirst(before)) }
+        #expect(drained == (8..<pushes).map { Data([UInt8($0 % 256)]) })
     }
 
     @Test("Concurrent pushes reach every child exactly once, in per-child order")

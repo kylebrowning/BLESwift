@@ -46,6 +46,11 @@ struct HostSessionLimitsTests {
             // fake re-offers a parked push every time the virtual backend reports itself
             // ready, so the script has to outlast those retries as well.
             fake.scriptedUpdateValueReturns = Array(repeating: false, count: 100_000)
+            // A live child with a real transmit queue, not one with a dead handle: the
+            // readiness it raises before any push is what tells the composite in front of it
+            // that its refusals are back-pressure, so its full FIFO closes the composite's
+            // window and the session's own queue is what grows from there.
+            fake.simulateReadyToUpdate()
             return fake
         }
         let provider = Provider(configuration: configuration)
