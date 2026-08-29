@@ -165,6 +165,53 @@ struct HostEndToEndTests {
         await provider.stop()
     }
 
+    @Test("A start behind a stopped start still reaches a linked central's scan")
+    func advertisingResumesAfterAStopBehindAStart() async throws {
+        let provider = try await makeProvider()
+        let port = await provider.port
+        let queue = DispatchSerialQueue(label: "host.e2e.restart")
+        let link = LinkPeripheralManager(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
+            queue: queue,
+            clientName: "restart-e2e",
+            retryInterval: .milliseconds(50)
+        )
+        let host = PeripheralHost(backend: link, queue: queue)
+        await waitFor(timeout: .seconds(5)) { host.state == .poweredOn }
+
+        let advertisement = PeripheralAdvertisement(localName: "Restarted Host", serviceUUIDs: [Self.heartRate])
+
+        // Start and stop on one queue turn, driven at the seam because a `PeripheralHost`
+        // awaits the completion the stop has to overtake. The provider applies both, in that
+        // order, and answers the start regardless: the device ends up silent.
+        await Self.onQueue(queue) {
+            link.startAdvertising(advertisement)
+            link.stopAdvertising()
+        }
+        // A barrier on the same ordered link: the provider queued this behind the start it
+        // has already answered, so the stray completion has been handled by the time it lands.
+        try await host.add(Self.service)
+        #expect(await Self.onQueue(queue) { link.isAdvertising } == false)
+
+        // The host asks again, and this time nothing is behind it. A start that is skipped
+        // here — because the cancelled one latched the flag — leaves the session silent for
+        // good, which is what the scan below reports.
+        try await host.startAdvertising(advertisement)
+
+        let (central, centralLink) = makeCentral(port: port, label: "host.e2e.restart.central")
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+        var found: Discovery?
+        for try await event in await central.scan(services: [Self.heartRate], timeout: .seconds(5)) {
+            if case .discovered(let discovery) = event { found = discovery; break }
+        }
+        #expect(try #require(found).advertisement.localName == "Restarted Host")
+
+        link.shutdown()
+        centralLink.shutdown()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
+    }
+
     @Test("The updateValue window closes after 32 unacknowledged pushes and reopens on the acknowledgement")
     func updateValueWindow() async throws {
         let provider = try await makeProvider()

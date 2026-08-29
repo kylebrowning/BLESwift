@@ -131,6 +131,61 @@ struct LinkPeripheralManagerTests {
         #expect(reads.withLock { $0 } == 0)
     }
 
+    @Test("A stop right behind a start leaves the manager reporting not advertising")
+    func stopBehindStartDoesNotLatchAdvertising() async throws {
+        let provider = try ScriptedHostProvider()
+        try await provider.start()
+        let queue = DispatchSerialQueue(label: "linkperipheralmanager.advertising")
+        let link = LinkPeripheralManager(
+            endpoint: provider.endpoint,
+            queue: queue,
+            clientName: "advertising",
+            codec: .json,
+            retryInterval: .milliseconds(50)
+        )
+        defer { provider.stop(); link.shutdown() }
+
+        let states = Mutex<[CentralState]>([])
+        let starts = Mutex<Int>(0)
+        await onQueue(queue) {
+            link.eventHandler = { event in
+                switch event {
+                case .didUpdateState(let state): states.withLock { $0.append(state) }
+                case .didStartAdvertising: starts.withLock { $0 += 1 }
+                default: break
+                }
+            }
+        }
+        await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .poweredOn } }
+
+        // Both calls on one queue turn — the interleaving a provider answers by applying the
+        // start and then the stop, with the start's completion already on its way back.
+        await onQueue(queue) {
+            link.startAdvertising(PeripheralAdvertisement(localName: "Latched", serviceUUIDs: [Self.service]))
+            link.stopAdvertising()
+        }
+        await waitFor(timeout: .seconds(5)) {
+            provider.requests.withLock { requests in
+                requests.contains { if case .stopAdvertising = $0 { return true }; return false }
+            }
+        }
+
+        // The completion of the start the stop cancelled. It is still reported to the host —
+        // a `startAdvertising` awaiting it must not hang — but it may not claim the radio.
+        provider.emit(.didStartAdvertising(error: nil))
+        await waitFor(timeout: .seconds(5)) { starts.withLock { $0 } == 1 }
+        #expect(starts.withLock { $0 } == 1)
+        #expect(await onQueue(queue) { link.isAdvertising } == false)
+
+        // A start with nothing behind it still claims it.
+        await onQueue(queue) {
+            link.startAdvertising(PeripheralAdvertisement(localName: "Latched", serviceUUIDs: [Self.service]))
+        }
+        provider.emit(.didStartAdvertising(error: nil))
+        await waitFor(timeout: .seconds(5)) { starts.withLock { $0 } == 2 }
+        #expect(await onQueue(queue) { link.isAdvertising })
+    }
+
     @Test("A stale update acknowledgement cannot open the next session's window")
     func staleUpdateAcknowledgementIsIgnored() async throws {
         let provider = try ScriptedHostProvider()

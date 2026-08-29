@@ -70,6 +70,23 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     nonisolated(unsafe) private var _didDeliverInitialState = false
     nonisolated(unsafe) private var _isAdvertising = false
 
+    /// How many ``startAdvertising(_:)`` requests are still outstanding: sent, not yet
+    /// answered by a `didStartAdvertising`, and not cancelled by a ``stopAdvertising()``
+    /// behind them.
+    ///
+    /// It exists because the provider answers a start it has already stopped again. A start
+    /// and a stop sent on one queue turn are applied in that order over there — leaving the
+    /// hosted device silent — but the start's completion is minted from inside the start and
+    /// arrives here *after* the stop was sent. Latching ``isAdvertising`` on for that
+    /// completion left this manager claiming a radio the provider had already quieted, and
+    /// `PeripheralHost.startAdvertising(_:)` early-returns on the flag, so the host could
+    /// never advertise again for the life of the session. A stop zeroes the count instead,
+    /// and a completion with no start behind it is delivered — a host awaiting one must not
+    /// hang — without claiming the radio. `VirtualPeripheralManagerBackend` answers the same
+    /// race by making both writes from its serial chain; a client that owns neither the radio
+    /// nor the ordering counts the starts it has outstanding.
+    nonisolated(unsafe) private var _outstandingStarts = 0
+
     /// The subscribers this manager has delivered a `didSubscribe` for and not yet a
     /// `didUnsubscribe`, per characteristic — the host's subscriber table, mirrored.
     ///
@@ -203,7 +220,10 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     }
 
     /// Whether the provider's host is currently advertising. `true` from a successful
-    /// `didStartAdvertising`, `false` from ``stopAdvertising()`` and from a dropped link.
+    /// `didStartAdvertising` for a start that is still outstanding, `false` from
+    /// ``stopAdvertising()`` and from a dropped link — both of which cancel every outstanding
+    /// start, so the completion of one the provider has already stopped again cannot latch
+    /// this back on. See `_outstandingStarts`.
     public var isAdvertising: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _isAdvertising
@@ -233,6 +253,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// `didStartAdvertising(error:)`.
     public func startAdvertising(_ advertisement: PeripheralAdvertisement) {
         dispatchPrecondition(condition: .onQueue(queue))
+        _outstandingStarts += 1
         send(.startAdvertising(
             localName: advertisement.localName,
             services: advertisement.serviceUUIDs.map(\.uuidString)
@@ -241,9 +262,14 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
 
     /// Asks the provider's host to stop advertising. Reports no completion of its own, so
     /// ``isAdvertising`` drops here rather than on an acknowledgement.
+    ///
+    /// It also cancels every start still outstanding: the provider applies this stop behind
+    /// them, so the completion any of them still owes describes a radio this call has since
+    /// quieted. See `_outstandingStarts`.
     public func stopAdvertising() {
         dispatchPrecondition(condition: .onQueue(queue))
         _isAdvertising = false
+        _outstandingStarts = 0
         send(.stopAdvertising)
     }
 
@@ -322,6 +348,9 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     private func handleLinkDropped() {
         dispatchPrecondition(condition: .onQueue(queue))
         _isAdvertising = false
+        // The provider that owed those completions is gone, and one still on the wire from it
+        // may yet be decoded — it describes a radio that no longer exists either way.
+        _outstandingStarts = 0
         _isAwaitingReconnect = true
         // Before the state change, so a host draining its events sees its subscribers leave
         // and only then hears the radio is gone.
@@ -381,7 +410,13 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
             }
 
         case .didStartAdvertising(let error):
-            if error == nil { _isAdvertising = true }
+            // Only a start no `stopAdvertising()` (or link drop) has cancelled may claim the
+            // radio; the completion itself is always reported, cancelled or not, so a host
+            // awaiting one is never left hanging. See `_outstandingStarts`.
+            if _outstandingStarts > 0 {
+                _outstandingStarts -= 1
+                if error == nil { _isAdvertising = true }
+            }
             deliver(.didStartAdvertising(error: error?.nsError))
 
         case .didAddService(let service, let error):
