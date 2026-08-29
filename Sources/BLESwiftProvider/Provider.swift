@@ -269,13 +269,8 @@ public actor Provider {
     private func makeCentralBackend(queue: DispatchSerialQueue) -> any CentralManaging {
         let virtual = queue.sync { VirtualCentralBackend(radio: radio, queue: queue) }
         guard configuration.passthrough else { return virtual }
-        guard let factory = configuration.centralBackendFactory else {
-            // Task 15 replaces this: `CoreBluetoothBackends` — the real central backend a
-            // passthrough provider composes with — does not exist yet, so a passthrough
-            // session with no injected factory is served by the virtual radio alone.
-            configuration.log?("passthrough has no central backend factory; CoreBluetoothBackends arrives in Task 15")
-            return virtual
-        }
+        // The host's own CoreBluetooth by default; an injected factory overrides it.
+        let factory = configuration.centralBackendFactory ?? CoreBluetoothBackends.makeCentral
         let real = queue.sync { factory(queue) }
         return CompositeCentral(backends: [virtual, real], queue: queue)
     }
@@ -290,14 +285,8 @@ public actor Provider {
             VirtualPeripheralManagerBackend(radio: radio, queue: queue, identifier: UUID(), name: clientName)
         }
         guard configuration.passthrough else { return virtual }
-        guard let factory = configuration.peripheralManagerBackendFactory else {
-            // Task 15 replaces this: `CoreBluetoothBackends` — the real peripheral-manager
-            // backend a passthrough provider composes with — does not exist yet, so a
-            // passthrough session with no injected factory is served by the virtual radio
-            // alone.
-            configuration.log?("passthrough has no peripheral backend factory; CoreBluetoothBackends arrives in Task 15")
-            return virtual
-        }
+        // The host's own CoreBluetooth by default; an injected factory overrides it.
+        let factory = configuration.peripheralManagerBackendFactory ?? CoreBluetoothBackends.makePeripheralManager
         let real = queue.sync { factory(queue) }
         return CompositePeripheralManager(backends: [virtual, real], queue: queue)
     }
