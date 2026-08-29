@@ -127,7 +127,7 @@ public enum ProviderCommandLine {
                               clients, alongside the virtual devices.
       --json                 Encode outgoing messages as JSON instead of the binary property
                               list default.
-      -h, --help              Print this help text and exit.
+      -h, --help             Print this help text and exit.
 
     Environment:
       BLESWIFT_LINK           host:port to listen on, used when --listen is not given.
