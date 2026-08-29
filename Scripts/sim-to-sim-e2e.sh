@@ -148,10 +148,14 @@ cat "$PROVIDER_LOG"
 
 # --- App --------------------------------------------------------------------
 log "Building BLESwiftExplorer for the simulator"
+# `generic/platform=iOS Simulator`, not a named device: the build's output is the same
+# simulator `.app` either way, and a generic destination needs no device lookup — which on a
+# CI runner can fail to enumerate the simulators `simctl` plainly has ("Unable to find a
+# device matching the provided destination specifier").
 xcodebuild build \
     -project Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj \
     -scheme BLESwiftExplorer \
-    -destination "platform=iOS Simulator,name=$ADVERTISER_SIM" \
+    -destination "generic/platform=iOS Simulator" \
     -derivedDataPath .build/e2e-dd \
     -skipPackagePluginValidation -skipMacroValidation -quiet
 
