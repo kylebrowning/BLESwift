@@ -40,6 +40,25 @@ public struct ProviderConfiguration: Sendable {
     /// The name the provider reports in its `ServerHello`, for client-side logging.
     public var providerName: String = "bleswift-provider"
 
+    /// How long an accepted connection has to send a valid `ClientHello` before it is
+    /// cancelled and released.
+    ///
+    /// A client that opens a socket and then says nothing would otherwise hold an entry — and
+    /// the connection it keeps alive — for as long as the provider runs, and enough of them
+    /// would fill ``maximumPendingConnections`` against every real client. Ten seconds is far
+    /// longer than a loopback handshake takes and short enough that a wedged or hostile peer
+    /// is not the provider's problem for long.
+    public var handshakeTimeout: Duration = .seconds(10)
+
+    /// How many accepted connections may be waiting on a handshake at once. A connection
+    /// accepted beyond this is cancelled immediately.
+    ///
+    /// Only unclaimed connections count: a completed handshake hands its connection to a
+    /// session, which frees the slot for the next client. Sixty-four is far more than the
+    /// handful of simulators a provider realistically serves, so the cap is a ceiling on a
+    /// misbehaving peer rather than a limit a real deployment meets.
+    public var maximumPendingConnections: Int = 64
+
     /// Receives one line per notable provider event — sessions opening and closing, refused
     /// handshakes, requests naming an unknown peripheral. `nil` discards them.
     public var log: (@Sendable (String) -> Void)?

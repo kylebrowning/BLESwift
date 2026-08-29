@@ -127,8 +127,15 @@ public actor Provider {
                 return
             }
             // Registered synchronously, before either handler is installed, so no handler can
-            // fire against an unknown connection.
-            self.register(connection)
+            // fire against an unknown connection. A refusal means the pending table is full of
+            // connections that have not handshaken: this one is dropped without ever entering
+            // it, so a peer opening sockets in a loop cannot crowd out a real client.
+            guard self.register(connection) else {
+                self.configuration.log?("refusing a connection: too many are awaiting a handshake")
+                connection.cancel()
+                return
+            }
+            self.scheduleHandshakeDeadline(for: connection)
             // Both captures are weak — a handler holding its own connection would be a cycle
             // nothing breaks for a connection that never reaches a session.
             //
@@ -196,8 +203,30 @@ public actor Provider {
     // MARK: - Pending connections
 
     /// Takes ownership of a freshly accepted connection. Called on the listener queue.
-    private nonisolated func register(_ connection: LinkConnection) {
-        pending.withLock { $0.register(connection) }
+    ///
+    /// - Returns: `false` when ``ProviderConfiguration/maximumPendingConnections`` connections
+    ///   are already awaiting a handshake, in which case nothing was recorded and the caller
+    ///   must cancel this one.
+    private nonisolated func register(_ connection: LinkConnection) -> Bool {
+        pending.withLock { $0.register(connection, limit: configuration.maximumPendingConnections) }
+    }
+
+    /// Cancels `connection` if it has still not handshaken
+    /// ``ProviderConfiguration/handshakeTimeout`` from now.
+    ///
+    /// The deadline lives out here rather than inside ``handle(_:from:)``, which must not
+    /// suspend: this is an independent task that only *reads* the connection's claim state
+    /// when it fires. A connection whose handshake completed is claimed by then, and one that
+    /// already ended is terminated, so either way the deadline finds nothing to do.
+    private nonisolated func scheduleHandshakeDeadline(for connection: LinkConnection) {
+        let timeout = configuration.handshakeTimeout
+        Task { [weak self, weak connection] in
+            try? await Task.sleep(for: timeout)
+            guard let self, let connection else { return }
+            guard self.pending.withLock({ $0.isClaimable(connection) }) else { return }
+            self.configuration.log?("releasing a connection that sent no client hello within \(timeout)")
+            connection.cancel()
+        }
     }
 
     /// Marks a connection as terminated — synchronously, on the listener queue, so a hello
@@ -423,9 +452,18 @@ struct PendingConnections {
 
     private var entries: [ObjectIdentifier: Entry] = [:]
 
-    /// Records a freshly accepted connection.
-    mutating func register(_ connection: LinkConnection) {
+    /// Records a freshly accepted connection, unless `limit` connections are already awaiting
+    /// a handshake.
+    ///
+    /// Only unclaimed, unterminated entries count against `limit`: a connection a session owns
+    /// is no longer pending, and one whose link has ended is on its way out.
+    ///
+    /// - Returns: `true` if the connection was recorded.
+    mutating func register(_ connection: LinkConnection, limit: Int) -> Bool {
+        let awaiting = entries.values.count { !$0.isClaimed && !$0.isTerminated }
+        guard awaiting < limit else { return false }
         entries[ObjectIdentifier(connection)] = Entry(connection: connection)
+        return true
     }
 
     /// Decides where `message` goes, and holds it if the answer is "nowhere yet".

@@ -377,6 +377,131 @@ struct CentralEndToEndTests {
         connection.cancel()
     }
 
+    /// One silent client: a connection that opens the socket and then says nothing, with a
+    /// flag recording whether the provider has since dropped it.
+    private final class SilentClient: Sendable {
+
+        /// The two flags a silent client has, in a class the connection's handler can capture —
+        /// a `Mutex` is noncopyable, so it is wrapped rather than closed over.
+        private final class Flags: Sendable {
+            private let storage = Mutex<(isReady: Bool, hasEnded: Bool)>((false, false))
+            var isReady: Bool { storage.withLock { $0.isReady } }
+            var hasEnded: Bool { storage.withLock { $0.hasEnded } }
+            func markReady() { storage.withLock { $0.isReady = true } }
+            func markEnded() { storage.withLock { $0.hasEnded = true } }
+        }
+
+        let connection: LinkConnection
+        private let flags = Flags()
+
+        /// Whether the socket reached `.ready`.
+        var isReady: Bool { flags.isReady }
+
+        /// Whether the connection has since reached a terminal state — which, for a client
+        /// that never writes, only the provider can have caused.
+        var hasEnded: Bool { flags.hasEnded }
+
+        /// Opens a socket to `endpoint` and never writes to it. Several clients share one
+        /// `queue` — a silent client's only callbacks are its own state transitions, and a
+        /// queue apiece would put dozens of threads behind sixty-four idle sockets.
+        init(endpoint: LinkEndpoint, queue: DispatchQueue) {
+            connection = LinkConnection.connect(
+                to: endpoint,
+                codec: .binaryPropertyList,
+                queue: queue
+            )
+            connection.onStateChange = { [flags] state in
+                switch state {
+                case .ready: flags.markReady()
+                case .failed, .cancelled: flags.markEnded()
+                case .idle, .connecting: break
+                }
+            }
+            connection.start()
+        }
+
+        /// Drops the handlers and closes the socket.
+        func close() {
+            connection.onStateChange = nil
+            connection.onMessage = nil
+            connection.cancel()
+        }
+    }
+
+    @Test("A connection that sends no client hello is released at the handshake deadline")
+    func silentConnectionIsReleasedAtTheHandshakeDeadline() async throws {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        // Short enough to test, far longer than a loopback handshake needs.
+        configuration.handshakeTimeout = .milliseconds(300)
+        let log = Mutex<[String]>([])
+        configuration.log = { line in log.withLock { $0.append(line) } }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+
+        let silent = SilentClient(endpoint: endpoint, queue: DispatchQueue(label: "e2e.silent"))
+        await waitFor(timeout: .seconds(5)) { silent.isReady }
+        #expect(silent.isReady)
+        #expect(!silent.hasEnded)
+
+        // Nothing is ever sent, so only the deadline can end this.
+        await waitFor(timeout: .seconds(10)) { silent.hasEnded }
+        #expect(silent.hasEnded)
+        #expect(log.withLock { $0 }.contains { $0.contains("no client hello") })
+        #expect(await provider.sessionCount == 0)
+
+        // And a client that does handshake, on the same provider, is served as before — the
+        // deadline only ever fires on a connection that has not been claimed.
+        let (central, link) = makeCentral(port: await provider.port, label: "e2e.silent.real")
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+        #expect(central.state == .poweredOn)
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(await provider.sessionCount == 1)
+
+        silent.close()
+        link.shutdown()
+        await provider.stop()
+    }
+
+    @Test("Beyond the pending cap, a further connection awaiting a handshake is refused")
+    func pendingConnectionCapRefusesFurtherConnections() async throws {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.maximumPendingConnections = 64
+        // The default deadline, so nothing below can be released before the cap is reached.
+        let log = Mutex<[String]>([])
+        configuration.log = { line in log.withLock { $0.append(line) } }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+
+        // One queue for all sixty-five: see `SilentClient.init(endpoint:queue:)`.
+        let clientQueue = DispatchQueue(label: "e2e.cap")
+        var silent: [SilentClient] = []
+        defer { for client in silent { client.close() } }
+        for index in 0..<64 {
+            let client = SilentClient(endpoint: endpoint, queue: clientQueue)
+            silent.append(client)
+            await waitFor(timeout: .seconds(10)) { client.isReady }
+            #expect(client.isReady, "connection \(index)")
+        }
+        // The accepts are delivered on the provider's listener queue, one behind the other;
+        // this settles the last of them before the connection that must be refused is opened.
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(silent.allSatisfy { !$0.hasEnded })
+
+        let refused = SilentClient(endpoint: endpoint, queue: clientQueue)
+        defer { refused.close() }
+        await waitFor(timeout: .seconds(10)) { refused.hasEnded }
+        #expect(refused.hasEnded)
+        #expect(log.withLock { $0 }.contains { $0.contains("too many are awaiting a handshake") })
+        // The cap sheds the newcomer, never the connections already waiting.
+        #expect(silent.allSatisfy { !$0.hasEnded })
+
+        await provider.stop()
+    }
+
     /// The name on the first peripheral `central` sights, or `nil` if the scan ends first.
     private static func firstSighting(of central: Central) async -> String? {
         do {
