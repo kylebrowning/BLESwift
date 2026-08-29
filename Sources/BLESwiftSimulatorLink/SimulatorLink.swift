@@ -151,6 +151,18 @@ public enum SimulatorLink {
                             resumeOnce(hello.accepted)
                         }
                         connection.start()
+                        // If this task was already cancelled when it reached
+                        // `withTaskCancellationHandler`, `onCancel` ran *before*
+                        // `onStateChange` was installed: the connection published its
+                        // terminal `.cancelled` with nothing listening, and `start()` then
+                        // returned without doing anything, because it refuses to start a
+                        // connection that is already terminal. Nothing would ever resume the
+                        // continuation. Re-check the state now that a handler exists; the
+                        // one-shot `resumeOnce` makes an overlap with the handler harmless.
+                        switch connection.state {
+                        case .failed, .cancelled: resumeOnce(false)
+                        case .idle, .connecting, .ready: break
+                        }
                     }
                 } onCancel: {
                     connection.cancel()

@@ -136,5 +136,32 @@ struct SimulatorLinkInstallTests {
         #expect(!reachable)
         #expect(elapsed < .seconds(1))
     }
+
+    @Test("isProviderReachable returns false at once when its task is already cancelled")
+    func isProviderReachableFromCancelledTask() async throws {
+        let queue = DispatchQueue(label: "reachable.cancelled.listener")
+        let listener = try LinkListener(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: 0),
+            codec: .binaryPropertyList,
+            queue: queue
+        )
+        // Silent again, and with a 30-second bound: nothing but the cancellation can end this
+        // probe, so a prompt `false` proves the cancelled path resumes at all. It used to be
+        // able to deadlock — the cancellation handler cancels the connection before the state
+        // handler exists, the terminal state is published to nobody, and the group waits on a
+        // continuation no one will ever resume.
+        try await listener.start()
+        defer { listener.cancel() }
+
+        let probe = Task {
+            await SimulatorLink.isProviderReachable(
+                LinkEndpoint(host: "127.0.0.1", port: listener.port),
+                timeout: .seconds(30)
+            )
+        }
+        probe.cancel()
+
+        #expect(try await bounded(seconds: 1) { await probe.value } == false)
+    }
 #endif
 }
