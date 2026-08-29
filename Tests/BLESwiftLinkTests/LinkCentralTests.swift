@@ -1,0 +1,169 @@
+//
+//  LinkCentralTests.swift
+//  BLESwiftLinkTests
+//
+
+import BLESwift
+import BLESwiftCore
+import BLESwiftLink
+import BLESwiftSimulatorLink
+import Dispatch
+import Foundation
+import Synchronization
+import Testing
+
+/// A scripted provider: accepts the handshake, records requests, lets tests inject events.
+final class ScriptedProvider: Sendable {
+    let listener: LinkListener
+    let requests = Mutex<[CentralRequest]>([])
+    private let connection = Mutex<LinkConnection?>(nil)
+
+    init() throws {
+        listener = try LinkListener(endpoint: LinkEndpoint(host: "127.0.0.1", port: 0), codec: .json, queue: DispatchQueue(label: "scripted"))
+        listener.onConnection = { [weak self] link in
+            guard let self else { return }
+            self.connection.withLock { $0 = link }
+            link.onMessage = { [weak self] message in
+                guard let self else { return }
+                switch message {
+                case .clientHello:
+                    link.send(.serverHello(ServerHello(protocolVersion: LinkProtocol.version, accepted: true, reason: nil, providerName: "scripted")))
+                    link.send(.centralEvent(.didUpdateState(.poweredOn)))
+                case .centralRequest(let request):
+                    self.requests.withLock { $0.append(request) }
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    func start() async throws { try await listener.start() }
+    var endpoint: LinkEndpoint { LinkEndpoint(host: "127.0.0.1", port: listener.port) }
+    func emit(_ event: CentralWireEvent) { connection.withLock { $0 }?.send(.centralEvent(event)) }
+    func dropClient() { connection.withLock { $0 }?.cancel() }
+
+    /// Stops the provider the way a real one goes away: the accepted connection is closed
+    /// *and* the listener cancelled. Cancelling the listener alone deliberately leaves
+    /// accepted connections open (see `LinkClientSessionTests.reconnects`).
+    func stop() {
+        connection.withLock { $0 }?.cancel()
+        listener.cancel()
+    }
+}
+
+@Suite("LinkCentral")
+struct LinkCentralTests {
+
+    private static let service = ServiceIdentifier(uuid: "180D")
+    private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
+
+    private func makeRig() async throws -> (Central, LinkCentral, ScriptedProvider) {
+        let provider = try ScriptedProvider()
+        try await provider.start()
+        let queue = DispatchSerialQueue(label: "LinkCentralTests")
+        let link = LinkCentral(endpoint: provider.endpoint, queue: queue, clientName: "test", retryInterval: .milliseconds(50))
+        let central = Central(backend: link, queue: queue)
+        await waitFor { central.state == .poweredOn }
+        return (central, link, provider)
+    }
+
+    @Test("Reports .unsupported until the provider is reachable, then the provider's state")
+    func stateBeforeAndAfterConnect() async throws {
+        let queue = DispatchSerialQueue(label: "state")
+        let link = LinkCentral(endpoint: LinkEndpoint(host: "127.0.0.1", port: 1), queue: queue, clientName: "t", retryInterval: .milliseconds(50))
+        let central = Central(backend: link, queue: queue)
+        await waitFor { central.state == .unsupported }
+        #expect(central.state == .unsupported)
+        link.shutdown()
+    }
+
+    @Test("Scan requests reach the provider and discoveries come back")
+    func scan() async throws {
+        let (central, link, provider) = try await makeRig()
+        defer { provider.stop(); link.shutdown() }
+        let id = UUID()
+        let task = Task { () -> Discovery? in
+            for try await event in await central.scan(services: [Self.service]) {
+                if case .discovered(let discovery) = event { return discovery }
+            }
+            return nil
+        }
+        await waitFor { provider.requests.withLock { $0 }.contains(.scan(services: ["180D"], allowDuplicates: false)) }
+        provider.emit(.didDiscover(peripheral: id, name: "HRM", advertisement: WireAdvertisement(AdvertisementData(localName: "HRM", serviceUUIDs: [Self.service])), rssi: -42))
+        let discovery = try await task.value
+        #expect(discovery?.peripheral.uuid == id)
+        #expect(discovery?.peripheral.name == "HRM")
+        #expect(discovery?.rssi == -42)
+        await waitFor { provider.requests.withLock { $0 }.contains(.stopScan) }
+    }
+
+    @Test("Connect, discover, read, write, notify round-trip through the mirror cache")
+    func gatt() async throws {
+        let (central, link, provider) = try await makeRig()
+        defer { provider.stop(); link.shutdown() }
+        let id = UUID()
+        let ref = WireCharacteristicRef(Self.measurement)
+
+        // Connect: the provider answers with maxima.
+        let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: "HRM")) }
+        await waitFor { provider.requests.withLock { $0 }.contains { if case .connect(let p, _, _) = $0 { return p == id }; return false } }
+        provider.emit(.didConnect(peripheral: id, name: "HRM", maximumWriteWithResponse: 200, maximumWriteWithoutResponse: 100))
+        let peripheral = try await connectTask.value
+
+        // Discovery is driven by the read: the provider must answer both discovery steps.
+        let readTask = Task { () -> Data in try await peripheral.read(from: Self.measurement) }
+        await waitFor { provider.requests.withLock { $0 }.contains(.discoverServices(peripheral: id, services: ["180D"])) }
+        provider.emit(.didDiscoverServices(peripheral: id, services: ["180D"], error: nil))
+        await waitFor { provider.requests.withLock { $0 }.contains(.discoverCharacteristics(peripheral: id, service: "180D", characteristics: ["2A37"])) }
+        provider.emit(.didDiscoverCharacteristics(peripheral: id, service: "180D", characteristics: [WireDiscoveredCharacteristic(uuid: "2A37", properties: CharacteristicProperties([.read, .write, .notify, .writeWithoutResponse]).rawValue)], error: nil))
+        await waitFor { provider.requests.withLock { $0 }.contains(.readValue(peripheral: id, characteristic: ref)) }
+        provider.emit(.didUpdateValue(peripheral: id, characteristic: ref, value: Data([0, 72]), error: nil))
+        #expect(try await readTask.value == Data([0, 72]))
+
+        // Write with response.
+        let writeTask = Task { try await peripheral.write(Data([1]), to: Self.measurement) }
+        await waitFor { provider.requests.withLock { $0 }.contains { if case .writeValue(id, ref, Data([1]), .withResponse, _) = $0 { return true }; return false } }
+        provider.emit(.didWriteValue(peripheral: id, characteristic: ref, error: nil))
+        try await writeTask.value
+
+        // Notification.
+        let notifyTask = Task { () -> Data? in
+            let stream: AsyncThrowingStream<Data, Error> = peripheral.notifications(for: Self.measurement)
+            for try await value in stream { return value }
+            return nil
+        }
+        await waitFor { provider.requests.withLock { $0 }.contains(.setNotifyValue(peripheral: id, characteristic: ref, enabled: true)) }
+        provider.emit(.didUpdateNotificationState(peripheral: id, characteristic: ref, isNotifying: true, error: nil))
+        provider.emit(.didUpdateValue(peripheral: id, characteristic: ref, value: Data([9]), error: nil))
+        #expect(try await notifyTask.value == Data([9]))
+
+        // Disconnect.
+        let disconnectTask = Task { try await central.disconnect(peripheral.id) }
+        await waitFor { provider.requests.withLock { $0 }.contains(.cancelConnection(peripheral: id)) }
+        provider.emit(.didDisconnect(peripheral: id, error: nil))
+        try await disconnectTask.value
+    }
+
+    @Test("Provider drop disconnects connected peripherals and reports .unsupported")
+    func providerDrop() async throws {
+        let (central, link, provider) = try await makeRig()
+        defer { provider.stop(); link.shutdown() }
+        let id = UUID()
+        let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: nil)) }
+        await waitFor { !provider.requests.withLock { $0 }.isEmpty }
+        provider.emit(.didConnect(peripheral: id, name: "x", maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
+        _ = try await connectTask.value
+        let events = Task { () -> ConnectionEvent? in
+            for await event in await central.connectionEvents() {
+                if case .disconnected = event { return event }
+            }
+            return nil
+        }
+        provider.stop()
+        let event = await events.value
+        #expect(event != nil)
+        await waitFor { central.state == .unsupported }
+        #expect(central.state == .unsupported)
+    }
+}
