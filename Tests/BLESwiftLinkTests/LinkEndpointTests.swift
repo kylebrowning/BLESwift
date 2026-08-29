@@ -4,6 +4,7 @@
 //
 
 import BLESwiftLink
+import Foundation
 import Testing
 
 @Suite("LinkEndpoint")
@@ -71,5 +72,36 @@ struct LinkEndpointTests {
         #expect(LinkEndpoint.fromEnvironment(["BLESWIFT_LINK": "10.0.0.2:9"]) == LinkEndpoint(host: "10.0.0.2", port: 9))
         #expect(LinkEndpoint.fromEnvironment([:]) == nil)
         #expect(LinkEndpoint.fromEnvironment(["BLESWIFT_LINK": "garbage"]) == nil)
+    }
+    @Test("localhost is normalized to the IPv4 loopback literal, on every route in")
+    func localhostIsNormalized() throws {
+        // The name resolves to both loopback families, so a listener and a client handed the
+        // same string could otherwise bind and dial different addresses.
+        #expect(LinkEndpoint(host: "localhost", port: 1).host == "127.0.0.1")
+        #expect(LinkEndpoint(host: "LocalHost", port: 1).host == "127.0.0.1")
+        #expect(LinkEndpoint(host: "localhost", port: 1) == LinkEndpoint(host: "127.0.0.1", port: 1))
+        #expect(LinkEndpoint(host: "localhost", port: 1).description == "127.0.0.1:1")
+        #expect(LinkEndpoint(string: "localhost:8080")?.host == "127.0.0.1")
+        #expect(LinkEndpoint.fromEnvironment(["BLESWIFT_LINK": "localhost:9"]) == LinkEndpoint(host: "127.0.0.1", port: 9))
+
+        var mutated = LinkEndpoint(host: "127.0.0.1", port: 1)
+        mutated.host = "localhost"
+        #expect(mutated.host == "127.0.0.1")
+
+        // Nothing else is touched, and a hostname that merely contains it is not the name.
+        #expect(LinkEndpoint(host: "localhost.example.com", port: 1).host == "localhost.example.com")
+        #expect(LinkEndpoint(host: "::1", port: 1).host == "::1")
+    }
+
+    @Test("A decoded endpoint keeps the encoded shape and is normalized like any other")
+    func codingRoundTrip() throws {
+        let encoded = try JSONEncoder().encode(LinkEndpoint(host: "127.0.0.1", port: 45541))
+        #expect(String(decoding: encoded, as: UTF8.self).contains("\"host\""))
+        #expect(try JSONDecoder().decode(LinkEndpoint.self, from: encoded) == LinkEndpoint.default)
+
+        // A value encoded before the normalization existed still reads back agreeing with
+        // what a listener binds.
+        let legacy = Data(#"{"host":"localhost","port":45541}"#.utf8)
+        #expect(try JSONDecoder().decode(LinkEndpoint.self, from: legacy) == LinkEndpoint.default)
     }
 }

@@ -199,6 +199,36 @@ struct TransportLoopbackTests {
         // And it is spent — the one-shot guard stands whichever way `start()` ended.
         await #expect(throws: LinkListenerError.alreadyStarted) { try await listener.start() }
     }
+
+    @Test("A listener and a client both given localhost meet on the same loopback address")
+    func localhostBindsAndDialsTheSameAddress() async throws {
+        // `localhost` resolves to both loopback families; before `LinkEndpoint` normalized it,
+        // a listener on one family and a client on the other never met.
+        let listener = try LinkListener(
+            endpoint: LinkEndpoint(host: "localhost", port: 0),
+            codec: .json,
+            queue: DispatchQueue(label: "localhost.listener")
+        )
+        try await listener.start()
+        defer { listener.cancel() }
+
+        let accepted = Mutex<Int>(0)
+        listener.onConnection = { _ in accepted.withLock { $0 += 1 } }
+
+        let client = LinkConnection.connect(
+            to: LinkEndpoint(host: "localhost", port: listener.port),
+            codec: .json,
+            queue: DispatchQueue(label: "localhost.client")
+        )
+        client.start()
+        defer { client.cancel() }
+
+        let isReady: @Sendable () -> Bool = { if case .ready = client.state { return true }; return false }
+        await waitFor(timeout: .seconds(5)) { isReady() }
+        #expect(isReady())
+        await waitFor(timeout: .seconds(5)) { accepted.withLock { $0 } == 1 }
+        #expect(accepted.withLock { $0 } == 1)
+    }
 }
 
 extension LinkConnection.State {

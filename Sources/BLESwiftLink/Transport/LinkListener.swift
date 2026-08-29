@@ -28,7 +28,9 @@ enum LinkTransportParameters {
     /// The loopback address `host` names, or `nil` when it names something else — in which
     /// case a listener binds every interface rather than loopback alone.
     ///
-    /// Recognized: `localhost`, anything in `127.0.0.0/8` (the whole block, not just
+    /// Recognized: `localhost` — which a ``LinkEndpoint`` normalizes away before a listener
+    /// ever sees it, and which is kept here only for a host string that reached this type by
+    /// another route — anything in `127.0.0.0/8` (the whole block, not just
     /// `127.0.0.1` — `127.0.0.2` is as much this machine as `127.0.0.1` is), and the IPv6
     /// loopback `::1`, bracketed or not, since `[::1]` is how it is written beside a port.
     static func loopback(_ host: String) -> Loopback? {
@@ -68,9 +70,12 @@ public enum LinkListenerError: Error, Equatable, Sendable {
 ///
 /// Each accepted connection is wrapped in a ``LinkConnection``, started, and handed to
 /// ``onConnection`` on the `queue` supplied at initialization. Binding to a loopback host —
-/// `localhost`, any `127.x.y.z`, or `::1` (bracketed or not), which binds the IPv6 loopback —
-/// restricts the listener to the loopback interface; any other host binds every interface on
-/// the port.
+/// any `127.x.y.z`, or `::1` (bracketed or not), which binds the IPv6 loopback — restricts the
+/// listener to the loopback interface; any other host binds every interface on the port.
+///
+/// A ``LinkEndpoint`` stores `localhost` as `127.0.0.1`, so a listener and a client handed the
+/// same host string always agree on which loopback family they are on — the name itself
+/// resolves to both.
 public final class LinkListener: Sendable {
 
     /// Everything mutable, guarded by one lock.

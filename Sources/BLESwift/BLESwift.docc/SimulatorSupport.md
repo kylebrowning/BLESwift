@@ -74,7 +74,7 @@ swift run bleswift-provider [--passthrough] [--fixture file.json …] [--listen 
 |---|---|
 | `--passthrough` | Also serve the Mac's real CoreBluetooth radio, alongside the virtual one. |
 | `--fixture <path>` | Load a fixture document and host its devices. Repeatable. |
-| `--listen <host:port>` | Where to listen. Defaults to `BLESWIFT_LINK`, then `127.0.0.1:45541`. |
+| `--listen <host:port>` | Where to listen. Defaults to `BLESWIFT_LINK`, then `127.0.0.1:45541`. Prefer a literal address: `localhost` is normalized to `127.0.0.1` — on the client side too — because the name resolves to both loopback families and the two ends must pick the same one. |
 | `--json` | Encode outgoing messages as JSON instead of the binary property list default. |
 
 The virtual radio always exists — `--passthrough` *adds* the Mac's radio rather than replacing
