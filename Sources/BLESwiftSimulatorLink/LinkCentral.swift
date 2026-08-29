@@ -485,10 +485,15 @@ public final class LinkCentral: CentralManaging, Sendable {
             deliver(.didUpdateState(state.state))
 
         case .didDiscover(let uuid, let name, let advertisement, let rssi):
+            // Validated before the mirror table is touched: a sighting carrying an identifier
+            // no BLESwift type can hold costs the session, and filing a peripheral for it
+            // first would leave the table holding an entry for a discovery that never
+            // happened — kept, and reported to the caller, across the reconnect that follows.
+            let data = try advertisement.advertisementData
             let target = peripheral(for: uuid, name: name)
             deliver(.didDiscover(
                 peripheral: target.peripheralIdentifier,
-                advertisement: try advertisement.advertisementData,
+                advertisement: data,
                 rssi: rssi
             ))
 
