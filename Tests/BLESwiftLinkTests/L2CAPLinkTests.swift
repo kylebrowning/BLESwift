@@ -131,6 +131,50 @@ struct L2CAPLinkTests {
         await tearDown(rig)
     }
 
+    @Test("Eight concurrent writers overflow the credit window without losing a block")
+    func concurrentWritersShareTheCreditWindow() async throws {
+        let (rig, peripheral) = try await makeRig(label: "l2cap.concurrent")
+        let channel = try await peripheral.openL2CAPChannel(psm: Self.psm, timeout: .seconds(5))
+        let fake = try await openedChannel(rig)
+
+        // 8 × 64 KiB is 512 KiB against a 256 KiB window, so at least half the writers must
+        // suspend for credit. `L2CAPChannel` is a `Sendable` struct that reaches the transport
+        // directly, so these really do arrive concurrently — each needs its own continuation.
+        let blockSize = 64 * 1024
+        let blockCount = 8
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in 0..<blockCount {
+                group.addTask {
+                    try await channel.write(Data(repeating: UInt8(index + 1), count: blockSize))
+                }
+            }
+            try await group.waitForAll()
+        }
+
+        let expected = blockSize * blockCount
+        await waitFor(timeout: .seconds(30)) {
+            await fake.onQueue { fake.writtenData.reduce(0) { $0 + $1.count } } == expected
+        }
+        let combined = await fake.onQueue { fake.writtenData.reduce(into: Data()) { $0.append($1) } }
+        #expect(combined.count == expected)
+
+        // Blocks may land in any order, but each must survive as one contiguous run of its own
+        // fill byte — a run-length pass finds exactly eight runs, one per writer.
+        var runs: [(byte: UInt8, length: Int)] = []
+        for byte in combined {
+            if runs.last?.byte == byte {
+                runs[runs.count - 1].length += 1
+            } else {
+                runs.append((byte: byte, length: 1))
+            }
+        }
+        #expect(runs.count == blockCount)
+        #expect(Set(runs.map(\.byte)) == Set((1...blockCount).map { UInt8($0) }))
+        #expect(runs.allSatisfy { $0.length == blockSize })
+
+        await tearDown(rig)
+    }
+
     @Test("600 KiB pushed inbound reaches the client's stream, cycling credit")
     func inboundThroughput() async throws {
         let (rig, peripheral) = try await makeRig(label: "l2cap.inbound")

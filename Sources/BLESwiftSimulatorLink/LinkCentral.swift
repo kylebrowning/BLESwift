@@ -419,9 +419,16 @@ public final class LinkCentral: CentralManaging, Sendable {
 
         case .didOpenL2CAPChannel(let uuid, let identifier, _, let error):
             let target = peripheral(for: uuid)
-            guard error == nil, let entry = _channels[identifier] else {
+            if let error {
                 _channels.removeValue(forKey: identifier)
-                target.deliver(.didOpenL2CAPChannel(channel: nil, error: error?.nsError ?? Self.unknownChannelError))
+                target.deliver(.didOpenL2CAPChannel(channel: nil, error: error.nsError))
+                return
+            }
+            guard let entry = _channels[identifier] else {
+                // The provider opened a channel this central has no record of — its half is
+                // live and would otherwise be pumped forever, so close it explicitly.
+                send(.l2capClose(channel: identifier))
+                target.deliver(.didOpenL2CAPChannel(channel: nil, error: Self.unknownChannelError))
                 return
             }
             target.deliver(.didOpenL2CAPChannel(channel: entry.channel, error: nil))

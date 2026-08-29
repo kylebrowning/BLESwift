@@ -27,11 +27,13 @@ enum LinkL2CAPError: Error, Equatable {
 /// ``receive(_:)``, ``addCredit(bytes:)``, and ``remoteClosed(error:)``.
 ///
 /// **Flow control, outbound.** The channel starts with
-/// ``BLESwiftLink/LinkFlowControl/l2capInitialCredit`` bytes of credit. ``write(_:)``
-/// consumes credit for each chunk it sends and suspends when there is not enough left; the
-/// provider grants credit back only once its own `write` to the real transport has returned,
-/// so a slow peer eventually suspends the writer rather than growing an unbounded queue in
-/// the provider.
+/// ``BLESwiftLink/LinkFlowControl/l2capInitialCredit`` bytes of credit. ``write(_:)`` splits
+/// its payload into chunks of at most ``maximumChunk`` bytes, consumes credit for each one,
+/// and suspends when there is not enough left; the provider grants credit back only once its
+/// own `write` to the real transport has returned, so a slow peer eventually suspends the
+/// writer rather than growing an unbounded queue in the provider. Writers that must wait are
+/// queued and served in arrival order, so concurrent writers neither starve nor lose each
+/// other's continuations.
 ///
 /// **Flow control, inbound.** Every ``receive(_:)`` yields to the inbound stream and
 /// immediately credits the provider for the bytes taken, since the client-side stream buffers
@@ -46,6 +48,14 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
     /// initial credit, so a maximal write still takes four chunks before it must wait.
     private static let maximumChunk = LinkFlowControl.l2capInitialCredit / 4
 
+    /// One writer suspended until the credit window has room for its chunk.
+    private struct Waiter {
+        /// The chunk size this writer is waiting to be granted.
+        let bytes: Int
+        /// Resumed once that credit has been deducted on its behalf, or failed on teardown.
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
     /// Everything mutable about a channel, under one lock.
     private struct State {
         /// The inbound stream's continuation, created when ``inbound()`` is first called.
@@ -57,9 +67,10 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
         var pending: [Data] = []
         /// Bytes this side may still send before it must wait for credit.
         var outboundCredit = LinkFlowControl.l2capInitialCredit
-        /// The single suspended writer, if any, and the size it is waiting for.
-        var waiter: CheckedContinuation<Void, Error>?
-        var waiterBytes = 0
+        /// Writers suspended for credit, oldest first. `L2CAPChannel` is a `Sendable` struct
+        /// whose `write(_:)` reaches this object directly, so any number of concurrent
+        /// writers is legal and each one must keep its own continuation.
+        var waiters: [Waiter] = []
         /// Whether the channel has been torn down, and with what error.
         var isClosed = false
         var closeError: Error?
@@ -128,17 +139,20 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
 
     /// Sends `data` outbound, suspending until every byte of it has been handed to the link.
     ///
-    /// A payload larger than ``BLESwiftLink/LinkFlowControl/l2capInitialCredit`` is split
-    /// into chunks that are credit-gated one at a time, so a single huge write can never
-    /// deadlock against a credit window it could not possibly fit in.
+    /// A payload larger than one wire chunk (a quarter of the initial credit, matching the
+    /// provider's own chunking) is split into chunks that are credit-gated one at a time, so
+    /// a single huge write can never deadlock against a credit window it could not possibly
+    /// fit in.
     ///
     /// - Parameter data: The bytes to send.
     /// - Throws: ``LinkL2CAPError/closed`` if the channel is closed before or while the write
     ///   is waiting for credit.
-    /// - Important: Only one write may be in flight at a time — `BLESwift`'s `L2CAPChannel`
-    ///   serializes them — and a write waiting for credit is not cancellable.
+    /// - Important: Concurrent writes are safe — each waits its turn in the credit queue —
+    ///   but the *interleaving* of two concurrent writes' chunks is unspecified. Serialize
+    ///   them yourself when a payload must arrive contiguously. A write waiting for credit is
+    ///   not cancellable.
     func write(_ data: Data) async throws {
-        guard data.count > LinkFlowControl.l2capInitialCredit else {
+        guard data.count > Self.maximumChunk else {
             try await sendChunk(data)
             return
         }
@@ -180,15 +194,8 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
 
     /// Grants `bytes` of outbound credit, resuming a writer that was waiting for room.
     func addCredit(bytes: Int) {
-        let waiter = state.withLock { state -> CheckedContinuation<Void, Error>? in
-            state.outboundCredit += bytes
-            guard let waiter = state.waiter, state.outboundCredit >= state.waiterBytes else { return nil }
-            state.outboundCredit -= state.waiterBytes
-            state.waiterBytes = 0
-            state.waiter = nil
-            return waiter
-        }
-        waiter?.resume()
+        state.withLock { $0.outboundCredit += bytes }
+        resumeGrantableWaiters()
     }
 
     /// Tears the channel down because the provider (or the link) ended it — the same as
@@ -208,24 +215,22 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
 
     /// Suspends until `count` bytes of outbound credit are available, consuming them.
     ///
-    /// The credit is deducted by whoever grants the wait — either this call, inline, or
-    /// ``addCredit(bytes:)`` — so a resumed writer can never lose its window to another
-    /// caller.
+    /// The credit is deducted by whoever grants the wait — this call, inline, or
+    /// ``addCredit(bytes:)`` on behalf of a queued writer — so a resumed writer can never
+    /// lose its window to another caller. A writer that arrives while others are already
+    /// queued joins the back of the queue even if there is credit to spare, so waiters are
+    /// served strictly in order and none can be starved by a steady stream of newcomers.
     private func acquireCredit(_ count: Int) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             enum Outcome { case granted, closed, waiting }
             let outcome = state.withLock { state -> Outcome in
                 guard !state.isClosed else { return .closed }
-                guard state.outboundCredit < count else {
-                    state.outboundCredit -= count
-                    return .granted
+                guard state.waiters.isEmpty, state.outboundCredit >= count else {
+                    state.waiters.append(Waiter(bytes: count, continuation: continuation))
+                    return .waiting
                 }
-                // One writer at a time: `L2CAPChannel.write(_:)` is the only caller and it is
-                // serialized by the `Central` actor owning it.
-                assert(state.waiter == nil, "LinkL2CAPChannel supports one suspended writer")
-                state.waiter = continuation
-                state.waiterBytes = count
-                return .waiting
+                state.outboundCredit -= count
+                return .granted
             }
             switch outcome {
             case .granted: continuation.resume()
@@ -235,13 +240,32 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
         }
     }
 
+    /// Resumes queued writers, oldest first, for as long as the credit window covers the one
+    /// at the head. Each waiter's credit is deducted under the lock and the continuation is
+    /// resumed after it is released, with the queue re-examined afterwards.
+    private func resumeGrantableWaiters() {
+        while true {
+            let waiter = state.withLock { state -> Waiter? in
+                guard !state.isClosed,
+                      let head = state.waiters.first,
+                      state.outboundCredit >= head.bytes
+                else { return nil }
+                state.outboundCredit -= head.bytes
+                state.waiters.removeFirst()
+                return head
+            }
+            guard let waiter else { return }
+            waiter.continuation.resume()
+        }
+    }
+
     /// The one teardown path: marks the channel closed, optionally tells the provider,
     /// finishes the inbound stream, and fails a suspended writer. Idempotent — a second call
     /// does nothing.
     private func teardown(error: Error?, notifyingProvider: Bool) {
         struct Teardown {
             var continuation: AsyncThrowingStream<Data, Error>.Continuation?
-            var waiter: CheckedContinuation<Void, Error>?
+            var waiters: [Waiter] = []
             var shouldSendClose = false
         }
         let teardown = state.withLock { state -> Teardown? in
@@ -250,18 +274,17 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
             state.closeError = error
             var teardown = Teardown()
             teardown.continuation = state.continuation
-            teardown.waiter = state.waiter
+            teardown.waiters = state.waiters
             teardown.shouldSendClose = notifyingProvider && !state.didSendClose
             if teardown.shouldSendClose { state.didSendClose = true }
             state.continuation = nil
-            state.waiter = nil
-            state.waiterBytes = 0
+            state.waiters = []
             return teardown
         }
         guard let teardown else { return }
         // Every callout happens after the lock is released.
         if teardown.shouldSendClose { send(.l2capClose(channel: channel)) }
         teardown.continuation?.finish(throwing: error)
-        teardown.waiter?.resume(throwing: LinkL2CAPError.closed)
+        for waiter in teardown.waiters { waiter.continuation.resume(throwing: LinkL2CAPError.closed) }
     }
 }
