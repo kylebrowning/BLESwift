@@ -278,17 +278,22 @@ public actor VirtualRadio {
     /// the backend's queue). Registering the sink as part of the connection is what keeps a
     /// notification from ever outrunning its own delivery path.
     ///
-    /// - Returns: `nil` on success, or the error to fail the attempt with.
+    /// The device's name is answered here rather than left to a second
+    /// ``name(of:)`` hop: the device could be removed between the two, and the connection that
+    /// just succeeded would then be named `nil`.
+    ///
+    /// - Returns: The error to fail the attempt with, or the connected device's name on
+    ///   success — both `nil` when the connection succeeded to an unnamed device.
     func connect(
         session: UUID,
         device: UUID,
         sink: @escaping @Sendable (PeripheralEvent) -> Void
-    ) -> NSError? {
-        guard sessions[session] != nil else { return Self.unknownDeviceError }
-        guard devices[device] != nil else { return Self.unknownDeviceError }
+    ) -> (error: NSError?, name: String?) {
+        guard sessions[session] != nil else { return (Self.unknownDeviceError, nil) }
+        guard let state = devices[device] else { return (Self.unknownDeviceError, nil) }
         sessions[session]?.peripheralSinks[device] = sink
         sessions[session]?.connections.insert(device)
-        return nil
+        return (nil, state.descriptor.name)
     }
 
     /// Disconnects `session` from `device`, dropping its subscriptions. The backend

@@ -176,10 +176,11 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         remote.setConnectionState(.connecting)
         let device = remote.identifier
         Task { [radio, sessionID, queue] in
-            let failure = await radio.connect(session: sessionID, device: device) { event in
+            // Connect-and-name in one actor hop: a second hop for the name could observe a
+            // `remove()` that landed in between and rename a live connection to `nil`.
+            let (failure, name) = await radio.connect(session: sessionID, device: device) { event in
                 queue.async { remote.deliver(event) }
             }
-            let name = await radio.name(of: device)
             queue.async { [self] in
                 if let failure {
                     remote.setConnectionState(.disconnected)
