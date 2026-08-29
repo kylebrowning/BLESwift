@@ -22,7 +22,7 @@ below for the resulting flows.
 
 ### Modules
 
-BLESwift ships as three products. `import BLESwift` is all most apps need — it re-exports
+BLESwift ships as several products. `import BLESwift` is all most apps need — it re-exports
 everything below, so every type on this page is available without a separate import:
 
 - **`BLESwiftCore`** — the backend-agnostic types and implementation seam underneath
@@ -33,11 +33,24 @@ everything below, so every type on this page is available without a separate imp
   `FakePeripheralManager` (peripheral-role) fakes for unit-testing your own BLE code without
   hardware. See <doc:GettingStarted>'s "Testing" section.
 
+Three further modules make `Central` and `PeripheralHost` work in the iOS Simulator, where
+CoreBluetooth is non-functional — see <doc:SimulatorSupport>:
+
+- **`BLESwiftSimulatorLink`** — the simulator-side half: backends that forward the seam to a
+  host-side provider, and the `SimulatorLink.install()` that routes every `Central()` /
+  `PeripheralHost()` through them.
+- **`BLESwiftProvider`** — the host-side half: a `Provider` that serves link clients from the
+  Mac's real radio, from an in-process virtual radio, or both. Behind the `bleswift-provider`
+  executable, and importable directly to host virtual devices written in Swift.
+- **`BLESwiftLink`** — the framed, `Codable` wire protocol and the fixture format the two
+  halves share. Rarely imported directly.
+
 ## Topics
 
 ### Essentials
 
 - <doc:GettingStarted>
+- <doc:SimulatorSupport>
 - ``Central``
 - ``Configuration``
 - ``WarningOptions``

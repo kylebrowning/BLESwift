@@ -275,8 +275,8 @@ public actor VirtualRadio {
 
     /// Connects `session` to `device`, routing that device's radio-initiated
     /// ``BLESwiftCore/PeripheralEvent``s to `sink` (which is responsible for hopping onto
-    /// the backend's queue). Registering the sink as part of the connection is what makes
-    /// it impossible for a notification to outrun its own delivery path.
+    /// the backend's queue). Registering the sink as part of the connection is what keeps a
+    /// notification from ever outrunning its own delivery path.
     ///
     /// - Returns: `nil` on success, or the error to fail the attempt with.
     func connect(
