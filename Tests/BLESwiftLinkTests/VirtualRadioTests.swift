@@ -308,5 +308,65 @@ struct VirtualRadioTests {
         await handle.notify(Data([0, 99]), for: Self.measurement, to: nil)
         #expect(try await bounded { try await task.value } == Data([0, 99]))
     }
+
+    /// A device that answers no GATT traffic — the sighting-history tests only need it to
+    /// exist and advertise.
+    private struct InertHandler: VirtualDeviceHandler {
+        func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
+            .failure(.unlikelyError)
+        }
+
+        func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> {
+            .failure(.unlikelyError)
+        }
+
+        func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {}
+    }
+
+    @Test("The sighting history is capped, forgetting the oldest sighting first")
+    func sightingHistoryIsCapped() async throws {
+        let radio = VirtualRadio()
+        let queue = DispatchSerialQueue(label: "VirtualRadioTests.sightings")
+        // A history of one, so a second sighting is all it takes to forget the first.
+        let backend = VirtualCentralBackend(radio: radio, queue: queue, maximumDiscovered: 1)
+
+        let sighted = Mutex<[UUID]>([])
+        await Self.onQueue(queue) {
+            backend.eventHandler = { event in
+                if case .didDiscover(let peripheral, _, _) = event { sighted.withLock { $0.append(peripheral.uuid) } }
+            }
+        }
+
+        /// Registers an advertising device and returns its handle once the backend has seen it.
+        func advertise() async -> (id: UUID, handle: VirtualDeviceHandle) {
+            let identifier = UUID()
+            let device = VirtualDevice(
+                descriptor: VirtualDeviceDescriptor(
+                    identifier: identifier,
+                    advertisement: AdvertisementData(serviceUUIDs: [Self.service], isConnectable: true)
+                ),
+                handler: InertHandler()
+            )
+            let handle = await radio.register(device)
+            await waitFor { sighted.withLock { $0.contains(identifier) } }
+            return (identifier, handle)
+        }
+
+        await Self.onQueue(queue) {
+            backend.scanForPeripherals(withServices: nil, options: ScanOptions(allowDuplicates: false))
+        }
+        // Sequential, so the history's order is the order they were registered in.
+        let oldest = await advertise()
+        let newest = await advertise()
+        #expect(sighted.withLock { $0 } == [oldest.id, newest.id])
+
+        // Both devices leave the radio, so only the sighting history can still vend a remote
+        // for them — which is exactly what the cap bounds.
+        await oldest.handle.remove()
+        await newest.handle.remove()
+
+        #expect(await Self.onQueue(queue) { backend.retrievePeripherals(withIdentifiers: [oldest.id]).isEmpty })
+        #expect(await Self.onQueue(queue) { backend.retrievePeripherals(withIdentifiers: [newest.id]).count } == 1)
+    }
 }
 #endif

@@ -63,7 +63,12 @@ public final class LinkCentral: CentralManaging, Sendable {
     nonisolated(unsafe) private var _sightingOrder: [UUID] = []
 
     /// How many peripheral mirrors this central keeps.
-    private static let maximumPeripherals = 1024
+    private let maximumPeripherals: Int
+
+    /// The mirror table's default size, used by every public initializer. Tests override it
+    /// to force eviction without minting a thousand identifiers.
+    package static let defaultMaximumPeripherals = 1024
+
     nonisolated(unsafe) private var _nextChannelIdentifier: UInt32 = 1
     nonisolated(unsafe) private var _channels: [UInt32: ChannelEntry] = [:]
 
@@ -87,14 +92,44 @@ public final class LinkCentral: CentralManaging, Sendable {
     ///     `LinkCodec.binaryPropertyList`.
     ///   - retryInterval: How long to wait before redialing after a failure. Defaults to two
     ///     seconds.
-    public init(
+    public convenience init(
         endpoint: LinkEndpoint,
         queue: DispatchSerialQueue,
         clientName: String = ProcessInfo.processInfo.processName,
         codec: LinkCodec = .binaryPropertyList,
         retryInterval: Duration = .seconds(2)
     ) {
+        self.init(
+            endpoint: endpoint,
+            queue: queue,
+            clientName: clientName,
+            codec: codec,
+            retryInterval: retryInterval,
+            maximumPeripherals: Self.defaultMaximumPeripherals
+        )
+    }
+
+    /// Creates a central whose mirror table holds at most `maximumPeripherals` peripherals —
+    /// the designated initializer, for tests that cannot mint
+    /// ``defaultMaximumPeripherals`` identifiers to force an eviction.
+    ///
+    /// - Parameters:
+    ///   - endpoint: The provider's host and port.
+    ///   - queue: The serial queue this central is confined to.
+    ///   - clientName: A human-readable name sent in the handshake.
+    ///   - codec: The codec used to encode messages.
+    ///   - retryInterval: How long to wait before redialing after a failure.
+    ///   - maximumPeripherals: How many peripheral mirrors to keep.
+    package init(
+        endpoint: LinkEndpoint,
+        queue: DispatchSerialQueue,
+        clientName: String = ProcessInfo.processInfo.processName,
+        codec: LinkCodec = .binaryPropertyList,
+        retryInterval: Duration = .seconds(2),
+        maximumPeripherals: Int
+    ) {
         self.queue = queue
+        self.maximumPeripherals = maximumPeripherals
         self.session = LinkClientSession(
             endpoint: endpoint,
             role: .central,
@@ -179,9 +214,28 @@ public final class LinkCentral: CentralManaging, Sendable {
 
     /// Asks the provider to connect to `peripheral`. A peripheral from another shim family is
     /// ignored, as the seam specifies.
+    ///
+    /// **A mirror the cap evicted is re-filed rather than refused.** The table is bounded, so
+    /// a caller holding a peripheral retrieved long enough ago can find its entry gone by the
+    /// time it connects — and dropping the request on the floor would leave that caller
+    /// waiting for a `didConnect` nothing was ever going to send. The identity check is on the
+    /// peripheral's *owner*, which no eviction changes; only a peripheral belonging to another
+    /// central, or one this central has since replaced with a different mirror for the same
+    /// identifier, is ignored.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard let target = peripheral as? LinkPeripheral, _peripherals[target.identifier] === target else { return }
+        guard let target = peripheral as? LinkPeripheral, target.isOwned(by: self) else { return }
+        guard let filed = _peripherals[target.identifier] else {
+            _peripherals[target.identifier] = target
+            touch(target.identifier)
+            // Marked connecting *before* the cap runs, so the eviction this insert may trigger
+            // cannot pick the very peripheral being connected.
+            target.markConnecting()
+            evictStalePeripherals()
+            send(.connect(peripheral: target.identifier, options: options.map(WireConnectOptions.init), requiresANCS: requiresANCS))
+            return
+        }
+        guard filed === target else { return }
         target.markConnecting()
         send(.connect(peripheral: target.identifier, options: options.map(WireConnectOptions.init), requiresANCS: requiresANCS))
     }
@@ -321,8 +375,8 @@ public final class LinkCentral: CentralManaging, Sendable {
     /// called on ``queue``.
     private func evictStalePeripherals() {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard _peripherals.count > Self.maximumPeripherals else { return }
-        var overflow = _peripherals.count - Self.maximumPeripherals
+        guard _peripherals.count > maximumPeripherals else { return }
+        var overflow = _peripherals.count - maximumPeripherals
         var kept: [UUID] = []
         kept.reserveCapacity(_sightingOrder.count)
         for identifier in _sightingOrder {

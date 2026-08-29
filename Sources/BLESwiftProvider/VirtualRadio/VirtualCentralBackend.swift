@@ -54,7 +54,11 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     nonisolated(unsafe) private var _discoveryOrder: [UUID] = []
 
     /// How many sightings ``_discovered`` remembers.
-    private static let maximumDiscovered = 1024
+    private let maximumDiscovered: Int
+
+    /// The sighting history's default size, used by the public initializer. Tests override it
+    /// to force eviction without reporting a thousand sightings.
+    package static let defaultMaximumDiscovered = 1024
 
     /// The serial chain of radio work, rooted in this backend's attachment. Swift guarantees
     /// no ordering between independent `Task`s, so a `scan` and the `stopScan` right behind it
@@ -84,9 +88,22 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     ///   - radio: The radio hosting the virtual devices to serve.
     ///   - queue: The queue every method and event delivery is confined to — the same
     ///     queue the owning `Central` is constructed with.
-    public init(radio: VirtualRadio, queue: DispatchSerialQueue) {
+    public convenience init(radio: VirtualRadio, queue: DispatchSerialQueue) {
+        self.init(radio: radio, queue: queue, maximumDiscovered: Self.defaultMaximumDiscovered)
+    }
+
+    /// Creates a backend whose sighting history holds at most `maximumDiscovered`
+    /// identifiers — the designated initializer, for tests that cannot report
+    /// ``defaultMaximumDiscovered`` sightings to force an eviction.
+    ///
+    /// - Parameters:
+    ///   - radio: The radio hosting the virtual devices to serve.
+    ///   - queue: The queue every method and event delivery is confined to.
+    ///   - maximumDiscovered: How many sightings to remember.
+    package init(radio: VirtualRadio, queue: DispatchSerialQueue, maximumDiscovered: Int) {
         self.radio = radio
         self.queue = queue
+        self.maximumDiscovered = maximumDiscovered
         let session = sessionID
         // Weak, so the radio's registration never keeps this backend alive; the strong
         // reference the hop takes lasts only as long as the delivery itself.
@@ -157,7 +174,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         guard _discovered.insert(identifier).inserted else { return }
         _discoveryOrder.append(identifier)
-        guard _discoveryOrder.count > Self.maximumDiscovered else { return }
+        guard _discoveryOrder.count > maximumDiscovered else { return }
         _discovered.remove(_discoveryOrder.removeFirst())
     }
 

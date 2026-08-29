@@ -375,5 +375,62 @@ struct LinkCentralTests {
         // identifier again mints a fresh one.
         #expect(oldestSurvived == false)
     }
+
+    @Test("The peripheral mirror cap evicts the least recently sighted disconnected mirror")
+    func peripheralCapEvictsTheOldestMirror() async throws {
+        let queue = DispatchSerialQueue(label: "LinkCentralTests.evict")
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: try closedPort()),
+            queue: queue,
+            clientName: "test",
+            retryInterval: .seconds(60),
+            maximumPeripherals: 1
+        )
+        defer { link.shutdown() }
+
+        let oldest = UUID()
+        let newest = UUID()
+        let survived = await onQueue(queue) { () -> Bool in
+            let first = link.retrievePeripherals(withIdentifiers: [oldest]).first as? LinkPeripheral
+            // One over the cap, and the older mirror is disconnected, so it is the one to go.
+            _ = link.retrievePeripherals(withIdentifiers: [newest])
+            return link.retrievePeripherals(withIdentifiers: [oldest]).first as? LinkPeripheral === first
+        }
+        #expect(survived == false)
+    }
+
+    @Test("A connect to a peripheral the cap evicted re-files it instead of dropping the request")
+    func connectRefilesAnEvictedPeripheral() async throws {
+        let provider = try ScriptedProvider()
+        try await provider.start()
+        let queue = DispatchSerialQueue(label: "LinkCentralTests.evictedConnect")
+        let link = LinkCentral(
+            endpoint: provider.endpoint,
+            queue: queue,
+            clientName: "test",
+            retryInterval: .milliseconds(50),
+            maximumPeripherals: 1
+        )
+        defer { link.shutdown(); provider.stop() }
+        await waitFor(timeout: .seconds(30)) { link.isProviderConnected }
+        #expect(link.isProviderConnected)
+
+        let target = UUID()
+        let held = try #require(await onQueue(queue) {
+            link.retrievePeripherals(withIdentifiers: [target]).first as? LinkPeripheral
+        })
+        // Overflows the cap of one, evicting `held` between the retrieval and the connect —
+        // the window a caller holding a perfectly valid peripheral cannot see.
+        await onQueue(queue) { _ = link.retrievePeripherals(withIdentifiers: [UUID()]) }
+
+        await onQueue(queue) { link.connect(held, options: nil, requiresANCS: false) }
+
+        await waitFor(timeout: .seconds(10)) { Self.connectCount(provider, for: target) == 1 }
+        #expect(Self.connectCount(provider, for: target) == 1)
+        // Re-filed under its identifier, so the provider's events for it reach the very
+        // object the caller is holding.
+        #expect(await onQueue(queue) { link.retrievePeripherals(withIdentifiers: [target]).first as? LinkPeripheral === held })
+        #expect(await onQueue(queue) { held.connectionState } == .connecting)
+    }
 }
 #endif

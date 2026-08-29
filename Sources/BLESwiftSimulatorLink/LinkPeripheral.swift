@@ -51,6 +51,13 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     /// `PeripheralRemote` that backend hands out, so this reference can never dangle.
     private unowned let central: LinkCentral
 
+    /// Whether `candidate` is the central that owns this peripheral.
+    ///
+    /// The ownership test ``LinkCentral/connect(_:options:requiresANCS:)`` uses in place of a
+    /// table lookup, which the mirror cap can invalidate under a caller that still holds a
+    /// perfectly valid peripheral.
+    func isOwned(by candidate: LinkCentral) -> Bool { central === candidate }
+
     /// The queue every mirroring method, property accessor, and event delivery is confined
     /// to — the same queue the owning `Central` was constructed with.
     private let queue: DispatchSerialQueue
