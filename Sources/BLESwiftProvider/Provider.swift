@@ -154,6 +154,12 @@ public actor Provider {
                             + "\(PendingConnections.maximumQueuedBytes) bytes behind its handshake"
                     )
                     connection.cancel()
+                case .exceededQueueDepth:
+                    self.configuration.log?(
+                        "dropping a connection holding more than "
+                            + "\(PendingConnections.maximumQueued) messages behind its handshake"
+                    )
+                    connection.cancel()
                 case .handshake:
                     Task { await self.handle(message, from: connection) }
                 case .deliver(let handler):
@@ -440,6 +446,9 @@ struct PendingConnections {
         /// Nowhere, and the connection goes with it: holding this message would put the
         /// entry's backlog past ``PendingConnections/maximumQueuedBytes``.
         case exceededBacklog
+        /// Nowhere, and the connection goes with it: holding this message would put the
+        /// entry's backlog past ``PendingConnections/maximumQueued`` messages.
+        case exceededQueueDepth
         /// To ``Provider/handle(_:from:)`` — the connection's first message, its hello.
         case handshake
         /// To the session that owns this connection.
@@ -473,11 +482,18 @@ struct PendingConnections {
         var queuedBytes = 0
     }
 
-    /// How many messages one entry holds before it starts dropping them. Only a connection
+    /// How many messages one entry holds before its connection is dropped. Only a connection
     /// whose handshake is in flight — or one that was rejected and is about to be cancelled —
     /// ever queues at all, so this is a ceiling on a misbehaving client, not a flow-control
     /// window.
-    private static let maximumQueued = 256
+    ///
+    /// Answered the way the byte cap is, and for the same reason: dropping the message
+    /// instead left the client believing a request it sent behind its own hello had been
+    /// accepted, and the session that opened a moment later served every neighbouring
+    /// message but that one — a silent hole in an ordered stream. A client that has put 256
+    /// messages behind a handshake that has not completed is not one whose session is merely
+    /// slow to open, so the connection goes.
+    static let maximumQueued = 256
 
     /// How many bytes of held messages one entry accumulates before its connection is dropped.
     ///
@@ -521,12 +537,16 @@ struct PendingConnections {
             entry.didRouteHello = true
             return .handshake
         }
-        guard entry.queued.count < Self.maximumQueued else { return .drop }
+        // Both caps release the backlog here rather than at the termination that follows: the
+        // caller cancels the connection the moment either returns, and nothing is served from
+        // a backlog whose connection is on its way out.
+        guard entry.queued.count < Self.maximumQueued else {
+            entry.queued = []
+            entry.queuedBytes = 0
+            return .exceededQueueDepth
+        }
         let cost = message.heldByteCount
         guard entry.queuedBytes + cost <= Self.maximumQueuedBytes else {
-            // Released here rather than at the termination that follows: the caller cancels the
-            // connection the moment this returns, and nothing is served from a backlog whose
-            // connection is on its way out.
             entry.queued = []
             entry.queuedBytes = 0
             return .exceededBacklog

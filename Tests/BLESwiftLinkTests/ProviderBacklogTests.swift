@@ -85,6 +85,35 @@ struct ProviderBacklogTests {
         #expect(remaining?.isEmpty == true)
     }
 
+    @Test("A backlog past the message cap ends the connection rather than dropping the message")
+    func messageCapEndsTheConnection() throws {
+        var pending = PendingConnections()
+        let connection = Self.connection()
+        let registered = pending.register(connection, limit: 4)
+        #expect(registered)
+        let routed = Self.routeHello(&pending, connection)
+        #expect(routed)
+
+        // Tiny, so the byte cap is nowhere near: only the message cap can answer this.
+        let message = Self.write(1)
+        #expect(PendingConnections.maximumQueued * message.heldByteCount < PendingConnections.maximumQueuedBytes)
+        for index in 0..<PendingConnections.maximumQueued {
+            guard case .drop = pending.route(message, from: connection) else {
+                Issue.record("message \(index) should have been held")
+                return
+            }
+        }
+
+        // The one past the cap takes the connection with it rather than being dropped in
+        // silence, exactly as the byte cap does.
+        guard case .exceededQueueDepth = pending.route(message, from: connection) else {
+            Issue.record("the message past the cap should have ended the connection")
+            return
+        }
+        let remaining = pending.beginReplay({ _ in }, for: connection)
+        #expect(remaining?.isEmpty == true)
+    }
+
     @Test("A backlog under the byte cap is held and replayed in order")
     func backlogUnderTheCapIsReplayed() throws {
         var pending = PendingConnections()
