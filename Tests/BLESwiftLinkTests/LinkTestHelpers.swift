@@ -3,7 +3,28 @@
 //  BLESwiftLinkTests
 //
 
+import BLESwiftCore
 import Foundation
+import Synchronization
+
+/// Collects a `PeripheralHost`'s subscription events off its actor, so a test can assert on
+/// what it was told and when. A `Mutex` is noncopyable, so it is wrapped rather than passed
+/// around bare.
+final class SubscriptionLog: Sendable {
+    private let events = Mutex<[SubscriptionEvent]>([])
+
+    func append(_ event: SubscriptionEvent) { events.withLock { $0.append(event) } }
+
+    /// Every event recorded so far, in arrival order.
+    var all: [SubscriptionEvent] { events.withLock { $0 } }
+
+    /// The subscriber and characteristic of the last recorded `.unsubscribed`, or `nil` when
+    /// the last event was not one.
+    var lastUnsubscribe: (central: Subscriber, characteristic: CharacteristicIdentifier)? {
+        guard case .unsubscribed(let central, let characteristic) = events.withLock({ $0.last }) else { return nil }
+        return (central, characteristic)
+    }
+}
 
 /// Polls `condition` every 5 ms until it is `true` or `timeout` elapses. Never throws —
 /// callers assert on the observable state afterwards, so a timeout surfaces as a normal

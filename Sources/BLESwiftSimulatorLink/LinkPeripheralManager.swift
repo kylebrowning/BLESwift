@@ -28,8 +28,10 @@ import Foundation
 /// is indistinguishable from a machine without Bluetooth — and that first `.unsupported` is
 /// delivered as soon as an ``eventHandler`` is attached. The provider's own `didUpdateState`
 /// replaces it; if the link then drops, the state falls back to `.unsupported`,
-/// ``isAdvertising`` becomes `false`, and every subscriber the host had is implicitly gone
-/// along with the session that owned them.
+/// ``isAdvertising`` becomes `false`, and every subscriber the host had is reported gone with
+/// a synthesized `didUnsubscribe`. The subscribers really are gone — they belonged to the
+/// provider session that just died, and a reconnect mints fresh `Subscriber`
+/// ids — so a host left holding them would be pushing at centrals that no longer exist.
 ///
 /// **Notification back-pressure.** ``updateValue(_:for:onSubscribed:)`` returns `false` once
 /// `LinkFlowControl.updateValueWindow` pushes are in flight unacknowledged,
@@ -58,6 +60,14 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     nonisolated(unsafe) private var _radioState: CentralState = .unsupported
     nonisolated(unsafe) private var _didDeliverInitialState = false
     nonisolated(unsafe) private var _isAdvertising = false
+
+    /// The subscribers this manager has delivered a `didSubscribe` for and not yet a
+    /// `didUnsubscribe`, per characteristic — the host's subscriber table, mirrored.
+    ///
+    /// It exists only so a dropped link can be answered with the `didUnsubscribe` the dead
+    /// provider will never send. Keyed by ``BLESwiftCore/Subscriber`` id so a repeat
+    /// `didSubscribe` for the same central refreshes rather than duplicates it.
+    nonisolated(unsafe) private var _subscribers: [CharacteristicIdentifier: [UUID: Subscriber]] = [:]
 
     /// The sequence number the next ``updateValue(_:for:onSubscribed:)`` is tagged with.
     nonisolated(unsafe) private var _nextSequence: UInt64 = 0
@@ -252,8 +262,13 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     // MARK: - Link lifecycle
 
     /// Handles the link dropping after having been established: nothing is advertising any
-    /// more, whatever centrals had subscribed are gone with the session that owned them, and
-    /// the radio state is unknowable again.
+    /// more, every central that had subscribed is reported unsubscribed, and the radio state
+    /// is unknowable again.
+    ///
+    /// The subscribers are synthesized rather than left standing because nothing else will
+    /// ever retract them: the provider that owed the `didUnsubscribe` is gone, and the one
+    /// that replaces it mints new ``BLESwiftCore/Subscriber`` ids for whoever resubscribes. A
+    /// host that kept the old ones would push at centrals that cannot receive.
     ///
     /// The notification window is emptied here: every unacknowledged push belonged to a
     /// session that no longer exists, so no `updateValueDelivered` can ever arrive for it and
@@ -268,6 +283,15 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         _isAdvertising = false
         _isAwaitingReconnect = true
+        // Before the state change, so a host draining its events sees its subscribers leave
+        // and only then hears the radio is gone.
+        let departing = _subscribers
+        _subscribers.removeAll()
+        for (characteristic, subscribers) in departing {
+            for subscriber in subscribers.values.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+                deliver(.didUnsubscribe(central: subscriber, characteristic: characteristic))
+            }
+        }
         if _outstandingUpdates.count >= LinkFlowControl.updateValueWindow { _wasBlockedAtDrop = true }
         _outstandingUpdates.removeAll()
         guard _radioState != .unsupported else { return }
@@ -330,10 +354,15 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
             deliver(.didReceiveWrite(try request.writeRequest))
 
         case .didSubscribe(let central, let characteristic):
-            deliver(.didSubscribe(central: central.subscriber, characteristic: try characteristic.identifier))
+            let identifier = try characteristic.identifier
+            _subscribers[identifier, default: [:]][central.subscriber.id] = central.subscriber
+            deliver(.didSubscribe(central: central.subscriber, characteristic: identifier))
 
         case .didUnsubscribe(let central, let characteristic):
-            deliver(.didUnsubscribe(central: central.subscriber, characteristic: try characteristic.identifier))
+            let identifier = try characteristic.identifier
+            _subscribers[identifier]?.removeValue(forKey: central.subscriber.id)
+            if _subscribers[identifier]?.isEmpty == true { _subscribers.removeValue(forKey: identifier) }
+            deliver(.didUnsubscribe(central: central.subscriber, characteristic: identifier))
 
         case .updateValueDelivered(let sequence):
             // Consumed, never forwarded: `readyToUpdateSubscribers` is synthesized here from

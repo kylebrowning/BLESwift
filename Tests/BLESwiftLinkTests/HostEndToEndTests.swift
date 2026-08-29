@@ -427,6 +427,54 @@ struct HostEndToEndTests {
         await provider.stop()
     }
 
+    @Test("A provider drop reaches the host as an unsubscribe for every subscriber it had")
+    func providerDropUnsubscribesTheHost() async throws {
+        let provider = try await makeProvider()
+        let port = await provider.port
+        let (host, hostLink) = makeHost(port: port, label: "host.e2e.dropsub.host")
+        await waitFor(timeout: .seconds(5)) { host.state == .poweredOn }
+        try await host.add(Self.service)
+
+        // Attached before anything can subscribe: `subscriptionEvents()` does not replay.
+        let log = SubscriptionLog()
+        let stream = await host.subscriptionEvents()
+        let observer = Task { for await event in stream { log.append(event) } }
+        defer { observer.cancel() }
+
+        try await host.startAdvertising(
+            PeripheralAdvertisement(localName: "Sim Host", serviceUUIDs: [Self.heartRate])
+        )
+
+        let (central, centralLink) = makeCentral(port: port, label: "host.e2e.dropsub.central")
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+        var found: Discovery?
+        for try await event in await central.scan(services: [Self.heartRate], timeout: .seconds(5)) {
+            if case .discovered(let discovery) = event { found = discovery; break }
+        }
+        let peripheral = try await central.connect(try #require(found).peripheral)
+
+        let notifications = Task {
+            for try await _ in peripheral.notifications(for: Self.measurement) as AsyncThrowingStream<Data, Error> {}
+        }
+        defer { notifications.cancel() }
+        await waitFor(timeout: .seconds(5)) { await !host.subscribers(for: Self.measurement).isEmpty }
+        let subscriber = try #require(await host.subscribers(for: Self.measurement).first)
+
+        // ---- The provider goes away with the subscription still live ----
+        await provider.stop()
+
+        // The subscriber died with the session that minted it: a reconnect issues fresh ids,
+        // so a host still holding this one would be pushing at a central that cannot receive.
+        await waitFor(timeout: .seconds(5)) { await host.subscribers(for: Self.measurement).isEmpty }
+        #expect(await host.subscribers(for: Self.measurement).isEmpty)
+        let departure = try #require(log.lastUnsubscribe)
+        #expect(departure.central == subscriber)
+        #expect(departure.characteristic == Self.measurement)
+
+        hostLink.shutdown()
+        centralLink.shutdown()
+    }
+
     /// Runs `make` until the port the previous provider released can be bound again — a
     /// just-closed listener may hold it for a moment.
     private static func rebind(port: UInt16, _ make: () async throws -> Provider) async throws -> Provider {

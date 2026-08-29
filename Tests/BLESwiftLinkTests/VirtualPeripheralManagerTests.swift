@@ -278,21 +278,6 @@ struct VirtualPeripheralManagerTests {
         }
     }
 
-    /// Collects a host's subscription events off its actor. A `Mutex` is noncopyable, so it
-    /// is wrapped rather than passed around bare.
-    private final class SubscriptionLog: Sendable {
-        private let events = Mutex<[SubscriptionEvent]>([])
-
-        func append(_ event: SubscriptionEvent) { events.withLock { $0.append(event) } }
-
-        /// The subscriber and characteristic of the last recorded `.unsubscribed`, or `nil`
-        /// when the last event was not one.
-        var lastUnsubscribe: (central: Subscriber, characteristic: CharacteristicIdentifier)? {
-            guard case .unsubscribed(let central, let characteristic) = events.withLock({ $0.last }) else { return nil }
-            return (central, characteristic)
-        }
-    }
-
     /// A hosted `PeripheralHost` on `radio` publishing ``service``, with an observer already
     /// attached to its subscription events.
     ///
