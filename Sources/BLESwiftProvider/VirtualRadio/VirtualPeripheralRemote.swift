@@ -123,10 +123,16 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     }
 
     /// Always `false` — the virtual radio has no ANCS.
-    public var ancsAuthorized: Bool { false }
+    public var ancsAuthorized: Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return false
+    }
 
     /// Always `true` — the virtual radio applies no write-without-response back-pressure.
-    public var canSendWriteWithoutResponse: Bool { true }
+    public var canSendWriteWithoutResponse: Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return true
+    }
 
     /// Asks the radio for `services` (or every service, when `nil`) and delivers
     /// `didDiscoverServices` once the answer lands.

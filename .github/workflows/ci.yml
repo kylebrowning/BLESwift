@@ -102,6 +102,13 @@ jobs:
         # test job resolves its one. Pinned names drift with the runner image's Xcode.
         run: |
           NAMES=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; names={x['name'] for r in d for x in d[r] if x['name'].startswith('iPhone')}; print('\n'.join(sorted(names)[-2:]))")
+          # Two *distinct* names are the whole point: the advertiser and the scanner have to
+          # boot as separate simulators. One name would silently run both roles on one
+          # device, so fail here with something readable instead.
+          if [ "$(echo "$NAMES" | grep -c .)" -lt 2 ]; then
+            echo "::error::need two distinct iPhone simulator names, found: ${NAMES:-none}"
+            exit 1
+          fi
           echo "ADVERTISER_SIM=$(echo "$NAMES" | tail -1)" >> "$GITHUB_ENV"
           echo "SCANNER_SIM=$(echo "$NAMES" | head -1)" >> "$GITHUB_ENV"
           echo "Using $NAMES"
