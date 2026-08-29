@@ -87,23 +87,45 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Simulators -------------------------------------------------------------
-# Idempotent: look the simulator up by name, create + boot it if it is missing.
+# Idempotent: look the simulator up by name, create + boot it only if there really is none.
+#
+# The lookup deliberately does NOT filter on state or availability. It used to run against
+# `simctl list devices available`, which hides a device whose runtime profile is momentarily
+# missing — so on a runner that already had an "iPhone 17", this created a *second* one, and
+# `grantiva run --simulator "iPhone 17"` then refused with "Multiple simulators are named".
+# Booting is what the state is for, not finding.
+#
+# A duplicate that already exists is not an error either: the first match wins, with a warning,
+# because deleting someone else's simulator is not this script's business. Every downstream
+# command takes the UDID rather than the name, so a duplicate cannot make the run ambiguous.
 ensure_simulator() {
     local name="$1"
-    local udid
-    udid="$(xcrun simctl list devices available -j \
+    local udids
+    udids="$(xcrun simctl list devices -j \
         | python3 -c '
 import json, sys
 name = sys.argv[1]
 data = json.load(sys.stdin)["devices"]
+available, other = [], []
 for runtime, devices in data.items():
     if "iOS" not in runtime:
         continue
     for device in devices:
-        if device["name"] == name:
-            print(device["udid"])
-            sys.exit(0)
+        if device["name"] != name:
+            continue
+        (available if device.get("isAvailable") else other).append(device["udid"])
+# An available device first: an unavailable one is still worth finding (it is what made a
+# duplicate get created), but it is the last thing to hand back.
+for udid in available + other:
+    print(udid)
 ' "$name")"
+    local udid
+    udid="$(echo "$udids" | sed -n '1p')"
+    local count
+    count="$(echo "$udids" | grep -c . || true)"
+    if (( count > 1 )); then
+        log "WARNING: $count simulators are named \"$name\"; using $udid"
+    fi
     if [[ -z "$udid" ]]; then
         log "Creating simulator \"$name\""
         local runtime
@@ -164,9 +186,11 @@ APP="$(find .build/e2e-dd -name BLESwiftExplorer.app -path '*iphonesimulator*' |
 echo "app: $APP"
 
 # --- Advertiser (keep-alive, background) ------------------------------------
-log "Advertiser session on \"$ADVERTISER_SIM\""
+log "Advertiser session on \"$ADVERTISER_SIM\" ($ADVERTISER_UDID)"
+# By UDID, not by name: a runner that has two simulators of the same name makes the name
+# ambiguous, and grantiva refuses it outright.
 grantiva run \
-    --simulator "$ADVERTISER_SIM" \
+    --simulator "$ADVERTISER_UDID" \
     --app-file "$APP" \
     --bundle-id "$BUNDLE_ID" \
     --flow Scripts/e2e/flows/advertise.yaml \
@@ -225,10 +249,10 @@ done
 echo "advertiser flow passed; peripheral is live"
 
 # --- Scanner ----------------------------------------------------------------
-log "Scanner session on \"$SCANNER_SIM\""
+log "Scanner session on \"$SCANNER_SIM\" ($SCANNER_UDID)"
 set +e
 grantiva run \
-    --simulator "$SCANNER_SIM" \
+    --simulator "$SCANNER_UDID" \
     --app-file "$APP" \
     --bundle-id "$BUNDLE_ID" \
     --flow Scripts/e2e/flows/scan-finds-advertiser.yaml \

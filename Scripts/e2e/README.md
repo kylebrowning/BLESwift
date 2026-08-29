@@ -82,6 +82,15 @@ xcrun simctl create "iPhone 17" \
 The script does this itself (picking the newest available iOS runtime), so you should not have
 to run it by hand.
 
+**Duplicates are tolerated, not created.** The lookup matches by name across *every* device the
+runtime knows, whatever its state and whether or not it is currently available — a device whose
+runtime profile is momentarily missing is still a device, and looking only at
+`simctl list devices available` is what used to make the script create a second `iPhone 17` on a
+runner that already had one. `grantiva run` then refused the ambiguous name outright. If several
+devices do share a name, the first (preferring an available one) wins with a warning rather than
+a third being created, and both sessions are launched by **UDID**, so a duplicate cannot make a
+run ambiguous.
+
 ## When it fails on CI
 
 The `sim-to-sim-e2e` job on `macos-latest` resolves `ADVERTISER_SIM` / `SCANNER_SIM` at run
