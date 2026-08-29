@@ -224,4 +224,37 @@ struct LinkCentralTests {
         #expect(peripheral?.name == "Named")
     }
 
+    @Test("The peripheral table is capped, keeping the ones a connect still refers to")
+    func peripheralTableIsCapped() async throws {
+        let queue = DispatchSerialQueue(label: "LinkCentralTests.cap")
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: try closedPort()),
+            queue: queue,
+            clientName: "test",
+            retryInterval: .seconds(60)
+        )
+        defer { link.shutdown() }
+
+        let connecting = UUID()
+        let oldest = UUID()
+        // One more than the cap, so two of the three oldest mirrors have to go.
+        let overflowing = (0..<1024).map { _ in UUID() }
+
+        let (heldSurvived, oldestSurvived) = await onQueue(queue) { () -> (Bool, Bool) in
+            let held = link.retrievePeripherals(withIdentifiers: [connecting]).first as? LinkPeripheral
+            // A connect in flight: `held` is `.connecting`, so however stale it becomes the
+            // cap must not drop it — the provider's events for it have to reach this object.
+            if let held { link.connect(held, options: nil, requiresANCS: false) }
+            let stale = link.retrievePeripherals(withIdentifiers: [oldest]).first as? LinkPeripheral
+            _ = link.retrievePeripherals(withIdentifiers: overflowing)
+            let heldAgain = link.retrievePeripherals(withIdentifiers: [connecting]).first as? LinkPeripheral
+            let staleAgain = link.retrievePeripherals(withIdentifiers: [oldest]).first as? LinkPeripheral
+            return (heldAgain === held, staleAgain === stale)
+        }
+
+        #expect(heldSurvived)
+        // The least recently sighted disconnected mirror was forgotten, so retrieving that
+        // identifier again mints a fresh one.
+        #expect(oldestSurvived == false)
+    }
 }

@@ -45,7 +45,25 @@ public final class LinkCentral: CentralManaging, Sendable {
     nonisolated(unsafe) private var _eventHandler: ((CentralEvent) -> Void)?
     nonisolated(unsafe) private var _radioState: CentralState = .unsupported
     nonisolated(unsafe) private var _didDeliverInitialState = false
+    /// Every peripheral this central has vended, so the same instance is returned for a given
+    /// identifier — the object the provider's wire events are routed to.
+    ///
+    /// **Bounded, least-recently-sighted first.** A long-lived scan across a busy room would
+    /// otherwise grow this table without limit, one mirror per identifier ever seen. Beyond
+    /// ``maximumPeripherals`` entries the least recently sighted ones are dropped, and only
+    /// ones that are `.disconnected`: anything connecting, connected, or disconnecting is
+    /// still referenced by a live operation, so it is skipped however old it is. The reason
+    /// for a cap rather than a prune is `VirtualCentralBackend`'s: forgetting a peripheral
+    /// that many sightings ago cannot strand a client that has not also connected to it, and
+    /// a forgotten identifier is not refused — the next retrieval simply mints a fresh mirror.
     nonisolated(unsafe) private var _peripherals: [UUID: LinkPeripheral] = [:]
+
+    /// ``_peripherals``' keys in least-recently-sighted order, which is what the cap evicts
+    /// from. Linear to update, over a list bounded by ``maximumPeripherals``.
+    nonisolated(unsafe) private var _sightingOrder: [UUID] = []
+
+    /// How many peripheral mirrors this central keeps.
+    private static let maximumPeripherals = 1024
     nonisolated(unsafe) private var _nextChannelIdentifier: UInt32 = 1
     nonisolated(unsafe) private var _channels: [UInt32: ChannelEntry] = [:]
 
@@ -263,11 +281,47 @@ public final class LinkCentral: CentralManaging, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         if let existing = _peripherals[identifier] {
             existing.record(name: name)
+            touch(identifier)
             return existing
         }
         let created = LinkPeripheral(identifier: identifier, name: name, central: self, queue: queue)
         _peripherals[identifier] = created
+        touch(identifier)
+        evictStalePeripherals()
         return created
+    }
+
+    /// Moves `identifier` to the most-recently-sighted end of ``_sightingOrder``. Must be
+    /// called on ``queue``.
+    private func touch(_ identifier: UUID) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        if let index = _sightingOrder.firstIndex(of: identifier) {
+            _sightingOrder.remove(at: index)
+        }
+        _sightingOrder.append(identifier)
+    }
+
+    /// Drops the least recently sighted `.disconnected` mirrors until the table is back
+    /// within ``maximumPeripherals``. A peripheral in any other connection state is left
+    /// alone: a connect, a live connection, or a cancellation in flight still refers to it,
+    /// and the provider's events for it must reach the instance its owner is holding. Must be
+    /// called on ``queue``.
+    private func evictStalePeripherals() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard _peripherals.count > Self.maximumPeripherals else { return }
+        var overflow = _peripherals.count - Self.maximumPeripherals
+        var kept: [UUID] = []
+        kept.reserveCapacity(_sightingOrder.count)
+        for identifier in _sightingOrder {
+            guard let candidate = _peripherals[identifier] else { continue }
+            guard overflow > 0, candidate.connectionState == .disconnected else {
+                kept.append(identifier)
+                continue
+            }
+            _peripherals.removeValue(forKey: identifier)
+            overflow -= 1
+        }
+        _sightingOrder = kept
     }
 
     // MARK: - Link lifecycle
