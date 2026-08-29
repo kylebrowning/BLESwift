@@ -61,6 +61,39 @@ struct FixtureTests {
         #expect(control.value == nil)
     }
 
+    /// The keys with a memberwise default decode as that default when the JSON omits them, so
+    /// the smallest device a fixture can describe is its `id` alone.
+    @Test("A minimal device decodes, taking every optional key's default")
+    func minimalDevice() throws {
+        let json = """
+        { "devices": [{ "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8" }] }
+        """
+        let document = try FixtureDocument.parse(Data(json.utf8))
+        let device = try #require(document.devices.first)
+        #expect(device.name == nil)
+        #expect(device.advertisedServices.isEmpty)
+        #expect(device.manufacturerData == nil)
+        #expect(device.services.isEmpty)
+        #expect(device.advertisement.serviceUUIDs?.isEmpty ?? true)
+        #expect(device.gattServices.isEmpty)
+    }
+
+    @Test("A characteristic without properties decodes as one advertising none")
+    func characteristicWithoutProperties() throws {
+        let json = """
+        {
+          "devices": [{
+            "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8",
+            "services": [{ "uuid": "180D", "characteristics": [{ "uuid": "2A37" }] }]
+          }]
+        }
+        """
+        let document = try FixtureDocument.parse(Data(json.utf8))
+        let characteristic = try #require(document.devices.first?.gattServices.first?.characteristics.first)
+        #expect(characteristic.properties.isEmpty)
+        #expect(characteristic.permissions.isEmpty)   // derived from no properties
+    }
+
     @Test("Unknown property strings fail decoding")
     func unknownProperty() {
         let bad = Self.json.replacingOccurrences(of: "\"notify\"", with: "\"telepathy\"")

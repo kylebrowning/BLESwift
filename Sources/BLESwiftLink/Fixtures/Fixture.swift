@@ -115,16 +115,20 @@ public struct FixtureDevice: Codable, Sendable, Equatable {
 
     /// Decodes a fixture device, rejecting an ``advertisedServices`` entry BLESwift's
     /// identifiers could not hold rather than trapping on it later in ``advertisement``.
+    ///
+    /// Only `id` is required. An absent ``advertisedServices`` or ``services`` decodes as
+    /// empty, matching this type's memberwise defaults, so the smallest device a fixture can
+    /// describe is `{ "id": "…" }`.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
         name = try container.decodeIfPresent(String.self, forKey: .name)
-        advertisedServices = try container.decode([String].self, forKey: .advertisedServices)
+        advertisedServices = try container.decodeIfPresent([String].self, forKey: .advertisedServices) ?? []
         for (index, uuid) in advertisedServices.enumerated() {
             try validateFixtureUUID(uuid, forKey: .advertisedServices, in: container, index: index)
         }
         manufacturerData = try container.decodeIfPresent(Data.self, forKey: .manufacturerData)
-        services = try container.decode([FixtureService].self, forKey: .services)
+        services = try container.decodeIfPresent([FixtureService].self, forKey: .services) ?? []
     }
 
     /// Encodes a fixture device, in the shape ``init(from:)`` reads.
@@ -246,11 +250,14 @@ public struct FixtureCharacteristic: Codable, Sendable, Equatable {
 
     /// Decodes a fixture characteristic, rejecting a ``uuid`` BLESwift's identifiers could
     /// not hold rather than trapping on it later in `gattCharacteristic(service:)`.
+    ///
+    /// Only `uuid` is required. An absent ``properties`` decodes as empty, matching this
+    /// type's memberwise default.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         uuid = try container.decode(String.self, forKey: .uuid)
         try validateFixtureUUID(uuid, forKey: .uuid, in: container)
-        properties = try container.decode([FixtureProperty].self, forKey: .properties)
+        properties = try container.decodeIfPresent([FixtureProperty].self, forKey: .properties) ?? []
         value = try container.decodeIfPresent(Data.self, forKey: .value)
         if let explicit = try container.decodeIfPresent([FixturePermission].self, forKey: .permissions) {
             permissions = explicit
