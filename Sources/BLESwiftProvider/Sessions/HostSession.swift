@@ -184,9 +184,13 @@ final class HostSession: Sendable {
     /// Offers queued pushes to the backend until it refuses one, acknowledging each one it
     /// accepts. Must be called on ``queue``.
     ///
-    /// A refused push is re-offered **verbatim** — same value, characteristic and subscriber
-    /// list — which is what lets a ``CompositePeripheralManager`` recognize the retry and
-    /// route it to the children that refused it alone.
+    /// A refused push stays at the head of the queue and is re-offered **verbatim** — same
+    /// value, characteristic and subscriber list — as the seam requires, and nothing behind
+    /// it is offered first. Over a ``CompositePeripheralManager`` that re-offer is what
+    /// settles a push the composite finished on its own behalf: the composite pushed the
+    /// value to the children that refused it as their windows reopened, and answers the
+    /// re-offer `true` without pushing again, so this drain acknowledges it exactly once and
+    /// no subscriber is notified twice.
     private func drainUpdates() {
         dispatchPrecondition(condition: .onQueue(queue))
         while let next = pendingUpdates.first {

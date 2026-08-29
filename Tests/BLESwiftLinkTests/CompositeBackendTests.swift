@@ -342,16 +342,23 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { second.updateValueCalls.count } == 2)
     }
 
-    @Test("A retried push reaches only the child that refused it")
-    func retriedUpdateSkipsTheChildThatAccepted() async {
+    @Test("The composite finishes a refused push, re-offering it to that child alone")
+    func refusedPushIsFinishedByTheComposite() async {
         let queue = DispatchSerialQueue(label: "CompositeBackendTests.retry")
         let accepting = FakePeripheralManager(queue: queue, state: .poweredOn)
         let refusing = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [accepting, refusing], queue: queue)
 
+        let ready = Mutex<Int>(0)
+        await onQueue(queue) {
+            composite.eventHandler = { event in
+                if case .readyToUpdateSubscribers = event { ready.withLock { $0 += 1 } }
+            }
+        }
+
         let value = Data([0xA5])
         // The first offer: the second child's transmit queue is full, so the composite
-        // reports `false` and the caller has to retry the very same push.
+        // reports `false` and holds the push.
         await onQueue(queue) { refusing.scriptedUpdateValueReturns = [false] }
         #expect(await onQueue(queue) {
             composite.updateValue(value, for: Self.measurement, onSubscribed: nil)
@@ -359,20 +366,59 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
         #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 1)
 
-        // The retry, once the refusing child is ready again: the child that already took the
-        // value must not be pushed to a second time, or its subscribers see a duplicate.
+        // While that push is owed the window is closed: a further push is refused and
+        // reaches nobody, so it cannot overtake the outstanding one.
+        #expect(await onQueue(queue) {
+            composite.updateValue(Data([0x11]), for: Self.measurement, onSubscribed: nil)
+        } == false)
+        #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
+        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 1)
+
+        // The refusing child's window reopens: the composite re-offers the outstanding value
+        // to that child alone — the child that already took it must not be pushed to a second
+        // time, or its subscribers see a duplicate — and only then does one readiness reach
+        // the host.
+        refusing.simulateReadyToUpdate()
+        await waitFor { ready.withLock { $0 } == 1 }
+        #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
+        #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 2)
+        #expect(await onQueue(queue) { refusing.updateValueCalls.last?.value } == value)
+
+        // The caller's mandated re-offer of the refused push is answered `true` and pushed
+        // nowhere: every child already has that value.
         #expect(await onQueue(queue) {
             composite.updateValue(value, for: Self.measurement, onSubscribed: nil)
         })
         #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
         #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 2)
 
-        // A *different* push is not a retry: it fans out to every child again.
+        // And the next push fans out to every child again.
         #expect(await onQueue(queue) {
             composite.updateValue(Data([0x5A]), for: Self.measurement, onSubscribed: nil)
         })
         #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 2)
         #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 3)
+        #expect(ready.withLock { $0 } == 1)
+    }
+
+    @Test("Two distinct pushes carrying the same bytes each reach every child")
+    func identicalPayloadsAreNotMistakenForARetry() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.identicalPayloads")
+        let first = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let second = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
+
+        // Same value, same characteristic, same (absent) subscriber list — two separate
+        // pushes all the same. Neither may be mistaken for a retry of the other.
+        let value = Data([0xA5])
+        for _ in 0..<2 {
+            #expect(await onQueue(queue) {
+                composite.updateValue(value, for: Self.measurement, onSubscribed: nil)
+            })
+        }
+
+        #expect(await onQueue(queue) { first.updateValueCalls.map(\.value) } == [value, value])
+        #expect(await onQueue(queue) { second.updateValueCalls.map(\.value) } == [value, value])
     }
 
     @Test("readyToUpdateSubscribers from any child is forwarded")
