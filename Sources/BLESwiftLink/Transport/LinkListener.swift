@@ -19,9 +19,42 @@ enum LinkTransportParameters {
         return parameters
     }
 
+    /// Which family's loopback address a host names.
+    enum Loopback {
+        case ipv4
+        case ipv6
+    }
+
+    /// The loopback address `host` names, or `nil` when it names something else — in which
+    /// case a listener binds every interface rather than loopback alone.
+    ///
+    /// Recognized: `localhost`, anything in `127.0.0.0/8` (the whole block, not just
+    /// `127.0.0.1` — `127.0.0.2` is as much this machine as `127.0.0.1` is), and the IPv6
+    /// loopback `::1`, bracketed or not, since `[::1]` is how it is written beside a port.
+    static func loopback(_ host: String) -> Loopback? {
+        switch host {
+        case "localhost":
+            return .ipv4
+        case "::1", "[::1]":
+            return .ipv6
+        default:
+            return isIPv4Loopback(host) ? .ipv4 : nil
+        }
+    }
+
     /// `true` when `host` names the loopback interface, in which case a listener binds only there.
     static func isLoopback(_ host: String) -> Bool {
-        host == "127.0.0.1" || host == "localhost"
+        loopback(host) != nil
+    }
+
+    /// Whether `host` is a dotted quad inside `127.0.0.0/8`.
+    private static func isIPv4Loopback(_ host: String) -> Bool {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4, parts[0] == "127" else { return false }
+        // `UInt8.init` alone would accept a signed `"+1"`, so the digits are checked too.
+        return parts.allSatisfy { part in
+            !part.isEmpty && part.allSatisfy(\.isASCII) && part.allSatisfy(\.isNumber) && UInt8(part) != nil
+        }
     }
 }
 
@@ -34,9 +67,10 @@ public enum LinkListenerError: Error, Equatable, Sendable {
 /// Accepts framed message connections on a TCP port.
 ///
 /// Each accepted connection is wrapped in a ``LinkConnection``, started, and handed to
-/// ``onConnection`` on the `queue` supplied at initialization. Binding to `127.0.0.1` or
-/// `localhost` restricts the listener to the loopback interface; any other host binds every
-/// interface on the port.
+/// ``onConnection`` on the `queue` supplied at initialization. Binding to a loopback host —
+/// `localhost`, any `127.x.y.z`, or `::1` (bracketed or not), which binds the IPv6 loopback —
+/// restricts the listener to the loopback interface; any other host binds every interface on
+/// the port.
 public final class LinkListener: Sendable {
 
     /// Everything mutable, guarded by one lock.
@@ -60,12 +94,14 @@ public final class LinkListener: Sendable {
     public init(endpoint: LinkEndpoint, codec: LinkCodec, queue: DispatchQueue) throws {
         let parameters = LinkTransportParameters.tcp()
         let port = NWEndpoint.Port(rawValue: endpoint.port) ?? .any
-        if LinkTransportParameters.isLoopback(endpoint.host) {
+        switch LinkTransportParameters.loopback(endpoint.host) {
+        case .some(let family):
             // `requiredLocalEndpoint` already names the port; passing it to `on:` as well is
             // rejected as EINVAL, so the loopback path binds through the parameters alone.
-            parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port)
+            let host: NWEndpoint.Host = family == .ipv6 ? .ipv6(.loopback) : .ipv4(.loopback)
+            parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)
             self.listener = try NWListener(using: parameters)
-        } else {
+        case .none:
             self.listener = try NWListener(using: parameters, on: port)
         }
         self.codec = codec
