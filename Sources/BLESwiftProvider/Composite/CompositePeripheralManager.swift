@@ -319,6 +319,12 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// Settles everything child `index` still owed, and drops what it will never take: it
     /// cannot answer a completion or a push while it is not powered on, and the host must
     /// not wait on it. Must be called on ``queue``.
+    ///
+    /// **Every completion is emitted last, after every table has been written.** A handler is
+    /// free to call straight back into this composite — ``completeAdd(_:error:from:)`` and the
+    /// advertisement half below already order their callouts this way — and one that did so
+    /// from the middle of the `_pendingAdds` walk had its new batch overwritten by the stale
+    /// snapshot the walk was still writing back.
     private func powerDown(child index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         _queues[index].removeAll()
@@ -327,18 +333,26 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         _proven[index] = false
         _loggedDropping.remove(index)
 
+        // Accumulated, and emitted only once every table below has been written: the loop
+        // walks a snapshot of `_pendingAdds`, so a handler that re-entered ``add(_:)``
+        // synchronously — appending a batch under a key this loop has yet to reach — had that
+        // batch destroyed by the write-back of the stale snapshot, after which the child's own
+        // `didAddService` was forwarded per child instead of aggregated once.
+        var settledAdds: [(identifier: ServiceIdentifier, error: NSError?)] = []
         for (identifier, batches) in _pendingAdds {
             var remaining: [Pending] = []
-            var settled: [NSError?] = []
             for var batch in batches {
                 guard batch.owing.remove(index) != nil else {
                     remaining.append(batch)
                     continue
                 }
-                if batch.owing.isEmpty { settled.append(batch.error) } else { remaining.append(batch) }
+                if batch.owing.isEmpty {
+                    settledAdds.append((identifier, batch.error))
+                } else {
+                    remaining.append(batch)
+                }
             }
             _pendingAdds[identifier] = remaining.isEmpty ? nil : remaining
-            for error in settled { _eventHandler?(.didAddService(identifier, error: error)) }
         }
 
         var remainingAdvertisements: [Pending] = []
@@ -351,7 +365,6 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
             if batch.owing.isEmpty { settledAdvertisements.append(batch.error) } else { remainingAdvertisements.append(batch) }
         }
         _pendingAdvertisements = remainingAdvertisements
-        for error in settledAdvertisements { _eventHandler?(.didStartAdvertising(error: error)) }
 
         // Nothing this child owed is counted as swallowed, and whatever it still had counted
         // against it is dropped: a `CBPeripheralManager` leaving `.poweredOn` *abandons* the
@@ -366,6 +379,11 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         _swallowedAdvertisements[index] = 0
 
         reopenWindowIfPossible()
+
+        // Every table is settled, so a handler re-entering from here finds this composite in
+        // one piece and whatever it queues survives.
+        for settled in settledAdds { _eventHandler?(.didAddService(settled.identifier, error: settled.error)) }
+        for error in settledAdvertisements { _eventHandler?(.didStartAdvertising(error: error)) }
     }
 
     /// Catches child `index` up with the composite's current services and advertisement now

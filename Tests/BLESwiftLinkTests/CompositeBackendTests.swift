@@ -944,6 +944,73 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { composite.radioState } == .poweredOn)
     }
 
+    @Test("A handler that re-enters add() from a power-down keeps its own batches")
+    func aReentrantAddFromPowerDownKeepsItsBatch() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.reentrantAdd")
+        let first = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let second = FakePeripheralManager(queue: queue, state: .poweredOn)
+        // Abandons what it had in flight, so every batch is settled by its power-down rather
+        // than by a completion of its own.
+        let leaving = AbandoningPeripheralManager(queue: queue, state: .poweredOn)
+        let composite = CompositePeripheralManager(backends: [first, second, leaving], queue: queue)
+
+        // Several services, so the power-down's walk settles one while others are still ahead
+        // of it in the snapshot — the batches a re-entrant `add()` used to lose.
+        let services = (1...8).map { index in
+            GATTService(
+                identifier: ServiceIdentifier(uuid: "18\(String(format: "%02X", index))"),
+                characteristics: []
+            )
+        }
+        let added = Mutex<[ServiceIdentifier]>([])
+        let reentries = Mutex<Int>(0)
+        await onQueue(queue) {
+            // Publishes, but never reports it: every batch is left owing this child alone, so
+            // the power-down below settles all of them in one walk.
+            leaving.completesAdds = false
+            composite.eventHandler = { event in
+                guard case .didAddService(let identifier, _) = event else { return }
+                added.withLock { $0.append(identifier) }
+                // Straight back into the composite, from the callout the power-down makes —
+                // which is exactly what the two in-tree consumers do not do, and what any
+                // other caller's handler may. Bounded to the power-down's own completions,
+                // one per service, so the re-adds those trigger do not recurse.
+                let round = reentries.withLock { count -> Int in
+                    count += 1
+                    return count
+                }
+                guard round <= services.count else { return }
+                for service in services { composite.add(service) }
+            }
+        }
+
+        await onQueue(queue) {
+            for service in services { composite.add(service) }
+        }
+        // Both powered-on children have reported, so nothing is owing but the child that is
+        // about to go — and nothing has reached the host yet.
+        await waitFor {
+            await self.onQueue(queue) {
+                first.addedServices.count == services.count && second.addedServices.count == services.count
+            }
+        }
+        _ = await onQueue(queue) { true }
+        #expect(added.withLock { $0 }.isEmpty)
+
+        leaving.simulateStateChange(.poweredOff)
+
+        // One completion per service for the power-down, then one per re-add — never one per
+        // child, which is what a batch destroyed by the walk's write-back would have produced.
+        let expected = services.count + services.count * services.count
+        await waitFor { added.withLock { $0.count } >= expected }
+        _ = await onQueue(queue) { true }
+        _ = await onQueue(queue) { true }
+        #expect(added.withLock { $0 }.count == expected)
+        for service in services {
+            #expect(added.withLock { $0 }.filter { $0 == service.identifier }.count == 1 + services.count)
+        }
+    }
+
     @Test("respond and removeAllHostedServices fan out to every child")
     func respondAndRemoveFanOut() async {
         let queue = DispatchSerialQueue(label: "CompositeBackendTests.respond")
@@ -1035,6 +1102,7 @@ private final class AbandoningPeripheralManager: PeripheralManaging, Sendable {
     nonisolated(unsafe) private var _addedServices: [ServiceIdentifier] = []
     nonisolated(unsafe) private var _startAdvertisingCallCount = 0
     nonisolated(unsafe) private var _onAdd: ((GATTService) -> Void)?
+    nonisolated(unsafe) private var _completesAdds = true
 
     init(queue: DispatchSerialQueue, state: CentralState) {
         self.queue = queue
@@ -1077,12 +1145,19 @@ private final class AbandoningPeripheralManager: PeripheralManaging, Sendable {
         set { dispatchPrecondition(condition: .onQueue(queue)); _onAdd = newValue }
     }
 
+    /// Whether ``add(_:)`` reports a completion at all — a radio still publishing when its
+    /// power goes, so the composite is left holding a batch that only a power-down can settle.
+    var completesAdds: Bool {
+        get { dispatchPrecondition(condition: .onQueue(queue)); return _completesAdds }
+        set { dispatchPrecondition(condition: .onQueue(queue)); _completesAdds = newValue }
+    }
+
     func add(_ service: GATTService) {
         dispatchPrecondition(condition: .onQueue(queue))
         _addedServices.append(service.identifier)
         _onAdd?(service)
         queue.async { [self] in
-            guard _radioState == .poweredOn else { return }
+            guard _radioState == .poweredOn, _completesAdds else { return }
             _eventHandler?(.didAddService(service.identifier, error: nil))
         }
     }
