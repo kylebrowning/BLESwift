@@ -69,23 +69,29 @@ reuses it if it is not, and boots it either way. A machine that already has two 
 sharing a name is fine too — `ensure` reports one UDID and every downstream command is given
 that UDID rather than the name, so a duplicate cannot make a run ambiguous.
 
-## When it fails on CI
+## Running it on CI
 
-The `sim-to-sim-e2e` job on `macos-latest` resolves `ADVERTISER_SIM` / `SCANNER_SIM` at run
-time — the two newest distinct `iPhone …` names the runner image actually has, taken from
-`xcrun simctl list devices available -j`. Nothing is pinned, because named devices drift with
-the image's Xcode and a name that matches nothing fails the job outright.
+**On demand only, from the Actions tab** — `.github/workflows/sim-to-sim-e2e.yml`, triggered
+by `workflow_dispatch` and nothing else. It is deliberately **not a PR gate**: GitHub's macOS
+runners boot simulators in anywhere from 112 s to 577 s, and grantiva's runner is not yet
+reliable on that image — it has passed there once. A job that goes red on runner weather rather
+than on the code teaches a reviewer to ignore it, so this one is run when it is wanted and
+**fails honestly** when it fails. There is no `continue-on-error`.
+
+The dispatch form takes two optional inputs, `advertiser_sim` and `scanner_sim`. Give both to
+pin the run to particular simulator names; leave both empty — the default — and the job
+resolves `ADVERTISER_SIM` / `SCANNER_SIM` at run time, taking the two newest distinct
+`iPhone …` names the runner image actually has from `xcrun simctl list devices available -j`.
+Nothing is pinned in the workflow, because named devices drift with the image's Xcode and a
+name that matches nothing fails the job outright. Giving only one of the two, or the same name
+twice, is refused with a readable error rather than silently running both roles on one device.
 
 **grantiva is installed unpinned.** `grantiva/homebrew-tap` ships a single `Formula/grantiva.rb`
 with no versioned formulae, so the job takes whatever the tap's HEAD points at. The script
 depends on 1.7.0 features (`simulator ensure --name`, `run --ready-file`, `run --env`,
 `simulator teardown --udid --force`), so the job prints `grantiva --version` as its own step.
 
-The job is `continue-on-error: true`, but not because the flow cannot pass — it has. It is
-non-gating because GitHub macOS runner capacity is erratic: simulator boots on that image have
-been measured anywhere from 109 s to 577 s.
-
-First things to check when it goes red:
+First things to check when a run goes red:
 
 - **grantiva version.** The `grantiva version` step; anything below 1.7.0 will fail on the
   flags above.
@@ -150,9 +156,9 @@ flows now do instead:
     execution, with no progress reaching the caller. Still true on a genuinely cold machine —
     see the open item below — but 1.7.0 caches the built agent and WebDriverAgent per runtime,
     so it is paid once rather than per run.
-12. **WebDriverAgent's 90-second startup timeout** was what made this job `continue-on-error`.
+12. **WebDriverAgent's 90-second startup timeout** was what first made this job non-gating.
     With the simulator booted to `bootstatus -b` and the app pre-installed, and with 1.7.0's
-    WDA cache, it has not been hit again; the job stays non-gating for runner capacity, not
+    WDA cache, it has not been hit again; the job is off the PR gate for runner capacity, not
     for this.
 
 ### Open
