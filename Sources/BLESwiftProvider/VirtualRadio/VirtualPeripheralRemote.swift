@@ -9,14 +9,14 @@ import Dispatch
 import Foundation
 import Synchronization
 
-/// A ``BLESwiftCore/PeripheralRemote`` backed by a ``VirtualRadio`` device, vended by
+/// A `PeripheralRemote` backed by a ``VirtualRadio`` device, vended by
 /// ``VirtualCentralBackend/retrievePeripherals(withIdentifiers:)``.
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Every stored property is
 /// `nonisolated(unsafe)` and touched only on ``queue``, which every `PeripheralRemote`
 /// method asserts at entry — the serial queue is the synchronization, exactly as it is for
 /// a real `CBPeripheral`. GATT work reaches the radio actor through one serial chain of
-/// `Task`s (see ``enqueue(_:)``), and every resulting event is delivered back with
+/// `Task`s (see `enqueue(_:)`), and every resulting event is delivered back with
 /// `queue.async`, never inline. The one exception is ``name``, which the radio fills in
 /// asynchronously and CoreBluetooth callers read off-queue, so it is `Mutex`-protected
 /// instead.
@@ -104,7 +104,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
 
     // MARK: - PeripheralRemote
 
-    /// Receives every ``BLESwiftCore/PeripheralEvent`` this remote produces, on ``queue``.
+    /// Receives every `PeripheralEvent` this remote produces, on ``queue``.
     public var eventHandler: ((PeripheralEvent) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))

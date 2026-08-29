@@ -12,7 +12,7 @@ import Foundation
 ///
 /// A descriptor is the *data* half of a ``VirtualDevice``; the ``VirtualDeviceHandler``
 /// paired with it is the *behavior* half, answering reads and writes for characteristics
-/// whose ``BLESwiftCore/GATTCharacteristic/value`` is `nil`.
+/// whose `GATTCharacteristic.value` is `nil`.
 public struct VirtualDeviceDescriptor: Sendable {
 
     /// A stable identifier for this device, used as the peripheral identifier every
@@ -51,7 +51,7 @@ public struct VirtualDeviceDescriptor: Sendable {
 /// The behavior half of a ``VirtualDevice``: the code that answers GATT traffic the radio
 /// cannot answer from the device's static database.
 ///
-/// A characteristic with a non-`nil` ``BLESwiftCore/GATTCharacteristic/value`` is *static*
+/// A characteristic with a non-`nil` `GATTCharacteristic.value` is *static*
 /// and is answered by ``VirtualRadio`` itself, exactly as CoreBluetooth answers a static
 /// `CBMutableCharacteristic`; every other read, and every write, reaches the handler.
 public protocol VirtualDeviceHandler: Sendable {

@@ -8,7 +8,7 @@ import BLESwiftCore
 import Dispatch
 import Foundation
 
-/// A ``BLESwiftCore/PeripheralManaging`` made of several — the peripheral-role counterpart
+/// A `PeripheralManaging` made of several — the peripheral-role counterpart
 /// to ``CompositeCentral``.
 ///
 /// One `PeripheralHost` over a composite is hosted simultaneously by every child: the same
@@ -16,7 +16,7 @@ import Foundation
 /// pushed on an in-process ``VirtualRadio`` *and* the Mac's real CoreBluetooth. Requests
 /// arriving from any child surface as one event stream, and
 /// ``respond(to:value:error:)`` is offered to every child — the ones that never minted
-/// that token ignore it, per ``BLESwiftCore/PeripheralManaging/respond(to:value:error:)``,
+/// that token ignore it, per `PeripheralManaging.respond(to:value:error:)`,
 /// so no routing table is needed.
 ///
 /// **Two completions are aggregated, not forwarded.** ``add(_:)`` and
@@ -60,7 +60,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     nonisolated(unsafe) private var _pendingAdvertisements: [Pending] = []
 
     /// The authorization status this composite reports: always
-    /// ``BLESwiftCore/BluetoothAuthorization/allowedAlways``. See
+    /// `BluetoothAuthorization.allowedAlways`. See
     /// ``CompositeCentral/bluetoothAuthorization`` for why a composite has no better
     /// answer to give.
     public static var bluetoothAuthorization: BluetoothAuthorization { .allowedAlways }
@@ -161,7 +161,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
 
     // MARK: - PeripheralManaging
 
-    /// Receives every ``BLESwiftCore/PeripheralHostEvent`` fanned in from the children, on
+    /// Receives every `PeripheralHostEvent` fanned in from the children, on
     /// ``queue``. Attaching and detaching behave exactly as
     /// ``CompositeCentral/eventHandler``: a non-`nil` handler (re)installs the composite on
     /// every child, `nil` clears every child's handler, and the first non-`nil` attachment
@@ -185,8 +185,8 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
-    /// ``BLESwiftCore/CentralState/poweredOn`` if any child is powered on, otherwise the
-    /// first child's state (``BLESwiftCore/CentralState/unknown`` with no children).
+    /// `CentralState.poweredOn` if any child is powered on, otherwise the
+    /// first child's state (`CentralState.unknown` with no children).
     public var radioState: CentralState {
         computedState
     }

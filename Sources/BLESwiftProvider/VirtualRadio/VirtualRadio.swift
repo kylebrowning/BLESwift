@@ -25,7 +25,7 @@ import Foundation
 /// ```
 public actor VirtualRadio {
 
-    /// The RSSI every sighting and ``BLESwiftCore/PeripheralRemote/readRSSI()`` reports.
+    /// The RSSI every sighting and `PeripheralRemote.readRSSI()` reports.
     /// Virtual devices have no radio distance, so a single plausible value stands in.
     public static let rssi = -50
 

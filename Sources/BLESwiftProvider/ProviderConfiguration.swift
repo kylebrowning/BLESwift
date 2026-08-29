@@ -22,7 +22,7 @@ import Dispatch
 /// ```
 public struct ProviderConfiguration: Sendable {
 
-    /// Where the provider listens. Defaults to ``BLESwiftLink/LinkEndpoint/default``; use
+    /// Where the provider listens. Defaults to `LinkEndpoint.default`; use
     /// port `0` to have the system assign a free port and read ``Provider/port`` afterwards.
     public var endpoint: LinkEndpoint = .default
 

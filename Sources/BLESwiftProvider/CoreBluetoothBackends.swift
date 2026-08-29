@@ -13,8 +13,8 @@ import BLESwiftCore
 import CoreBluetooth
 import Dispatch
 
-/// The host machine's own CoreBluetooth, as ``BLESwiftCore/CentralManaging`` and
-/// ``BLESwiftCore/PeripheralManaging`` — the "real" half a passthrough ``Provider``
+/// The host machine's own CoreBluetooth, as `CentralManaging` and
+/// `PeripheralManaging` — the "real" half a passthrough ``Provider``
 /// composes with its ``VirtualRadio``.
 ///
 /// A ``Provider`` whose ``ProviderConfiguration/passthrough`` is set calls these for every
@@ -35,12 +35,12 @@ import Dispatch
 ///   or the initial `didUpdateState` fires against no handler and is lost.
 public enum CoreBluetoothBackends {
 
-    /// A real `CBCentralManager` confined to `queue`, as a ``BLESwiftCore/CentralManaging``.
+    /// A real `CBCentralManager` confined to `queue`, as a `CentralManaging`.
     ///
     /// The system power alert is suppressed (`CBCentralManagerOptionShowPowerAlertKey`):
     /// a provider is a background tool, and a modal "Turn on Bluetooth" panel raised by a
     /// simulator's scan would be a surprise with no one to answer it. A powered-off radio
-    /// simply reports ``BLESwiftCore/CentralState/poweredOff``, and the composite carries on
+    /// simply reports `CentralState.poweredOff`, and the composite carries on
     /// with the virtual half.
     ///
     /// - Parameter queue: The serial queue CoreBluetooth delivers on and the returned
@@ -56,7 +56,7 @@ public enum CoreBluetoothBackends {
     }
 
     /// A real `CBPeripheralManager` confined to `queue`, as a
-    /// ``BLESwiftCore/PeripheralManaging``.
+    /// `PeripheralManaging`.
     ///
     /// - Parameter queue: The serial queue CoreBluetooth delivers on and the returned
     ///   backend is confined to. Must be the queue this call is made from.

@@ -22,8 +22,8 @@ import Synchronization
 /// ```
 ///
 /// **One session per connection, one backend per session.** A client identifies its role in
-/// the handshake; a `.central` client gets a ``CentralSession`` driving a
-/// ``VirtualCentralBackend``, and a `.peripheral` client gets a ``HostSession`` driving a
+/// the handshake; a `.central` client gets a `CentralSession` driving a
+/// ``VirtualCentralBackend``, and a `.peripheral` client gets a `HostSession` driving a
 /// ``VirtualPeripheralManagerBackend`` — each optionally composed with the host's real
 /// CoreBluetooth, when ``ProviderConfiguration/passthrough`` is set — on a serial queue
 /// created for that session alone. Sessions share only the radio, which is exactly what makes
@@ -100,7 +100,7 @@ public actor Provider {
     ///
     /// - Throws: The `NWError` the listener failed to bind with — a port already in use
     ///   fails here rather than being retried — or
-    ///   ``BLESwiftLink/LinkListenerError/alreadyStarted`` if the provider is already
+    ///   `LinkListenerError.alreadyStarted` if the provider is already
     ///   listening.
     public func start() async throws {
         guard listener == nil else { throw LinkListenerError.alreadyStarted }

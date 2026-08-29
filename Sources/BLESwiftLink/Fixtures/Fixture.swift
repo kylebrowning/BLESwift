@@ -77,7 +77,7 @@ public struct FixtureDevice: Codable, Sendable, Equatable {
 
     /// This device's advertisement, derived from ``name``, ``advertisedServices``, and
     /// ``manufacturerData``. Always advertises as connectable; every other
-    /// ``BLESwiftCore/AdvertisementData`` field is left `nil`.
+    /// `AdvertisementData` field is left `nil`.
     public var advertisement: AdvertisementData {
         AdvertisementData(
             localName: name,
@@ -130,7 +130,7 @@ public struct FixtureService: Codable, Sendable, Equatable {
         try container.encode(characteristics, forKey: .characteristics)
     }
 
-    /// This service, converted to a ``BLESwiftCore/GATTService``.
+    /// This service, converted to a `GATTService`.
     public var gattService: GATTService {
         let identifier = ServiceIdentifier(uuid: uuid)
         return GATTService(
@@ -224,7 +224,7 @@ public struct FixtureCharacteristic: Codable, Sendable, Equatable {
 }
 
 /// One operation a fixture characteristic advertises support for, mirroring
-/// ``BLESwiftCore/CharacteristicProperties``.
+/// `CharacteristicProperties`.
 public enum FixtureProperty: String, Codable, Sendable, CaseIterable {
 
     /// The characteristic's value can be read.
@@ -251,7 +251,7 @@ public enum FixtureProperty: String, Codable, Sendable, CaseIterable {
     /// The characteristic has an Extended Properties descriptor.
     case extendedProperties
 
-    /// This fixture property, converted to its ``BLESwiftCore/CharacteristicProperties``
+    /// This fixture property, converted to its `CharacteristicProperties`
     /// member.
     public var characteristicProperty: CharacteristicProperties {
         switch self {
@@ -268,7 +268,7 @@ public enum FixtureProperty: String, Codable, Sendable, CaseIterable {
 }
 
 /// One access permission gating a fixture characteristic's value, mirroring
-/// ``BLESwiftCore/AttributePermissions``.
+/// `AttributePermissions`.
 public enum FixturePermission: String, Codable, Sendable, CaseIterable {
 
     /// The attribute's value can be read.
@@ -283,7 +283,7 @@ public enum FixturePermission: String, Codable, Sendable, CaseIterable {
     /// The attribute's value can only be written on an encrypted link.
     case writeEncryptionRequired
 
-    /// This fixture permission, converted to its ``BLESwiftCore/AttributePermissions``
+    /// This fixture permission, converted to its `AttributePermissions`
     /// member.
     public var attributePermission: AttributePermissions {
         switch self {

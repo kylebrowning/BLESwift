@@ -17,10 +17,10 @@ public enum ProviderCommandLine {
     /// The parsed result of ``parse(_:environment:)``.
     public struct Options: Sendable, Equatable {
         /// Where the provider listens. Defaults to `--listen`, then `BLESWIFT_LINK`, then
-        /// ``BLESwiftLink/LinkEndpoint/default``.
+        /// `LinkEndpoint.default`.
         public var endpoint: LinkEndpoint
-        /// The codec the provider encodes with. `--json` selects ``BLESwiftLink/LinkCodec/json``;
-        /// otherwise ``BLESwiftLink/LinkCodec/binaryPropertyList``.
+        /// The codec the provider encodes with. `--json` selects `LinkCodec.json`;
+        /// otherwise `LinkCodec.binaryPropertyList`.
         public var codec: LinkCodec
         /// Whether `--passthrough` was given.
         public var passthrough: Bool

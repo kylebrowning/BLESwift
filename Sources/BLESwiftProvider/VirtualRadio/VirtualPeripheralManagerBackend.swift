@@ -9,7 +9,7 @@ import Dispatch
 import Foundation
 import Synchronization
 
-/// A ``BLESwiftCore/PeripheralManaging`` served by a ``VirtualRadio`` instead of
+/// A `PeripheralManaging` served by a ``VirtualRadio`` instead of
 /// CoreBluetooth — hand one to `PeripheralHost(backend:queue:)` and the resulting host
 /// becomes a virtual device on that radio, reachable from any ``VirtualCentralBackend``
 /// sharing it. A real `PeripheralHost` and a real `Central`, talking to each other in one
@@ -17,8 +17,8 @@ import Synchronization
 ///
 /// The backend registers exactly one device on the radio, whose
 /// ``VirtualDeviceHandler`` forwards every read, write, and subscription change to the
-/// host as a ``BLESwiftCore/PeripheralHostEvent``; the host's
-/// ``BLESwiftCore/PeripheralManaging/respond(to:value:error:)`` resolves the parked
+/// host as a `PeripheralHostEvent`; the host's
+/// `PeripheralManaging.respond(to:value:error:)` resolves the parked
 /// request. Publishing a service, advertising, and notifying are applied to the device
 /// through its ``VirtualDeviceHandle``.
 ///
@@ -85,7 +85,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
     ///
     /// The device is registered *not* advertising, with an empty GATT database — exactly
     /// the state a freshly created `CBPeripheralManager` is in. ``radioState`` is
-    /// ``BLESwiftCore/CentralState/poweredOn`` from construction; the matching
+    /// `CentralState.poweredOn` from construction; the matching
     /// `didUpdateState` is delivered once, when a non-`nil` ``eventHandler`` is first
     /// attached, mirroring CoreBluetooth's delegate-only state reporting.
     ///
@@ -192,7 +192,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
 
     // MARK: - PeripheralManaging
 
-    /// Receives every ``BLESwiftCore/PeripheralHostEvent`` this backend produces, on
+    /// Receives every `PeripheralHostEvent` this backend produces, on
     /// ``queue``. The first non-`nil` attachment also triggers the one-shot
     /// `didUpdateState(.poweredOn)`; setting it back to `nil` removes the hosted device from
     /// the radio, disconnecting any central attached to it with
@@ -216,7 +216,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
         }
     }
 
-    /// Always ``BLESwiftCore/CentralState/poweredOn`` — a virtual radio is never off.
+    /// Always `CentralState.poweredOn` — a virtual radio is never off.
     public var radioState: CentralState {
         dispatchPrecondition(condition: .onQueue(queue))
         return .poweredOn

@@ -20,7 +20,7 @@ import Foundation
 /// **The mirror cache.** CoreBluetooth answers `isDiscovered`/`properties(of:)`/
 /// `discoveredServices` synchronously from its own object graph; across a link there is no
 /// such graph to consult, so every discovery result the provider reports is mirrored here.
-/// The mirror is updated *inline* as each wire event arrives (both happen on ``queue``), and
+/// The mirror is updated *inline* as each wire event arrives (both happen on `queue`), and
 /// the matching `PeripheralEvent` is delivered afterwards via `queue.async` — so by the time
 /// `Central` handles a discovery completion, the cache it is about to interrogate is already
 /// current.
@@ -93,7 +93,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     }
 
     /// Whether another `.withoutResponse` write fits in the link's flow-control window
-    /// (``LinkFlowControl/writeWithoutResponseWindow``).
+    /// (`LinkFlowControl.writeWithoutResponseWindow`).
     public var canSendWriteWithoutResponse: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _outstandingWithoutResponse < LinkFlowControl.writeWithoutResponseWindow

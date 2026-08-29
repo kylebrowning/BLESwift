@@ -58,7 +58,7 @@ public actor FixtureDeviceHandler: VirtualDeviceHandler {
     /// Answers a read from the store.
     ///
     /// - Returns: The stored value (empty `Data` if the characteristic has never held one),
-    ///   or ``BLESwiftCore/ATTError/readNotPermitted`` if the fixture declares no such
+    ///   or `ATTError.readNotPermitted` if the fixture declares no such
     ///   characteristic.
     public func read(
         _ characteristic: CharacteristicIdentifier,

@@ -9,8 +9,8 @@ import Dispatch
 import Foundation
 
 /// A `CentralManaging` backed by a provider process rather than a local `CBCentralManager`:
-/// every call is encoded as a ``CentralRequest`` and sent over one `LinkClientSession`,
-/// and every ``CentralWireEvent`` the provider sends back is translated into a `CentralEvent`
+/// every call is encoded as a `CentralRequest` and sent over one `LinkClientSession`,
+/// and every `CentralWireEvent` the provider sends back is translated into a `CentralEvent`
 /// or a ``LinkPeripheral``'s `PeripheralEvent`.
 ///
 /// Hand one to `Central(backend:queue:)`, passing the *same* `DispatchSerialQueue`:
@@ -66,7 +66,7 @@ public final class LinkCentral: CentralManaging, Sendable {
     ///   - clientName: A human-readable name sent in the handshake, for provider-side
     ///     logging. Defaults to the current process's name.
     ///   - codec: The codec used to encode messages. Defaults to
-    ///     ``LinkCodec/binaryPropertyList``.
+    ///     `LinkCodec.binaryPropertyList`.
     ///   - retryInterval: How long to wait before redialing after a failure. Defaults to two
     ///     seconds.
     public init(
@@ -103,7 +103,7 @@ public final class LinkCentral: CentralManaging, Sendable {
 
     /// Stops the session and detaches every event handler — this central's and each of its
     /// peripherals'. Idempotent, and safe to call from any thread. Nothing calls it in
-    /// production; ``deinit`` stops the session on its own.
+    /// production; `deinit` stops the session on its own.
     public func shutdown() {
         session.stop()
         queue.async { [self] in

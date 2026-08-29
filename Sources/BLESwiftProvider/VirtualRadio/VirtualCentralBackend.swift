@@ -9,7 +9,7 @@ import Dispatch
 import Foundation
 import Synchronization
 
-/// A ``BLESwiftCore/CentralManaging`` served by a ``VirtualRadio`` instead of CoreBluetooth
+/// A `CentralManaging` served by a ``VirtualRadio`` instead of CoreBluetooth
 /// — hand one to `Central(backend:queue:)` and the resulting `Central` talks to the radio's
 /// virtual devices with no hardware involved.
 ///
@@ -19,7 +19,7 @@ import Synchronization
 /// **Concurrency — queue-confined, not lock-protected.** Every stored property is
 /// `nonisolated(unsafe)` and touched only on ``queue``, which every `CentralManaging`
 /// method asserts at entry. Work reaches the radio actor through one serial chain of
-/// `Task`s rooted in this backend's attachment (see ``enqueue(_:)``) and every event is
+/// `Task`s rooted in this backend's attachment (see `enqueue(_:)`) and every event is
 /// delivered back with `queue.async`, never inline — the delivery contract
 /// `CentralManaging` requires.
 public final class VirtualCentralBackend: CentralManaging, Sendable {
@@ -27,7 +27,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// The queue every method and event delivery is confined to.
     public let queue: DispatchSerialQueue
 
-    /// This backend's identity to the radio. Also the ``BLESwiftCore/Subscriber`` id that
+    /// This backend's identity to the radio. Also the `Subscriber` id that
     /// device handlers see for traffic originating here.
     public let sessionID = UUID()
 
@@ -66,7 +66,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
 
     /// Creates a backend served by `radio` and confined to `queue`.
     ///
-    /// ``radioState`` is ``BLESwiftCore/CentralState/poweredOn`` from construction; the
+    /// ``radioState`` is `CentralState.poweredOn` from construction; the
     /// matching `didUpdateState` is delivered once, when a non-`nil` ``eventHandler`` is
     /// first attached — mirroring CoreBluetooth, which reports its state only through the
     /// delegate.
@@ -155,7 +155,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
 
     // MARK: - CentralManaging
 
-    /// Receives every ``BLESwiftCore/CentralEvent`` this backend produces, on ``queue``.
+    /// Receives every `CentralEvent` this backend produces, on ``queue``.
     /// The first non-`nil` attachment also triggers the one-shot
     /// `didUpdateState(.poweredOn)`.
     public var eventHandler: ((CentralEvent) -> Void)? {
@@ -172,7 +172,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// Always ``BLESwiftCore/CentralState/poweredOn`` — a virtual radio is never off.
+    /// Always `CentralState.poweredOn` — a virtual radio is never off.
     public var radioState: CentralState {
         dispatchPrecondition(condition: .onQueue(queue))
         return .poweredOn

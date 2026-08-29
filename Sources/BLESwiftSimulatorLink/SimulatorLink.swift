@@ -43,12 +43,12 @@ public enum SimulatorLink {
     ///
     /// - Parameters:
     ///   - endpoint: The provider's host and port. `nil` resolves to
-    ///     ``BLESwiftLink/LinkEndpoint/fromEnvironment(_:)`` (the `BLESWIFT_LINK` environment
-    ///     variable), falling back to ``BLESwiftLink/LinkEndpoint/default``.
+    ///     `LinkEndpoint.fromEnvironment(_:)` (the `BLESWIFT_LINK` environment
+    ///     variable), falling back to `LinkEndpoint.default`.
     ///   - clientName: A human-readable name sent in the handshake, for provider-side
     ///     logging. Defaults to the current process's name.
     ///   - codec: The codec used to encode link messages. Defaults to
-    ///     ``BLESwiftLink/LinkCodec/binaryPropertyList``.
+    ///     `LinkCodec.binaryPropertyList`.
     ///
     /// Idempotent: calling this again — with the same or different parameters — simply
     /// replaces the registered factories and the resolved ``endpoint``.

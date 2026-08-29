@@ -8,7 +8,7 @@ import BLESwiftCore
 import Dispatch
 import Foundation
 
-/// A ``BLESwiftCore/CentralManaging`` made of several — every call fans out to every child
+/// A `CentralManaging` made of several — every call fans out to every child
 /// backend, and every child's events fan back in as one stream.
 ///
 /// This is what lets one central-role connection be served by *both* an in-process
@@ -17,7 +17,7 @@ import Foundation
 /// `CBCentralManager`-backed shim, and a single `Central` scans, retrieves, and connects
 /// across both worlds without knowing there is more than one radio.
 ///
-/// **Routing is unnecessary by construction.** ``BLESwiftCore/CentralManaging`` specifies
+/// **Routing is unnecessary by construction.** `CentralManaging` specifies
 /// that `connect`/`cancelPeripheralConnection` given a peripheral from a *different* shim
 /// family is a silent no-op rather than a trap, so ``connect(_:options:requiresANCS:)`` and
 /// ``cancelPeripheralConnection(_:)`` simply call every child and let the mismatched ones
@@ -52,7 +52,7 @@ public final class CompositeCentral: CentralManaging, Sendable {
     nonisolated(unsafe) private var _lastEmittedState: CentralState?
 
     /// The authorization status this composite reports: always
-    /// ``BLESwiftCore/BluetoothAuthorization/allowedAlways``.
+    /// `BluetoothAuthorization.allowedAlways`.
     ///
     /// `bluetoothAuthorization` is a `static` on the seam (mirroring `CBManager`'s class
     /// property), so a composite of *instances* has no way to consult its children — and
@@ -129,7 +129,7 @@ public final class CompositeCentral: CentralManaging, Sendable {
 
     // MARK: - CentralManaging
 
-    /// Receives every ``BLESwiftCore/CentralEvent`` fanned in from the children, on
+    /// Receives every `CentralEvent` fanned in from the children, on
     /// ``queue``.
     ///
     /// Setting a non-`nil` handler (re)installs the composite on every child; setting `nil`
@@ -155,8 +155,8 @@ public final class CompositeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// ``BLESwiftCore/CentralState/poweredOn`` if any child is powered on, otherwise the
-    /// first child's state (``BLESwiftCore/CentralState/unknown`` with no children).
+    /// `CentralState.poweredOn` if any child is powered on, otherwise the
+    /// first child's state (`CentralState.unknown` with no children).
     public var radioState: CentralState {
         computedState
     }
@@ -174,7 +174,7 @@ public final class CompositeCentral: CentralManaging, Sendable {
     }
 
     /// Asks every child to connect `peripheral`. Children of a different shim family ignore
-    /// it silently, per ``BLESwiftCore/CentralManaging/connect(_:options:requiresANCS:)`` —
+    /// it silently, per `CentralManaging.connect(_:options:requiresANCS:)` —
     /// which is why no routing table is needed.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -189,7 +189,7 @@ public final class CompositeCentral: CentralManaging, Sendable {
     }
 
     /// Every child's answer, concatenated in child order and de-duplicated by
-    /// ``BLESwiftCore/PeripheralRemote/identifier`` — the first backend to vend an
+    /// `PeripheralRemote.identifier` — the first backend to vend an
     /// identifier wins it.
     public func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote] {
         dispatchPrecondition(condition: .onQueue(queue))

@@ -9,8 +9,8 @@ import Dispatch
 import Foundation
 
 /// A `PeripheralManaging` backed by a provider process rather than a local
-/// `CBPeripheralManager`: every call is encoded as a ``BLESwiftLink/HostRequest`` and sent
-/// over one `LinkClientSession`, and every ``BLESwiftLink/HostWireEvent`` the provider
+/// `CBPeripheralManager`: every call is encoded as a `HostRequest` and sent
+/// over one `LinkClientSession`, and every `HostWireEvent` the provider
 /// sends back is translated into a `PeripheralHostEvent`.
 ///
 /// Hand one to `PeripheralHost(backend:queue:)`, passing the *same* `DispatchSerialQueue`:
@@ -20,7 +20,7 @@ import Foundation
 /// let host = PeripheralHost(backend: LinkPeripheralManager(endpoint: endpoint, queue: queue), queue: queue)
 /// ```
 ///
-/// The provider hosts this peripheral on its ``VirtualRadio``, so a `Central` in *another*
+/// The provider hosts this peripheral on its `VirtualRadio`, so a `Central` in *another*
 /// simulator, dialing the same provider through a `LinkCentral`, can scan for it, connect,
 /// and hold a full GATT conversation with it.
 ///
@@ -32,7 +32,7 @@ import Foundation
 /// along with the session that owned them.
 ///
 /// **Notification back-pressure.** ``updateValue(_:for:onSubscribed:)`` returns `false` once
-/// ``BLESwiftLink/LinkFlowControl/updateValueWindow`` pushes are in flight unacknowledged,
+/// `LinkFlowControl.updateValueWindow` pushes are in flight unacknowledged,
 /// exactly as a full CoreBluetooth transmit queue does; the provider acknowledges each push
 /// as its own backend accepts it, and the acknowledgement that reopens the window is
 /// reported as `readyToUpdateSubscribers`. A dropped link empties the window — the
@@ -92,7 +92,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     ///     it and gives it to the hosted device, so it is the name remote centrals see.
     ///     Defaults to the current process's name.
     ///   - codec: The codec used to encode messages. Defaults to
-    ///     ``BLESwiftLink/LinkCodec/binaryPropertyList``.
+    ///     `LinkCodec.binaryPropertyList`.
     ///   - retryInterval: How long to wait before redialing after a failure. Defaults to two
     ///     seconds.
     public init(
@@ -128,7 +128,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     }
 
     /// Stops the session and detaches the event handler. Idempotent, and safe to call from
-    /// any thread. Nothing calls it in production; ``deinit`` stops the session on its own.
+    /// any thread. Nothing calls it in production; `deinit` stops the session on its own.
     public func shutdown() {
         session.stop()
         queue.async { [self] in
@@ -217,7 +217,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// through the provider's host.
     ///
     /// - Returns: `false` — without sending anything — once
-    ///   ``BLESwiftLink/LinkFlowControl/updateValueWindow`` pushes are unacknowledged;
+    ///   `LinkFlowControl.updateValueWindow` pushes are unacknowledged;
     ///   `true` otherwise, having sent the push and claimed a slot in the window.
     public func updateValue(
         _ value: Data,
