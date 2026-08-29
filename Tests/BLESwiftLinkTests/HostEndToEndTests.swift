@@ -670,6 +670,47 @@ struct HostEndToEndTests {
         await provider.stop()
     }
 
+    @Test("stop() takes the fixtures off the radio and start() registers them afresh")
+    func stopUnregistersFixturesAndStartRegistersThemAgain() async throws {
+        let fixtureJSON = """
+        { "devices": [ { "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8", "name": "Fixture HRM",
+          "advertisedServices": ["180D"], "services": [ { "uuid": "180D", "characteristics": [
+            { "uuid": "2A37", "properties": ["read", "notify"], "value": "AEg=" } ] } ] } ] }
+        """
+        let fixtureID = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.fixtures = try FixtureDocument.parse(Data(fixtureJSON.utf8)).devices
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        #expect(provider.radio.knownDeviceIDs.withLock { $0 } == [fixtureID])
+        let stale = try #require(await provider.handle(for: fixtureID))
+
+        // A stopped provider hosts nothing: the radio is left as it was found, and there is no
+        // handle to vend for a device that is no longer on it.
+        await provider.stop()
+        #expect(provider.radio.knownDeviceIDs.withLock { $0.isEmpty })
+        #expect(await provider.handle(for: fixtureID) == nil)
+
+        // Started again, the same configured fixture is registered again — a *new*
+        // registration under the same id.
+        try await provider.start()
+        #expect(provider.radio.knownDeviceIDs.withLock { $0 } == [fixtureID])
+        #expect(await provider.radio.services(of: fixtureID, matching: nil) == [Self.heartRate])
+
+        // The handle from before the stop is stale for good: the radio's generation guard
+        // refuses everything it asks for rather than applying it to the device that replaced
+        // the one it was minted for.
+        await stale.setServices([])
+        #expect(await provider.radio.services(of: fixtureID, matching: nil) == [Self.heartRate])
+
+        // And the handle `handle(for:)` vends now is the current one.
+        let fresh = try #require(await provider.handle(for: fixtureID))
+        await fresh.setServices([])
+        #expect(await provider.radio.services(of: fixtureID, matching: nil).isEmpty)
+        await provider.stop()
+    }
+
     @Test("A redial reaching the provider before its old session was torn down keeps its identity")
     func aRedialBeforeTheOldSessionIsGoneKeepsItsIdentifier() async throws {
         let provider = try await makeProvider()

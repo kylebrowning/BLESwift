@@ -224,8 +224,21 @@ public actor Provider {
         sessions.count
     }
 
-    /// Stops listening and closes every live session, dropping each client's link. Idempotent.
-    public func stop() {
+    /// Stops listening, closes every live session — dropping each client's link — and takes
+    /// this provider's own fixture devices back off the radio. Idempotent.
+    ///
+    /// **The radio is left as this provider found it.** A `Provider` that stopped listening is
+    /// hosting nothing, and a fixture left registered would keep answering a `VirtualRadio`
+    /// shared with another provider, keep its identifier in
+    /// ``ProviderConfiguration/fixtures``' way, and keep a handle alive for a device nothing
+    /// drives any more.
+    ///
+    /// - Note: ``start()`` after a ``stop()`` registers the configured fixtures again, from
+    ///   scratch: each one is a *new* registration under the same id, and ``handle(for:)``
+    ///   vends the fresh ``VirtualDeviceHandle`` for it. A handle taken before the stop is
+    ///   stale for good — every call on it is refused by the radio's generation guard rather
+    ///   than applied to the device that replaced the one it was minted for.
+    public func stop() async {
         listener?.cancel()
         listener = nil
         for connection in pending.withLock({ $0.drain() }) {
@@ -235,6 +248,13 @@ public actor Provider {
             session.close()
         }
         sessions.removeAll()
+        for handle in fixtures.values {
+            await handle.remove()
+        }
+        fixtures.removeAll()
+        // Everything ``addVirtualDevice(_:advertising:)`` registered goes with them: this
+        // provider defends no identifier it is no longer hosting a device under.
+        providerOwnedIdentifiers.removeAll()
     }
 
     // MARK: - Pending connections
