@@ -160,6 +160,45 @@ struct CentralEndToEndTests {
         await provider.stop()
     }
 
+    @Test("A hello sent the instant a connection is ready is always answered")
+    func handshakeRace() async throws {
+        let provider = try await makeProvider()
+        let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+        // The hello leaves on the `.ready` transition itself, so it races the provider's own
+        // bookkeeping for the connection it just accepted. Repeated because the race is
+        // scheduler-dependent: one iteration proves nothing, fifty consistently caught the
+        // dropped handshake before the pending table was made synchronous.
+        for iteration in 0..<50 {
+            let connection = LinkConnection.connect(
+                to: endpoint,
+                codec: .binaryPropertyList,
+                queue: DispatchQueue(label: "e2e.race.\(iteration)")
+            )
+            let answer = Mutex<ServerHello?>(nil)
+            connection.onStateChange = { [weak connection] state in
+                guard case .ready = state else { return }
+                connection?.send(.clientHello(ClientHello(
+                    protocolVersion: LinkProtocol.version,
+                    role: .central,
+                    clientName: "race"
+                )))
+            }
+            connection.onMessage = { message in
+                guard case .serverHello(let hello) = message else { return }
+                answer.withLock { $0 = hello }
+            }
+            connection.start()
+            await waitFor(timeout: .seconds(2)) { answer.withLock { $0 != nil } }
+            #expect(answer.withLock { $0?.accepted } == true, "iteration \(iteration)")
+            connection.onStateChange = nil
+            connection.onMessage = nil
+            connection.cancel()
+        }
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        #expect(await provider.sessionCount == 0)
+        await provider.stop()
+    }
+
     /// The name on the first peripheral `central` sights, or `nil` if the scan ends first.
     private static func firstSighting(of central: Central) async -> String? {
         do {

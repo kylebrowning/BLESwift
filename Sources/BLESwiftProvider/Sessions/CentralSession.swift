@@ -45,6 +45,14 @@ final class CentralSession: Sendable {
         let psm: UInt16
     }
 
+    /// The `.withResponse` maximum reported for a connection whose remote this session never
+    /// saw — CoreBluetooth's own ATT-MTU-derived ceiling, not a zero-length write budget.
+    private static let defaultMaximumWriteWithResponse = 182
+
+    /// The `.withoutResponse` maximum reported for a connection whose remote this session
+    /// never saw — the conservative default a client assumes before any negotiation.
+    private static let defaultMaximumWriteWithoutResponse = 20
+
     /// The error a channel-open completion reports until L2CAP is tunnelled over the link.
     private static var l2capUnavailable: NSError {
         NSError(
@@ -95,14 +103,18 @@ final class CentralSession: Sendable {
         self.backend = backend
         self.queue = queue
         self.log = log
-        // Weak: the session owns the connection, so a strong capture would be a cycle.
-        connection.onMessage = { [weak self] message in
-            guard let self, case .centralRequest(let request) = message else { return }
-            self.queue.async { self.perform(request) }
-        }
         queue.async { [self] in
             guard !isClosed else { return }
             self.backend.eventHandler = { [weak self] event in self?.translate(event) }
+            // Installed only once the backend's own handler exists, so no request can reach
+            // the backend before its events have somewhere to go. Nothing is lost by the
+            // wait: a client sends nothing until it has processed the `ServerHello`, which
+            // the provider sends after this block is already enqueued. Weak, because the
+            // session owns the connection and a strong capture would be a cycle.
+            connection.onMessage = { [weak self] message in
+                guard let self, case .centralRequest(let request) = message else { return }
+                self.queue.async { self.perform(request) }
+            }
             send(.didUpdateState(WireCentralState(self.backend.radioState)))
         }
     }
@@ -282,11 +294,16 @@ final class CentralSession: Sendable {
 
         case .didConnect(let peripheral):
             let remote = remotes[peripheral.uuid]
+            if remote == nil {
+                log?("no remote for peripheral \(peripheral.uuid); reporting default write maxima")
+            }
             send(.didConnect(
                 peripheral: peripheral.uuid,
                 name: remote?.name ?? peripheral.name,
-                maximumWriteWithResponse: remote?.maximumWriteValueLength(for: .withResponse) ?? 0,
-                maximumWriteWithoutResponse: remote?.maximumWriteValueLength(for: .withoutResponse) ?? 0
+                maximumWriteWithResponse: remote?.maximumWriteValueLength(for: .withResponse)
+                    ?? Self.defaultMaximumWriteWithResponse,
+                maximumWriteWithoutResponse: remote?.maximumWriteValueLength(for: .withoutResponse)
+                    ?? Self.defaultMaximumWriteWithoutResponse
             ))
 
         case .didFailToConnect(let peripheral, let error):
