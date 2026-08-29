@@ -114,7 +114,7 @@ struct L2CAPLinkTests {
             clientName: "dealloc",
             retryInterval: .seconds(60)
         )
-        weak var deallocated = link
+        weak let deallocated = link
         // Captured by value into the hop and released with it, so `link` stays the only
         // strong reference this test holds.
         let channel: LinkL2CAPChannel = await withCheckedContinuation { continuation in
@@ -129,9 +129,23 @@ struct L2CAPLinkTests {
         await waitFor(timeout: .seconds(5)) { channel.suspendedWriterCount == 1 }
         #expect(channel.suspendedWriterCount == 1)
 
+        // Drained before the release, and this is the whole of the test's synchronization:
+        // every chunk that window-filling write put on the link handed the central a block of
+        // its own — the send closure a channel is built with hops onto the central's queue
+        // holding a *strong* reference to it — so the central cannot deallocate while any of
+        // them is still pending. Under load they can still be queued at the moment the last
+        // test-held reference goes, which is a queue that has not drained yet rather than a
+        // reference this test forgot. One hop onto the serial queue flushes everything
+        // enqueued before it.
+        _ = await Self.onQueue(queue) { true }
+
         // Released, not shut down: `deinit` is the whole point — a central that simply goes
         // out of scope must not leave its writers parked forever.
         link = nil
+        // The gate is the deallocation itself, observed rather than assumed to have happened
+        // by the time the next statement runs: `deinit` is dropped by whichever thread holds
+        // the last reference, which need not be this one.
+        await waitFor(timeout: .seconds(5)) { deallocated == nil }
         #expect(deallocated == nil)
 
         do {
