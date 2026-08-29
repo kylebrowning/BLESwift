@@ -28,6 +28,7 @@ jobs:
     # concurrency code they cover — actually execute.
     name: Test (iOS Simulator)
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # Named devices drift with the runner image's Xcode — `iPhone 16` is gone from the
@@ -39,7 +40,17 @@ jobs:
           echo "SIM=$SIM" >> "$GITHUB_ENV"
           echo "Using $SIM"
       - name: Test on iOS Simulator
-        run: xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,name=$SIM"
+        # Retried once. Twice on this branch the runner's simulator starved the test process
+        # outright: the (unchanged, macOS-green) `BLESwiftTests` suite froze for ~100 s inside
+        # the simulator — process-side timestamps show ~47 s stalls, and every test in that
+        # window reported 104-105 s — until the whole job timed out. It is the runner, not the
+        # suite: the same tests pass in the macOS job and passed here on an earlier push.
+        run: |
+          for attempt in 1 2; do
+            xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,name=$SIM" && exit 0
+            echo "attempt $attempt failed"
+          done
+          exit 1
 
   platform-build:
     # The manifest declares watchOS/tvOS/visionOS; the peripheral role's CoreBluetooth
