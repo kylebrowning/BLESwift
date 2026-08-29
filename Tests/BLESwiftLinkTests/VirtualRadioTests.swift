@@ -7,7 +7,7 @@
 import BLESwift
 import BLESwiftCore
 import BLESwiftLink
-import BLESwiftProvider
+@testable import BLESwiftProvider
 import Dispatch
 import Foundation
 import Synchronization
@@ -152,6 +152,44 @@ struct VirtualRadioTests {
         let nsError = try #require(reported) as NSError
         #expect(nsError.domain == "BLESwiftProvider")
         #expect(nsError.code == 2)
+    }
+
+    @Test("A device's event sink is released on disconnect and on removal")
+    func peripheralSinksAreReleased() async throws {
+        /// Stands in for everything a real sink closes over — a backend's remote, and through
+        /// it the session it belongs to. Its lifetime *is* the sink's.
+        final class Probe: Sendable {}
+
+        let radio = VirtualRadio()
+        let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
+        let (device, handler) = VirtualDevice.fixture(fixture)
+        let handle = await radio.register(device)
+        await handler.attach(handle)
+        let identifier = fixture.id
+        let session = UUID()
+        await radio.attach(session: session, centralSink: { _ in }, knownDevicesSink: { _ in })
+
+        // Ended by the central: the sink goes with the connection that registered it.
+        weak var afterDisconnect: Probe?
+        do {
+            let probe = Probe()
+            afterDisconnect = probe
+            #expect(await radio.connect(session: session, device: identifier, sink: { _ in _ = probe }).error == nil)
+        }
+        #expect(afterDisconnect != nil)
+        await radio.disconnect(session: session, device: identifier)
+        #expect(afterDisconnect == nil)
+
+        // Ended by the device going away: same, for every session, connected or not.
+        weak var afterRemoval: Probe?
+        do {
+            let probe = Probe()
+            afterRemoval = probe
+            #expect(await radio.connect(session: session, device: identifier, sink: { _ in _ = probe }).error == nil)
+        }
+        #expect(afterRemoval != nil)
+        await handle.remove()
+        #expect(afterRemoval == nil)
     }
 
     @Test("Back-to-back writes without response reach the radio in the order they were made")

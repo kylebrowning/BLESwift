@@ -45,7 +45,21 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// Identifiers this backend has reported a sighting for. A device removed from the radio
     /// after being seen stays retrievable exactly as CoreBluetooth keeps vending a
     /// `CBPeripheral` for a peer it has scanned; the connect attempt is what then fails.
+    ///
+    /// **Bounded, oldest first.** Of the two ways to keep a long-lived session's sighting
+    /// history from growing without limit — pruning identifiers the radio no longer knows, or
+    /// capping the history — this takes the cap, because pruning is the one that changes
+    /// behavior: a removed device would stop being retrievable, which is exactly the
+    /// CoreBluetooth-shaped property the set exists to provide. The cap only forgets sightings
+    /// ``maximumDiscovered`` devices old, which no client can still be holding an identifier
+    /// from that it has not also connected to.
     nonisolated(unsafe) private var _discovered: Set<UUID> = []
+
+    /// The order ``_discovered`` was filled in, so the cap can drop the oldest sighting.
+    nonisolated(unsafe) private var _discoveryOrder: [UUID] = []
+
+    /// How many sightings ``_discovered`` remembers.
+    private static let maximumDiscovered = 1024
 
     /// The serial chain of radio work, rooted in this backend's attachment. Swift guarantees
     /// no ordering between independent `Task`s, so a `scan` and the `stopScan` right behind it
@@ -141,9 +155,19 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             _remotes[peripheral.uuid]?.setConnectionState(.disconnected)
         }
         if case .didDiscover(let peripheral, _, _) = event {
-            _discovered.insert(peripheral.uuid)
+            remember(peripheral.uuid)
         }
         _eventHandler?(event)
+    }
+
+    /// Records a sighting of `identifier`, forgetting the oldest one once the history is
+    /// full. Must be called on ``queue``.
+    private func remember(_ identifier: UUID) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard _discovered.insert(identifier).inserted else { return }
+        _discoveryOrder.append(identifier)
+        guard _discoveryOrder.count > Self.maximumDiscovered else { return }
+        _discovered.remove(_discoveryOrder.removeFirst())
     }
 
     /// The remote for `identifier`, created on first use and reused for the life of this

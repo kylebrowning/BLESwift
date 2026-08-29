@@ -156,7 +156,12 @@ public actor VirtualRadio {
         subscriptions.removeValue(forKey: device)
         announceKnownDevices()
         let identifier = PeripheralIdentifier(uuid: device, name: state.descriptor.name)
-        for sessionID in Array(sessions.keys) where sessions[sessionID]?.connections.contains(device) == true {
+        for sessionID in Array(sessions.keys) {
+            // Dropped for every session, connected or not: the sink routes events *from* this
+            // device, and there is no longer a device to route them from. A live entry would
+            // outlive the device and keep its backend's remote alive with it.
+            sessions[sessionID]?.peripheralSinks.removeValue(forKey: device)
+            guard sessions[sessionID]?.connections.contains(device) == true else { continue }
             sessions[sessionID]?.connections.remove(device)
             sessions[sessionID]?.centralSink(.didDisconnect(identifier, error: Self.deviceRemovedError))
         }
@@ -200,8 +205,8 @@ public actor VirtualRadio {
         }
     }
 
-    /// Detaches a backend, cancelling its scan and dropping its connections and
-    /// subscriptions.
+    /// Detaches a backend, cancelling its scan and dropping its connections, its per-device
+    /// sinks — the whole session record goes — and its subscriptions.
     func detach(session: UUID) {
         guard let removed = sessions.removeValue(forKey: session) else { return }
         removed.scanner?.repeater?.cancel()
@@ -309,6 +314,10 @@ public actor VirtualRadio {
     /// `cancelPeripheralConnection(_:)`.
     func disconnect(session: UUID, device: UUID) {
         sessions[session]?.connections.remove(device)
+        // Goes with the connection: the sink was registered by ``connect(session:device:sink:)``
+        // and the backend delivers the `didDisconnect` itself, so nothing is left to route
+        // through it.
+        sessions[session]?.peripheralSinks.removeValue(forKey: device)
         dropSubscriptions(session: session, device: device)
     }
 
