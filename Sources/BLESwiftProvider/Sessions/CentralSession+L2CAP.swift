@@ -80,16 +80,26 @@ final class OpenChannel: Sendable {
 
     /// Grants `bytes` of credit, resuming the pump if that is enough for what it is waiting
     /// on. The credit is deducted here, so the resumed pump cannot lose its window.
-    func grant(_ bytes: Int) {
-        let waiter = credit.withLock { credit -> CheckedContinuation<Void, Never>? in
-            credit.available += bytes
-            guard let waiter = credit.waiter, credit.available >= credit.waitingFor else { return nil }
+    ///
+    /// - Parameter bytes: The credit to add. Already known to be in range — see
+    ///   ``CentralSession/grantCredit(_:to:)``.
+    /// - Returns: `false` if the addition overflowed, which no honest peer can bring about:
+    ///   the caller closes the channel rather than carry on with a wrapped window.
+    func grant(_ bytes: Int) -> Bool {
+        enum Outcome { case overflow, granted(CheckedContinuation<Void, Never>?) }
+        let outcome = credit.withLock { credit -> Outcome in
+            let sum = credit.available.addingReportingOverflow(bytes)
+            guard !sum.overflow else { return .overflow }
+            credit.available = sum.partialValue
+            guard let waiter = credit.waiter, credit.available >= credit.waitingFor else { return .granted(nil) }
             credit.available -= credit.waitingFor
             credit.waitingFor = 0
             credit.waiter = nil
-            return waiter
+            return .granted(waiter)
         }
+        guard case .granted(let waiter) = outcome else { return false }
         waiter?.resume()
+        return true
     }
 
     /// Marks the window closed and releases a waiting pump, so teardown never strands it.
@@ -230,13 +240,37 @@ extension CentralSession {
 
     /// Grants `bytes` of credit to `channel`, waking its pump. Must be called on
     /// ``CentralSession/queue``.
+    ///
+    /// **A credit is validated before it is applied.** A single grant can never be zero or
+    /// negative, and can never exceed the whole window — the client credits back exactly what
+    /// it has consumed, and it can never have consumed more than
+    /// ``BLESwiftLink/LinkFlowControl/l2capInitialCredit``. Anything else, including an
+    /// addition that would overflow, is a protocol violation from a peer that has stopped
+    /// following the scheme; the channel is closed rather than left with a window that could
+    /// go negative and wedge its pump forever.
     func grantCredit(_ bytes: Int, to channel: UInt32) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let open = channels[channel] else {
             log?("no L2CAP channel \(channel); ignoring l2capCredit")
             return
         }
-        open.grant(bytes)
+        guard bytes > 0, bytes <= LinkFlowControl.l2capInitialCredit, open.grant(bytes) else {
+            log?("invalid L2CAP credit \(bytes) on channel \(channel); closing it")
+            channels.removeValue(forKey: channel)
+            tearDown(open)
+            send(.l2capClosed(channel: channel, error: WireError(CentralSession.l2capCreditRejected)))
+            return
+        }
+    }
+
+    /// The error a channel is closed with when its peer granted a credit the scheme does not
+    /// permit.
+    static var l2capCreditRejected: NSError {
+        NSError(
+            domain: "BLESwiftProvider",
+            code: 7,
+            userInfo: [NSLocalizedDescriptionKey: "The client granted an out-of-range L2CAP credit"]
+        )
     }
 
     /// Closes `channel` at the client's request: tears down the transport and drops the

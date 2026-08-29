@@ -7,7 +7,7 @@
 import BLESwift
 import BLESwiftCore
 import BLESwiftLink
-import BLESwiftProvider
+@testable import BLESwiftProvider
 @testable import BLESwiftSimulatorLink
 import BLESwiftTestSupport
 import Dispatch
@@ -331,6 +331,58 @@ struct L2CAPLinkTests {
         sent.withLock { $0.removeAll() }
         channel.receive(Data([4, 5, 6, 7]))
         #expect(sent.withLock { $0 }.isEmpty)
+    }
+
+    // MARK: - Credit validation
+
+    @Test("A credit the scheme does not permit closes the client's channel", arguments: [0, -1, -8192, LinkFlowControl.l2capInitialCredit + 1, Int.max])
+    func clientRejectsAnOutOfRangeCredit(bytes: Int) async throws {
+        // The client half on its own, as `closedChannelCreditsNothing` drives it.
+        let sent = Mutex<[CentralRequest]>([])
+        let channel = LinkL2CAPChannel(channel: 9, psm: Self.psm) { request in
+            sent.withLock { $0.append(request) }
+        }
+        let stream = channel.inbound()
+
+        channel.addCredit(bytes: bytes)
+
+        // The channel is torn down: the provider is told, and the consumer's stream throws.
+        #expect(sent.withLock { $0 } == [.l2capClose(channel: 9)])
+        await #expect(throws: LinkL2CAPError.invalidCredit(bytes)) {
+            for try await _ in stream {}
+        }
+        // And nothing was added to the window: a later write must not be let through on
+        // credit that was never legitimately granted.
+        await #expect(throws: LinkL2CAPError.closed) { try await channel.write(Data([1])) }
+    }
+
+    @Test("A credit the scheme does not permit closes the provider's channel")
+    func providerRejectsAnOutOfRangeCredit() async throws {
+        let (rig, peripheral) = try await makeRig(label: "l2cap.badcredit")
+        let channel = try await peripheral.openL2CAPChannel(psm: Self.psm, timeout: .seconds(5))
+        let fake = try await openedChannel(rig)
+        #expect(await fake.onQueue { fake.isClosed } == false)
+
+        // Ids are allocated from 1, so the one channel this rig opened is 1. Sent straight
+        // down the link, behind `Central`'s back: no honest client can produce this.
+        let link = rig.link
+        link.queue.async { link.send(.l2capCredit(channel: 1, bytes: -1)) }
+
+        await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.isClosed } }
+        #expect(await fake.onQueue { fake.isClosed })
+
+        // And the client hears the close, so its consumer is not left waiting on a channel
+        // the provider has already torn down: the stream ends rather than hanging.
+        let stream = channel.incomingData
+        try await bounded(seconds: 5) {
+            do {
+                for try await _ in stream {}
+            } catch {
+                // A close carrying the provider's rejection is exactly what is expected here.
+            }
+        }
+
+        await tearDown(rig)
     }
 
     // MARK: - Open failure

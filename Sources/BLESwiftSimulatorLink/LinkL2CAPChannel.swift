@@ -15,6 +15,11 @@ enum LinkL2CAPError: Error, Equatable {
     /// A write was attempted on a channel that has already been closed — locally, by the
     /// provider, or by the link dropping.
     case closed
+
+    /// The provider granted a credit the scheme does not permit — zero, negative, larger than
+    /// the whole window, or one that would overflow it. The channel is closed rather than
+    /// carried on with a window that could go negative.
+    case invalidCredit(Int)
 }
 
 /// The client half of an L2CAP channel tunnelled over the link: an
@@ -215,8 +220,28 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
     }
 
     /// Grants `bytes` of outbound credit, resuming a writer that was waiting for room.
+    ///
+    /// **A credit is validated before it is applied.** The provider credits back exactly what
+    /// it has written to the real transport, which can never be zero, negative, or more than
+    /// ``BLESwiftLink/LinkFlowControl/l2capInitialCredit`` at once. Anything else — an
+    /// addition that would overflow included — is a protocol violation, and the channel is
+    /// closed with ``LinkL2CAPError/invalidCredit(_:)`` rather than left with a window that
+    /// could go negative and suspend its writers forever.
     func addCredit(bytes: Int) {
-        state.withLock { $0.outboundCredit += bytes }
+        guard bytes > 0, bytes <= LinkFlowControl.l2capInitialCredit else {
+            teardown(error: LinkL2CAPError.invalidCredit(bytes), notifyingProvider: true)
+            return
+        }
+        let overflowed = state.withLock { state -> Bool in
+            let sum = state.outboundCredit.addingReportingOverflow(bytes)
+            guard !sum.overflow else { return true }
+            state.outboundCredit = sum.partialValue
+            return false
+        }
+        guard !overflowed else {
+            teardown(error: LinkL2CAPError.invalidCredit(bytes), notifyingProvider: true)
+            return
+        }
         resumeGrantableWaiters()
     }
 
