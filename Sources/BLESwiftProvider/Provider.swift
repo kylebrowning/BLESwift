@@ -45,7 +45,7 @@ public actor Provider {
     /// The listener, once ``start()`` has bound it.
     private var listener: LinkListener?
 
-    /// Connections that have been accepted but have not completed a handshake.
+    /// Every accepted connection, and where each one's messages currently go.
     ///
     /// Deliberately *not* actor-isolated. A connection's handlers fire on the listener queue
     /// and reach the actor through unstructured `Task`s, between which Swift guarantees no
@@ -56,6 +56,12 @@ public actor Provider {
     /// connection is already here. Entries are held strongly — the listener does not retain
     /// what it accepts — and a terminated entry keeps its connection alive until the actor has
     /// released it, so no `ObjectIdentifier` can be recycled underneath a pending key.
+    ///
+    /// It is also the connection's *router*, which is what makes the handshake window safe:
+    /// the first message goes to ``handle(_:from:)``, everything behind it is held in the
+    /// entry until the session installs its handler — and is then replayed, in order, under
+    /// the same lock. A client that puts its first request in the same write as its
+    /// `ClientHello` is served rather than dropped.
     private nonisolated let pending = Mutex(PendingConnections())
 
     /// The live sessions of both roles, keyed by their connection.
@@ -125,9 +131,21 @@ public actor Provider {
             self.register(connection)
             // Both captures are weak — a handler holding its own connection would be a cycle
             // nothing breaks for a connection that never reaches a session.
+            //
+            // This stays the connection's only message handler for its whole life: a session
+            // registers *its* handler in the table instead of replacing this one, so the
+            // routing decision is made synchronously, on the listener queue, in the order the
+            // messages were received. Only the very first message takes the actor hop.
             connection.onMessage = { [weak self, weak connection] message in
-                guard let connection else { return }
-                Task { await self?.handle(message, from: connection) }
+                guard let self, let connection else { return }
+                switch self.pending.withLock({ $0.route(message, from: connection) }) {
+                case .drop:
+                    break
+                case .handshake:
+                    Task { await self.handle(message, from: connection) }
+                case .deliver(let handler):
+                    handler(message)
+                }
             }
             connection.onStateChange = { [weak self, weak connection] state in
                 switch state {
@@ -192,17 +210,22 @@ public actor Provider {
 
     // MARK: - Handshake
 
-    /// Handles the one message a connection is allowed to send before it has a session: its
-    /// ``BLESwiftLink/ClientHello``.
+    /// Handles the first message a connection sends: its ``BLESwiftLink/ClientHello``.
     ///
-    /// - Important: This method must not suspend. Claiming the connection and installing its
-    ///   session happen in one uninterrupted actor step, so a termination can only be observed
-    ///   entirely before the claim (which then fails) or entirely after the session exists
-    ///   (which it then closes).
+    /// Everything the client sent behind that hello is already held in the connection's
+    /// entry; constructing the session installs the session's own handler in that entry and
+    /// replays the backlog to it, and the session then writes the accepted `ServerHello` as
+    /// its first frame — so the hello still precedes every event on the wire without leaving
+    /// a window in which a request has nowhere to go.
+    ///
+    /// - Important: This method must not suspend. Claiming the connection, installing its
+    ///   session and handing over its messages happen in one uninterrupted actor step, so a
+    ///   termination can only be observed entirely before the claim (which then fails) or
+    ///   entirely after the session exists (which it then closes).
     private func handle(_ message: LinkMessage, from connection: LinkConnection) {
         // A connection accepted while — or after — `stop()` ran must never open a session:
-        // `stop()` drains the pending table, so an acceptance racing it would otherwise leave
-        // a live session on a provider that is no longer listening.
+        // `stop()` empties the connection table, so an acceptance racing it would otherwise
+        // leave a live session on a provider that is no longer listening.
         guard listener != nil else {
             connection.cancel()
             return
@@ -233,15 +256,20 @@ public actor Provider {
             connection.cancel()
             return
         }
-        // Only an accepted handshake takes the connection out of the pending table: from here
-        // on its session owns it.
+        // Only an accepted handshake claims the connection: from here on its session owns the
+        // messages, and the entry routes them there rather than back to this method.
         guard pending.withLock({ $0.claim(connection) }) else { return }
-        connection.send(.serverHello(ServerHello(
+        let accepted = ServerHello(
             protocolVersion: LinkProtocol.version,
             accepted: true,
             reason: nil,
             providerName: configuration.providerName
-        )))
+        )
+        // Installs the session's handler in the connection's entry and replays whatever
+        // arrived behind the hello, in order, before any newer message can be delivered.
+        let install: (@escaping @Sendable (LinkMessage) -> Void) -> Void = { handler in
+            self.pending.withLock { $0.install(handler, for: connection) }
+        }
         switch hello.role {
         case .central:
             sessionOrdinal += 1
@@ -251,6 +279,8 @@ public actor Provider {
                 backend: makeCentralBackend(queue: queue),
                 queue: queue,
                 ordinal: sessionOrdinal,
+                hello: accepted,
+                install: install,
                 log: configuration.log
             )
             configuration.log?("opened central session \(sessionOrdinal) for \(hello.clientName)")
@@ -262,6 +292,8 @@ public actor Provider {
                 backend: makePeripheralBackend(queue: queue, clientName: hello.clientName),
                 queue: queue,
                 ordinal: sessionOrdinal,
+                hello: accepted,
+                install: install,
                 log: configuration.log
             )
             configuration.log?("opened host session \(sessionOrdinal) for \(hello.clientName)")
@@ -305,21 +337,54 @@ public actor Provider {
     }
 }
 
-/// The provider's table of accepted-but-not-yet-handed-off connections.
+/// The provider's table of accepted connections, and the router for their messages.
 ///
 /// Guarded by one `Mutex` on ``Provider``, and written from the listener queue *before* a
 /// connection's handlers exist, which is what makes the handshake independent of the order
 /// unstructured `Task`s happen to reach the actor in.
+///
+/// An entry lives from the moment its connection is accepted until the link ends, and it is
+/// what every message is routed through: the first goes to the actor's handshake, the ones
+/// behind it are held until a session installs its handler, and everything after that is
+/// delivered straight to the session on the listener queue. Nothing between the hello and the
+/// session is dropped, and no message can overtake one that arrived before it.
 struct PendingConnections {
 
-    /// One accepted connection, and whether its link has already ended.
+    /// Where one message goes, decided synchronously on the listener queue.
+    enum Routing {
+        /// Nowhere: the link has ended, the connection is unknown, or the message was held
+        /// for a session that has not installed its handler yet.
+        case drop
+        /// To ``Provider/handle(_:from:)`` — the connection's first message, its hello.
+        case handshake
+        /// To the session that owns this connection.
+        case deliver(@Sendable (LinkMessage) -> Void)
+    }
+
+    /// One accepted connection: whether its link has ended, how far its handshake has got,
+    /// and either its session's handler or the messages waiting for one.
     private struct Entry {
         /// The connection, held strongly until ``release(_:)`` — which also keeps its
         /// `ObjectIdentifier` from being recycled while the key is still in the table.
         let connection: LinkConnection
-        /// Whether the link ended before the handshake completed.
+        /// Whether the link ended.
         var isTerminated = false
+        /// Whether the first message has already been routed to the handshake, so a second
+        /// hello cannot open a second session.
+        var didRouteHello = false
+        /// Whether an accepted handshake has claimed this connection.
+        var isClaimed = false
+        /// The session's message handler, once it has one.
+        var handler: (@Sendable (LinkMessage) -> Void)?
+        /// Messages that arrived behind the hello, held in order until ``handler`` exists.
+        var queued: [LinkMessage] = []
     }
+
+    /// How many messages one entry holds before it starts dropping them. Only a connection
+    /// whose handshake is in flight — or one that was rejected and is about to be cancelled —
+    /// ever queues at all, so this is a ceiling on a misbehaving client, not a flow-control
+    /// window.
+    private static let maximumQueued = 256
 
     private var entries: [ObjectIdentifier: Entry] = [:]
 
@@ -328,31 +393,76 @@ struct PendingConnections {
         entries[ObjectIdentifier(connection)] = Entry(connection: connection)
     }
 
-    /// Whether `connection` is still pending and has not terminated — so a hello that lost the
-    /// race to its own connection's teardown is ignored rather than resurrecting it.
+    /// Decides where `message` goes, and holds it if the answer is "nowhere yet".
+    ///
+    /// - Returns: The routing to apply, on the listener queue, before the next message is
+    ///   routed.
+    mutating func route(_ message: LinkMessage, from connection: LinkConnection) -> Routing {
+        let key = ObjectIdentifier(connection)
+        guard var entry = entries[key], !entry.isTerminated else { return .drop }
+        if let handler = entry.handler { return .deliver(handler) }
+        defer { entries[key] = entry }
+        guard entry.didRouteHello else {
+            entry.didRouteHello = true
+            return .handshake
+        }
+        if entry.queued.count < Self.maximumQueued { entry.queued.append(message) }
+        return .drop
+    }
+
+    /// Hands `connection`'s messages to `handler` and replays everything held for it, in
+    /// order.
+    ///
+    /// The replay happens here, while the table is still locked, so a message arriving on the
+    /// listener queue cannot slip past the backlog: it blocks on the lock and is delivered
+    /// behind it. `handler` must therefore not reach back into this table — the session's
+    /// does nothing but hop onto its own queue.
+    ///
+    /// Nothing is installed for a connection whose link has already ended: its session is
+    /// about to be closed.
+    mutating func install(_ handler: @escaping @Sendable (LinkMessage) -> Void, for connection: LinkConnection) {
+        let key = ObjectIdentifier(connection)
+        guard var entry = entries[key], !entry.isTerminated else { return }
+        entry.handler = handler
+        let queued = entry.queued
+        entry.queued = []
+        entries[key] = entry
+        for message in queued { handler(message) }
+    }
+
+    /// Whether `connection` is still awaiting a handshake and has not terminated — so a hello
+    /// that lost the race to its own connection's teardown is ignored rather than
+    /// resurrecting it.
     ///
     /// Non-mutating, so a handshake that is about to be *rejected* can be recognized without
     /// releasing the connection the rejection still has to be written to.
     func isClaimable(_ connection: LinkConnection) -> Bool {
         guard let entry = entries[ObjectIdentifier(connection)] else { return false }
-        return !entry.isTerminated
+        return !entry.isTerminated && !entry.isClaimed
     }
 
-    /// Claims `connection` for a completed handshake, removing it from the table.
+    /// Claims `connection` for a completed handshake.
     ///
-    /// - Returns: `true` only if the connection was still pending and had not terminated, as
+    /// The entry stays in the table — it is what routes the connection's messages to the
+    /// session about to ``install(_:for:)`` its handler, and what holds the ones that arrive
+    /// in between.
+    ///
+    /// - Returns: `true` only if the connection was unclaimed and had not terminated, as
     ///   ``isClaimable(_:)`` reports.
     mutating func claim(_ connection: LinkConnection) -> Bool {
         let key = ObjectIdentifier(connection)
         guard isClaimable(connection) else { return false }
-        entries.removeValue(forKey: key)
+        entries[key]?.isClaimed = true
         return true
     }
 
-    /// Marks `connection`'s link as ended. A connection that has already been claimed by a
-    /// handshake is not in the table and is unaffected: its session owns it now.
+    /// Marks `connection`'s link as ended, and drops both its handler and anything still
+    /// held for it: nothing is delivered to a session whose link is gone.
     mutating func markTerminated(_ connection: LinkConnection) {
-        entries[ObjectIdentifier(connection)]?.isTerminated = true
+        let key = ObjectIdentifier(connection)
+        entries[key]?.isTerminated = true
+        entries[key]?.handler = nil
+        entries[key]?.queued = []
     }
 
     /// Drops `connection` from the table, releasing the strong reference it was held by.
@@ -360,7 +470,8 @@ struct PendingConnections {
         entries.removeValue(forKey: ObjectIdentifier(connection))
     }
 
-    /// Empties the table, returning every connection that was in it.
+    /// Empties the table, returning every connection that was in it — those still
+    /// handshaking and those a session already owns alike. `stop()` cancels them all.
     mutating func drain() -> [LinkConnection] {
         defer { entries.removeAll() }
         return entries.values.map(\.connection)

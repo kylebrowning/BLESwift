@@ -63,9 +63,10 @@ final class HostSession: Sendable {
 
     /// Creates a session serving `connection` from `backend`.
     ///
-    /// Ordering matches ``CentralSession``: the backend's event handler is installed first,
-    /// then the connection's message handler, then the opening `didUpdateState` is sent. The
-    /// caller must have sent its accepted `ServerHello` first.
+    /// Ordering matches ``CentralSession``: the opening block — the accepted `hello`, the
+    /// backend's event handler, the opening `didUpdateState` — is scheduled on `queue` first,
+    /// and the session's message handler is then installed synchronously, replaying whatever
+    /// the client sent behind its `ClientHello`.
     ///
     /// - Parameters:
     ///   - connection: The accepted link connection, already started.
@@ -73,12 +74,17 @@ final class HostSession: Sendable {
     ///     to `queue`.
     ///   - queue: This session's own serial queue.
     ///   - ordinal: This session's number, for log lines.
+    ///   - hello: The accepted `ServerHello`, written as this session's first frame.
+    ///   - install: Hands this session the connection's messages, replaying any that arrived
+    ///     behind the hello. Called once, synchronously.
     ///   - log: Receives one line per notable session event.
     init(
         connection: LinkConnection,
         backend: any PeripheralManaging,
         queue: DispatchSerialQueue,
         ordinal: Int,
+        hello: ServerHello,
+        install: (@escaping @Sendable (LinkMessage) -> Void) -> Void,
         log: (@Sendable (String) -> Void)?
     ) {
         self.connection = connection
@@ -88,14 +94,15 @@ final class HostSession: Sendable {
         self.log = log
         queue.async { [self] in
             guard !isClosed else { return }
+            // Nothing may precede the hello on the wire — see `CentralSession`.
+            connection.send(.serverHello(hello))
             self.backend.eventHandler = { [weak self] event in self?.translate(event) }
-            // Installed only once the backend's own handler exists — see `CentralSession`.
-            connection.onMessage = { [weak self] message in
-                guard let self, case .hostRequest(let request) = message else { return }
-                self.queue.async { self.perform(request) }
-            }
             send(.didUpdateState(WireCentralState(self.backend.radioState)))
             log?("opened \(label) over a \(self.backend is CompositePeripheralManager ? "composite" : "virtual") backend")
+        }
+        install { [weak self] message in
+            guard let self, case .hostRequest(let request) = message else { return }
+            self.queue.async { self.perform(request) }
         }
     }
 
@@ -117,7 +124,9 @@ final class HostSession: Sendable {
             // the next reconnect, so both ends agree without a final exchange.
             let discarded = pendingUpdates.count
             pendingUpdates.removeAll()
-            connection.onMessage = nil
+            // Nothing to detach on the connection: the provider's table routes its
+            // messages, and it drops this session's handler when the link ends — which
+            // cancelling it below is what brings about.
             connection.cancel()
             log?("closed \(label), discarding \(discarded) queued update(s)")
         }

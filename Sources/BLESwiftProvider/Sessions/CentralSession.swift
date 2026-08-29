@@ -93,22 +93,30 @@ final class CentralSession: Sendable {
 
     /// Creates a session serving `connection` from `backend`.
     ///
-    /// The session installs itself as the connection's message handler immediately, then
-    /// schedules — on `queue` — attaching to the backend and sending the opening
-    /// `didUpdateState`. The caller must have sent its accepted `ServerHello` first: nothing
-    /// may precede it on the wire.
+    /// **Ordering.** The session first schedules its own opening work on `queue` — writing
+    /// the accepted `hello`, attaching to the backend, and sending the opening
+    /// `didUpdateState` — and only then, synchronously, installs its message handler with
+    /// `install`. So the hello is still the first frame on the wire, while every request the
+    /// client sent behind its `ClientHello` is handed over (and replayed by `install`) with
+    /// no window in which it has nowhere to go. Requests reach the backend behind the opening
+    /// block because they hop onto the same serial `queue`, which it is already enqueued on.
     ///
     /// - Parameters:
     ///   - connection: The accepted link connection, already started.
     ///   - backend: The central backend serving this connection. Must be confined to `queue`.
     ///   - queue: This session's own serial queue.
     ///   - ordinal: This session's number, for log lines.
+    ///   - hello: The accepted `ServerHello`, written as this session's first frame.
+    ///   - install: Hands this session the connection's messages, replaying any that arrived
+    ///     behind the hello. Called once, synchronously.
     ///   - log: Receives one line per notable session event.
     init(
         connection: LinkConnection,
         backend: any CentralManaging,
         queue: DispatchSerialQueue,
         ordinal: Int,
+        hello: ServerHello,
+        install: (@escaping @Sendable (LinkMessage) -> Void) -> Void,
         log: (@Sendable (String) -> Void)?
     ) {
         self.connection = connection
@@ -118,19 +126,17 @@ final class CentralSession: Sendable {
         self.log = log
         queue.async { [self] in
             guard !isClosed else { return }
+            // Nothing may precede the hello on the wire, so it goes out from here — ahead of
+            // every event this session can produce — rather than from the provider, which
+            // would be racing this block.
+            connection.send(.serverHello(hello))
             self.backend.eventHandler = { [weak self] event in self?.translate(event) }
-            // Installed only once the backend's own handler exists, so no request can reach
-            // the backend before its events have somewhere to go. Nothing is lost by the
-            // wait: `Provider.handle` sends the `ServerHello` *before* it constructs this
-            // session, and a client sends nothing until it has processed that hello — a
-            // round trip that cannot beat the single `queue.async` this block is enqueued
-            // by. Weak, because the session owns the connection and a strong capture would
-            // be a cycle.
-            connection.onMessage = { [weak self] message in
-                guard let self, case .centralRequest(let request) = message else { return }
-                self.queue.async { self.perform(request) }
-            }
             send(.didUpdateState(WireCentralState(self.backend.radioState)))
+        }
+        // Weak, because the session owns the connection and a strong capture would be a cycle.
+        install { [weak self] message in
+            guard let self, case .centralRequest(let request) = message else { return }
+            self.queue.async { self.perform(request) }
         }
     }
 
@@ -154,7 +160,9 @@ final class CentralSession: Sendable {
             remotes.removeAll()
             pendingWrites.removeAll()
             pendingOpens.removeAll()
-            connection.onMessage = nil
+            // Nothing to detach on the connection: the provider's table routes its
+            // messages, and it drops this session's handler when the link ends — which
+            // cancelling it below is what brings about.
             connection.cancel()
         }
     }

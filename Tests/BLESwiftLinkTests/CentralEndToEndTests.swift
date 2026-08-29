@@ -199,6 +199,48 @@ struct CentralEndToEndTests {
         await provider.stop()
     }
 
+    @Test("A request sent behind the hello, before the session exists, is still served")
+    func requestBehindTheHelloIsServed() async throws {
+        let provider = try await makeProvider()
+        let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+        // The scan leaves on the heels of the hello — same `.ready` callback, so both frames
+        // are decoded from the same receive and delivered back to back on the provider's
+        // listener queue, long before the handshake has hopped onto the actor and built a
+        // session. Repeated because the window is scheduler-dependent: before the provider
+        // held the messages behind the hello, this dropped the scan (or refused the
+        // connection outright, reading the scan as a first message that was not a hello).
+        for iteration in 0..<25 {
+            let connection = LinkConnection.connect(
+                to: endpoint,
+                codec: .binaryPropertyList,
+                queue: DispatchQueue(label: "e2e.behindhello.\(iteration)")
+            )
+            let discovered = Mutex<UUID?>(nil)
+            connection.onStateChange = { [weak connection] state in
+                guard case .ready = state else { return }
+                connection?.send(.clientHello(ClientHello(
+                    protocolVersion: LinkProtocol.version,
+                    role: .central,
+                    clientName: "behind-hello"
+                )))
+                connection?.send(.centralRequest(.scan(services: ["180D"], allowDuplicates: false)))
+            }
+            connection.onMessage = { message in
+                guard case .centralEvent(.didDiscover(let peripheral, _, _, _)) = message else { return }
+                discovered.withLock { $0 = peripheral }
+            }
+            connection.start()
+            await waitFor(timeout: .seconds(5)) { discovered.withLock { $0 != nil } }
+            #expect(discovered.withLock { $0 } == Self.deviceID, "iteration \(iteration)")
+            connection.onStateChange = nil
+            connection.onMessage = nil
+            connection.cancel()
+        }
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        #expect(await provider.sessionCount == 0)
+        await provider.stop()
+    }
+
     @Test("A hello arriving after stop() opens no session")
     func helloAfterStop() async throws {
         let provider = try await makeProvider()
