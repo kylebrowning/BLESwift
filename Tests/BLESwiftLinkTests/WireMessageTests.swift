@@ -88,6 +88,36 @@ struct WireMessageTests {
         }
     }
 
+    @Test("Every WireCentralState round-trips through every codec", arguments: LinkCodec.allCases)
+    func centralStateRoundTrip(codec: LinkCodec) throws {
+        for state in WireCentralState.allCases {
+            let message = LinkMessage.centralEvent(.didUpdateState(state))
+            #expect(try codec.decode(LinkMessage.self, from: codec.encode(message)) == message, "\(state)")
+        }
+    }
+
+    @Test("Every WireWriteType round-trips through every codec", arguments: LinkCodec.allCases)
+    func writeTypeRoundTrip(codec: LinkCodec) throws {
+        for type in WireWriteType.allCases {
+            let message = LinkMessage.centralRequest(.writeValue(
+                peripheral: Self.id,
+                characteristic: WireCharacteristicRef(Self.characteristic),
+                value: Data([1]),
+                type: type,
+                sequence: 0
+            ))
+            #expect(try codec.decode(LinkMessage.self, from: codec.encode(message)) == message, "\(type)")
+        }
+    }
+
+    @Test("Every LinkRole round-trips through every codec", arguments: LinkCodec.allCases)
+    func linkRoleRoundTrip(codec: LinkCodec) throws {
+        for role in LinkRole.allCases {
+            let message = LinkMessage.clientHello(ClientHello(protocolVersion: 1, role: role, clientName: "app"))
+            #expect(try codec.decode(LinkMessage.self, from: codec.encode(message)) == message, "\(role)")
+        }
+    }
+
     @Test("WireError ↔ NSError preserves domain, code, description")
     func errorConversion() {
         let ns = NSError(domain: "CBErrorDomain", code: 7, userInfo: [NSLocalizedDescriptionKey: "timed out"])

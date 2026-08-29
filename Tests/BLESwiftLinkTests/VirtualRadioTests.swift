@@ -76,9 +76,34 @@ struct VirtualRadioTests {
 
     @Test("Connecting to an unknown identifier throws rather than connecting")
     func unknown() async throws {
-        let (central, _, _) = try await makeRig()
-        await #expect(throws: (any Error).self) {
+        let (central, radio, handle) = try await makeRig()
+        // An identifier the backend has never seen is never vended as a remote at all, so the
+        // attempt fails before it can reach the radio.
+        do {
             _ = try await central.connect(PeripheralIdentifier(uuid: UUID(), name: nil), timeout: .seconds(2))
+            Issue.record("Expected the connect to fail")
+        } catch let error as BLESwiftError {
+            guard case .unexpectedPeripheral = error else {
+                Issue.record("Expected .unexpectedPeripheral, got \(error)")
+                return
+            }
+        }
+
+        // A device this backend *has* sighted stays retrievable after the radio drops it, and
+        // the connect attempt is what then fails — with the radio's own error.
+        let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+        for try await event in await central.scan(services: [Self.service], timeout: .seconds(2)) {
+            if case .discovered = event { break }
+        }
+        await handle.remove()
+        await waitFor { await radio.name(of: id) == nil }
+        do {
+            _ = try await central.connect(PeripheralIdentifier(uuid: id, name: nil), timeout: .seconds(2))
+            Issue.record("Expected the connect to fail")
+        } catch {
+            let nsError = error as NSError
+            #expect(nsError.domain == "BLESwiftProvider")
+            #expect(nsError.code == 1)
         }
     }
 
@@ -110,12 +135,17 @@ struct VirtualRadioTests {
         let (central, _, handle) = try await makeRig()
         let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
         _ = try await central.connect(PeripheralIdentifier(uuid: id, name: nil))
-        let events = Task { () -> Bool in
-            for await event in await central.connectionEvents() { if case .disconnected = event { return true } }
-            return false
+        let events = Task { () -> (any Error)?? in
+            for await event in await central.connectionEvents() {
+                if case .disconnected(_, let error, _) = event { return .some(error) }
+            }
+            return .none
         }
         await handle.remove()
-        #expect(await events.value)
+        let reported = try #require(await events.value)
+        let nsError = try #require(reported) as NSError
+        #expect(nsError.domain == "BLESwiftProvider")
+        #expect(nsError.code == 2)
     }
 
     @Test("Back-to-back writes without response reach the radio in the order they were made")

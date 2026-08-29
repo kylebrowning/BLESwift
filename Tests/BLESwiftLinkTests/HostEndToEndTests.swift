@@ -139,9 +139,9 @@ struct HostEndToEndTests {
             }
             return nil
         }
-        // No public "notifications are armed" signal, so a fixed delay stands in for one,
-        // exactly as the in-process sim-to-sim tests do.
-        try await Task.sleep(for: .milliseconds(100))
+        // The host's own subscriber list is the arming signal on this path, so wait on it
+        // rather than on a fixed delay.
+        await waitFor(timeout: .seconds(5)) { await !host.subscribers(for: Self.measurement).isEmpty }
         #expect(await !host.subscribers(for: Self.measurement).isEmpty)
         try await host.updateValue(Data([0, 99]), for: Self.measurement, onSubscribed: nil)
         #expect(try await notifications.value == Data([0, 99]))

@@ -57,6 +57,7 @@ struct BackendRegistryTests {
     @Test("Clearing the registry returns nil factories")
     func clearing() {
         BackendRegistry.centralFactory = { queue in FakeCentral(queue: queue) }
+        #expect(BackendRegistry.centralFactory != nil)
         BackendRegistry.centralFactory = nil
         #expect(BackendRegistry.centralFactory == nil)
         BackendRegistry.peripheralManagerFactory = nil

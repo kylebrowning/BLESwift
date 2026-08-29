@@ -4,7 +4,7 @@
 //
 
 /// Which side of the link a client identifies itself as during the handshake.
-public enum LinkRole: String, Codable, Sendable {
+public enum LinkRole: String, Codable, Sendable, CaseIterable {
     /// The client speaks `CentralRequest`/`CentralWireEvent` — it drives a remote
     /// `Central`.
     case central

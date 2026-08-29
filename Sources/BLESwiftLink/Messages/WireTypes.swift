@@ -52,7 +52,7 @@ extension Optional where Wrapped == NSError {
 }
 
 /// A `Codable` mirror of `CentralState`.
-public enum WireCentralState: String, Codable, Sendable, Equatable {
+public enum WireCentralState: String, Codable, Sendable, Equatable, CaseIterable {
     /// Mirrors `CentralState.unknown`.
     case unknown
     /// Mirrors `CentralState.resetting`.
@@ -92,7 +92,7 @@ public enum WireCentralState: String, Codable, Sendable, Equatable {
 }
 
 /// A `Codable` mirror of `WriteType`.
-public enum WireWriteType: String, Codable, Sendable, Equatable {
+public enum WireWriteType: String, Codable, Sendable, Equatable, CaseIterable {
     /// Mirrors `WriteType.withResponse`.
     case withResponse
     /// Mirrors `WriteType.withoutResponse`.

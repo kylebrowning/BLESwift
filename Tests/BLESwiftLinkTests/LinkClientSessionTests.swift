@@ -75,7 +75,9 @@ struct LinkClientSessionTests {
 
     @Test("Retries until a provider appears")
     func retries() async throws {
-        let port: UInt16 = 45999
+        // A port the system just handed out and released, rather than a fixed number another
+        // process — or another run of this suite — could be sitting on.
+        let port = try await Self.freePort()
         let queue = DispatchSerialQueue(label: "client")
         let session = LinkClientSession(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), role: .central, clientName: "unit", queue: queue, retryInterval: .milliseconds(50))
         session.start()
