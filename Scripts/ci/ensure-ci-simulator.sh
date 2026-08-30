@@ -16,6 +16,8 @@
 set -euo pipefail
 name="$1"
 
+stale_list="$(mktemp)"
+trap 'rm -f "$stale_list"' EXIT
 existing="$(xcrun simctl list devices -j | python3 -c '
 import json, sys
 name = sys.argv[1]
@@ -26,13 +28,15 @@ stale = [d for d in matches if not d.get("isAvailable", True)]
 print(available[0]["udid"] if available else "")
 for d in stale:
     print("stale " + d["udid"], file=sys.stderr)
-' "$name" 2>"${TMPDIR:-/tmp}/ensure-ci-simulator.$$")"
+' "$name" 2>"$stale_list")"
+# A delete that fails is fatal: creating alongside the stale device would duplicate the name,
+# which is the condition this deletion exists to prevent, and a wedged CoreSimulator after an
+# Xcode upgrade is better reported here than as grantiva's ambiguity warning on every run.
 while read -r word udid; do
     [[ "$word" == "stale" ]] || continue
     echo "deleting unavailable \"$name\" ($udid)" >&2
-    xcrun simctl delete "$udid" >&2 || true
-done <"${TMPDIR:-/tmp}/ensure-ci-simulator.$$"
-rm -f "${TMPDIR:-/tmp}/ensure-ci-simulator.$$"
+    xcrun simctl delete "$udid" >&2 || { echo "could not delete unavailable \"$name\" ($udid); refusing to create a duplicate" >&2; exit 1; }
+done <"$stale_list"
 if [[ -n "$existing" ]]; then
     print -- "$existing"
     exit 0
@@ -62,6 +66,7 @@ print(runtimes[-1]["identifier"])
 # `simctl create` prints the new UDID; anything else on stdout (beta Xcodes chatter on some
 # paths) must not reach the caller, which writes this into GITHUB_ENV one line at a time.
 created="$(xcrun simctl create "$name" "$device_type" "$runtime")"
-udid="$(print -- "$created" | grep -E -o '[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}' | head -1)"
+# `|| true` so a no-match grep reaches the guard below instead of aborting under `set -e`.
+udid="$(print -- "$created" | grep -E -o -m1 '[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}' || true)"
 [[ -n "$udid" ]] || { echo "simctl create did not return a UDID:" >&2; print -- "$created" >&2; exit 1; }
 print -- "$udid"
