@@ -11,7 +11,8 @@ import Dispatch
 import Foundation
 import Testing
 
-/// What the provider leaves on a shared radio when its own lifecycle is interrupted.
+/// What the provider leaves on a shared radio when its own lifecycle is interrupted — a
+/// `stop()` racing a registration, and a `start()` whose listener never binds.
 @Suite("Provider lifecycle")
 struct ProviderLifecycleTests {
 
@@ -46,6 +47,29 @@ struct ProviderLifecycleTests {
             ),
             handler: InertHandler()
         )
+    }
+
+    /// The JSON for one fixture device under `identifier`.
+    private static func fixtureJSON(_ identifier: UUID) -> String {
+        """
+        {
+          "devices": [
+            {
+              "id": "\(identifier.uuidString)",
+              "name": "Fixture Lifecycle",
+              "advertisedServices": ["180D"],
+              "services": [
+                {
+                  "uuid": "180D",
+                  "characteristics": [
+                    { "uuid": "2A37", "properties": ["read"], "value": "AEg=" }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+        """
     }
 
     /// A handler whose subscription callback takes its time, so removing its device — which
@@ -116,5 +140,40 @@ struct ProviderLifecycleTests {
         await radio.detach(session: session)
     }
 
+    @Test("A start() whose listener cannot bind registers no fixtures")
+    func aFailedStartRegistersNoFixtures() async throws {
+        // A port with a provider already on it: the second bind is refused, which is the
+        // documented failure `start()` propagates.
+        var occupying = ProviderConfiguration()
+        occupying.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        let holder = Provider(configuration: occupying)
+        try await holder.start()
+        let taken = await holder.port
+
+        let identifier = UUID()
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: taken)
+        configuration.fixtures = try FixtureDocument.parse(Data(Self.fixtureJSON(identifier).utf8)).devices
+        let provider = Provider(configuration: configuration)
+        await #expect(throws: (any Error).self) { try await provider.start() }
+
+        // Nothing was left behind by the attempt: no device on the shared radio, and no
+        // handle vended for one — a handle from a failed start would be refused by the
+        // radio's generation guard the moment a retry re-registered the fixture.
+        #expect(await provider.handle(for: identifier) == nil)
+        #expect(!provider.radio.knownDeviceIDs.withLock { $0.contains(identifier) })
+
+        // The retry, on a port that is free, is what registers the fixture and vends the
+        // handle that drives it.
+        await holder.stop()
+        var retry = ProviderConfiguration()
+        retry.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        retry.fixtures = configuration.fixtures
+        let second = Provider(configuration: retry)
+        try await second.start()
+        #expect(await second.handle(for: identifier) != nil)
+        #expect(second.radio.knownDeviceIDs.withLock { $0.contains(identifier) })
+        await second.stop()
+    }
 }
 #endif

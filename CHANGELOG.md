@@ -66,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device on the radio in neither of the tables `stop()` empties — never removed, and its
   identifier no longer defended. Such a registration is now taken straight back off. (#29)
 
+- `Provider.start()` (BLESwiftProvider) registered its fixtures before binding the listener
+  and left them registered when the bind threw — a port already in use, the documented case.
+  A retry then registered each fixture a second time under a fresh generation and stranded
+  every handle the first attempt had vended. A failed start now rolls its registrations
+  back. (#30)
+
 ## [2.0.0] - 2026-08-24
 
 > **Breaking:** GATT read/write/notify now validate a characteristic's advertised

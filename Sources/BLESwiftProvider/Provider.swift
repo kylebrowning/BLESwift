@@ -158,6 +158,13 @@ public actor Provider {
     ///
     /// Returns once the port is bound, so ``port`` is valid on return.
     ///
+    /// **A start that throws leaves the radio as it found it.** The fixtures go on before the
+    /// listener binds — so no client can be served a radio that is still filling up — and come
+    /// straight back off if the bind fails. Left registered, a retry would register each
+    /// fixture a second time under a fresh generation and strand every handle
+    /// ``handle(for:)`` vended from the first attempt, all of them refused by the radio's
+    /// generation guard.
+    ///
     /// - Throws: ``ProviderFixtureError/duplicateIdentifier(_:)`` if two configured fixtures
     ///   declare the same `id`; the `NWError` the listener failed to bind with — a port already
     ///   in use fails here rather than being retried — or
@@ -180,11 +187,17 @@ public actor Provider {
             fixtures[fixture.id] = handle
             providerOwnedIdentifiers.insert(fixture.id)
         }
-        let listener = try LinkListener(
-            endpoint: configuration.endpoint,
-            codec: configuration.codec,
-            queue: listenerQueue
-        )
+        let listener: LinkListener
+        do {
+            listener = try LinkListener(
+                endpoint: configuration.endpoint,
+                codec: configuration.codec,
+                queue: listenerQueue
+            )
+        } catch {
+            await unregisterFixtures()
+            throw error
+        }
         listener.onConnection = { [weak self] connection in
             guard let self else {
                 connection.cancel()
@@ -249,8 +262,26 @@ public actor Provider {
                 break
             }
         }
-        try await listener.start()
+        do {
+            try await listener.start()
+        } catch {
+            await unregisterFixtures()
+            throw error
+        }
         self.listener = listener
+    }
+
+    /// Takes the fixtures this ``start()`` registered back off ``radio`` and stops defending
+    /// their identifiers — the rollback for a listener that never bound. Devices
+    /// ``addVirtualDevice(_:advertising:)`` registered are left alone: they are not this
+    /// start's to undo.
+    private func unregisterFixtures() async {
+        let registered = fixtures
+        fixtures.removeAll()
+        for (identifier, handle) in registered {
+            await handle.remove()
+            providerOwnedIdentifiers.remove(identifier)
+        }
     }
 
     /// The port the listener is bound to, or `0` before ``start()`` has returned.
