@@ -40,9 +40,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when constructing their default backend. No behavior change when nothing is registered: they
   construct CoreBluetooth exactly as before. The explicit `init(backend:queue:…)` initializers
   ignore the registry.
+- Documented a limitation of the `--passthrough` L2CAP path (BLESwiftProvider): the provider
+  pairs `didOpenL2CAPChannel` completions to a client's channel opens by arrival order, per
+  peripheral, because the callback carries nothing that names the open it answers. A
+  completion for an open that was outstanding when the peripheral disconnected is discarded if
+  it arrives before the client reconnects, but one arriving after the client has reconnected
+  and opened again is taken for the new open's answer — bridging the new channel to the
+  previous connection's transport. This cannot be closed at the provider; it is written up in
+  `bridgeOpenedChannel` and in the "Where the link diverges from CoreBluetooth" list of the
+  "Running in the iOS Simulator" article. Virtual devices are unaffected. (#28)
 
 ### Fixed
 
+- `HostSession` (BLESwiftProvider) counted every `addService` request against
+  `maximumHostedServices`, including the ones the backend refused as duplicates: a client that
+  re-added one service sixty-four times — and was correctly told each time that it was a
+  duplicate — lost its link over a database holding one service. A refused `didAddService` now
+  gives the slot back. (#26)
+
+- `CentralSession`'s L2CAP pump (BLESwiftProvider) sent inbound bytes onto the link without
+  the identity check every other off-queue completion makes: a pump that had cleared its
+  cancellation check just before its bridge was torn down could put the dead channel's bytes
+  on the wire under a channel id the session had since re-issued. (#27)
+
+- `Provider.addVirtualDevice(_:advertising:)` (BLESwiftProvider) recorded its device after a
+  suspension the provider serves `stop()` across, so a stop overlapping the call left the
+  device on the radio in neither of the tables `stop()` empties — never removed, and its
+  identifier no longer defended. Such a registration is now taken straight back off, including
+  when it began inside one stop's window and resumed after a second, overlapping stop had
+  returned. (#29)
+
+- `Provider.start()` (BLESwiftProvider) registered its fixtures before binding the listener
+  and left them registered when the bind threw — a port already in use, the documented case.
+  A retry then registered each fixture a second time under a fresh generation and stranded
+  every handle the first attempt had vended. A failed start now rolls its registrations
+  back. (#30)
+
+- `CentralSession` (BLESwiftProvider) dropped the whole link — the scan, every peripheral,
+  every L2CAP channel — when a client queued more than 256 `.withoutResponse` writes for one
+  peripheral, which a few hundred writers released together by a single readiness signal
+  reach honestly. Excess writes are now parked per peripheral (1024 writes or 1 MiB,
+  whichever comes first) and drained on the backend's readiness; only past that cap does that
+  peripheral's queue go — dropped with nothing reported, exactly as CoreBluetooth drops a
+  `.withoutResponse` write it cannot send, but acknowledged write by write so the client's
+  window is not left holding slots for payloads that were discarded. (#31)
 - `VirtualDeviceHandle` (BLESwiftProvider) now holds its `VirtualRadio` weakly. A radio with
   a fixture attached formed a retain cycle — radio → device table → `FixtureDeviceHandler` →
   handle → radio — and never deallocated unless `Provider.stop()` explicitly removed the

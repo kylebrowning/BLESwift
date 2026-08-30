@@ -94,6 +94,25 @@ public actor Provider {
     /// Numbers the per-session queue labels.
     private var sessionOrdinal = 0
 
+    /// Bumped by every ``stop()``, so work that suspended before one can tell on resuming
+    /// that the provider it was registering with has been torn down underneath it. See
+    /// ``addVirtualDevice(_:advertising:)``.
+    private var stopGeneration: UInt64 = 0
+
+    /// How many ``stop()`` calls are between their first line and their last — they suspend in
+    /// the radio several times, and this actor serves other calls while they do. A
+    /// registration that both began and finished inside that window would carry the *same*
+    /// ``stopGeneration`` on both sides of its own suspension and still be emptied out of the
+    /// tables behind it.
+    ///
+    /// A depth rather than a flag: two stops can overlap — and one stop's own `handle.remove()`
+    /// calls can return in any order — so the *inner* one's exit must not report the outer
+    /// one's window as closed.
+    private var stopDepth = 0
+
+    /// Whether any ``stop()`` is currently in flight. See ``stopDepth``.
+    private var isStopping: Bool { stopDepth > 0 }
+
     /// Creates a provider. Nothing is registered and no port is bound until ``start()``.
     ///
     /// - Parameter configuration: Where to listen, what to host, and how to log.
@@ -111,12 +130,31 @@ public actor Provider {
     ///   - device: The device to host.
     ///   - advertising: Whether it starts out advertising. Defaults to `true`.
     /// - Returns: The handle for pushing notifications and mutating the device afterwards.
-    ///   Stale once ``stop()`` has removed the device, exactly as a fixture's handle is.
+    ///   Stale once ``stop()`` has removed the device, exactly as a fixture's handle is —
+    ///   including a ``stop()`` that ran *during* this call, which takes the device straight
+    ///   back off the radio rather than leaving it there for nothing to remove.
     @discardableResult
     public func addVirtualDevice(_ device: VirtualDevice, advertising: Bool = true) async -> VirtualDeviceHandle {
         let identifier = device.descriptor.identifier
+        // Registering suspends, and this actor serves a `stop()` while it does — a stop that
+        // began before this call, or one that is suspended in the radio itself. Either way it
+        // empties both tables and the identifier set, so recording the device on resuming
+        // would leave it on a shared radio with nothing holding its handle and nothing
+        // defending its identifier — the one thing `stop()` promises it does not do. It goes
+        // straight back off instead.
+        //
+        // Both sides of the suspension are read, and the *entry* side is what a second stop
+        // cannot take back: an add that began inside one stop's window and resumed after a
+        // shorter, overlapping stop had returned would otherwise find the depth back at zero
+        // and the generation unchanged since it looked, and record an orphan anyway.
+        let generation = stopGeneration
+        let wasStopping = isStopping
         providerOwnedIdentifiers.insert(identifier)
         let handle = await radio.register(device, advertising: advertising)
+        guard !wasStopping, generation == stopGeneration, !isStopping else {
+            await handle.remove()
+            return handle
+        }
         addedDevices[identifier] = handle
         return handle
     }
@@ -133,6 +171,13 @@ public actor Provider {
     /// Registers every configured fixture on ``radio``, then binds the listener.
     ///
     /// Returns once the port is bound, so ``port`` is valid on return.
+    ///
+    /// **A start that throws leaves the radio as it found it.** The fixtures go on before the
+    /// listener binds — so no client can be served a radio that is still filling up — and come
+    /// straight back off if the bind fails. Left registered, a retry would register each
+    /// fixture a second time under a fresh generation and strand every handle
+    /// ``handle(for:)`` vended from the first attempt, all of them refused by the radio's
+    /// generation guard.
     ///
     /// - Throws: ``ProviderFixtureError/duplicateIdentifier(_:)`` if two configured fixtures
     ///   declare the same `id`; the `NWError` the listener failed to bind with — a port already
@@ -156,11 +201,17 @@ public actor Provider {
             fixtures[fixture.id] = handle
             providerOwnedIdentifiers.insert(fixture.id)
         }
-        let listener = try LinkListener(
-            endpoint: configuration.endpoint,
-            codec: configuration.codec,
-            queue: listenerQueue
-        )
+        let listener: LinkListener
+        do {
+            listener = try LinkListener(
+                endpoint: configuration.endpoint,
+                codec: configuration.codec,
+                queue: listenerQueue
+            )
+        } catch {
+            await unregisterFixtures()
+            throw error
+        }
         listener.onConnection = { [weak self] connection in
             guard let self else {
                 connection.cancel()
@@ -225,8 +276,26 @@ public actor Provider {
                 break
             }
         }
-        try await listener.start()
+        do {
+            try await listener.start()
+        } catch {
+            await unregisterFixtures()
+            throw error
+        }
         self.listener = listener
+    }
+
+    /// Takes the fixtures this ``start()`` registered back off ``radio`` and stops defending
+    /// their identifiers — the rollback for a listener that never bound. Devices
+    /// ``addVirtualDevice(_:advertising:)`` registered are left alone: they are not this
+    /// start's to undo.
+    private func unregisterFixtures() async {
+        let registered = fixtures
+        fixtures.removeAll()
+        for (identifier, handle) in registered {
+            await handle.remove()
+            providerOwnedIdentifiers.remove(identifier)
+        }
     }
 
     /// The port the listener is bound to, or `0` before ``start()`` has returned.
@@ -237,6 +306,13 @@ public actor Provider {
     /// How many sessions — of either role — are live.
     public var sessionCount: Int {
         sessions.count
+    }
+
+    /// Every live session, in no particular order. Internal, and there for the tests that
+    /// drive one session's off-queue completions directly — nothing in the public surface
+    /// hands a session out.
+    var liveSessions: [any ProviderSession] {
+        Array(sessions.values)
     }
 
     /// Stops listening, closes every live session — dropping each client's link — and takes
@@ -251,12 +327,19 @@ public actor Provider {
     /// before the set of provider-owned identifiers is emptied, so no window exists in which a device is
     /// still on the radio and its identifier no longer refused to a client claiming it.
     ///
+    /// A ``addVirtualDevice(_:advertising:)`` that overlapped this — suspended in the radio
+    /// when it started, or begun while it was itself suspended there — takes its device back
+    /// off on resuming, for the same reason: this provider hosts nothing once it has stopped.
+    ///
     /// - Note: ``start()`` after a ``stop()`` registers the configured fixtures again, from
     ///   scratch: each one is a *new* registration under the same id, and ``handle(for:)``
     ///   vends the fresh ``VirtualDeviceHandle`` for it. A handle taken before the stop is
     ///   stale for good — every call on it is refused by the radio's generation guard rather
     ///   than applied to the device that replaced the one it was minted for.
     public func stop() async {
+        stopGeneration &+= 1
+        stopDepth += 1
+        defer { stopDepth -= 1 }
         listener?.cancel()
         listener = nil
         for connection in pending.withLock({ $0.drain() }) {

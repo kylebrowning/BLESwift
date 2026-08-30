@@ -31,12 +31,28 @@ struct CentralSessionLimitsTests {
         func store(_ peripheral: FakePeripheral) { storage.withLock { $0 = peripheral } }
     }
 
+    /// Runs `body` on `session`'s own serial queue and returns its result — the sanctioned
+    /// way for a test to touch session state, which is queue-confined rather than locked.
+    private func onSessionQueue<T: Sendable>(
+        _ session: CentralSession,
+        _ body: @escaping @Sendable () -> T
+    ) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            session.queue.async { continuation.resume(returning: body()) }
+        }
+    }
+
+    /// The one central-role session `provider` is serving.
+    private func centralSession(of provider: Provider) async throws -> CentralSession {
+        try #require(await provider.liveSessions.compactMap { $0 as? CentralSession }.first)
+    }
+
 #if !targetEnvironment(simulator)
     // Sockets in a CI simulator are unreliable; the simulator-side path is covered by the
     // two-simulator E2E on real simulators.
 
-    @Test("A client that queues past the write window loses its session")
-    func writeWindowOverrunClosesTheSession() async throws {
+    @Test("A burst past the write window is parked, not answered with a dropped link")
+    func writeWindowOverrunParksRatherThanDroppingTheLink() async throws {
         let fakeBox = PeripheralBox()
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
@@ -63,7 +79,7 @@ struct CentralSessionLimitsTests {
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             queue: queue,
-            clientName: "greedy",
+            clientName: "bursty",
             retryInterval: .seconds(30)
         )
         let central = Central(backend: link, queue: queue)
@@ -72,13 +88,13 @@ struct CentralSessionLimitsTests {
         await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
         #expect(await provider.sessionCount == 1)
 
-        // Straight down the link, behind `Peripheral`'s back: its own writer honors the
-        // window, which is the whole point — only a client that has stopped honoring it can
-        // reach this.
-        let overrun = CentralSession.maximumPendingWrites + 1
+        // Far past the window the client agreed to honor, which is what a few hundred writers
+        // released together by one readiness signal produce — and what CoreBluetooth would
+        // simply queue.
+        let burst = 4 * LinkFlowControl.writeWithoutResponseWindow + 1
         let reference = Self.control
         queue.async {
-            for sequence in 0..<overrun {
+            for sequence in 0..<burst {
                 link.send(.writeValue(
                     peripheral: Self.deviceID,
                     characteristic: WireCharacteristicRef(reference),
@@ -89,11 +105,129 @@ struct CentralSessionLimitsTests {
             }
         }
 
-        // The session goes, rather than the provider's memory.
-        await waitFor(timeout: .seconds(10)) { await provider.sessionCount == 0 }
-        #expect(await provider.sessionCount == 0)
+        // Parked — every one of them, watched arriving rather than assumed: a machine slow
+        // enough to still be delivering the burst would otherwise let this test pass without
+        // the session ever holding more than the old cap allowed.
+        let session = try await centralSession(of: provider)
+        await waitFor(timeout: .seconds(10)) {
+            await onSessionQueue(session) { session.pendingWrites[Self.deviceID]?.count ?? 0 } == burst
+        }
+        #expect(await onSessionQueue(session) { session.pendingWrites[Self.deviceID]?.count ?? 0 } == burst)
+
+        // And the scan, every other peripheral and every L2CAP channel this session holds
+        // survive a burst on one characteristic.
+        #expect(await provider.sessionCount == 1)
 
         link.shutdown()
+        await provider.stop()
+    }
+
+    @Test("A client that never consumes its acknowledgements loses that peripheral's queue, not its link")
+    func writeQueueOverflowDiscardsThePeripheralsWritesAndKeepsTheSession() async throws {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            let peripheral = FakePeripheral(
+                identifier: Self.deviceID,
+                name: "Fake",
+                canSendWriteWithoutResponse: false,
+                queue: queue
+            )
+            fake.retrievablePeripherals[Self.deviceID] = peripheral
+            fake.connectBehavior = .succeed
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        // A raw client, so nothing acknowledges anything on its behalf: the sequences it
+        // spends are never returned to a window it is not keeping.
+        let connection = LinkConnection.connect(
+            to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "centralsession.writeoverflow")
+        )
+        let accepted = Mutex(false)
+        let events = Mutex<[CentralWireEvent]>([])
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(
+                protocolVersion: LinkProtocol.version,
+                role: .central,
+                clientName: "insatiable"
+            )))
+        }
+        connection.onMessage = { message in
+            switch message {
+            case .serverHello(let hello) where hello.accepted: accepted.withLock { $0 = true }
+            case .centralEvent(let event): events.withLock { $0.append(event) }
+            default: break
+            }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { accepted.withLock { $0 } }
+        connection.send(.centralRequest(.connect(peripheral: Self.deviceID, options: nil, requiresANCS: false)))
+        await waitFor(timeout: .seconds(5)) {
+            events.withLock { $0 }.contains { if case .didConnect = $0 { return true } else { return false } }
+        }
+
+        // One more than the queue holds, none of them ever drained.
+        let overrun = CentralSession.maximumPendingWrites + 1
+        for sequence in 0..<overrun {
+            connection.send(.centralRequest(.writeValue(
+                peripheral: Self.deviceID,
+                characteristic: WireCharacteristicRef(Self.control),
+                value: Data([0x01]),
+                type: .withoutResponse,
+                sequence: UInt64(sequence)
+            )))
+        }
+
+        // The peripheral's queue goes, acknowledged write by write so the client's own window
+        // is not left holding slots for payloads that were discarded. The link — the scan,
+        // every other peripheral, every channel — stays.
+        await waitFor(timeout: .seconds(10)) {
+            events.withLock { $0 }.filter {
+                if case .writeWithoutResponseAccepted = $0 { return true } else { return false }
+            }.count == overrun
+        }
+        #expect(events.withLock { $0 }.filter {
+            if case .writeWithoutResponseAccepted = $0 { return true } else { return false }
+        }.count == overrun, "every discarded write gives the client back its window slot")
+        #expect(await provider.sessionCount == 1)
+
+        // Nothing else is reported: a `.withoutResponse` write has no completion in
+        // CoreBluetooth, so a discarded one produces no event at all — least of all one a
+        // live `.withResponse` write on the same characteristic would be answered by.
+        #expect(!events.withLock { $0 }.contains {
+            if case .didWriteValue = $0 { return true } else { return false }
+        }, "a discarded withoutResponse write reports nothing")
+
+        connection.send(.centralRequest(.writeValue(
+            peripheral: Self.deviceID,
+            characteristic: WireCharacteristicRef(Self.control),
+            value: Data([0x02]),
+            type: .withResponse,
+            sequence: UInt64(overrun)
+        )))
+        await waitFor(timeout: .seconds(10)) {
+            events.withLock { $0 }.contains {
+                if case .didWriteValue = $0 { return true } else { return false }
+            }
+        }
+        let completions = events.withLock { $0 }.compactMap { event -> WireError?? in
+            guard case .didWriteValue(_, let characteristic, let error) = event,
+                  characteristic == WireCharacteristicRef(Self.control) else { return nil }
+            return .some(error)
+        }
+        #expect(completions.count == 1, "only the withResponse write is answered")
+        #expect(completions.first == .some(nil), "and with its own real result")
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
         await provider.stop()
     }
 

@@ -227,6 +227,82 @@ struct L2CAPLinkTests {
         await provider.stop()
     }
 
+    /// Runs `body` on `session`'s own serial queue and returns its result — the sanctioned
+    /// way for a test to touch session state, which is queue-confined rather than locked.
+    private func onSessionQueue<T: Sendable>(
+        _ session: CentralSession,
+        _ body: @escaping @Sendable () -> T
+    ) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            session.queue.async { continuation.resume(returning: body()) }
+        }
+    }
+
+    /// The one central-role session `provider` is serving.
+    private func centralSession(of provider: Provider) async throws -> CentralSession {
+        try #require(await provider.liveSessions.compactMap { $0 as? CentralSession }.first)
+    }
+
+    @Test("A pump send from a bridge whose channel id was reused is dropped")
+    func aStalePumpSendUnderAReusedIdentifierIsDropped() async throws {
+        let box = PeripheralBox()
+        let provider = try await makeProvider(box)
+        let client = RawClient(port: await provider.port, label: "l2cap.stalepump")
+        await waitFor(timeout: .seconds(5)) { client.isAccepted }
+        client.send(.connect(peripheral: Self.deviceID, options: nil, requiresANCS: false))
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains { if case .didConnect = $0 { return true } else { return false } }
+        }
+
+        /// Opens channel id 7 and waits for its completion.
+        func open() async {
+            let before = client.events.filter {
+                if case .didOpenL2CAPChannel = $0 { return true } else { return false }
+            }.count
+            client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: Self.psm.rawValue, channel: 7))
+            await waitFor(timeout: .seconds(5)) {
+                client.events.filter {
+                    if case .didOpenL2CAPChannel = $0 { return true } else { return false }
+                }.count > before
+            }
+        }
+
+        await open()
+        let session = try await centralSession(of: provider)
+        let stale = try #require(await onSessionQueue(session) { session.channels[7] })
+
+        // The id goes back to the client and is handed straight to another channel — the
+        // state the pump's hop can land in, having cleared its cancellation check just before
+        // the teardown that dropped its bridge.
+        client.send(.l2capClose(channel: 7))
+        await open()
+        let live = try #require(await onSessionQueue(session) { session.channels[7] })
+        #expect(live !== stale)
+
+        // The dead bridge's bytes must not reach the client under an id that is now another
+        // channel's.
+        let staleBytes = Data([0xDE, 0xAD])
+        await onSessionQueue(session) {
+            session.sendFromPump(.l2capData(channel: 7, data: staleBytes), channel: 7, open: stale)
+        }
+        // Bounded by the live bridge's own send: the queue is serial and the connection
+        // writes in order, so a frame that arrives after this one was never sent at all.
+        let liveBytes = Data([0xC0, 0xFF, 0xEE])
+        await onSessionQueue(session) {
+            session.sendFromPump(.l2capData(channel: 7, data: liveBytes), channel: 7, open: live)
+        }
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains(.l2capData(channel: 7, data: liveBytes))
+        }
+        #expect(client.events.contains(.l2capData(channel: 7, data: liveBytes)))
+        #expect(!client.events.contains(.l2capData(channel: 7, data: staleBytes)))
+
+        client.send(.l2capClose(channel: 7))
+        client.shutdown()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
+    }
+
     @Test("A stale write failure under a reused channel id leaves the live channel alone")
     func aStaleWriteFailureDoesNotTearDownAReusedIdentifier() async throws {
         let box = PeripheralBox()

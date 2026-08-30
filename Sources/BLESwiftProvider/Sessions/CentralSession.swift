@@ -31,8 +31,9 @@ import Foundation
 ///   loop refers to itself weakly.
 final class CentralSession: Sendable {
 
-    /// One `.withoutResponse` write waiting for the peripheral to be ready for it.
-    private struct PendingWrite {
+    /// One `.withoutResponse` write waiting for the peripheral to be ready for it. Internal
+    /// for ``pendingWrites``' reason.
+    struct PendingWrite {
         let sequence: UInt64
         let characteristic: CharacteristicIdentifier
         let value: Data
@@ -53,14 +54,28 @@ final class CentralSession: Sendable {
     /// never saw — the conservative default a client assumes before any negotiation.
     private static let defaultMaximumWriteWithoutResponse = 20
 
-    /// How many unsent `.withoutResponse` writes this session holds for one peripheral before
-    /// it stops believing the client.
+    /// How many unsent `.withoutResponse` writes this session parks for one peripheral before
+    /// it gives up on that peripheral's queue.
     ///
-    /// Four times the window the client agreed to honor: a client that has stopped waiting
-    /// for `writeWithoutResponseAccepted` can otherwise grow this queue — and the provider's
-    /// memory — without bound, and there is no answer to that but to disbelieve it. The
-    /// factor of four is slack for the acknowledgements still in flight, not a second window.
-    static let maximumPendingWrites = 4 * LinkFlowControl.writeWithoutResponseWindow
+    /// Far past the window a client agreed to honor, because exceeding that window is not by
+    /// itself dishonest: `Central.awaitWriteWithoutResponseReadiness` resumes every parked
+    /// writer on one readiness signal, so a few hundred writers can legitimately fire at once
+    /// — CoreBluetooth would simply queue them. They are parked here and drained on the
+    /// backend's readiness, exactly as a smaller queue was. A thousand of them for one
+    /// peripheral is another matter: the client has stopped consuming acknowledgements
+    /// altogether, and *this peripheral's* queue goes rather than the provider's memory — or
+    /// the whole link, which took the scan and every other peripheral and channel with it.
+    /// Those writes are dropped with nothing reported, exactly as CoreBluetooth drops a
+    /// `.withoutResponse` write it cannot send.
+    static let maximumPendingWrites = 1024
+
+    /// How many bytes of unsent `.withoutResponse` writes this session parks for one
+    /// peripheral, whichever cap is reached first.
+    ///
+    /// ``maximumPendingWrites`` alone bounds the count and not the memory: one frame may
+    /// carry up to ``BLESwiftLink/LinkFraming/maximumPayloadLength``, so a thousand of them
+    /// is a great deal more than a megabyte.
+    static let maximumPendingWriteBytes = 1 << 20
 
     /// How many `openL2CAPChannel` completions this session waits on for one peripheral before
     /// it stops believing the client.
@@ -129,7 +144,17 @@ final class CentralSession: Sendable {
     /// How many remotes this session keeps — ``defaultMaximumRemotes``, unless a test asked
     /// for a smaller table.
     private let maximumRemotes: Int
-    nonisolated(unsafe) private var pendingWrites: [UUID: [PendingWrite]] = [:]
+
+    /// The `.withoutResponse` writes parked for each peripheral, oldest first, against
+    /// ``maximumPendingWrites`` and ``maximumPendingWriteBytes``. Internal rather than private
+    /// so a test can watch a burst arrive rather than guess at when it has. Session ``queue``
+    /// only.
+    nonisolated(unsafe) var pendingWrites: [UUID: [PendingWrite]] = [:]
+
+    /// How many bytes of payload ``pendingWrites`` is holding per peripheral, against
+    /// ``maximumPendingWriteBytes``. Kept rather than summed on every arrival, which would be
+    /// quadratic over a queue this long. Session ``queue`` only.
+    nonisolated(unsafe) private var pendingWriteBytes: [UUID: Int] = [:]
     nonisolated(unsafe) var pendingOpens: [UUID: [PendingOpen]] = [:]
     nonisolated(unsafe) private var isClosed = false
 
@@ -215,6 +240,7 @@ final class CentralSession: Sendable {
             remotes.removeAll()
             connectOrder.removeAll()
             pendingWrites.removeAll()
+            pendingWriteBytes.removeAll()
             pendingOpens.removeAll()
             // Nothing to detach on the connection: the provider's table routes its
             // messages, and it drops this session's handler when the link ends — which
@@ -321,15 +347,21 @@ final class CentralSession: Sendable {
                 remote.writeValue(value, for: identifier, type: .withResponse)
                 return
             }
-            // A client that keeps queueing past the window it agreed to has stopped following
-            // the protocol; the link goes rather than this session's memory.
-            guard pendingWrites[peripheral, default: []].count < Self.maximumPendingWrites else {
-                failProtocol(ProtocolViolation.writeWindowExceeded(peripheral: peripheral))
+            // Parked, however far past its window the client is: writers released together by
+            // one readiness signal are honest, and CoreBluetooth would queue them. Only a
+            // queue past both caps is a client that has stopped consuming acknowledgements,
+            // and then this peripheral's queue is what goes — dropped silently, as a
+            // `.withoutResponse` write always is — rather than the link.
+            guard pendingWrites[peripheral, default: []].count < Self.maximumPendingWrites,
+                  pendingWriteBytes[peripheral, default: 0] + value.count <= Self.maximumPendingWriteBytes else {
+                discardPendingWrites(for: peripheral, including:
+                    PendingWrite(sequence: sequence, characteristic: identifier, value: value))
                 return
             }
             pendingWrites[peripheral, default: []].append(
                 PendingWrite(sequence: sequence, characteristic: identifier, value: value)
             )
+            pendingWriteBytes[peripheral, default: 0] += value.count
             drainWrites(for: peripheral)
 
         case .setNotifyValue(let peripheral, let characteristic, let enabled):
@@ -394,10 +426,6 @@ final class CentralSession: Sendable {
     /// What a client did that the protocol does not permit, beyond the malformed fields the
     /// wire boundary itself rejects.
     enum ProtocolViolation: Error, Equatable {
-        /// More `.withoutResponse` writes were queued for one peripheral than
-        /// ``maximumPendingWrites`` allows — the client has ignored its flow-control window.
-        case writeWindowExceeded(peripheral: UUID)
-
         /// More `openL2CAPChannel` completions were outstanding for one peripheral than
         /// ``maximumPendingOpens`` allows — the client has stopped consuming them.
         case openWindowExceeded(peripheral: UUID)
@@ -418,7 +446,7 @@ final class CentralSession: Sendable {
     }
 
     /// Drops the client's link because it sent something the protocol does not allow — a
-    /// malformed identifier, or more queued writes than the window can ever have permitted.
+    /// malformed identifier, or more outstanding channel opens than any honest client has.
     /// The provider's own termination path then closes this session. Must be called on
     /// ``queue``. Internal so the L2CAP bridge can refuse a client on the same terms.
     func failProtocol(_ error: some Error) {
@@ -463,6 +491,7 @@ final class CentralSession: Sendable {
             // Both are empty — that is what made the remote idle — but the keys would
             // otherwise outlive it, so the side tables stay bounded by this one.
             pendingWrites.removeValue(forKey: identifier)
+            pendingWriteBytes.removeValue(forKey: identifier)
             pendingOpens.removeValue(forKey: identifier)
             overflow -= 1
         }
@@ -529,8 +558,42 @@ final class CentralSession: Sendable {
         guard let remote = remotes[peripheral] else { return }
         while let next = pendingWrites[peripheral]?.first, remote.canSendWriteWithoutResponse {
             pendingWrites[peripheral]?.removeFirst()
+            pendingWriteBytes[peripheral] = max(0, (pendingWriteBytes[peripheral] ?? 0) - next.value.count)
             remote.writeValue(next.value, for: next.characteristic, type: .withoutResponse)
             send(.writeWithoutResponseAccepted(peripheral: peripheral, sequence: next.sequence))
+        }
+    }
+
+    /// Gives up on everything queued for `peripheral`, plus the write that would not fit,
+    /// and tells the client. Must be called on ``queue``.
+    ///
+    /// Each discarded write is still *acknowledged*: a `.withoutResponse` write holds a slot
+    /// in the client's window until `writeWithoutResponseAccepted` reopens it, and enough
+    /// unreturned slots wedge its writer for good — the same reason a write this session
+    /// cannot route is acknowledged rather than dropped in silence.
+    ///
+    /// **Nothing else is reported.** A `.withoutResponse` write has no completion in
+    /// CoreBluetooth: the payload is dropped and the caller is told nothing, which is exactly
+    /// what a write too large for one packet does on device. Synthesizing a `didWriteValue`
+    /// would put an event on the wire that no real write of this type produces — invisible to
+    /// a client that has no API to surface it, and worse than invisible to one with a live
+    /// `.withResponse` write outstanding on the same characteristic, whose completion it would
+    /// be taken for. The discard is a provider-side fault, and it is logged there.
+    ///
+    /// - Parameters:
+    ///   - peripheral: The peripheral whose queue is being given up on.
+    ///   - including: The write that did not fit, discarded with the rest of them.
+    private func discardPendingWrites(for peripheral: UUID, including overflow: PendingWrite) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let discarded = (pendingWrites.removeValue(forKey: peripheral) ?? []) + [overflow]
+        pendingWriteBytes.removeValue(forKey: peripheral)
+        log?(
+            "\(label): discarding \(discarded.count) queued write(s) for peripheral \(peripheral); "
+                + "the client queued past \(Self.maximumPendingWrites) writes or "
+                + "\(Self.maximumPendingWriteBytes) bytes without consuming its acknowledgements"
+        )
+        for write in discarded {
+            send(.writeWithoutResponseAccepted(peripheral: peripheral, sequence: write.sequence))
         }
     }
 
@@ -701,6 +764,10 @@ final class CentralSession: Sendable {
     private func discardPerConnectionState(for peripheral: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         pendingWrites.removeValue(forKey: peripheral)
+        pendingWriteBytes.removeValue(forKey: peripheral)
+        // Dropped rather than remembered: a completion the backend still delivers for an open
+        // this connection issued finds no pending open and has its channel closed. See
+        // ``CentralSession/bridgeOpenedChannel(_:error:from:)`` for what that cannot catch.
         pendingOpens.removeValue(forKey: peripheral)
         // The client tears its own halves down off the disconnect; closing the backend's
         // ends here is what stops their pumps and releases the transports.

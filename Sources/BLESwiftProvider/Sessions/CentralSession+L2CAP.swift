@@ -158,6 +158,18 @@ extension CentralSession {
     /// The backend's completions for one peripheral arrive in the order the opens were
     /// issued, so a FIFO per peripheral is enough to pair them up. Must be called on
     /// ``CentralSession/queue``.
+    ///
+    /// **A completion cannot be tied to the connection that asked for it.**
+    /// `didOpenL2CAPChannel` carries a channel or an error and nothing that names the open it
+    /// answers, so this pairing is by arrival order alone. A completion for an open that was
+    /// outstanding when the peripheral disconnected is therefore matched to whatever this
+    /// session pends next: one arriving before the peripheral reconnects finds an empty FIFO
+    /// and has its channel closed, but one arriving *after* the client has reconnected and
+    /// opened again is popped as that open's answer, bridging the new channel id to the
+    /// previous connection's transport. Nothing at the provider can tell those two apart, and
+    /// no bookkeeping here can close that window — it is a documented limitation of the
+    /// passthrough L2CAP path against real hardware, not something a client can work around
+    /// either.
     func bridgeOpenedChannel(_ channel: (any L2CAPChannelRemote)?, error: NSError?, from peripheral: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         var queued = pendingOpens[peripheral] ?? []
@@ -222,7 +234,7 @@ extension CentralSession {
                         guard !Task.isCancelled else { return }
                         await open.waitForCredit(piece.count)
                         guard !Task.isCancelled else { return }
-                        self?.sendFromPump(.l2capData(channel: channel, data: piece))
+                        self?.sendFromPump(.l2capData(channel: channel, data: piece), channel: channel, open: open)
                     }
                 }
                 self?.finishChannel(channel, open: open, error: nil)
@@ -389,8 +401,16 @@ extension CentralSession {
 
     /// Sends one event from the pump, hopping onto ``CentralSession/queue`` first. The queue
     /// is serial, so the pump's frames keep their order.
-    private func sendFromPump(_ event: CentralWireEvent) {
+    ///
+    /// The identity check every other off-queue completion makes is made here too: the pump
+    /// clears its cancellation check *before* the hop, so a teardown landing in between —
+    /// which drops the id, and may have re-issued it to another channel by the time this runs
+    /// — would otherwise put the old bridge's bytes on the wire under an id that is no longer
+    /// its own. Internal so a test can drive it with a bridge the session has already
+    /// dropped.
+    func sendFromPump(_ event: CentralWireEvent, channel: UInt32, open: OpenChannel) {
         queue.async { [self] in
+            guard isCurrent(channel, open) else { return }
             send(event)
         }
     }
