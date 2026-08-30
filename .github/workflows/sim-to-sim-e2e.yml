@@ -3,9 +3,11 @@ name: Sim-to-sim E2E
 # Two simulator apps talk BLE to each other through bleswift-provider's virtual radio,
 # driven by grantiva. No hardware, no entitlements. Runs on every push to main and every
 # same-repository pull request, on the project's self-hosted Mac: it boots two simulators in
-# seconds where GitHub's hosted image took 112-577 s and flaked on runner weather. A fork PR
-# skips this job — the self-hosted machine is never exposed to a fork, and the hosted image
-# cannot run the test reliably. There is no `continue-on-error`: when it is red, it is red.
+# seconds where GitHub's hosted image took 112-577 s and flaked on runner weather. The job's
+# `if:` skips a fork PR, but that condition lives in this file and a `pull_request` run uses
+# the PR head's copy of it — see the note at the top of `ci.yml`: the boundary that keeps a
+# fork off the machine is the fork-PR approval policy plus a review of the PR's workflow diff
+# before approving. There is no `continue-on-error`: when it is red, it is red.
 #
 # grantiva is whatever the runner has installed (`brew upgrade grantiva` on the Mac to move
 # it); the `grantiva --version` step records which. The script depends on 1.7.0 features
@@ -91,12 +93,15 @@ jobs:
         # cancelled step is killed before the trap finishes, and on a persistent runner a
         # simulator still leased by a dead grantiva run fails the next run's `ensure`.
         if: always()
+        # `teardown --udid --force` reclaims by live-process inspection — exactly the
+        # grantiva runner, WebDriverAgent and simulator for that device, and nothing else on
+        # a Mac that is also someone's workstation — so it is called for every device of each
+        # name regardless of state (a cancelled run leaves them Booting or Shutting Down as
+        # often as Booted; tearing down an idle device is harmless). No process-name kills.
         run: |
-          pkill -f bleswift-provider || true
-          pkill -f grantiva-runner || true
           for name in "$ADVERTISER_SIM" "$SCANNER_SIM"; do
             [ -n "$name" ] || continue
-            for udid in $(xcrun simctl list devices -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(' '.join(x['udid'] for r in d for x in d[r] if x['name']==sys.argv[1] and x['state']=='Booted'))" "$name"); do
+            for udid in $(xcrun simctl list devices -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(' '.join(x['udid'] for r in d for x in d[r] if x['name']==sys.argv[1]))" "$name"); do
               grantiva simulator teardown --udid "$udid" --force || true
             done
           done

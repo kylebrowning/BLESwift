@@ -75,8 +75,11 @@ that UDID rather than the name, so a duplicate cannot make a run ambiguous.
 on the project's self-hosted Mac runner (labels `self-hosted, macOS, ARM64, bleswift`). It
 is a PR gate now because the machine boots two simulators in seconds; GitHub's hosted macOS
 image took 112 s to 577 s and flaked on runner weather, which is why the job was on-demand
-only until the runner moved. A pull request from a fork skips the job: the self-hosted
-machine is never exposed to a fork, and the hosted image cannot run the test reliably. It
+only until the runner moved. The job's `if:` skips a pull request from a fork — but that
+condition lives in the workflow file, and a fork's PR runs its own copy of it, so it is a
+convenience rather than the boundary. The boundary is the repository's fork-PR approval
+policy plus the rule in `ci.yml`: approving a fork PR includes reading its
+`.github/workflows` diff. It
 **fails honestly** when it fails — there is no `continue-on-error`. grantiva is whatever the
 runner has installed (`brew upgrade grantiva` on the Mac to move it); the job prints the
 version it ran.
@@ -90,16 +93,18 @@ Nothing is pinned in the workflow, because named devices drift with the image's 
 name that matches nothing fails the job outright. Giving only one of the two, or the same name
 twice, is refused with a readable error rather than silently running both roles on one device.
 
-**grantiva is installed unpinned.** `grantiva/homebrew-tap` ships a single `Formula/grantiva.rb`
-with no versioned formulae, so the job takes whatever the tap's HEAD points at. The script
-depends on 1.7.0 features (`simulator ensure --name`, `run --ready-file`, `run --env`,
-`simulator teardown --udid --force`), so the job prints `grantiva --version` as its own step.
+**grantiva is whatever the runner has.** The job installs nothing: it puts Homebrew on
+`PATH` and runs the grantiva already on the Mac, printing `grantiva --version` as its own
+step. The script depends on 1.7.0 features (`simulator ensure --name`, `run --ready-file`,
+`run --env`, `simulator teardown --udid --force`); `brew upgrade grantiva` on the runner moves
+it, and the tap has no versioned formulae to pin to.
 
 First things to check when a run goes red:
 
 - **grantiva version.** The `grantiva version` step; anything below 1.7.0 will fail on the
   flags above.
-- **grantiva installation.** `brew install grantiva/tap/grantiva` must succeed, and on a cold
+- **grantiva presence.** A missing grantiva fails the `grantiva version` step with
+  `command not found` — `brew install grantiva/tap/grantiva` on the runner. On a cold
   machine the first `grantiva run` builds `GrantivaAgent` and a WebDriverAgent runner inside
   the first flow's clock. `grantiva doctor` reports what is missing.
 - **Simulator availability.** If no iOS runtime is installed at all, `grantiva simulator ensure`
