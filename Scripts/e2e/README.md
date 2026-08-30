@@ -140,7 +140,7 @@ flows now do instead:
    now — it is what makes this test possible.
 8. **`simulator ensure` required `--name`, `--device-type` and `--runtime` together**, so the
    script used `xcrun simctl` and its own JSON lookup. 1.7.0 accepts `--name` alone and reads
-   the device type out of the name; the simctl lookup is gone.
+   the device type out of the name; the simctl lookup is gone from the happy path — it survives only in the duplicate-name fallback below.
 9. **Off-screen elements are not found, and `scrollUntilVisible` is the fix.** Not a bug — the
    accessibility tree genuinely does not expose a `List` row below the fold. Both flows keep
    their `scrollUntilVisible` steps.

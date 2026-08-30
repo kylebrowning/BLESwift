@@ -42,7 +42,7 @@ import Logging
 /// acknowledgements died with the session that owed them, and pushes made while it is down
 /// are dropped unsent, so neither can ever be acknowledged — and the window is emptied again
 /// at the reconnect. A host blocked on the window when the link drops is released by the drop
-/// itself, with `bluetoothUnavailable`: the drop that takes the radio out of `.poweredOn`
+/// itself, with `bluetoothUnavailable`: a drop from any state but `.unsupported`
 /// delivers `didUpdateState(.unsupported)`, and `PeripheralHost` fails every parked readiness
 /// waiter on any state but `.poweredOn`. The single `readyToUpdateSubscribers` at the
 /// reconnect is the backstop for a waiter that parked while the radio was already
@@ -111,7 +111,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     nonisolated(unsafe) private var _outstandingUpdates: [UInt64] = []
 
     /// Whether the window was full when the link dropped. A host blocked on it at a drop from
-    /// `.poweredOn` has already been failed with `bluetoothUnavailable` by the `.unsupported`
+    /// any state but `.unsupported` has already been failed with `bluetoothUnavailable` by the `.unsupported`
     /// state change; this flag arms the reconnect to emit one `readyToUpdateSubscribers` for
     /// the waiter that case cannot reach — one parked before a drop taken from an
     /// already-`.unsupported` radio, which delivers no state change to fail it, and whose
@@ -353,7 +353,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// cleared again at the reconnect. No `readyToUpdateSubscribers` is emitted here — a
     /// readiness signal against a dead radio would only invite a push that goes nowhere. A
     /// host that was *blocked* at that moment is released all the same, by the
-    /// `didUpdateState(.unsupported)` delivered below when the radio was still `.poweredOn`:
+    /// `didUpdateState(.unsupported)` delivered below when the radio was not already `.unsupported`:
     /// `PeripheralHost` fails every parked readiness waiter with `bluetoothUnavailable` on any
     /// state but `.poweredOn`. When the radio was already `.unsupported` no state change is
     /// delivered, and `_wasBlockedAtDrop` arms the reconnect's readiness instead.
