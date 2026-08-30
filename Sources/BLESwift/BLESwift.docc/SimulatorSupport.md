@@ -320,6 +320,16 @@ is broken.
   CoreBluetooth clips a notification that will not fit the subscriber's MTU. Nothing chunks a
   large value across several notifications for you, here or on device: read
   ``Subscriber/maximumUpdateValueLength`` and fragment.
+- **An L2CAP open outstanding at a disconnect can be answered by the wrong channel.**
+  `didOpenL2CAPChannel` carries a channel or an error and nothing that says which open it
+  answers, so the provider pairs completions to your `openL2CAPChannel(_:)` calls in arrival
+  order, per peripheral. A completion that was still outstanding when a `--passthrough`
+  connection to real hardware dropped is discarded if it lands before you reconnect; one that
+  lands *after* you have reconnected and opened again is taken for that open's answer, and the
+  channel you get is the previous connection's. Nothing at either end can tell the two apart.
+  If a channel opened right after a reconnect behaves as though it belongs to the connection
+  that just went away, close it and open again. Virtual devices are unaffected: the virtual
+  radio answers every open before the disconnect that would strand it.
 - **Initial radio state.** A link-backed ``Central`` reports ``CentralState/unsupported`` until
   the provider answers — the same state the Simulator reports today, so an app that waits for
   `.poweredOn` simply waits — and then reports whatever state the provider does. If the provider

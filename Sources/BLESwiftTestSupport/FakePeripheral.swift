@@ -71,7 +71,6 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _l2capOpenBehavior: L2CAPOpenBehavior = .succeed
     nonisolated(unsafe) private var _openL2CAPChannelCalls: [L2CAPPSM] = []
     nonisolated(unsafe) private var _lastOpenedL2CAPChannel: FakeL2CAPChannel?
-    nonisolated(unsafe) private var _heldL2CAPOpens: [L2CAPPSM] = []
 
     /// Creates a `FakePeripheral` confined to `queue`.
     ///
@@ -592,9 +591,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         case succeed
         /// Deliver a failing `didOpenL2CAPChannel` carrying `error` and no channel.
         case fail(NSError)
-        /// Record the call but deliver nothing until
-        /// ``FakePeripheral/simulateNextHeldL2CAPOpenCompletion()`` releases it — for
-        /// exercising open timeouts, cancellation, and completions that land late.
+        /// Record the call but deliver nothing — for exercising open timeout / cancellation.
         case hold
     }
 
@@ -896,44 +893,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         case .fail(let error):
             queue.async { [self] in deliver(.didOpenL2CAPChannel(channel: nil, error: error)) }
         case .hold:
-            _heldL2CAPOpens.append(psm)
-        }
-    }
-
-    /// Delivers the *newest* still-held `didOpenL2CAPChannel` completion as a success carrying
-    /// a fresh ``FakeL2CAPChannel`` for the PSM that open asked for — also stashed in
-    /// ``lastOpenedL2CAPChannel`` — leaving every older held open held. A no-op if none are
-    /// held.
-    ///
-    /// The scenario ``simulateNextHeldL2CAPOpenCompletion()`` cannot produce: a backend that
-    /// answers the open the live connection issued and simply never answers one an earlier
-    /// connection left outstanding.
-    public func simulateLastHeldL2CAPOpenCompletion() {
-        queue.async { [self] in
-            dispatchPrecondition(condition: .onQueue(queue))
-            guard !_heldL2CAPOpens.isEmpty else { return }
-            let psm = _heldL2CAPOpens.removeLast()
-            let channel = FakeL2CAPChannel(psm: psm, queue: queue)
-            _lastOpenedL2CAPChannel = channel
-            deliver(.didOpenL2CAPChannel(channel: channel, error: nil))
-        }
-    }
-
-    /// Delivers the oldest still-held `didOpenL2CAPChannel` completion (FIFO) as a success
-    /// carrying a fresh ``FakeL2CAPChannel`` for the PSM that open asked for — also stashed in
-    /// ``lastOpenedL2CAPChannel``. A no-op if none are held.
-    ///
-    /// The counterpart to ``simulateNextHeldServiceDiscoveryCompletion()`` for
-    /// ``L2CAPOpenBehavior/hold``: it is what lets a test complete an open *after* something
-    /// else has happened to the connection it was issued on.
-    public func simulateNextHeldL2CAPOpenCompletion() {
-        queue.async { [self] in
-            dispatchPrecondition(condition: .onQueue(queue))
-            guard !_heldL2CAPOpens.isEmpty else { return }
-            let psm = _heldL2CAPOpens.removeFirst()
-            let channel = FakeL2CAPChannel(psm: psm, queue: queue)
-            _lastOpenedL2CAPChannel = channel
-            deliver(.didOpenL2CAPChannel(channel: channel, error: nil))
+            break
         }
     }
 

@@ -156,27 +156,22 @@ extension CentralSession {
     /// registers the bridge, answers the client, and starts the inbound pump.
     ///
     /// The backend's completions for one peripheral arrive in the order the opens were
-    /// issued, so a FIFO per peripheral is enough to pair them up — as long as the FIFO is
-    /// the right connection's. A completion the *previous* connection is still owed is
-    /// consumed first and paired with nothing: it belongs to a transport the client already
-    /// tore its half of down, and pairing it would bridge a live channel id to a dead
-    /// connection.
+    /// issued, so a FIFO per peripheral is enough to pair them up. Must be called on
+    /// ``CentralSession/queue``.
     ///
-    /// That debt is owed only until the peripheral connects again — see
-    /// ``CentralSession/strandedOpens``, which also documents what is left standing: a
-    /// completion for the previous connection that arrives *after* the reconnect is paired
-    /// with a live open, because `didOpenL2CAPChannel` names no open and the two cannot be
-    /// told apart. Must be called on ``CentralSession/queue``.
+    /// **A completion cannot be tied to the connection that asked for it.**
+    /// `didOpenL2CAPChannel` carries a channel or an error and nothing that names the open it
+    /// answers, so this pairing is by arrival order alone. A completion for an open that was
+    /// outstanding when the peripheral disconnected is therefore matched to whatever this
+    /// session pends next: one arriving before the peripheral reconnects finds an empty FIFO
+    /// and has its channel closed, but one arriving *after* the client has reconnected and
+    /// opened again is popped as that open's answer, bridging the new channel id to the
+    /// previous connection's transport. Nothing at the provider can tell those two apart, and
+    /// no bookkeeping here can close that window — it is a documented limitation of the
+    /// passthrough L2CAP path against real hardware, not something a client can work around
+    /// either.
     func bridgeOpenedChannel(_ channel: (any L2CAPChannelRemote)?, error: NSError?, from peripheral: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
-        var owed = purgeStrandedOpens(for: peripheral)
-        if !owed.isEmpty {
-            log?("L2CAP open completion for a connection that has ended on peripheral \(peripheral); closing the channel")
-            owed.removeFirst()
-            strandedOpens[peripheral] = owed.isEmpty ? nil : owed
-            channel?.close(error: nil)
-            return
-        }
         var queued = pendingOpens[peripheral] ?? []
         let pending = queued.isEmpty ? nil : queued.removeFirst()
         pendingOpens[peripheral] = queued

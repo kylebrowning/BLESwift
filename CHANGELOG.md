@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when constructing their default backend. No behavior change when nothing is registered: they
   construct CoreBluetooth exactly as before. The explicit `init(backend:queue:…)` initializers
   ignore the registry.
+- Documented a limitation of the `--passthrough` L2CAP path (BLESwiftProvider): the provider
+  pairs `didOpenL2CAPChannel` completions to a client's channel opens by arrival order, per
+  peripheral, because the callback carries nothing that names the open it answers. A
+  completion for an open that was outstanding when the peripheral disconnected is discarded if
+  it arrives before the client reconnects, but one arriving after the client has reconnected
+  and opened again is taken for the new open's answer — bridging the new channel to the
+  previous connection's transport. This cannot be closed at the provider; it is written up in
+  `bridgeOpenedChannel` and in the "Where the link diverges from CoreBluetooth" list of the
+  "Running in the iOS Simulator" article. Virtual devices are unaffected. (#28)
 
 ### Fixed
 
@@ -53,19 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the identity check every other off-queue completion makes: a pump that had cleared its
   cancellation check just before its bridge was torn down could put the dead channel's bytes
   on the wire under a channel id the session had since re-issued. (#27)
-
-- `CentralSession` (BLESwiftProvider) paired `didOpenL2CAPChannel` completions to client
-  channel ids by a per-peripheral FIFO with no notion of which connection issued the open, so
-  a completion for an open issued before a disconnect — arriving after the client had
-  reconnected and opened again — was popped as the new one and bridged the new channel id to
-  the previous connection's transport. Completions an ended connection still owes are now
-  consumed and their channels closed. Nothing is owed across a connection boundary: the debt
-  is dropped at that peripheral's next `didConnect` — where the live connection's own
-  completion would otherwise pay it, closing the channel the client is waiting for — and at
-  its next disconnect, and it expires after ten seconds for a peripheral that never
-  reconnects. One window stays open by construction: `didOpenL2CAPChannel` names no open, so a
-  completion for the previous connection that arrives *after* the reconnect still pairs with a
-  live one. (#28)
 
 - `Provider.addVirtualDevice(_:advertising:)` (BLESwiftProvider) recorded its device after a
   suspension the provider serves `stop()` across, so a stop overlapping the call left the
