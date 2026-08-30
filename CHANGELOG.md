@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `VirtualDeviceHandle` (BLESwiftProvider) now holds its `VirtualRadio` weakly. A radio with
+  a fixture attached formed a retain cycle — radio → device table → `FixtureDeviceHandler` →
+  handle → radio — and never deallocated unless `Provider.stop()` explicitly removed the
+  device.
+
 ## [2.0.0] - 2026-08-24
 
 > **Breaking:** GATT read/write/notify now validate a characteristic's advertised

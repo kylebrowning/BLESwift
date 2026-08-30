@@ -50,6 +50,11 @@ public actor FixtureDeviceHandler: VirtualDeviceHandler {
     /// can notify subscribers and refresh static values. Until this is called, an accepted
     /// write is stored but neither notified nor republished.
     ///
+    /// Holding the handle does not keep the radio alive — ``VirtualDeviceHandle`` refers to
+    /// it weakly — so whoever registered the device keeps the reference that does; once the
+    /// radio is gone, an accepted write is still stored, and neither notified nor
+    /// republished.
+    ///
     /// - Parameter handle: The registered device's handle.
     public func attach(_ handle: VirtualDeviceHandle) {
         self.handle = handle
