@@ -71,14 +71,18 @@ that UDID rather than the name, so a duplicate cannot make a run ambiguous.
 
 ## Running it on CI
 
-**On demand only, from the Actions tab** — `.github/workflows/sim-to-sim-e2e.yml`, triggered
-by `workflow_dispatch` and nothing else. It is deliberately **not a PR gate**: GitHub's macOS
-runners boot simulators in anywhere from 112 s to 577 s, and grantiva's runner is not yet
-reliable on that image — it has passed there once. A job that goes red on runner weather rather
-than on the code teaches a reviewer to ignore it, so this one is run when it is wanted and
-**fails honestly** when it fails. There is no `continue-on-error`.
+**On every push to `main` and every same-repository pull request** — `.github/workflows/sim-to-sim-e2e.yml`,
+on the project's self-hosted Mac runner (labels `self-hosted, macOS, ARM64, bleswift`). It
+is a PR gate now because the machine boots two simulators in seconds; GitHub's hosted macOS
+image took 112 s to 577 s and flaked on runner weather, which is why the job was on-demand
+only until the runner moved. A pull request from a fork skips the job: the self-hosted
+machine is never exposed to a fork, and the hosted image cannot run the test reliably. It
+**fails honestly** when it fails — there is no `continue-on-error`. grantiva is whatever the
+runner has installed (`brew upgrade grantiva` on the Mac to move it); the job prints the
+version it ran.
 
-The dispatch form takes two optional inputs, `advertiser_sim` and `scanner_sim`. Give both to
+It can also be dispatched from the Actions tab. The dispatch form takes two optional inputs,
+`advertiser_sim` and `scanner_sim`. Give both to
 pin the run to particular simulator names; leave both empty — the default — and the job
 resolves `ADVERTISER_SIM` / `SCANNER_SIM` at run time, taking the two newest distinct
 `iPhone …` names the runner image actually has from `xcrun simctl list devices available -j`.
@@ -158,16 +162,15 @@ flows now do instead:
     so it is paid once rather than per run.
 12. **WebDriverAgent's 90-second startup timeout** was what first made this job non-gating.
     With the simulator booted to `bootstatus -b` and the app pre-installed, and with 1.7.0's
-    WDA cache, it has not been hit again; the job is off the PR gate for runner capacity, not
-    for this.
+    WDA cache, it has not been hit again.
 
 ### Open
 
 **Cold-runner first-run WebDriverAgent build.** grantiva's WDA cache covers iOS 26.2 and 26.4.
-GitHub's `macos-latest` image is on 26.2, so CI should now be served from that cache; a local
-machine on iOS 27 falls outside it and rebuilds WebDriverAgent once, the first time a flow runs
-against a 27 simulator. Nothing to work around — it is a one-time cost per runtime — but it is
-the remaining reason a first run looks hung for a few minutes.
+A machine on iOS 27 — the self-hosted runner included — falls outside it and rebuilds
+WebDriverAgent once, the first time a flow runs against a 27 simulator. Nothing to work around —
+it is a one-time cost per runtime on the runner — but it is the remaining reason a first run
+looks hung for a few minutes.
 
 **`simulator ensure --name` refuses a duplicated name.** A machine with two simulators of the
 same name gets `Multiple simulators are named "<name>"; delete duplicates or use a unique
