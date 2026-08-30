@@ -20,6 +20,10 @@ let package = Package(
         .library(name: "BLESwiftCore", targets: ["BLESwiftCore"]),
         .library(name: "BLESwiftProfiles", targets: ["BLESwiftProfiles"]),
         .library(name: "BLESwiftTestSupport", targets: ["BLESwiftTestSupport"]),
+        .library(name: "BLESwiftLink", targets: ["BLESwiftLink"]),
+        .library(name: "BLESwiftSimulatorLink", targets: ["BLESwiftSimulatorLink"]),
+        .library(name: "BLESwiftProvider", targets: ["BLESwiftProvider"]),
+        .executable(name: "bleswift-provider", targets: ["bleswift-provider"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.5.0"),
@@ -55,6 +59,47 @@ let package = Package(
         .testTarget(
             name: "BLESwiftTests",
             dependencies: ["BLESwift", "BLESwiftCore", "BLESwiftProfiles", "BLESwiftTestSupport"]
+        ),
+        .target(
+            name: "BLESwiftLink",
+            dependencies: [
+                "BLESwiftCore",
+                .product(name: "Logging", package: "swift-log")
+            ],
+            resources: [.copy("BLESwiftLink.docc")],
+            swiftSettings: sharedSwiftSettings
+        ),
+        .target(
+            name: "BLESwiftSimulatorLink",
+            dependencies: [
+                "BLESwiftCore",
+                "BLESwiftLink",
+                .product(name: "Logging", package: "swift-log")
+            ],
+            resources: [.copy("BLESwiftSimulatorLink.docc")],
+            swiftSettings: sharedSwiftSettings
+        ),
+        .target(
+            name: "BLESwiftProvider",
+            dependencies: [
+                "BLESwift",
+                "BLESwiftLink",
+                .product(name: "Logging", package: "swift-log")
+            ],
+            resources: [.copy("BLESwiftProvider.docc")],
+            swiftSettings: sharedSwiftSettings
+        ),
+        .executableTarget(
+            name: "bleswift-provider",
+            dependencies: ["BLESwiftProvider"],
+            swiftSettings: sharedSwiftSettings
+        ),
+        .testTarget(
+            name: "BLESwiftLinkTests",
+            dependencies: [
+                "BLESwift", "BLESwiftCore", "BLESwiftTestSupport",
+                "BLESwiftLink", "BLESwiftSimulatorLink", "BLESwiftProvider"
+            ]
         )
     ]
 )

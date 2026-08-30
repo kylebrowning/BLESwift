@@ -84,6 +84,7 @@ struct ScanView: View {
                 Button("Scan Heart Rate service (baseline scan(services:))") {
                     model.startServiceScan(services: [HeartRateMeasurement.service])
                 }
+                .accessibilityIdentifier("scan.startHeartRate")
             }
             Button("findFirst(matching:) →") {
                 Task { findFirstResult = await model.findFirst(matching: buildFilter()) }
@@ -105,6 +106,7 @@ struct ScanView: View {
                 } label: {
                     VStack(alignment: .leading) {
                         Text(item.name).font(.headline)
+                            .accessibilityIdentifier("scan.resultName")
                         Text("\(item.rssi) dBm · \(item.discovery.peripheral.uuid.uuidString)")
                             .font(.caption).foregroundStyle(.secondary)
                         if !item.services.isEmpty {
@@ -113,6 +115,7 @@ struct ScanView: View {
                         }
                     }
                 }
+                .accessibilityIdentifier("scan.result.\(item.name)")
             }
         }
     }

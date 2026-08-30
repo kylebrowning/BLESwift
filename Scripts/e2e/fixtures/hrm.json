@@ -1,0 +1,26 @@
+{
+  "devices": [
+    {
+      "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8",
+      "name": "Fixture HRM",
+      "advertisedServices": ["180D"],
+      "services": [
+        {
+          "uuid": "180D",
+          "characteristics": [
+            {
+              "uuid": "2A37",
+              "properties": ["read", "notify"],
+              "value": "AEg="
+            },
+            {
+              "uuid": "2A39",
+              "properties": ["read", "write", "notify"],
+              "value": "AA=="
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,424 @@
+//
+//  CentralSessionLimitsTests.swift
+//  BLESwiftLinkTests
+//
+
+#if os(macOS)
+import BLESwift
+import BLESwiftCore
+import BLESwiftLink
+@testable import BLESwiftProvider
+@testable import BLESwiftSimulatorLink
+import BLESwiftTestSupport
+import Dispatch
+import Foundation
+import Synchronization
+import Testing
+
+/// What a central-role session refuses to hold on a misbehaving client's behalf.
+@Suite("Central session limits")
+struct CentralSessionLimitsTests {
+
+    private static let deviceID = UUID(uuidString: "2C7F9A11-4E3B-4D5A-9C8E-7F6A5B4C3D2E")!
+    private static let service = ServiceIdentifier(uuid: "180D")
+    private static let control = CharacteristicIdentifier(uuid: "2A39", service: service)
+
+    /// A `Sendable` hand-off for the `FakePeripheral` the backend factory builds on the
+    /// session's queue.
+    private final class PeripheralBox: Sendable {
+        private let storage = Mutex<FakePeripheral?>(nil)
+        var peripheral: FakePeripheral? { storage.withLock { $0 } }
+        func store(_ peripheral: FakePeripheral) { storage.withLock { $0 = peripheral } }
+    }
+
+#if !targetEnvironment(simulator)
+    // Sockets in a CI simulator are unreliable; the simulator-side path is covered by the
+    // two-simulator E2E on real simulators.
+
+    @Test("A client that queues past the write window loses its session")
+    func writeWindowOverrunClosesTheSession() async throws {
+        let fakeBox = PeripheralBox()
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            // Back-pressured from the start: nothing this client queues is ever drained, so
+            // the queue grows exactly as fast as the client fills it.
+            let peripheral = FakePeripheral(
+                identifier: Self.deviceID,
+                name: "Fake",
+                canSendWriteWithoutResponse: false,
+                queue: queue
+            )
+            fake.retrievablePeripherals[Self.deviceID] = peripheral
+            fake.connectBehavior = .succeed
+            fakeBox.store(peripheral)
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let queue = DispatchSerialQueue(label: "centralsession.writewindow")
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            queue: queue,
+            clientName: "greedy",
+            retryInterval: .seconds(30)
+        )
+        let central = Central(backend: link, queue: queue)
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+        _ = try await central.connect(PeripheralIdentifier(uuid: Self.deviceID, name: "Fake"))
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
+        #expect(await provider.sessionCount == 1)
+
+        // Straight down the link, behind `Peripheral`'s back: its own writer honors the
+        // window, which is the whole point — only a client that has stopped honoring it can
+        // reach this.
+        let overrun = CentralSession.maximumPendingWrites + 1
+        let reference = Self.control
+        queue.async {
+            for sequence in 0..<overrun {
+                link.send(.writeValue(
+                    peripheral: Self.deviceID,
+                    characteristic: WireCharacteristicRef(reference),
+                    value: Data([0x01]),
+                    type: .withoutResponse,
+                    sequence: UInt64(sequence)
+                ))
+            }
+        }
+
+        // The session goes, rather than the provider's memory.
+        await waitFor(timeout: .seconds(10)) { await provider.sessionCount == 0 }
+        #expect(await provider.sessionCount == 0)
+
+        link.shutdown()
+        await provider.stop()
+    }
+
+    @Test("A client that queues past the channel-open cap loses its session")
+    func openOverrunClosesTheSession() async throws {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            let peripheral = FakePeripheral(identifier: Self.deviceID, name: "Fake", queue: queue)
+            // Every open is held: nothing this client queues is ever completed, so the
+            // pending-open list grows exactly as fast as the client fills it.
+            peripheral.l2capOpenBehavior = .hold
+            fake.retrievablePeripherals[Self.deviceID] = peripheral
+            fake.connectBehavior = .succeed
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let queue = DispatchSerialQueue(label: "centralsession.openwindow")
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            queue: queue,
+            clientName: "greedy-opener",
+            retryInterval: .seconds(30)
+        )
+        let central = Central(backend: link, queue: queue)
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+        _ = try await central.connect(PeripheralIdentifier(uuid: Self.deviceID, name: "Fake"))
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
+        #expect(await provider.sessionCount == 1)
+
+        // Straight down the link, behind `Peripheral`'s back, as above.
+        let overrun = CentralSession.maximumPendingOpens + 1
+        queue.async {
+            for channel in 0..<overrun {
+                link.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: 0x80, channel: UInt32(channel)))
+            }
+        }
+
+        await waitFor(timeout: .seconds(10)) { await provider.sessionCount == 0 }
+        #expect(await provider.sessionCount == 0)
+
+        link.shutdown()
+        await provider.stop()
+    }
+
+    @Test("An unroutable withoutResponse write is still acknowledged, reopening the client's slot")
+    func unroutableWriteWithoutResponseIsAcknowledged() async throws {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        // A raw client, so the write can name a peripheral the session never connected — the
+        // one thing `Peripheral`'s own writer cannot produce.
+        let connection = LinkConnection.connect(
+            to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "centralsession.unroutablewrite")
+        )
+        let accepted = Mutex(false)
+        let acknowledged = Mutex<[UInt64]>([])
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(
+                protocolVersion: LinkProtocol.version,
+                role: .central,
+                clientName: "unroutable"
+            )))
+        }
+        connection.onMessage = { message in
+            switch message {
+            case .serverHello(let hello) where hello.accepted:
+                accepted.withLock { $0 = true }
+            case .centralEvent(.writeWithoutResponseAccepted(_, let sequence)):
+                acknowledged.withLock { $0.append(sequence) }
+            default:
+                break
+            }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { accepted.withLock { $0 } }
+
+        // Nothing was ever connected, so there is no remote to route either of these to.
+        for sequence in UInt64(0)..<3 {
+            connection.send(.centralRequest(.writeValue(
+                peripheral: Self.deviceID,
+                characteristic: WireCharacteristicRef(Self.control),
+                value: Data([0x01]),
+                type: .withoutResponse,
+                sequence: sequence
+            )))
+        }
+
+        // Every one of them comes back acknowledged: a dropped write must not cost the client
+        // the window slot it is holding for it.
+        await waitFor(timeout: .seconds(10)) { acknowledged.withLock { $0.count } == 3 }
+        #expect(acknowledged.withLock { $0 } == [0, 1, 2])
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+        await provider.stop()
+    }
+
+    /// A provider serving one `FakePeripheral` over a `FakeCentral`, a linked `Central`
+    /// already connected to it, and one open L2CAP channel.
+    ///
+    /// Ids are allocated from 1, so the single channel these tests open is channel `1` — which
+    /// is what lets them address it from behind `Peripheral`'s back.
+    private func makeL2CAPRig(
+        label: String,
+        clientName: String
+    ) async throws -> (provider: Provider, link: LinkCentral, channel: L2CAPChannel, fake: FakeL2CAPChannel) {
+        let fakeBox = PeripheralBox()
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            let peripheral = FakePeripheral(identifier: Self.deviceID, name: "Fake", queue: queue)
+            fake.retrievablePeripherals[Self.deviceID] = peripheral
+            fake.connectBehavior = .succeed
+            fakeBox.store(peripheral)
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let queue = DispatchSerialQueue(label: label)
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            queue: queue,
+            clientName: clientName,
+            retryInterval: .seconds(30)
+        )
+        let central = Central(backend: link, queue: queue)
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+        let peripheral = try await central.connect(PeripheralIdentifier(uuid: Self.deviceID, name: "Fake"))
+        let channel = try await peripheral.openL2CAPChannel(psm: L2CAPPSM(0x0041), timeout: .seconds(5))
+        let fakePeripheral = try #require(fakeBox.peripheral)
+        await waitFor(timeout: .seconds(5)) {
+            await fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel != nil }
+        }
+        let fake = try #require(await fakePeripheral.onQueue { fakePeripheral.lastOpenedL2CAPChannel })
+        return (provider, link, channel, fake)
+    }
+
+    @Test("A client that writes past the L2CAP credit window loses its session")
+    func l2capWriteWindowOverrunClosesTheSession() async throws {
+        let rig = try await makeL2CAPRig(label: "centralsession.l2capwindow", clientName: "greedy-writer")
+        let fake = rig.fake
+        // Nothing the client writes ever reaches the transport, so the session's outstanding
+        // count only grows — exactly the back-pressure a client is supposed to wait out.
+        await fake.onQueue { fake.writeBehavior = .hold }
+
+        // One chunk more than the window plus its slack, straight down the link behind
+        // `L2CAPChannel`'s back: its own writer waits for credit, which is the whole point.
+        let chunk = Data(repeating: 0x5A, count: CentralSession.maximumChunk)
+        let overrun = CentralSession.maximumOutstandingWrites / CentralSession.maximumChunk + 1
+        let link = rig.link
+        link.queue.async {
+            for _ in 0..<overrun { link.send(.l2capData(channel: 1, data: chunk)) }
+        }
+
+        // The session goes, rather than the provider's memory.
+        await waitFor(timeout: .seconds(10)) { await rig.provider.sessionCount == 0 }
+        #expect(await rig.provider.sessionCount == 0)
+
+        withExtendedLifetime(rig.channel) {}
+        rig.link.shutdown()
+        await rig.provider.stop()
+    }
+
+    @Test("A single oversized L2CAP frame loses the client its session")
+    func l2capOversizedFrameClosesTheSession() async throws {
+        let rig = try await makeL2CAPRig(label: "centralsession.l2capframe", clientName: "greedy-framer")
+
+        // One byte past the chunk size both ends agreed on. No honest client produces it: its
+        // own writer splits everything it sends at exactly that size.
+        let oversized = Data(repeating: 0x5A, count: CentralSession.maximumChunk + 1)
+        let link = rig.link
+        link.queue.async { link.send(.l2capData(channel: 1, data: oversized)) }
+
+        await waitFor(timeout: .seconds(10)) { await rig.provider.sessionCount == 0 }
+        #expect(await rig.provider.sessionCount == 0)
+        // Refused before it was ever handed to the transport.
+        let fake = rig.fake
+        #expect(await fake.onQueue { fake.writtenData }.isEmpty)
+
+        withExtendedLifetime(rig.channel) {}
+        rig.link.shutdown()
+        await rig.provider.stop()
+    }
+
+    @Test("A connect is still tracked when every remote the session already holds is busy")
+    func connectSurvivesATableOfBusyRemotes() async throws {
+        let busy = UUID()
+        let arriving = UUID()
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        // A table of one, so the second connect overflows it with the first still connected.
+        configuration.maximumRemotesPerCentralSession = 1
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            for identifier in [busy, arriving] {
+                // `busy` reports itself connected from the start — `FakeCentral` delivers the
+                // connection events but never moves a `FakePeripheral`'s own state, and the
+                // cap reads that state to decide what it may evict.
+                let peripheral = FakePeripheral(
+                    identifier: identifier,
+                    name: "Fake",
+                    state: identifier == busy ? .connected : .disconnected,
+                    queue: queue
+                )
+                peripheral.availableServices = [Self.service: [Self.control]]
+                fake.retrievablePeripherals[identifier] = peripheral
+            }
+            fake.connectBehavior = .succeed
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let queue = DispatchSerialQueue(label: "centralsession.busytable")
+        let link = LinkCentral(
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            queue: queue,
+            clientName: "busy",
+            retryInterval: .seconds(30)
+        )
+        let central = Central(backend: link, queue: queue)
+        await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
+
+        // Connected, and stays that way: this remote is never idle, so the cap may not evict
+        // it — which leaves the arriving one as the only candidate the eviction could pick.
+        _ = try await bounded { try await central.connect(PeripheralIdentifier(uuid: busy, name: "Fake")) }
+        let second = try await bounded { try await central.connect(PeripheralIdentifier(uuid: arriving, name: "Fake")) }
+
+        // The session still has a remote filed for it, so its requests reach the backend and
+        // the answers come back. Before the eviction ran ahead of the insert, this connect
+        // evicted itself and every request after it was answered with silence.
+        let services = try await bounded { try await second.discoverServices() }
+        #expect(services == [Self.service])
+
+        link.shutdown()
+        await provider.stop()
+    }
+
+    @Test("An idle remote is evicted once the session is holding more than it keeps")
+    func remoteTableIsCapped() async throws {
+        // One more than the cap, so exactly the least recently connected one is evicted.
+        let identifiers = (0..<(CentralSession.defaultMaximumRemotes + 1)).map { _ in UUID() }
+        let oldest = try #require(identifiers.first)
+        let newest = try #require(identifiers.last)
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            for (index, identifier) in identifiers.enumerated() {
+                let peripheral = FakePeripheral(identifier: identifier, name: "Fake", queue: queue)
+                // Distinct values, so an answer names the peripheral it came from.
+                peripheral.scriptedRSSI = -index
+                fake.retrievablePeripherals[identifier] = peripheral
+            }
+            // Held: every remote stays `.disconnected`, which is exactly what the cap evicts.
+            fake.connectBehavior = .hang
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let connection = LinkConnection.connect(
+            to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "centralsession.remotecap")
+        )
+        let accepted = Mutex(false)
+        let rssi = Mutex<[UUID]>([])
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(
+                protocolVersion: LinkProtocol.version,
+                role: .central,
+                clientName: "collector"
+            )))
+        }
+        connection.onMessage = { message in
+            switch message {
+            case .serverHello(let hello) where hello.accepted:
+                accepted.withLock { $0 = true }
+            case .centralEvent(.didReadRSSI(let peripheral, _, _)):
+                rssi.withLock { $0.append(peripheral) }
+            default:
+                break
+            }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { accepted.withLock { $0 } }
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
+
+        // One connect per identifier, oldest first — none of them ever completes.
+        for identifier in identifiers {
+            connection.send(.centralRequest(.connect(peripheral: identifier, options: nil, requiresANCS: false)))
+        }
+
+        // The link is ordered and the session's queue serial, so the answer to the second
+        // read cannot arrive before the first would have.
+        connection.send(.centralRequest(.readRSSI(peripheral: oldest)))
+        connection.send(.centralRequest(.readRSSI(peripheral: newest)))
+        await waitFor(timeout: .seconds(10)) { rssi.withLock { $0.contains(newest) } }
+
+        // The newest is answered; the oldest was forgotten to make room for it.
+        #expect(rssi.withLock { $0 } == [newest])
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+        await provider.stop()
+    }
+#endif
+}
+#endif

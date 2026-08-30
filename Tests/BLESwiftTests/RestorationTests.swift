@@ -123,7 +123,11 @@ struct RestorationTests {
 
     @Test("restored-connecting manual connect times out per RestorationConfiguration.connectingTimeout")
     func restoredConnectingTimesOut() async throws {
-        let (central, fakeCentral, fakePeripheral) = makeRestorationCentral(connectingTimeout: .milliseconds(100))
+        // A second, not a tenth of one: the test only needs the timeout to fire *eventually*,
+        // and a margin that short races the connect attempt's own scheduling on a starved
+        // machine — the attempt is then cancelled before it is even attached, and the
+        // restoration fails with `.operationCancelled` instead of the timeout under test.
+        let (central, fakeCentral, fakePeripheral) = makeRestorationCentral(connectingTimeout: .seconds(1))
         await registerRetrievable(fakePeripheral, on: fakeCentral)
         await fakeCentral.onQueue { fakeCentral.connectBehavior = .hang }
 
@@ -132,10 +136,11 @@ struct RestorationTests {
 
         // The timeout triggers the standard two-phase cancel: CoreBluetooth is asked to
         // cancel the pending connection, and the failure resolves once it confirms.
-        await waitFor { await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
+        await waitFor(timeout: .seconds(30)) { await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
+        #expect(await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1)
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
 
-        let events = await collectRestorationEvents(central, count: 2)
+        let events = await collectRestorationEvents(central, count: 2, timeout: .seconds(30))
         try #require(events.count == 2)
         guard case .failedToRestoreConnection(let identifier, let error) = events[1] else {
             Issue.record("expected .failedToRestoreConnection, got \(events[1])")
@@ -491,8 +496,11 @@ struct RestorationTests {
     @Test("two restored-connecting peripherals reconnect independently and concurrently — the startup window closes only after both resolve")
     func multipleRestoredConnectingReconnectIndependently() async throws {
         let runner = FakeStartupBackgroundTask()
+        // A second, for the reason `restoredConnectingTimesOut` gives: only the hanging
+        // peripheral needs this to fire, and a margin of a fraction of one can expire against
+        // the *succeeding* peripheral's connect before its `didConnect` is delivered.
         let (central, fakeCentral, succeedFake) = makeRestorationCentral(
-            connectingTimeout: .milliseconds(150),
+            connectingTimeout: .seconds(1),
             startupBackgroundTask: runner
         )
         await registerRetrievable(succeedFake, on: fakeCentral)
@@ -511,17 +519,18 @@ struct RestorationTests {
 
         // The succeeding one resolves quickly; the window must not close yet — the other
         // one's manual reconnect is still hung.
-        await waitFor {
+        await waitFor(timeout: .seconds(30)) {
             if case .connected = await central.connectionState(of: succeedFake.peripheralIdentifier) { return true }
             return false
         }
         #expect(runner.endCount == 0)
 
         // The hanging one times out via the standard two-phase cancel.
-        await waitFor { await fakeCentral.onQueue { fakeCentral.cancelCallCounts[hangFake.identifier] } == 1 }
+        await waitFor(timeout: .seconds(30)) { await fakeCentral.onQueue { fakeCentral.cancelCallCounts[hangFake.identifier] } == 1 }
+        #expect(await fakeCentral.onQueue { fakeCentral.cancelCallCounts[hangFake.identifier] } == 1)
         fakeCentral.simulateDisconnect(hangFake.peripheralIdentifier, error: nil)
 
-        let events = await collectRestorationEvents(central, count: 3)
+        let events = await collectRestorationEvents(central, count: 3, timeout: .seconds(30))
         try #require(events.count == 3)
         var outcomes: [PeripheralIdentifier: RestorationEvent] = [:]
         for event in events[1...] {
@@ -546,7 +555,7 @@ struct RestorationTests {
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCounts[succeedFake.identifier] } == 1)
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCounts[hangFake.identifier] } == 1)
 
-        await waitFor { runner.endCount == 1 }
+        await waitFor(timeout: .seconds(30)) { runner.endCount == 1 }
         #expect(runner.endCount == 1)
     }
 

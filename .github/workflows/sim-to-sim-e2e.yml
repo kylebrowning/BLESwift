@@ -1,0 +1,91 @@
+name: Sim-to-sim E2E
+
+# On demand only. Two simulator apps talk BLE to each other through bleswift-provider's
+# virtual radio, driven by grantiva. No hardware, no entitlements.
+#
+# Not a PR gate, and deliberately not on `push`: GitHub's macOS runners boot simulators in
+# anywhere from 112 s to 577 s, and grantiva's runner is not yet reliable on that image — it
+# has passed there once. A job that flakes on runner weather teaches a reviewer to ignore it,
+# so it is run from the Actions tab when it is wanted, and it fails honestly when it does.
+# There is no `continue-on-error` here for that reason.
+#
+# The grantiva version this job runs is not pinned, and cannot be today: the tap ships a
+# single `grantiva.rb` and no versioned formulae, so there is no `grantiva@1.7.0` to ask brew
+# for. The `grantiva --version` step below is the signal instead — it prints what the tap's
+# HEAD formula actually installed, and is the first line to read when a run goes red after
+# passing. Pin the install here the day the tap publishes versioned formulae.
+
+on:
+  workflow_dispatch:
+    inputs:
+      advertiser_sim:
+        description: 'Simulator name to host the peripheral (empty = resolve from the runner)'
+        required: false
+        default: ''
+      scanner_sim:
+        description: 'Simulator name to scan (empty = resolve from the runner)'
+        required: false
+        default: ''
+
+jobs:
+  sim-to-sim-e2e:
+    name: Sim-to-sim E2E (grantiva)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install grantiva
+        # Unpinned: the tap ships a single `grantiva.rb`, with no versioned formulae to pin
+        # to, so this installs whatever the tap's HEAD formula points at (1.7.0 or newer).
+        # Noted in Scripts/e2e/README.md.
+        run: brew install grantiva/tap/grantiva
+      - name: grantiva version
+        # Printed as its own step: the script's behaviour depends on 1.7.0 features
+        # (`simulator ensure --name`, `run --ready-file`, `run --env`,
+        # `simulator teardown --udid --force`), and a tap that has moved backwards or
+        # forwards is the first thing to check when this run goes red.
+        run: grantiva --version
+      - name: Resolve two simulators
+        # Both inputs given, both are used as-is — that is what the dispatch inputs are for.
+        # Otherwise the two newest *numbered* iPhone models the runner actually has: names are
+        # ranked with a numbered model ("iPhone 17 Pro") above an unnumbered or suffixed one
+        # ("iPhone Air", "iPhone 17e"), then by that number, then by name — so a plain
+        # alphabetical sort cannot hand back "iPhone Air" as one of the two newest. Pinned
+        # names drift with the runner image's Xcode, which is why nothing is pinned here.
+        env:
+          ADVERTISER_INPUT: ${{ inputs.advertiser_sim }}
+          SCANNER_INPUT: ${{ inputs.scanner_sim }}
+        run: |
+          if [ -n "$ADVERTISER_INPUT" ] && [ -n "$SCANNER_INPUT" ]; then
+            if [ "$ADVERTISER_INPUT" = "$SCANNER_INPUT" ]; then
+              echo "::error::advertiser_sim and scanner_sim must name two distinct simulators"
+              exit 1
+            fi
+            echo "ADVERTISER_SIM=$ADVERTISER_INPUT" >> "$GITHUB_ENV"
+            echo "SCANNER_SIM=$SCANNER_INPUT" >> "$GITHUB_ENV"
+            echo "Using $ADVERTISER_INPUT and $SCANNER_INPUT (from the dispatch inputs)"
+            exit 0
+          fi
+          if [ -n "$ADVERTISER_INPUT" ] || [ -n "$SCANNER_INPUT" ]; then
+            echo "::error::give both advertiser_sim and scanner_sim, or neither"
+            exit 1
+          fi
+          NAMES=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; names={x['name'] for r in d for x in d[r] if x['name'].startswith('iPhone')}; rank=lambda n: (1, int(n.split()[1]), n) if len(n.split()) > 1 and n.split()[1].isdigit() else (0, 0, n); print('\n'.join(sorted(names, key=rank)[-2:]))")
+          # Two *distinct* names are the whole point: the advertiser and the scanner have to
+          # boot as separate simulators. One name would silently run both roles on one
+          # device, so fail here with something readable instead.
+          if [ "$(echo "$NAMES" | grep -c .)" -lt 2 ]; then
+            echo "::error::need two distinct iPhone simulator names, found: ${NAMES:-none}"
+            exit 1
+          fi
+          echo "ADVERTISER_SIM=$(echo "$NAMES" | tail -1)" >> "$GITHUB_ENV"
+          echo "SCANNER_SIM=$(echo "$NAMES" | head -1)" >> "$GITHUB_ENV"
+          echo "Using $NAMES"
+      - name: Run
+        run: Scripts/sim-to-sim-e2e.sh
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-to-sim-e2e
+          path: .build/e2e-report

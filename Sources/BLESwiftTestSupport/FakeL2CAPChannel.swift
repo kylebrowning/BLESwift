@@ -25,9 +25,20 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
     private let inboundStream: AsyncThrowingStream<Data, Error>
     private let inboundContinuation: AsyncThrowingStream<Data, Error>.Continuation
 
+    /// What ``write(_:)`` does with the data it is handed.
+    public enum WriteBehavior: Sendable {
+        /// Records the data and completes at once.
+        case complete
+        /// Records the data and never completes, until ``close(error:)`` fails every write
+        /// still held — the back-pressure a transport that has stopped draining applies.
+        case hold
+    }
+
     nonisolated(unsafe) private var _writtenData: [Data] = []
     nonisolated(unsafe) private var _closed = false
     nonisolated(unsafe) private var _closeError: Error?
+    nonisolated(unsafe) private var _writeBehavior: WriteBehavior = .complete
+    nonisolated(unsafe) private var _heldWrites: [CheckedContinuation<Void, Error>] = []
 
     /// Creates a `FakeL2CAPChannel` for `psm`, confined to `queue`.
     public init(psm: L2CAPPSM, queue: DispatchSerialQueue) {
@@ -67,7 +78,10 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
                     continuation.resume(throwing: BLESwiftError.l2capChannelClosed)
                 } else {
                     _writtenData.append(data)
-                    continuation.resume()
+                    switch _writeBehavior {
+                    case .complete: continuation.resume()
+                    case .hold: _heldWrites.append(continuation)
+                    }
                 }
             }
         }
@@ -79,6 +93,11 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
             guard !_closed else { return }
             _closed = true
             _closeError = error
+            // Nothing may be stranded: a held write outlives the channel otherwise, and with
+            // it the task that is awaiting it.
+            let held = _heldWrites
+            _heldWrites = []
+            for continuation in held { continuation.resume(throwing: BLESwiftError.l2capChannelClosed) }
             if let error {
                 inboundContinuation.finish(throwing: error)
             } else {
@@ -105,6 +124,19 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
     public var closeError: Error? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _closeError
+    }
+
+    /// What ``write(_:)`` does with the data it is handed. Set — and read — via
+    /// ``onQueue(_:)``.
+    public var writeBehavior: WriteBehavior {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _writeBehavior
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _writeBehavior = newValue
+        }
     }
 
     /// Simulates the peer sending `data` inbound: asynchronously `yield`s it to the

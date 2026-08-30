@@ -258,6 +258,10 @@ struct MultiPeripheralNotificationTests {
         let streamA: AsyncThrowingStream<Data, Error> = peripheralA.notifications(for: Self.heartRateMeasurement)
         let taskA = Task { for try await _ in streamA {} }
         await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheralA.peripheralIdentifier) == 1 }
+        // The refcount reaching one and the fake having been called are two different
+        // observables, and on a loaded machine the second can land after the first — so it is
+        // waited for rather than sampled.
+        await waitFor { await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 1 }
         #expect(await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 1)
         // B's fake must be untouched by A's subscription.
         #expect(await fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 0)
@@ -265,6 +269,7 @@ struct MultiPeripheralNotificationTests {
         let streamB: AsyncThrowingStream<Data, Error> = peripheralB.notifications(for: Self.heartRateMeasurement)
         let taskB = Task { for try await _ in streamB {} }
         await waitFor { await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: fakePeripheralB.peripheralIdentifier) == 1 }
+        await waitFor { await fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 1 }
         #expect(await fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 1)
         // A's fake must be untouched by B's subscription starting.
         #expect(await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 1)

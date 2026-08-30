@@ -1,0 +1,29 @@
+# Scanner side of the two-simulator end-to-end test — the load-bearing assertion.
+#
+# The advertiser simulator is already advertising as "BLESwift Explorer Sim" on
+# 180D through the host-side bleswift-provider's virtual radio. This scanner runs
+# a real BLESwift `scan(services:)` and must see it under that name.
+#
+# The Scan screen is a List: both the scan button and the Discoveries section sit
+# below the fold on an iPhone, so each has to be scrolled into view before it can
+# be tapped or asserted on.
+appId: com.bleswift.explorer
+---
+- launchApp
+- scrollUntilVisible:
+    element:
+      id: "scan.startHeartRate"
+    direction: DOWN
+    timeout: 15000
+- tapOn:
+    id: "scan.startHeartRate"
+- scrollUntilVisible:
+    element:
+      text: "BLESwift Explorer Sim"
+    direction: DOWN
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      text: "BLESwift Explorer Sim"
+      exact: true
+    timeout: 30000

@@ -9,7 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `BackendRegistry` (BLESwiftCore): a process-wide pair of optional backend factories that
+  `Central(configuration:)` and `PeripheralHost(configuration:)` consult when constructing
+  their default backend. Both are `nil` unless something registers one.
+- `BLESwiftLink`, `BLESwiftSimulatorLink`, and `BLESwiftProvider` products, plus the
+  `bleswift-provider` executable: BLE in the iOS Simulator, where CoreBluetooth is
+  non-functional. `SimulatorLink.install()` routes every subsequently-constructed `Central()`
+  / `PeripheralHost()` over a localhost TCP link to a `bleswift-provider` process on the host
+  Mac, which serves it from the Mac's real radio (`--passthrough`), from an in-process virtual
+  radio, or both. `BLESWIFT_LINK` (`host:port`) overrides the default `127.0.0.1:45541`
+  endpoint on both ends, and `SimulatorLink.isProviderReachable()` probes for a listening
+  provider. See the "Running in the iOS Simulator" DocC article.
+- A declarative JSON fixture format (`FixtureDocument`/`FixtureDevice`/`FixtureService`/
+  `FixtureCharacteristic` in BLESwiftLink), loaded with `bleswift-provider --fixture`: virtual
+  devices with advertisements and GATT databases, base64 values and manufacturer data,
+  permissions derived from the declared properties, writes stored, and writes to a notifying
+  characteristic pushed to every subscriber.
+- `Provider.addVirtualDevice(_:advertising:)` (BLESwiftProvider): host a virtual device
+  written in Swift — a `VirtualDeviceDescriptor` plus a `VirtualDeviceHandler` — and drive it
+  afterwards through the returned `VirtualDeviceHandle`.
+- `BLESwiftExplorer`: an Advertise tab driving `PeripheralHost`, and `--auto-advertise` /
+  `--auto-scan` launch arguments for automated runs.
+- A two-simulator end-to-end test (`Scripts/sim-to-sim-e2e.sh`) and its CI job: two simulator
+  apps meet on the provider's virtual radio — one advertising, one scanning and connecting —
+  with no Bluetooth hardware and no entitlements.
+
 ### Changed
+
+- `Central(configuration:)` and `PeripheralHost(configuration:)` now consult `BackendRegistry`
+  when constructing their default backend. No behavior change when nothing is registered: they
+  construct CoreBluetooth exactly as before. The explicit `init(backend:queue:…)` initializers
+  ignore the registry.
 
 ### Fixed
 

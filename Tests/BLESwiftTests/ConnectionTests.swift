@@ -553,7 +553,11 @@ struct ConnectionTests {
         let collected = await collector.value
         #expect(collected.count == 4)
 
-        try await Task.sleep(for: .milliseconds(60))
+        // Wait for the second attempt to actually happen rather than sleeping a margin: on a
+        // loaded machine the policy's 5 ms backoff plus the hop that follows it can outlast
+        // any fixed sleep. The assertion below is unchanged — exactly two attempts, in order,
+        // and no third one, since the policy returns `nil` for attempt 2.
+        await waitFor(timeout: .seconds(10)) { attemptLog.attempts.count >= 2 }
         #expect(attemptLog.attempts == [1, 2])
     }
 

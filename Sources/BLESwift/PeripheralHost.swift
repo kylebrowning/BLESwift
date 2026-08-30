@@ -122,6 +122,22 @@ public actor PeripheralHost {
         self.queue = queue
         self.configuration = configuration
 
+        // A registered backend (see `BackendRegistry`) replaces CoreBluetooth wholesale.
+        if let factory = BackendRegistry.peripheralManagerFactory {
+            let backend = factory(queue)
+            self.manager = backend
+            self.proxy = nil
+            // Hopped onto `queue` because the backend's `eventHandler` setter may be
+            // queue-confined; `[weak self]` like the CoreBluetooth path — no retain cycle.
+            queue.sync {
+                backend.eventHandler = { [weak self] event in
+                    guard let self else { return }
+                    self.assumeIsolated { $0.handle(event) }
+                }
+            }
+            return
+        }
+
         let proxy = PeripheralManagerDelegateProxy()
         self.proxy = proxy
 

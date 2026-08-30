@@ -11,24 +11,29 @@
 		1BBCA12CDF112D2261E47FF0 /* PeripheralDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C7C5C40C283C5FD24BD7D59 /* PeripheralDetailView.swift */; };
 		260F671DB21AC33FC90CEF68 /* ScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE4DE47F5A1B09F4ECBF4D4A /* ScanView.swift */; };
 		420AFE15D1689DE9D6425D58 /* BLESwiftExplorerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 256B96AE63034D72D5A4549D /* BLESwiftExplorerApp.swift */; };
+		45758AEF51A7421E563F7B54 /* AdvertiserModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1EAA0C0AD0A86DDFFEF2DBB /* AdvertiserModel.swift */; };
 		51BBCA525A820C9280501071 /* ExplorerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B06E865400E2931EF18088A0 /* ExplorerModel.swift */; };
+		594966B08820271D555126A0 /* BLESwiftSimulatorLink in Frameworks */ = {isa = PBXBuildFile; productRef = 8C20140F770EBCC33ABBFA9F /* BLESwiftSimulatorLink */; };
 		5F35C61E716471A57F78A252 /* SystemEventsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDC7EA10A48DB8FF159829D8 /* SystemEventsView.swift */; };
 		815857653ACAD637848A91FE /* RestorationDemoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7331CCE7BA08900E5568D89F /* RestorationDemoView.swift */; };
 		8ABB4B7586F446FF7C92434A /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6800182A564F6B8531409BA /* RootView.swift */; };
 		C6A8F07084522A6073C54538 /* StateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F002E17F7D3E4453E5903E09 /* StateView.swift */; };
 		CB27A4A86579275A9AA8E65F /* CharacteristicDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCCBE61C5F4B1C6052DCFA93 /* CharacteristicDecoder.swift */; };
 		D279DDC678EB769F2387A2BC /* SavedDevicesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 986A8D8EE07C7BBBDCEB78A3 /* SavedDevicesView.swift */; };
+		DD6F58EC857379849B027656 /* AdvertiseView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1500A611DCD1849B43057D94 /* AdvertiseView.swift */; };
 		F91FC5E3AA5CB404A46431ED /* BLESwiftProfiles in Frameworks */ = {isa = PBXBuildFile; productRef = 4A8FE40770D3FB5E7441B4B7 /* BLESwiftProfiles */; };
 		FAFCE3F0B2E0347F9495F683 /* ConnectionLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8A596255303FC8B2102D1CC /* ConnectionLogView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		1500A611DCD1849B43057D94 /* AdvertiseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdvertiseView.swift; sourceTree = "<group>"; };
 		256B96AE63034D72D5A4549D /* BLESwiftExplorerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLESwiftExplorerApp.swift; sourceTree = "<group>"; };
 		6F1B3C466BEDEC9C6A52B79D /* BLESwiftExplorer.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = BLESwiftExplorer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7331CCE7BA08900E5568D89F /* RestorationDemoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestorationDemoView.swift; sourceTree = "<group>"; };
 		986A8D8EE07C7BBBDCEB78A3 /* SavedDevicesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedDevicesView.swift; sourceTree = "<group>"; };
 		9C7C5C40C283C5FD24BD7D59 /* PeripheralDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeripheralDetailView.swift; sourceTree = "<group>"; };
 		B06E865400E2931EF18088A0 /* ExplorerModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerModel.swift; sourceTree = "<group>"; };
+		B1EAA0C0AD0A86DDFFEF2DBB /* AdvertiserModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdvertiserModel.swift; sourceTree = "<group>"; };
 		B6800182A564F6B8531409BA /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		EDC7EA10A48DB8FF159829D8 /* SystemEventsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemEventsView.swift; sourceTree = "<group>"; };
 		EE4DE47F5A1B09F4ECBF4D4A /* ScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanView.swift; sourceTree = "<group>"; };
@@ -45,6 +50,7 @@
 			files = (
 				0E45684784149DCDED459C02 /* BLESwift in Frameworks */,
 				F91FC5E3AA5CB404A46431ED /* BLESwiftProfiles in Frameworks */,
+				594966B08820271D555126A0 /* BLESwiftSimulatorLink in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -62,6 +68,7 @@
 		216E7856F0665066F7C24DBB /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				1500A611DCD1849B43057D94 /* AdvertiseView.swift */,
 				F8A596255303FC8B2102D1CC /* ConnectionLogView.swift */,
 				9C7C5C40C283C5FD24BD7D59 /* PeripheralDetailView.swift */,
 				7331CCE7BA08900E5568D89F /* RestorationDemoView.swift */,
@@ -77,6 +84,7 @@
 		31B29E3A2801BD6CABA1FB0A /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				B1EAA0C0AD0A86DDFFEF2DBB /* AdvertiserModel.swift */,
 				256B96AE63034D72D5A4549D /* BLESwiftExplorerApp.swift */,
 				FCCBE61C5F4B1C6052DCFA93 /* CharacteristicDecoder.swift */,
 				B06E865400E2931EF18088A0 /* ExplorerModel.swift */,
@@ -120,6 +128,7 @@
 			packageProductDependencies = (
 				3AA2739C3A9CDA11B84189FB /* BLESwift */,
 				4A8FE40770D3FB5E7441B4B7 /* BLESwiftProfiles */,
+				8C20140F770EBCC33ABBFA9F /* BLESwiftSimulatorLink */,
 			);
 			productName = BLESwiftExplorer;
 			productReference = 6F1B3C466BEDEC9C6A52B79D /* BLESwiftExplorer.app */;
@@ -163,6 +172,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DD6F58EC857379849B027656 /* AdvertiseView.swift in Sources */,
+				45758AEF51A7421E563F7B54 /* AdvertiserModel.swift in Sources */,
 				420AFE15D1689DE9D6425D58 /* BLESwiftExplorerApp.swift in Sources */,
 				CB27A4A86579275A9AA8E65F /* CharacteristicDecoder.swift in Sources */,
 				FAFCE3F0B2E0347F9495F683 /* ConnectionLogView.swift in Sources */,
@@ -397,6 +408,10 @@
 		4A8FE40770D3FB5E7441B4B7 /* BLESwiftProfiles */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = BLESwiftProfiles;
+		};
+		8C20140F770EBCC33ABBFA9F /* BLESwiftSimulatorLink */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BLESwiftSimulatorLink;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

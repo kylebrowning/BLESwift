@@ -167,6 +167,34 @@ pattern and scripting reference, and
 a complete, standalone package exercising this exact pattern from outside BLESwift itself (no
 `@testable import`).
 
+## BLE in the iOS Simulator
+
+CoreBluetooth is non-functional in the iOS Simulator. `BLESwiftSimulatorLink` fixes that without
+changing a line of your BLE code: it swaps the backends `Central()` and `PeripheralHost()`
+construct for ones that forward every call over localhost TCP to `bleswift-provider` on your Mac.
+
+```swift
+import BLESwiftSimulatorLink
+
+#if targetEnvironment(simulator)
+SimulatorLink.install()   // before your first Central() / PeripheralHost()
+#endif
+```
+
+```sh
+swift run bleswift-provider --passthrough        # also serve the Mac's real radio
+swift run bleswift-provider --fixture hrm.json   # serve virtual devices from JSON
+```
+
+The virtual radio needs no hardware, no entitlements, and no approval — and because a
+simulator's `PeripheralHost` is hosted on it as a device, **two simulators can talk to each
+other** (`Scripts/sim-to-sim-e2e.sh`, which runs locally and on CI on demand from the Actions
+tab — not a PR gate, because GitHub macOS runner capacity is erratic).
+`--passthrough` additionally exposes
+your Mac's real radio, and needs a Bluetooth-entitled, signed provider build. See the
+[Running in the iOS Simulator](Sources/BLESwift/BLESwift.docc/SimulatorSupport.md) DocC article
+for fixtures, code-defined virtual devices, and the documented divergences from CoreBluetooth.
+
 ## Platform support
 
 | Platform  | Minimum version |
@@ -176,9 +204,13 @@ a complete, standalone package exercising this exact pattern from outside BLESwi
 | watchOS   | 11.0            |
 | tvOS      | 18.0            |
 | visionOS  | 2.0             |
+| iOS Simulator | 18.0, via `BLESwiftSimulatorLink` + `bleswift-provider` |
 
 The central role is available on every platform above. The peripheral role (`PeripheralHost`)
 is iOS and macOS only, because CoreBluetooth's `CBPeripheralManager` does not exist elsewhere.
+The iOS Simulator has no working CoreBluetooth at all; both roles run there over
+`BLESwiftSimulatorLink` and a host-side `bleswift-provider` — see
+[BLE in the iOS Simulator](#ble-in-the-ios-simulator).
 
 ## Installation
 
@@ -208,6 +240,15 @@ Each module ships a DocC catalog. Hosted on the Swift Package Index:
 - [BLESwiftTestSupport](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswifttestsupport) —
   the fakes and the testing rig
   ([in repo](Sources/BLESwiftTestSupport/BLESwiftTestSupport.docc/BLESwiftTestSupport.md))
+- [BLESwiftSimulatorLink](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswiftsimulatorlink) —
+  `SimulatorLink.install()` and the simulator-side link backends
+  ([in repo](Sources/BLESwiftSimulatorLink/BLESwiftSimulatorLink.docc/BLESwiftSimulatorLink.md))
+- [BLESwiftProvider](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswiftprovider) —
+  the host-side provider, the virtual radio, and code-defined virtual devices
+  ([in repo](Sources/BLESwiftProvider/BLESwiftProvider.docc/BLESwiftProvider.md))
+- [BLESwiftLink](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswiftlink) —
+  the wire protocol and the fixture format the two halves share
+  ([in repo](Sources/BLESwiftLink/BLESwiftLink.docc/BLESwiftLink.md))
 
 (The hosted pages appear once the next tagged release is indexed; until then, read the catalogs
 in the repository or build them locally with `swift package generate-documentation`.)
