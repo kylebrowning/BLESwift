@@ -165,16 +165,28 @@ public final class LinkCentral: CentralManaging, Sendable {
         session.isConnected
     }
 
-    /// Stops the session and detaches every event handler — this central's and each of its
-    /// peripherals' — failing every open L2CAP channel. Idempotent, and safe to call from any
+    /// Stops the session, then runs the teardown a dropped link runs — every connected
+    /// peripheral disconnected with `LinkError.providerDisconnected`, every open L2CAP channel
+    /// failed, and the state dropped to `.unsupported` — and detaches every event handler a
+    /// turn behind it, this central's and each of its peripherals'. Idempotent, and safe to call from any
     /// thread. Nothing calls it in production; `deinit` does the same work on its own.
+    ///
+    /// **The teardown runs before the handlers go, and the handlers go a turn behind it.**
+    /// `session.stop()` marks the session stopped before the connection's terminal transition
+    /// is observed, so the session's own `onDisconnected` never fires: without this, a
+    /// consumer mid-`read` was left awaiting a completion nothing would ever deliver rather
+    /// than failed. `deliver(_:)` hands its event to the *next* queue turn, so clearing the
+    /// handler in this block would swallow every event this teardown just produced — it is
+    /// queued behind them instead.
     public func shutdown() {
         session.stop()
         queue.async { [self] in
-            _eventHandler = nil
-            closeChannels(matching: { _ in true }, error: LinkError.providerDisconnected.nsError)
-            for peripheral in _peripherals.values {
-                peripheral.detachEventHandler()
+            handleLinkDropped()
+            queue.async { [self] in
+                _eventHandler = nil
+                for peripheral in _peripherals.values {
+                    peripheral.detachEventHandler()
+                }
             }
         }
     }

@@ -112,6 +112,12 @@ public struct VirtualDevice: Sendable {
 ///
 /// Every method hops onto the owning actor; the handle itself holds no mutable state, so
 /// it is freely `Sendable`.
+///
+/// The handle holds its radio *weakly*, so a device whose handler keeps its own handle —
+/// ``FixtureDeviceHandler`` does, to notify and republish — cannot keep the radio alive
+/// through the radio's own device table. Once the last external reference to the radio
+/// drops, every method below becomes a no-op, exactly as it already does for a device that
+/// has been removed.
 public final class VirtualDeviceHandle: Sendable {
 
     /// The registered device's identifier.
@@ -126,8 +132,14 @@ public final class VirtualDeviceHandle: Sendable {
     /// cannot remove, unadvertise, or empty the device its own successor just registered.
     let generation: UInt64
 
-    /// The radio hosting the device.
-    private let radio: VirtualRadio
+    /// The radio hosting the device, held weakly: the radio's device table holds the
+    /// handler, which may in turn hold this handle, so a strong reference here would be a
+    /// cycle that outlives the radio's last owner.
+    ///
+    /// `nonisolated(unsafe)` only because a `weak` reference cannot be declared `let`: it is
+    /// written once, in `init`, and never again, and the runtime's own weak loads are
+    /// thread-safe — so concurrent readers see either the radio or `nil`, never a race.
+    private nonisolated(unsafe) weak var radio: VirtualRadio?
 
     /// Creates a handle bound to `radio`, for the registration `generation` identifies.
     init(identifier: UUID, generation: UInt64, radio: VirtualRadio) {
@@ -144,7 +156,7 @@ public final class VirtualDeviceHandle: Sendable {
     ///   - characteristic: The characteristic the value belongs to.
     ///   - centrals: Restricts delivery to these centrals; `nil` notifies every subscriber.
     public func notify(_ value: Data, for characteristic: CharacteristicIdentifier, to centrals: [Subscriber]?) async {
-        await radio.notify(
+        await radio?.notify(
             device: identifier,
             characteristic: characteristic,
             value: value,
@@ -158,7 +170,7 @@ public final class VirtualDeviceHandle: Sendable {
     ///
     /// - Parameter advertising: Whether the device advertises from now on.
     public func setAdvertising(_ advertising: Bool) async {
-        await radio.setAdvertising(advertising, device: identifier, generation: generation)
+        await radio?.setAdvertising(advertising, device: identifier, generation: generation)
     }
 
     /// Replaces the advertisement the device broadcasts. Takes effect for every sighting
@@ -166,7 +178,7 @@ public final class VirtualDeviceHandle: Sendable {
     ///
     /// - Parameter advertisement: The device's new advertisement.
     public func setAdvertisement(_ advertisement: AdvertisementData) async {
-        await radio.setAdvertisement(advertisement, device: identifier, generation: generation)
+        await radio?.setAdvertisement(advertisement, device: identifier, generation: generation)
     }
 
     /// Replaces the device's GATT database — including the static values the radio answers
@@ -179,7 +191,7 @@ public final class VirtualDeviceHandle: Sendable {
     ///
     /// - Parameter services: The device's new services.
     public func setServices(_ services: [GATTService]) async {
-        await radio.setServices(services, device: identifier, generation: generation)
+        await radio?.setServices(services, device: identifier, generation: generation)
     }
 
     /// Removes the device from the radio. Every central currently connected to it is
@@ -188,7 +200,7 @@ public final class VirtualDeviceHandle: Sendable {
     ///
     /// A no-op once the identifier has been re-registered: see the `generation` note above.
     public func remove() async {
-        await radio.remove(device: identifier, generation: generation)
+        await radio?.remove(device: identifier, generation: generation)
     }
 }
 #endif

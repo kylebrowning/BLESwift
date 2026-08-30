@@ -43,6 +43,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `VirtualDeviceHandle` (BLESwiftProvider) now holds its `VirtualRadio` weakly. A radio with
+  a fixture attached formed a retain cycle — radio → device table → `FixtureDeviceHandler` →
+  handle → radio — and never deallocated unless `Provider.stop()` explicitly removed the
+  device.
+- `CompositeCentral` and `CompositePeripheralManager` (BLESwiftProvider) now reconcile a
+  child from the `didUpdateState` payload instead of re-reading its live `radioState`. Two
+  transitions that coalesced before the handler drained them read as no change at all, so a
+  child that power-cycled was never re-issued the scan and the connection-event registration,
+  nor had its services republished and its advertisement restarted.
+- Clearing `VirtualPeripheralManagerBackend.eventHandler` (BLESwiftProvider) now detaches the
+  handler and nothing more, leaving the hosted device on the radio and re-attaching a working
+  backend — as `CompositePeripheralManager` documents for every child it clears and
+  re-installs. It used to remove the device and end the backend's work chain permanently, so a
+  detach through a composite was terminal. The device is still taken off the radio when the
+  backend is deallocated, and when a peripheral-role session closes.
+- `LinkCentral.shutdown()` and `LinkPeripheralManager.shutdown()` (BLESwiftSimulatorLink) now
+  run the same teardown a dropped link runs before they detach their event handler, so a
+  consumer mid-operation is failed rather than stranded: every connected peripheral is
+  disconnected, every subscriber reported as departing, and the state dropped to
+  `.unsupported` (open L2CAP channels were already failed on shutdown; that teardown moved
+  into the shared path). Stopping the session marks it stopped before its connection
+  reaches a terminal state, so none of the rest used to happen at all.
 - Fixed a lock-order deadlock between event fan-out and stream cancellation. The internal
   `Broadcaster` and `ThrowingBroadcaster` held their `Mutex` across
   `AsyncStream.Continuation.yield`, which takes the consuming task's status lock, while a
