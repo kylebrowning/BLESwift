@@ -42,10 +42,12 @@ import Logging
 /// acknowledgements died with the session that owed them, and pushes made while it is down
 /// are dropped unsent, so neither can ever be acknowledged — and the window is emptied again
 /// at the reconnect. A host blocked on the window when the link drops is released by the drop
-/// itself, with `bluetoothUnavailable`: ``handleLinkDropped()`` delivers
-/// `didUpdateState(.unsupported)`, and `PeripheralHost` fails every parked readiness waiter
-/// on any state but `.poweredOn`. The single `readyToUpdateSubscribers` at the reconnect is
-/// the backstop for a waiter that arrived in between, not the release path for the drop.
+/// itself, with `bluetoothUnavailable`: the drop that takes the radio out of `.poweredOn`
+/// delivers `didUpdateState(.unsupported)`, and `PeripheralHost` fails every parked readiness
+/// waiter on any state but `.poweredOn`. The single `readyToUpdateSubscribers` at the
+/// reconnect is the backstop for a waiter that parked while the radio was already
+/// `.unsupported` — a drop from that state delivers no state change — not the release path
+/// for the drop.
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``LinkCentral``: every stored property is `nonisolated(unsafe)`, safe only because every
@@ -108,9 +110,10 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// cheaper than hashing.
     nonisolated(unsafe) private var _outstandingUpdates: [UInt64] = []
 
-    /// Whether the window was full when the link dropped, so the owning `PeripheralHost` is
-    /// waiting on a `readyToUpdateSubscribers` that the dead session's acknowledgements can
-    /// never produce. Cleared by the reconnect that answers it.
+    /// Whether the window was full when the link dropped. The host blocked on it has already
+    /// been failed with `bluetoothUnavailable` by the `.unsupported` state change; this flag
+    /// only arms the reconnect to emit one `readyToUpdateSubscribers` as a backstop for a
+    /// waiter that parked in between. Cleared by the reconnect that emits it.
     nonisolated(unsafe) private var _wasBlockedAtDrop = false
 
     /// Whether the next provider state is a *reconnect* and must clear the window rather than
@@ -344,10 +347,12 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// a surviving count would wedge the window shut. Emptying it here also keeps
     /// ``updateValue(_:for:onSubscribed:)`` answering `true` while the link is down, so a host
     /// pushing into the dark is not wedged either — those pushes are dropped unsent and are
-    /// cleared again at the reconnect. A host that was *blocked* at that moment is deliberately
-    /// **not** released here: it is about to be told the radio is `.unsupported`, and a
-    /// readiness signal against a dead radio would only invite a push that goes nowhere. The
-    /// release is deferred to the reconnect.
+    /// cleared again at the reconnect. No `readyToUpdateSubscribers` is emitted here — a
+    /// readiness signal against a dead radio would only invite a push that goes nowhere. A
+    /// host that was *blocked* at that moment is released all the same, by the
+    /// `didUpdateState(.unsupported)` delivered below: `PeripheralHost` fails every parked
+    /// readiness waiter with `bluetoothUnavailable` on any state but `.poweredOn`.
+    /// `_wasBlockedAtDrop` only arms the reconnect's one-shot readiness backstop.
     private func handleLinkDropped() {
         dispatchPrecondition(condition: .onQueue(queue))
         _isAdvertising = false
