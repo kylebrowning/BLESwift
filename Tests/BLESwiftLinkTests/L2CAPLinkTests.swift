@@ -253,7 +253,7 @@ struct L2CAPLinkTests {
         try #require(await provider.liveSessions.compactMap { $0 as? CentralSession }.first)
     }
 
-    @Test("A channel-open completion from a connection that has ended is not paired with the next open")
+    @Test("A channel-open completion from a connection that has ended is absorbed, not paired")
     func aStaleOpenCompletionIsNotPairedWithTheNextConnectionsOpen() async throws {
         let stalePSM = UInt16(0x0041)
         let livePSM = UInt16(0x0043)
@@ -276,6 +276,7 @@ struct L2CAPLinkTests {
         }
         let provider = Provider(configuration: configuration)
         try await provider.start()
+
         let client = RawClient(port: await provider.port, label: "l2cap.staleopen")
         await waitFor(timeout: .seconds(5)) { client.isAccepted }
 
@@ -298,28 +299,26 @@ struct L2CAPLinkTests {
         client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: stalePSM, channel: 1))
         await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.openL2CAPChannelCalls.count } == 1 }
 
-        // The connection ends underneath it, and the client reconnects and opens again —
-        // taking a fresh channel id, as a client that saw the disconnect does.
+        // The connection ends underneath it, and the completion lands in the window this
+        // session can still recognize: after the disconnect, before anything reconnects.
         let backend = try #require(centralBox.central)
         backend.simulateDisconnect(PeripheralIdentifier(uuid: Self.deviceID, name: "Fake L2CAP"), error: nil)
         await waitFor(timeout: .seconds(5)) {
             client.events.contains { if case .didDisconnect = $0 { return true } else { return false } }
         }
-        await connect()
-        client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: livePSM, channel: 2))
-        await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.openL2CAPChannelCalls.count } == 2 }
-
-        // The *first* connection's completion lands now. It answers nothing: channel id 2
-        // belongs to an open the live connection issued, and bridging it here would hand the
-        // client the previous connection's transport.
         fake.simulateNextHeldL2CAPOpenCompletion()
         let firstChannel = try #require(await fake.onQueue { fake.lastOpenedL2CAPChannel })
         await waitFor(timeout: .seconds(5)) { await firstChannel.onQueue { firstChannel.isClosed } }
         #expect(await firstChannel.onQueue { firstChannel.isClosed }, "a stranded completion's channel is closed, not leaked")
+        // Answered nothing: the client tore its own half down off the disconnect, and channel
+        // id 1 is not a channel this session ever bridged.
         #expect(!client.events.contains { if case .didOpenL2CAPChannel = $0 { return true } else { return false } })
 
-        // The live connection's own completion is what answers channel id 2 — and it carries
-        // the PSM that open asked for, not the dead connection's.
+        // The client reconnects and opens again, taking a fresh channel id — and *its* open is
+        // answered by the live connection's own completion.
+        await connect()
+        client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: livePSM, channel: 2))
+        await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.openL2CAPChannelCalls.count } == 2 }
         fake.simulateNextHeldL2CAPOpenCompletion()
         await waitFor(timeout: .seconds(5)) {
             client.events.contains { if case .didOpenL2CAPChannel = $0 { return true } else { return false } }
@@ -328,13 +327,14 @@ struct L2CAPLinkTests {
             peripheral: Self.deviceID, channel: 2, psm: livePSM, error: nil
         )))
 
+        client.send(.l2capClose(channel: 2))
         client.shutdown()
         await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
         await provider.stop()
     }
 
-    @Test("A completion the backend never delivers stops being owed, and the next open is answered")
-    func anUnhonoredStrandedOpenExpiresRatherThanEatingTheNextCompletion() async throws {
+    @Test("An open outstanding at a disconnect is not owed across the reconnect")
+    func aStrandedOpenIsForgottenWhenThePeripheralConnectsAgain() async throws {
         let stalePSM = UInt16(0x0041)
         let livePSM = UInt16(0x0043)
         let box = PeripheralBox()
@@ -342,8 +342,8 @@ struct L2CAPLinkTests {
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
         configuration.passthrough = true
-        // Short enough to sit out in a test: the real deadline is ten seconds.
-        configuration.strandedOpenLifetimePerCentralSession = .milliseconds(100)
+        // The shipping lifetime, and nothing waits it out: a debt that outlived the reconnect
+        // would be paid by the live connection's own completion, whatever its deadline.
         configuration.centralBackendFactory = { queue in
             let fake = FakeCentral(queue: queue, state: .poweredOn)
             let peripheral = FakePeripheral(identifier: Self.deviceID, name: "Fake L2CAP", queue: queue)
@@ -357,7 +357,7 @@ struct L2CAPLinkTests {
         let provider = Provider(configuration: configuration)
         try await provider.start()
 
-        let client = RawClient(port: await provider.port, label: "l2cap.expiredopen")
+        let client = RawClient(port: await provider.port, label: "l2cap.reconnectopen")
         await waitFor(timeout: .seconds(5)) { client.isAccepted }
 
         func connect() async {
@@ -372,10 +372,11 @@ struct L2CAPLinkTests {
             }
         }
 
+        // The ordinary passthrough sequence: an open outstanding when the link drops, a
+        // reconnect, a fresh open, and a backend that answers the fresh one — and never the
+        // one whose connection went away.
         await connect()
         let fake = try #require(box.peripheral)
-        // Issued on the first connection, and never completed on it or on any other — a
-        // backend is not obliged to call back for a channel whose connection went away.
         client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: stalePSM, channel: 1))
         await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.openL2CAPChannelCalls.count } == 1 }
 
@@ -388,10 +389,9 @@ struct L2CAPLinkTests {
         client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: livePSM, channel: 2))
         await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.openL2CAPChannelCalls.count } == 2 }
 
-        // Past the deadline, the debt is no longer owed — so the live connection's own
-        // completion answers the client's open rather than being eaten by it. Left standing,
-        // this client's `openL2CAPChannel` never returns.
-        try await Task.sleep(for: .milliseconds(200))
+        // The live open is answered rather than closed on the client's behalf: a debt held
+        // across the reconnect would have consumed this completion and left the client's
+        // `openL2CAPChannel` waiting forever.
         fake.simulateLastHeldL2CAPOpenCompletion()
         await waitFor(timeout: .seconds(5)) {
             client.events.contains { if case .didOpenL2CAPChannel = $0 { return true } else { return false } }

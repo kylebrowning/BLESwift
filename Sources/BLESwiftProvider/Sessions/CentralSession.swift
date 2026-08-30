@@ -176,11 +176,21 @@ final class CentralSession: Sendable {
     /// channel the completion carries and is never paired with anything; the client's own
     /// halves went with the disconnect it was already told about.
     ///
-    /// **A debt expires**, at ``strandedOpenLifetime``, and is dropped outright at the
-    /// peripheral's next disconnect. A backend is not obliged to complete an open its
-    /// connection outlived — CoreBluetooth may simply never call back — and a debt that stood
-    /// forever would eat the *next* connection's completion instead, hanging the client's
-    /// `openL2CAPChannel` for good and pinning a remote the cap could otherwise evict.
+    /// **A debt is short-lived on purpose.** It is dropped outright at the peripheral's next
+    /// `didConnect` — a new connection is one the old open cannot be completed on, so nothing
+    /// is owed any more — and at its next disconnect, and it expires at
+    /// ``strandedOpenLifetime`` for a peripheral that never reconnects. A debt that outlived
+    /// the reconnect would be honored by the *live* connection's completion, which arrives
+    /// first in the ordinary sequence: the live open would be closed rather than answered and
+    /// the client's `openL2CAPChannel` would hang for good, which is worse than the
+    /// mispairing it is there to prevent.
+    ///
+    /// **What is left standing.** A completion for the *previous* connection that arrives
+    /// after the reconnect is paired with whatever this session pends next — issue #28's
+    /// original mispairing, in the one window nothing can close: `didOpenL2CAPChannel` carries
+    /// no identifier for the open it answers, so a completion arriving in the live
+    /// connection's lifetime cannot be told from the live connection's own. The debt closes
+    /// the window that *can* be closed — every completion landing before the reconnect.
     /// Session ``queue`` only.
     nonisolated(unsafe) var strandedOpens: [UUID: [ContinuousClock.Instant]] = [:]
     nonisolated(unsafe) private var isClosed = false
@@ -660,6 +670,11 @@ final class CentralSession: Sendable {
             ))
 
         case .didConnect(let peripheral):
+            // Nothing is owed across a connection boundary: an open the previous connection
+            // issued cannot be completed on this one, and a debt kept past here would be paid
+            // by *this* connection's own completion — closing the channel the client is
+            // waiting for instead of answering it. See ``strandedOpens``.
+            strandedOpens.removeValue(forKey: peripheral.uuid)
             let remote = remotes[peripheral.uuid]
             if remote == nil {
                 log?("no remote for peripheral \(peripheral.uuid); reporting default write maxima")
