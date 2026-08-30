@@ -64,7 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Provider.addVirtualDevice(_:advertising:)` (BLESwiftProvider) recorded its device after a
   suspension the provider serves `stop()` across, so a stop overlapping the call left the
   device on the radio in neither of the tables `stop()` empties — never removed, and its
-  identifier no longer defended. Such a registration is now taken straight back off. (#29)
+  identifier no longer defended. Such a registration is now taken straight back off, including
+  when it began inside one stop's window and resumed after a second, overlapping stop had
+  returned. (#29)
 
 - `Provider.start()` (BLESwiftProvider) registered its fixtures before binding the listener
   and left them registered when the bind threw — a port already in use, the documented case.

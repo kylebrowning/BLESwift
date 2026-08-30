@@ -99,11 +99,19 @@ public actor Provider {
     /// ``addVirtualDevice(_:advertising:)``.
     private var stopGeneration: UInt64 = 0
 
-    /// Whether a ``stop()`` is between its first line and its last — it suspends in the radio
-    /// several times, and this actor serves other calls while it does. A registration that
-    /// both began and finished inside that window would carry the *same* ``stopGeneration``
-    /// on both sides of its own suspension and still be emptied out of the tables behind it.
-    private var isStopping = false
+    /// How many ``stop()`` calls are between their first line and their last — they suspend in
+    /// the radio several times, and this actor serves other calls while they do. A
+    /// registration that both began and finished inside that window would carry the *same*
+    /// ``stopGeneration`` on both sides of its own suspension and still be emptied out of the
+    /// tables behind it.
+    ///
+    /// A depth rather than a flag: two stops can overlap — and one stop's own `handle.remove()`
+    /// calls can return in any order — so the *inner* one's exit must not report the outer
+    /// one's window as closed.
+    private var stopDepth = 0
+
+    /// Whether any ``stop()`` is currently in flight. See ``stopDepth``.
+    private var isStopping: Bool { stopDepth > 0 }
 
     /// Creates a provider. Nothing is registered and no port is bound until ``start()``.
     ///
@@ -134,10 +142,16 @@ public actor Provider {
         // would leave it on a shared radio with nothing holding its handle and nothing
         // defending its identifier — the one thing `stop()` promises it does not do. It goes
         // straight back off instead.
+        //
+        // Both sides of the suspension are read, and the *entry* side is what a second stop
+        // cannot take back: an add that began inside one stop's window and resumed after a
+        // shorter, overlapping stop had returned would otherwise find the depth back at zero
+        // and the generation unchanged since it looked, and record an orphan anyway.
         let generation = stopGeneration
+        let wasStopping = isStopping
         providerOwnedIdentifiers.insert(identifier)
         let handle = await radio.register(device, advertising: advertising)
-        guard generation == stopGeneration, !isStopping else {
+        guard !wasStopping, generation == stopGeneration, !isStopping else {
             await handle.remove()
             return handle
         }
@@ -324,8 +338,8 @@ public actor Provider {
     ///   than applied to the device that replaced the one it was minted for.
     public func stop() async {
         stopGeneration &+= 1
-        isStopping = true
-        defer { isStopping = false }
+        stopDepth += 1
+        defer { stopDepth -= 1 }
         listener?.cancel()
         listener = nil
         for connection in pending.withLock({ $0.drain() }) {

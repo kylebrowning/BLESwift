@@ -140,6 +140,83 @@ struct ProviderLifecycleTests {
         await radio.detach(session: session)
     }
 
+    /// A handler whose subscription callback blocks the thread it is called on, holding the
+    /// radio itself — not merely its caller — for the duration.
+    ///
+    /// ``SlowHandler`` suspends instead, which releases the radio actor and lets everything
+    /// queued behind it run. This one is what keeps a registration parked at its one
+    /// suspension point long enough for a second `stop()` to open and close a window around
+    /// it.
+    private struct BlockingHandler: VirtualDeviceHandler {
+        let seconds: Double
+
+        func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
+            .failure(.unlikelyError)
+        }
+
+        func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> {
+            .failure(.unlikelyError)
+        }
+
+        func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {
+            usleep(useconds_t(seconds * 1_000_000))
+        }
+    }
+
+    @Test("A second stop() returning cannot clear the window an add began inside")
+    func addVirtualDeviceInsideOverlappingStopsLeavesNothingRegistered() async throws {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        let radio = provider.radio
+
+        let blockerID = UUID()
+        let blocker = VirtualDevice(
+            descriptor: VirtualDeviceDescriptor(
+                identifier: blockerID,
+                name: "Blocker",
+                advertisement: AdvertisementData(localName: "Blocker", serviceUUIDs: [Self.service], isConnectable: true),
+                services: [
+                    GATTService(identifier: Self.service, characteristics: [
+                        GATTCharacteristic(identifier: Self.measurement, properties: [.read, .notify], permissions: [.readable])
+                    ])
+                ]
+            ),
+            handler: BlockingHandler(seconds: 0.6)
+        )
+        await provider.addVirtualDevice(blocker)
+        let session = UUID()
+        await radio.attach(session: session, centralSink: { _ in })
+        #expect(await radio.connect(session: session, device: blockerID, sink: { _ in }).error == nil)
+        #expect(await radio.setNotify(true, device: blockerID, characteristic: Self.measurement, session: session).isNotifying)
+
+        // The long stop: parked reporting the blocker's subscription as an unsubscribe, which
+        // holds the radio itself, so everything below queues behind it in a known order.
+        let long = Task { await provider.stop() }
+        try await Task.sleep(for: .milliseconds(100))
+
+        // The short stop, and then the registration: the second stop finds the device already
+        // gone from the radio, so it returns as soon as the radio frees up — before the
+        // registration behind it in the radio's queue has resumed.
+        let short = Task { await provider.stop() }
+        try await Task.sleep(for: .milliseconds(100))
+        let identifier = UUID()
+        let adding = Task { await provider.addVirtualDevice(Self.device(identifier: identifier)) }
+
+        _ = try await bounded { await short.value }
+        _ = try await bounded { await long.value }
+        _ = try await bounded { await adding.value }
+
+        // Whichever stop returned first, the add began inside a window that had not closed:
+        // the radio is left as this provider found it.
+        await waitFor(timeout: .seconds(5)) { !radio.knownDeviceIDs.withLock { $0.contains(identifier) } }
+        #expect(!radio.knownDeviceIDs.withLock { $0.contains(identifier) })
+        #expect(!radio.knownDeviceIDs.withLock { $0.contains(blockerID) })
+
+        await radio.detach(session: session)
+    }
+
     @Test("A start() whose listener cannot bind registers no fixtures")
     func aFailedStartRegistersNoFixtures() async throws {
         // A port with a provider already on it: the second bind is refused, which is the
