@@ -330,6 +330,15 @@ is broken.
   If a channel opened right after a reconnect behaves as though it belongs to the connection
   that just went away, close it and open again. Virtual devices are unaffected: the virtual
   radio answers every open before the disconnect that would strand it.
+- **A `.withoutResponse` backlog has a ceiling, and overrunning it drops the backlog.** Your
+  client sends every `.withoutResponse` write immediately, even when its 64-write window is
+  already full, and the provider parks what its backend is not ready for — up to 1024 writes
+  or 1 MiB per peripheral. Past that, the provider discards that peripheral's entire parked
+  backlog (the older writes included), keeps the link, and acknowledges the discarded writes
+  so your window reopens. So an app that releases far more than 64 writers on one
+  ``Peripheral/canSendWriteWithoutResponse`` signal against a peripheral that stays busy loses
+  payloads silently and is immediately told it may send again; CoreBluetooth would keep the
+  window shut. Pace `.withoutResponse` writes on the readiness signal as you would on device.
 - **Initial radio state.** A link-backed ``Central`` reports ``CentralState/unsupported`` until
   the provider answers — the same state the Simulator reports today, so an app that waits for
   `.poweredOn` simply waits — and then reports whatever state the provider does. If the provider
