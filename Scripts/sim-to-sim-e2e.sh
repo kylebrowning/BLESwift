@@ -89,8 +89,7 @@ trap cleanup EXIT INT TERM
 # `grantiva simulator ensure --name <name>` is find-or-create: it reuses a simulator of that
 # name if one exists, and otherwise creates it from the device type read out of the name and
 # the newest installed iOS runtime. It boots by default and reports the UDID, which is what
-# every downstream command takes — so a machine that happens to have two simulators sharing a
-# name can never make this run ambiguous.
+# every downstream command takes.
 #
 # `--json`, not the plain output: without it `ensure` prints a human sentence
 # ("Reused iPhone 17 Pro (<UDID>) — Booted") that would have to be scraped.

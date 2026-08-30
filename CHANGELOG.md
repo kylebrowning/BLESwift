@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.unsupported` (open L2CAP channels were already failed on shutdown; that teardown moved
   into the shared path). Stopping the session marks it stopped before its connection
   reaches a terminal state, so none of the rest used to happen at all.
+- Fixed a lock-order deadlock between event fan-out and stream cancellation. The internal
+  `Broadcaster` and `ThrowingBroadcaster` held their `Mutex` across
+  `AsyncStream.Continuation.yield`, which takes the consuming task's status lock, while a
+  concurrent cancellation of that consumer held the same status lock and re-entered the
+  `Mutex` from `onTermination`. Both now snapshot their subscribers under the lock and fan
+  out after releasing it, as `finish()` already did. Any consumer cancelling a
+  `connectionEvents()`/`stateUpdates()`-style stream mid-burst could hang. (#25)
 
 ## [2.0.0] - 2026-08-24
 

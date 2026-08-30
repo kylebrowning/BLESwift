@@ -360,7 +360,8 @@ struct HostEndToEndTests {
         scripted.stop()
         await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .unsupported } }
         #expect(states.withLock { $0.last } == .unsupported)
-        // The drop alone must not release the host: the radio it would push at is gone.
+        // The drop emits no readiness of its own (a real host is released by the `.unsupported`
+        // state change instead): the radio it would push at is gone.
         #expect(readyCount.withLock { $0 } == 0)
 
         // ---- A real provider on the same port; the reconnect releases the blocked host ----

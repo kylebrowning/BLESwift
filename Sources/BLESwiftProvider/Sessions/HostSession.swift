@@ -160,8 +160,8 @@ final class HostSession: Sendable {
             backend.eventHandler = nil
             // Dropped, not acknowledged: the connection is being cancelled, so no
             // `updateValueDelivered` could reach the client anyway — and it does not need one.
-            // A client whose link drops empties its own window and releases a blocked host on
-            // the next reconnect, so both ends agree without a final exchange.
+            // A client whose link drops empties its own window and fails a blocked host's wait
+            // at the drop, so both ends agree without a final exchange.
             let discarded = pendingUpdates.count
             pendingUpdates.removeAll()
             // Nothing to detach on the connection: the provider's table routes its
