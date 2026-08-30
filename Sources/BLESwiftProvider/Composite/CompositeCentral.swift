@@ -195,10 +195,18 @@ public final class CompositeCentral: CentralManaging, Sendable {
     /// Reconciles child `index` entering `poweredOn`, catching it up with the scan and the
     /// connection-event registration it could not have served while it was off. Must be called
     /// on ``queue``.
-    private func childChangedState(_ index: Int) {
+    ///
+    /// Driven by the state the child *reported*, never by its live `radioState`: two
+    /// transitions that coalesce before this handler drains both read the same live value, so
+    /// re-reading it would see `was == now` for each and skip the reconciliation the power
+    /// cycle earned.
+    ///
+    /// - Parameters:
+    ///   - index: The child that reported a state.
+    ///   - now: The state it reported, from the `didUpdateState` payload.
+    private func childChangedState(_ index: Int, to now: CentralState) {
         dispatchPrecondition(condition: .onQueue(queue))
         let was = _childStates[index]
-        let now = backends[index].radioState
         guard was != now else { return }
         _childStates[index] = now
         guard was != .poweredOn, now == .poweredOn else { return }
@@ -239,10 +247,10 @@ public final class CompositeCentral: CentralManaging, Sendable {
     private func handle(_ event: CentralEvent, from index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         switch event {
-        case .didUpdateState:
+        case .didUpdateState(let state):
             // Never forwarded verbatim: one child powering off says nothing about the
             // composite, which is still served by the others.
-            childChangedState(index)
+            childChangedState(index, to: state)
             emitState()
         case .willRestoreState:
             // Dropped. Restoration is a per-manager, iOS-only concept; replaying one

@@ -41,8 +41,13 @@ import Logging
 /// reported as `readyToUpdateSubscribers`. A dropped link empties the window — the
 /// acknowledgements died with the session that owed them, and pushes made while it is down
 /// are dropped unsent, so neither can ever be acknowledged — and the window is emptied again
-/// at the reconnect, which is also where a host left blocked by either is released by exactly
-/// one `readyToUpdateSubscribers`. Never by the drop itself.
+/// at the reconnect. A host blocked on the window when the link drops is released by the drop
+/// itself, with `bluetoothUnavailable`: a drop from any state but `.unsupported`
+/// delivers `didUpdateState(.unsupported)`, and `PeripheralHost` fails every parked readiness
+/// waiter on any state but `.poweredOn`. The single `readyToUpdateSubscribers` at the
+/// reconnect is the backstop for a waiter that parked while the radio was already
+/// `.unsupported` — a drop from that state delivers no state change — not the release path
+/// for the drop.
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``LinkCentral``: every stored property is `nonisolated(unsafe)`, safe only because every
@@ -105,9 +110,13 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// cheaper than hashing.
     nonisolated(unsafe) private var _outstandingUpdates: [UInt64] = []
 
-    /// Whether the window was full when the link dropped, so the owning `PeripheralHost` is
-    /// waiting on a `readyToUpdateSubscribers` that the dead session's acknowledgements can
-    /// never produce. Cleared by the reconnect that answers it.
+    /// Whether the window was full when the link dropped. A host blocked on it at a drop from
+    /// any state but `.unsupported` has already been failed with `bluetoothUnavailable` by the `.unsupported`
+    /// state change; this flag arms the reconnect to emit one `readyToUpdateSubscribers` for
+    /// the waiter that case cannot reach — one parked before a drop taken from an
+    /// already-`.unsupported` radio, which delivers no state change to fail it, and whose
+    /// window is emptied here with the waiter still parked. Cleared by the reconnect that
+    /// emits it.
     nonisolated(unsafe) private var _wasBlockedAtDrop = false
 
     /// Whether the next provider state is a *reconnect* and must clear the window rather than
@@ -186,12 +195,22 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         session.isConnected
     }
 
-    /// Stops the session and detaches the event handler. Idempotent, and safe to call from
-    /// any thread. Nothing calls it in production; `deinit` stops the session on its own.
+    /// Stops the session, then runs the teardown a dropped link runs — every subscriber
+    /// reported as departing and the state dropped to `.unsupported` — and detaches the event
+    /// handler a turn behind it. Idempotent, and safe to call from any thread. Nothing calls it in production;
+    /// `deinit` stops the session on its own.
+    ///
+    /// **The teardown runs before the handler goes, and the handler goes a turn behind it**,
+    /// for the reason ``LinkCentral/shutdown()`` gives: the session is marked stopped before
+    /// its connection reaches a terminal state, so `onDisconnected` never fires, and a host
+    /// awaiting `add(_:)` or `startAdvertising(_:)` was stranded rather than failed.
     public func shutdown() {
         session.stop()
         queue.async { [self] in
-            _eventHandler = nil
+            handleLinkDropped()
+            queue.async { [self] in
+                _eventHandler = nil
+            }
         }
     }
 
@@ -341,10 +360,13 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// a surviving count would wedge the window shut. Emptying it here also keeps
     /// ``updateValue(_:for:onSubscribed:)`` answering `true` while the link is down, so a host
     /// pushing into the dark is not wedged either — those pushes are dropped unsent and are
-    /// cleared again at the reconnect. A host that was *blocked* at that moment is deliberately
-    /// **not** released here: it is about to be told the radio is `.unsupported`, and a
-    /// readiness signal against a dead radio would only invite a push that goes nowhere. The
-    /// release is deferred to the reconnect.
+    /// cleared again at the reconnect. No `readyToUpdateSubscribers` is emitted here — a
+    /// readiness signal against a dead radio would only invite a push that goes nowhere. A
+    /// host that was *blocked* at that moment is released all the same, by the
+    /// `didUpdateState(.unsupported)` delivered below when the radio was not already `.unsupported`:
+    /// `PeripheralHost` fails every parked readiness waiter with `bluetoothUnavailable` on any
+    /// state but `.poweredOn`. When the radio was already `.unsupported` no state change is
+    /// delivered, and `_wasBlockedAtDrop` arms the reconnect's readiness instead.
     private func handleLinkDropped() {
         dispatchPrecondition(condition: .onQueue(queue))
         _isAdvertising = false
@@ -400,8 +422,10 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
                 // The provider is back, with a session — and a queue — of its own. Nothing this
                 // client sent to the old one will ever be acknowledged, whether it was in
                 // flight at the drop or dropped unsent afterwards, so the window is emptied
-                // here too. A host blocked by either can push again, but only a
-                // `readyToUpdateSubscribers` will tell it so.
+                // here too. A host blocked at the drop was already failed by the `.unsupported`
+                // state change; one still parked — it parked while the radio was already
+                // `.unsupported`, so no state change failed it — is told it can push again
+                // only by this `readyToUpdateSubscribers`.
                 _isAwaitingReconnect = false
                 let wasBlocked = _outstandingUpdates.count >= LinkFlowControl.updateValueWindow || _wasBlockedAtDrop
                 _wasBlockedAtDrop = false

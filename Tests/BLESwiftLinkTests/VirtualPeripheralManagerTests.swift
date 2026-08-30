@@ -462,6 +462,44 @@ struct VirtualPeripheralManagerTests {
         #expect(found == nil)
     }
 
+    @Test("Clearing the event handler detaches it without removing the hosted device")
+    func clearingTheHandlerIsNotTerminal() async throws {
+        let radio = VirtualRadio()
+        let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.detach")
+        let identifier = UUID()
+        let backend = VirtualPeripheralManagerBackend(radio: radio, queue: queue, identifier: identifier)
+
+        let started = Mutex<[NSError?]>([])
+        await Self.onQueue(queue) {
+            backend.eventHandler = { event in
+                if case .didStartAdvertising(let error) = event { started.withLock { $0.append(error) } }
+            }
+            backend.add(Self.service)
+            backend.startAdvertising(PeripheralAdvertisement(localName: "Detachable", serviceUUIDs: [Self.heartRate]))
+        }
+        await waitFor { started.withLock { !$0.isEmpty } }
+        #expect(started.withLock { $0 } == [nil])
+        #expect(await radio.services(of: identifier, matching: nil) == [Self.heartRate])
+
+        // Detaching is not a teardown: the device stays on the radio, exactly as
+        // ``CompositePeripheralManager/eventHandler`` documents for every child it clears.
+        await Self.onQueue(queue) { backend.eventHandler = nil }
+        _ = await Self.onQueue(queue) { true }
+        #expect(await radio.services(of: identifier, matching: nil) == [Self.heartRate])
+
+        // And re-attaching re-installs a working backend rather than an inert one: the
+        // advertisement it is given is applied and completes without the removal error.
+        await Self.onQueue(queue) {
+            backend.eventHandler = { event in
+                if case .didStartAdvertising(let error) = event { started.withLock { $0.append(error) } }
+            }
+            backend.startAdvertising(PeripheralAdvertisement(localName: "Detachable", serviceUUIDs: [Self.heartRate]))
+        }
+        await waitFor { started.withLock { $0.count } == 2 }
+        #expect(started.withLock { $0 } == [nil, nil])
+        #expect(await radio.services(of: identifier, matching: nil) == [Self.heartRate])
+    }
+
     // MARK: - Departing subscribers
 
     /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.

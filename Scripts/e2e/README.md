@@ -65,9 +65,9 @@ is `.build/e2e-report/provider.log`.
 
 Nothing to do by hand: `grantiva simulator ensure --name "iPhone 17"` resolves the device type
 from the name and the newest installed iOS runtime, creates the simulator if it is missing,
-reuses it if it is not, and boots it either way. A machine that already has two simulators
-sharing a name is fine too — `ensure` reports one UDID and every downstream command is given
-that UDID rather than the name, so a duplicate cannot make a run ambiguous.
+reuses it if it is not, and boots it either way. A machine with two simulators sharing a name
+is the one `ensure` failure the script recovers from (`Multiple simulators are named …`): it picks one
+of them itself, preferring a booted one, warns, and carries on by UDID — see "Open" below.
 
 ## Running it on CI
 
@@ -140,7 +140,7 @@ flows now do instead:
    now — it is what makes this test possible.
 8. **`simulator ensure` required `--name`, `--device-type` and `--runtime` together**, so the
    script used `xcrun simctl` and its own JSON lookup. 1.7.0 accepts `--name` alone and reads
-   the device type out of the name; the simctl lookup is gone.
+   the device type out of the name; the simctl lookup is gone from the happy path — it survives only in the duplicate-name fallback below.
 9. **Off-screen elements are not found, and `scrollUntilVisible` is the fix.** Not a bug — the
    accessibility tree genuinely does not expose a `List` row below the fold. Both flows keep
    their `scrollUntilVisible` steps.

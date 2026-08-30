@@ -1084,6 +1084,75 @@ struct CompositeBackendTests {
         #expect(added.withLock { $0 } == [Self.heartRate, Self.battery])
         #expect(started.withLock { $0 } == 2)
     }
+
+    // MARK: - Coalesced state transitions
+
+    @Test("A child's coalesced power cycle still re-issues the scan")
+    func coalescedCentralTransitionsStillReconcile() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.coalescedScan")
+        let first = FakeCentral(queue: queue, state: .poweredOn)
+        let second = FakeCentral(queue: queue, state: .poweredOn)
+        let composite = CompositeCentral(backends: [first, second], queue: queue)
+        await onQueue(queue) { composite.eventHandler = { _ in } }
+
+        let options = ScanOptions(allowDuplicates: true)
+        await onQueue(queue) { composite.scanForPeripherals(withServices: [Self.heartRate], options: options) }
+        #expect(await onQueue(queue) { second.scanCallCount } == 1)
+
+        // The child power-cycles, and both transitions land before the composite drains
+        // either — so its *live* `radioState` reads `.poweredOn` at both deliveries, and the
+        // payloads are the only record that it was ever off.
+        await onQueue(queue) {
+            let deliver = second.eventHandler
+            deliver?(.didUpdateState(.poweredOff))
+            deliver?(.didUpdateState(.poweredOn))
+        }
+
+        #expect(await onQueue(queue) { second.scanCallCount } == 2)
+        #expect(await onQueue(queue) { second.lastScanServices } == [Self.heartRate])
+        // The child that never cycled was issued the scan exactly once.
+        #expect(await onQueue(queue) { first.scanCallCount } == 1)
+    }
+
+    @Test("A peripheral child's coalesced power cycle still republishes and re-advertises")
+    func coalescedPeripheralTransitionsStillReconcile() async {
+        let queue = DispatchSerialQueue(label: "CompositeBackendTests.coalescedPublish")
+        let first = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let second = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
+
+        let added = Mutex<[NSError?]>([])
+        let started = Mutex<[NSError?]>([])
+        await onQueue(queue) {
+            composite.eventHandler = { event in
+                switch event {
+                case .didAddService(_, let error): added.withLock { $0.append(error) }
+                case .didStartAdvertising(let error): started.withLock { $0.append(error) }
+                default: break
+                }
+            }
+            composite.add(Self.service)
+            composite.startAdvertising(PeripheralAdvertisement(localName: "Composite", serviceUUIDs: [Self.heartRate]))
+        }
+        await waitFor { added.withLock { !$0.isEmpty } && started.withLock { !$0.isEmpty } }
+        #expect(await onQueue(queue) { second.addedServices.count } == 1)
+        #expect(await onQueue(queue) { second.startAdvertisingCallCount } == 1)
+
+        // As above: two transitions coalesce, so only the payloads say the child went away
+        // and came back — and coming back is what the composite must catch up on.
+        await onQueue(queue) {
+            let deliver = second.eventHandler
+            deliver?(.didUpdateState(.poweredOff))
+            deliver?(.didUpdateState(.poweredOn))
+        }
+        _ = await onQueue(queue) { true }
+
+        #expect(await onQueue(queue) { second.addedServices.count } == 2)
+        #expect(await onQueue(queue) { second.startAdvertisingCallCount } == 2)
+        // The catch-up is the composite's own business: the host hears one of each, still.
+        #expect(added.withLock { $0 } == [nil])
+        #expect(started.withLock { $0 } == [nil])
+    }
 }
 
 /// A peripheral-role child that answers only while its radio is on: whatever it had in flight

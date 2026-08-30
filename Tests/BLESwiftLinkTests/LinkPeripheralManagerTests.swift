@@ -88,6 +88,48 @@ struct LinkPeripheralManagerTests {
         }
     }
 
+    @Test("shutdown reports the subscribers leaving and drops the state to .unsupported")
+    func shutdownRunsTheDroppedLinkTeardown() async throws {
+        let provider = try ScriptedHostProvider()
+        try await provider.start()
+        let queue = DispatchSerialQueue(label: "linkperipheralmanager.shutdown")
+        let link = LinkPeripheralManager(
+            endpoint: provider.endpoint,
+            queue: queue,
+            clientName: "shutdown",
+            codec: .json,
+            retryInterval: .milliseconds(50)
+        )
+        defer { provider.stop() }
+
+        let states = Mutex<[CentralState]>([])
+        let subscribes = Mutex<Int>(0)
+        let unsubscribes = Mutex<[CharacteristicIdentifier]>([])
+        await onQueue(queue) {
+            link.eventHandler = { event in
+                switch event {
+                case .didUpdateState(let state): states.withLock { $0.append(state) }
+                case .didSubscribe: subscribes.withLock { $0 += 1 }
+                case .didUnsubscribe(_, let characteristic): unsubscribes.withLock { $0.append(characteristic) }
+                default: break
+                }
+            }
+        }
+        await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .poweredOn } }
+
+        let subscriber = WireSubscriber(id: UUID(), maximumUpdateValueLength: 20)
+        provider.emit(.didSubscribe(central: subscriber, characteristic: WireCharacteristicRef(Self.measurement)))
+        await waitFor(timeout: .seconds(5)) { subscribes.withLock { $0 } == 1 }
+        #expect(subscribes.withLock { $0 } == 1)
+
+        // Tearing the link down is not the same as the link staying up: a host must hear its
+        // subscribers leave and the radio go, or it waits on both forever.
+        link.shutdown()
+        await waitFor(timeout: .seconds(1)) { states.withLock { $0.last == .unsupported } }
+        #expect(states.withLock { $0.last } == .unsupported)
+        #expect(unsubscribes.withLock { $0 } == [Self.measurement])
+    }
+
     @Test("A read request carrying a negative offset drops the session instead of trapping")
     func negativeReadOffsetDropsTheSession() async throws {
         let provider = try ScriptedHostProvider()

@@ -153,22 +153,26 @@ final class HostSession: Sendable {
         }
     }
 
-    /// Tears the session down: stops advertising, empties the hosted GATT database, detaches
-    /// the backend's event handler — which, for a ``VirtualPeripheralManagerBackend``, also
-    /// removes the device from the radio, so any central still connected to it sees the
-    /// removal — and closes the link connection. Idempotent, and safe to call from any
-    /// thread.
+    /// Tears the session down: stops advertising, empties the hosted GATT database, takes the
+    /// hosted device off the radio — so any central still connected to it sees the removal —
+    /// detaches the backend's event handler, and closes the link connection. Idempotent, and
+    /// safe to call from any thread.
+    ///
+    /// The removal is asked for outright rather than taken as a side effect of the detach:
+    /// clearing a ``VirtualPeripheralManagerBackend``'s handler only detaches it, which is
+    /// what lets a composite clear and re-install its children.
     func close() {
         queue.async { [self] in
             guard !isClosed else { return }
             isClosed = true
             backend.stopAdvertising()
             backend.removeAllHostedServices()
+            (backend as? any HostedDeviceRemoving)?.removeHostedDevice()
             backend.eventHandler = nil
             // Dropped, not acknowledged: the connection is being cancelled, so no
             // `updateValueDelivered` could reach the client anyway — and it does not need one.
-            // A client whose link drops empties its own window and releases a blocked host on
-            // the next reconnect, so both ends agree without a final exchange.
+            // A client whose link drops empties its own window and fails a blocked host's wait
+            // at the drop, so both ends agree without a final exchange.
             let discarded = pendingUpdates.count
             pendingUpdates.removeAll()
             // Nothing to detach on the connection: the provider's table routes its

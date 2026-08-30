@@ -1281,6 +1281,26 @@ struct VirtualRadioTests {
         #expect(allowed == .success(Data([0, 0x48])))
     }
 
+    @Test("A radio with a fixture attached deallocates once its last strong reference drops")
+    func fixtureAttachmentDoesNotRetainTheRadio() async throws {
+        let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
+        weak var weakRadio: VirtualRadio?
+        // The handler outlives the scope, so the only path that could keep the radio alive is
+        // the handle it was attached with — exactly the cycle this guards against.
+        var retainedHandler: FixtureDeviceHandler?
+        do {
+            let radio = VirtualRadio()
+            weakRadio = radio
+            let (device, handler) = VirtualDevice.fixture(fixture)
+            await handler.attach(radio.register(device))
+            retainedHandler = handler
+            #expect(weakRadio != nil)
+        }
+        #expect(weakRadio == nil)
+        #expect(retainedHandler != nil)
+        retainedHandler = nil
+    }
+
     /// The remote `backend` vends for `identifier`, fetched on its own queue.
     private static func remote(
         _ backend: VirtualCentralBackend,

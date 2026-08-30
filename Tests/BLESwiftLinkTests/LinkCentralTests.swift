@@ -287,6 +287,43 @@ struct LinkCentralTests {
         try await bounded { try await disconnectTask.value }
     }
 
+    @Test("shutdown fails an in-flight read instead of stranding it")
+    func shutdownFailsAnInFlightRead() async throws {
+        let (central, link, provider) = try await makeRig()
+        defer { provider.stop() }
+        let id = UUID()
+        let ref = WireCharacteristicRef(Self.measurement)
+
+        let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: "HRM")) }
+        await waitFor { provider.requests.withLock { $0 }.contains { if case .connect(let p, _, _) = $0 { return p == id }; return false } }
+        provider.emit(.didConnect(peripheral: id, name: "HRM", maximumWriteWithResponse: 200, maximumWriteWithoutResponse: 100))
+        let peripheral = try await bounded { try await connectTask.value }
+
+        // A read the provider is given and never answers — the state a consumer is in when it
+        // decides to tear the link down.
+        let readTask = Task { () -> Data in try await peripheral.read(from: Self.measurement) }
+        await waitFor { provider.requests.withLock { $0 }.contains(.discoverServices(peripheral: id, services: ["180D"])) }
+        provider.emit(.didDiscoverServices(peripheral: id, services: ["180D"], error: nil))
+        await waitFor { provider.requests.withLock { $0 }.contains(.discoverCharacteristics(peripheral: id, service: "180D", characteristics: ["2A37"])) }
+        provider.emit(.didDiscoverCharacteristics(
+            peripheral: id,
+            service: "180D",
+            characteristics: [WireDiscoveredCharacteristic(uuid: "2A37", properties: CharacteristicProperties([.read]).rawValue)],
+            error: nil
+        ))
+        await waitFor { provider.requests.withLock { $0 }.contains(.readValue(peripheral: id, characteristic: ref)) }
+
+        // The teardown the branch's own tests use. It must fail what is in flight, exactly as
+        // the provider going away does — a read left awaiting a completion nobody will ever
+        // deliver is the hang this guards against.
+        link.shutdown()
+        await #expect(throws: BLESwiftError.unexpectedDisconnect) {
+            try await bounded("read after shutdown", seconds: 1) { try await readTask.value }
+        }
+        await waitFor(timeout: .seconds(1)) { central.state == .unsupported }
+        #expect(central.state == .unsupported)
+    }
+
     @Test("Provider drop disconnects connected peripherals and reports .unsupported")
     func providerDrop() async throws {
         let (central, link, provider) = try await makeRig()
