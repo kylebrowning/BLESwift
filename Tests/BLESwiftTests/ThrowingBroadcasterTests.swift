@@ -3,6 +3,7 @@
 //  BLESwiftTests
 //
 
+import Dispatch
 import Testing
 import BLESwiftCore
 @testable import BLESwift
@@ -202,4 +203,77 @@ struct ThrowingBroadcasterTests {
             return error
         }
     }
+
+    @Test("Stress: yielding while subscribers cancel never deadlocks")
+    func concurrentYieldAndCancellationDoNotDeadlock() {
+        // Mirrors the `Broadcaster` regression test for the same lock-order inversion:
+        // `yield(_:)` must not hold this broadcaster's `Mutex` across
+        // `AsyncThrowingStream.Continuation.yield`, which — when it resumes a suspended
+        // consumer — takes that consumer task's status lock, while a concurrent cancellation
+        // holds that status lock and re-enters the `Mutex` from `onTermination`.
+        //
+        // A deadlock parks every cooperative thread rather than suspending tasks, so an
+        // `await`-based watchdog would never be scheduled to notice it. The stress work runs
+        // detached and signals a `DispatchSemaphore`; this test blocks on that semaphore with
+        // a deadline, so the inversion surfaces as a failed expectation, not a hung suite.
+        let finishedSignal = DispatchSemaphore(value: 0)
+
+        let stress = Task.detached {
+            let broadcaster = ThrowingBroadcaster<Int>()
+
+            // Steady subscribers spend most of their time suspended, so each fan-out
+            // resumes them one after another — the half of the inversion that touches
+            // consumer status locks.
+            let steady = (0..<8).map { _ in
+                Task.detached {
+                    for try await _ in broadcaster.stream() {}
+                }
+            }
+
+            let producer = Task.detached {
+                var iteration = 0
+                while !Task.isCancelled {
+                    broadcaster.yield(iteration)
+                    iteration += 1
+                    // Let the consumers drain and suspend again before the next fan-out.
+                    await Task.yield()
+                }
+            }
+
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<4 {
+                    group.addTask {
+                        for _ in 0..<150 {
+                            let consumer = Task.detached {
+                                for try await _ in broadcaster.stream() {}
+                            }
+                            await Task.yield()
+                            // Cancelling a consumer that is very likely suspended awaiting
+                            // the producer: cancellation runs `onTermination` synchronously,
+                            // under that consumer's status lock, on this thread.
+                            consumer.cancel()
+                            _ = try? await consumer.value
+                        }
+                    }
+                }
+            }
+
+            producer.cancel()
+            await producer.value
+            for task in steady {
+                task.cancel()
+            }
+            for task in steady {
+                _ = try? await task.value
+            }
+            broadcaster.finish()
+            finishedSignal.signal()
+        }
+
+        let finished = finishedSignal.wait(timeout: .now() + 10) == .success
+        stress.cancel()
+
+        #expect(finished, "ThrowingBroadcaster.yield deadlocked against subscriber cancellation")
+    }
+
 }
