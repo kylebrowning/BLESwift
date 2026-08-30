@@ -71,35 +71,50 @@ that UDID rather than the name, so a duplicate cannot make a run ambiguous.
 
 ## Running it on CI
 
-**On demand only, from the Actions tab** — `.github/workflows/sim-to-sim-e2e.yml`, triggered
-by `workflow_dispatch` and nothing else. It is deliberately **not a PR gate**: GitHub's macOS
-runners boot simulators in anywhere from 112 s to 577 s, and grantiva's runner is not yet
-reliable on that image — it has passed there once. A job that goes red on runner weather rather
-than on the code teaches a reviewer to ignore it, so this one is run when it is wanted and
-**fails honestly** when it fails. There is no `continue-on-error`.
+**On every push to `main` and every same-repository pull request** — `.github/workflows/sim-to-sim-e2e.yml`,
+on the project's self-hosted Mac runner (labels `self-hosted, macOS, ARM64, bleswift`). It
+is a PR gate now because the machine boots two simulators in seconds; GitHub's hosted macOS
+image took 112 s to 577 s and flaked on runner weather, which is why the job was on-demand
+only until the runner moved. The job's `if:` skips a pull request from a fork — but that
+condition lives in the workflow file, and a fork's PR runs its own copy of it, so it is a
+convenience rather than the boundary. The boundary is the repository's fork-PR approval
+policy plus the rule in `ci.yml`: approving a fork PR includes reading its
+`.github/workflows` diff. It
+**fails honestly** when it fails — there is no `continue-on-error`. grantiva is whatever the
+runner has installed (`brew upgrade grantiva` on the Mac to move it); the job prints the
+version it ran.
 
-The dispatch form takes two optional inputs, `advertiser_sim` and `scanner_sim`. Give both to
-pin the run to particular simulator names; leave both empty — the default — and the job
-resolves `ADVERTISER_SIM` / `SCANNER_SIM` at run time, taking the two newest distinct
-`iPhone …` names the runner image actually has from `xcrun simctl list devices available -j`.
-Nothing is pinned in the workflow, because named devices drift with the image's Xcode and a
-name that matches nothing fails the job outright. Giving only one of the two, or the same name
-twice, is refused with a readable error rather than silently running both roles on one device.
+It can also be dispatched from the Actions tab. The dispatch form takes two optional inputs,
+`advertiser_sim` and `scanner_sim`. Give both to
+pin the run to particular simulator names; leave both empty — the default — and the job uses
+two CI-only devices, `BLESwift CI Advertiser` and `BLESwift CI Scanner`, created on first use
+by `Scripts/ci/ensure-ci-simulator.sh` from the newest iPhone device type on the highest-version
+iOS runtime installed. A device of that name on an older runtime, or left unavailable by a
+runtime removal, is deleted and recreated — so the CI devices follow runtime installs — and a
+delete that fails stops the job rather than creating a duplicate of the name. The runner is also a
+workstation, and the job's reclaim step tears down every device of the names it used — so
+the names are CI's own, never "the two newest iPhones" someone is debugging on. Giving only
+one of the two inputs, or the same name twice, is refused with a readable error rather than
+silently running both roles on one device.
 
-**grantiva is installed unpinned.** `grantiva/homebrew-tap` ships a single `Formula/grantiva.rb`
-with no versioned formulae, so the job takes whatever the tap's HEAD points at. The script
-depends on 1.7.0 features (`simulator ensure --name`, `run --ready-file`, `run --env`,
-`simulator teardown --udid --force`), so the job prints `grantiva --version` as its own step.
+**grantiva is whatever the runner has.** The job installs nothing: it puts Homebrew on
+`PATH` and runs the grantiva already on the Mac, printing `grantiva --version` as its own
+step. The script depends on 1.7.0 features (`simulator ensure --name`, `run --ready-file`,
+`run --env`, `simulator teardown --udid --force`); `brew upgrade grantiva` on the runner moves
+it, and the tap has no versioned formulae to pin to.
 
 First things to check when a run goes red:
 
 - **grantiva version.** The `grantiva version` step; anything below 1.7.0 will fail on the
   flags above.
-- **grantiva installation.** `brew install grantiva/tap/grantiva` must succeed, and on a cold
+- **grantiva presence.** A missing grantiva fails the `grantiva version` step with
+  `command not found` — `brew install grantiva/tap/grantiva` on the runner. On a cold
   machine the first `grantiva run` builds `GrantivaAgent` and a WebDriverAgent runner inside
   the first flow's clock. `grantiva doctor` reports what is missing.
-- **Simulator availability.** If no iOS runtime is installed at all, `grantiva simulator ensure`
-  has nothing to create the device from and the script fails immediately.
+- **Simulator availability.** If no iOS runtime is installed at all, the **Resolve two
+  simulators** step fails first — `Scripts/ci/ensure-ci-simulator.sh` exits with `no iOS
+  runtime is installed` before the script runs. On the dispatch-input path the same condition
+  reaches `grantiva simulator ensure`, which has nothing to create the device from.
 - **Uploaded artifacts.** The `sim-to-sim-e2e` artifact contains `provider.log` (which side
   connected: `opened central session …` / `opened host session …`), both `report.json`s and
   grantiva's failure screenshots. That is usually enough to tell a BLE failure from a UI one.
@@ -158,21 +173,22 @@ flows now do instead:
     so it is paid once rather than per run.
 12. **WebDriverAgent's 90-second startup timeout** was what first made this job non-gating.
     With the simulator booted to `bootstatus -b` and the app pre-installed, and with 1.7.0's
-    WDA cache, it has not been hit again; the job is off the PR gate for runner capacity, not
-    for this.
+    WDA cache, it has not been hit again.
 
 ### Open
 
 **Cold-runner first-run WebDriverAgent build.** grantiva's WDA cache covers iOS 26.2 and 26.4.
-GitHub's `macos-latest` image is on 26.2, so CI should now be served from that cache; a local
-machine on iOS 27 falls outside it and rebuilds WebDriverAgent once, the first time a flow runs
-against a 27 simulator. Nothing to work around — it is a one-time cost per runtime — but it is
-the remaining reason a first run looks hung for a few minutes.
+A machine on iOS 27 — the self-hosted runner included — falls outside it and rebuilds
+WebDriverAgent once, the first time a flow runs against a 27 simulator. Nothing to work around —
+it is a one-time cost per runtime on the runner — but it is the remaining reason a first run
+looks hung for a few minutes.
 
 **`simulator ensure --name` refuses a duplicated name.** A machine with two simulators of the
 same name gets `Multiple simulators are named "<name>"; delete duplicates or use a unique
-name` and a non-zero exit — and GitHub's runner image ships three "iPhone 17 Pro Max" devices,
-so a name the runner picks can genuinely be ambiguous. There is no `--udid` on `ensure` to
+name` and a non-zero exit. CI no longer meets this — its `BLESwift CI …` names are kept unique
+by `Scripts/ci/ensure-ci-simulator.sh` — but a local machine, or a dispatch that names a
+device the machine has twice (GitHub's hosted image shipped three "iPhone 17 Pro Max"), still
+can. There is no `--udid` on `ensure` to
 disambiguate with, and deleting a runner's devices is not this script's business, so
 `ensure_simulator` catches that one error and falls back to `xcrun simctl list devices
 available -j`: it picks a device of that name (preferring one already booted), boots it, and

@@ -224,9 +224,8 @@ advertises, the other scans, connects, reads, writes, and subscribes.
 
 `Scripts/sim-to-sim-e2e.sh` runs exactly that, end to end, across two booted simulators and the
 `BLESwiftExplorer` sample app. The provider binds an ephemeral loopback port and both apps are
-pointed at it through `BLESWIFT_LINK`, so nothing is pinned. It runs locally, and on CI on
-demand from the Actions tab — it is not a PR gate, because GitHub macOS runner capacity is
-erratic. See `Scripts/e2e/README.md` for the topology, the
+pointed at it through `BLESWIFT_LINK`, so nothing is pinned. It runs locally, and on every push
+to `main` and every same-repository pull request on the project's self-hosted CI runner. See `Scripts/e2e/README.md` for the topology, the
 environment overrides, and what to check when it goes red.
 
 ## Security

@@ -5,16 +5,56 @@ on:
     branches: [main]
   pull_request:
 
+# Every job runs on the project's self-hosted macOS runner (labels below). GitHub's hosted
+# macOS runners boot simulators in 100-600 s and starve the test process about one push in
+# four; a Mac on a desk does neither. A single runner executes one job at a time, so the
+# jobs in a run are effectively serial; a newer pull-request run on the same ref cancels
+# the older one, and pushes to main queue (see `concurrency` below).
+#
+# The repository is public. A pull request from a fork falls back to GitHub's hosted image
+# in `runs-on` below — but that expression lives in this file, and a `pull_request` run uses
+# the workflow file FROM THE PR HEAD, so a fork can rewrite it. The expression is therefore a
+# convenience, not the boundary. The boundary is the repository's fork-PR approval policy
+# ("all external contributors"): nothing from a fork runs until a maintainer approves it, and
+# that approval MUST include reading the PR's `.github/workflows` diff — a fork PR that touches
+# a workflow file is not approved, it is rewritten by the maintainer on a same-repo branch.
+# Runner groups with pinned workflows would enforce this mechanically; they are an
+# organization feature and this is a personal repository.
+# A superseded pull-request run is cancelled; pushes to main queue, so every commit on main
+# keeps a CI verdict even when two merges land within one serialized run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Strict build & test (macOS)
-    runs-on: macos-latest
+    timeout-minutes: 20
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Build (warnings as errors)
         run: BLESWIFT_STRICT=1 swift build
       - name: Test
         run: BLESWIFT_STRICT=1 swift test
+      - name: Test on the Swift 6.3 release toolchain
+        # The self-hosted Mac runs a beta Xcode, which has hidden Swift 6.3 release-toolchain
+        # failures before (an `Xcode 27 beta` build passed where consumers on 6.3.3 failed).
+        # The release toolchain installed on the runner is the canary for that, and its
+        # absence on the self-hosted runner is a failure, not a skip: a canary that goes
+        # green when it is uninstalled is not one. Only GitHub's hosted image — the fork-PR
+        # fallback, which has no such toolchain — may skip it.
+        env:
+          HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          if xcrun --toolchain org.swift.633202606251a swift --version >/dev/null 2>&1; then
+            TOOLCHAINS=org.swift.633202606251a swift test --scratch-path .build-6.3
+          elif [ "$HOSTED" = "true" ]; then
+            echo "::warning::hosted runner has no Swift 6.3.3 toolchain; canary skipped"
+          else
+            echo "::error::Swift 6.3.3 release toolchain (org.swift.633202606251a) is not installed on this runner"
+            exit 1
+          fi
       - name: Consumer simulation (issue #20 regression guard)
         # Xcode compiles package dependencies with -suppress-warnings, which
         # hard-conflicts with -warnings-as-errors. This step fails if strict
@@ -27,41 +67,44 @@ jobs:
     # simulator so those tests — and the connection-event subscriber-refcount
     # concurrency code they cover — actually execute.
     name: Test (iOS Simulator)
-    runs-on: macos-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # Named devices drift with the runner image's Xcode — `iPhone 16` is gone from the
-      # current one — and a destination that matches nothing fails the job outright. So the
-      # name is resolved from what the runner actually has rather than pinned here.
-      #
-      # Ranked, not sorted alphabetically: a numbered model ("iPhone 17 Pro") outranks an
-      # unnumbered or suffixed one ("iPhone Air", "iPhone 17e"), then the number decides, then
-      # the name. A plain sort hands back "iPhone Air" as the newest, which it is not. Same
-      # ranking as `sim-to-sim-e2e.yml`, which takes the newest two rather than the newest one.
-      - name: Resolve a simulator
+      # A CI-only device, by UDID. The runner is also someone's workstation, so the job must
+      # not borrow "the newest iPhone" — that is the device they are debugging on. The script
+      # reuses a device of this name when it is on the highest-version iOS runtime installed,
+      # and otherwise recreates it from the newest iPhone device type on that runtime; nothing
+      # is pinned, so the device follows runtime installs.
+      - name: Resolve the CI simulator
         run: |
-          SIM=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; names={x['name'] for r in d for x in d[r] if x['name'].startswith('iPhone')}; rank=lambda n: (1, int(n.split()[1]), n) if len(n.split()) > 1 and n.split()[1].isdigit() else (0, 0, n); print(sorted(names, key=rank)[-1])")
-          echo "SIM=$SIM" >> "$GITHUB_ENV"
-          echo "Using $SIM"
+          SIM_UDID=$(Scripts/ci/ensure-ci-simulator.sh "BLESwift CI Test")
+          echo "SIM_UDID=$SIM_UDID" >> "$GITHUB_ENV"
+          xcrun simctl list devices -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(*[f\"Using {x['name']} ({r}) {x['udid']}\" for r in d for x in d[r] if x['udid']==sys.argv[1]])" "$SIM_UDID"
       - name: Test on iOS Simulator
-        # Retried once. Twice on this branch the runner's simulator starved the test process
-        # outright: the (unchanged, macOS-green) `BLESwiftTests` suite froze for ~100 s inside
-        # the simulator — process-side timestamps show ~47 s stalls, and every test in that
-        # window reported 104-105 s — until the whole job timed out. It is the runner, not the
-        # suite: the same tests pass in the macOS job and passed here on an earlier push.
+        # Retried once. On GitHub's hosted runners the simulator starved the test process
+        # outright (the macOS-green `BLESwiftTests` suite froze for ~100 s inside the
+        # simulator until the job timed out). The self-hosted Mac has not shown it; the retry
+        # stays for the hosted fallback that fork PRs still use.
         run: |
           for attempt in 1 2; do
-            xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,name=$SIM" && exit 0
+            xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,id=$SIM_UDID" && exit 0
             echo "attempt $attempt failed"
           done
           exit 1
+      - name: Shut the CI simulator down
+        # Runs on cancellation too: a cancelled `xcodebuild test` leaves the device booted
+        # with a half-torn-down session on a persistent runner.
+        if: always()
+        run: |
+          [ -n "$SIM_UDID" ] && xcrun simctl shutdown "$SIM_UDID" 2>/dev/null || true
 
   platform-build:
     # The manifest declares watchOS/tvOS/visionOS; the peripheral role's CoreBluetooth
     # APIs are unavailable there and must stay fenced out (issue #22 regression guard).
     name: Build (${{ matrix.platform }})
-    runs-on: macos-latest
+    timeout-minutes: 20
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}
     strategy:
       fail-fast: false
       matrix:
@@ -86,7 +129,8 @@ jobs:
     # so it stays compiling against the package. It depends on the package by path and
     # ships a committed .xcodeproj (via a .gitignore negation), so CI needs no xcodegen.
     name: Build sample app (${{ matrix.platform }})
-    runs-on: macos-latest
+    timeout-minutes: 20
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}
     strategy:
       fail-fast: false
       matrix:
