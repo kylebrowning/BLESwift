@@ -65,9 +65,9 @@ is `.build/e2e-report/provider.log`.
 
 Nothing to do by hand: `grantiva simulator ensure --name "iPhone 17"` resolves the device type
 from the name and the newest installed iOS runtime, creates the simulator if it is missing,
-reuses it if it is not, and boots it either way. A machine that already has two simulators
-sharing a name is fine too — `ensure` reports one UDID and every downstream command is given
-that UDID rather than the name, so a duplicate cannot make a run ambiguous.
+reuses it if it is not, and boots it either way. A machine with two simulators sharing a name
+is the one case `ensure` refuses (`Multiple simulators are named …`); the script then picks one
+of them itself, preferring a booted one, warns, and carries on by UDID — see "Open" below.
 
 ## Running it on CI
 

@@ -41,8 +41,11 @@ import Logging
 /// reported as `readyToUpdateSubscribers`. A dropped link empties the window — the
 /// acknowledgements died with the session that owed them, and pushes made while it is down
 /// are dropped unsent, so neither can ever be acknowledged — and the window is emptied again
-/// at the reconnect, which is also where a host left blocked by either is released by exactly
-/// one `readyToUpdateSubscribers`. Never by the drop itself.
+/// at the reconnect. A host blocked on the window when the link drops is released by the drop
+/// itself, with `bluetoothUnavailable`: ``handleLinkDropped()`` delivers
+/// `didUpdateState(.unsupported)`, and `PeripheralHost` fails every parked readiness waiter
+/// on any state but `.poweredOn`. The single `readyToUpdateSubscribers` at the reconnect is
+/// the backstop for a waiter that arrived in between, not the release path for the drop.
 ///
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``LinkCentral``: every stored property is `nonisolated(unsafe)`, safe only because every
