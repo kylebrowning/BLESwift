@@ -335,10 +335,12 @@ is broken.
   already full, and the provider parks what its backend is not ready for — up to 1024 writes
   or 1 MiB per peripheral. Past that, the provider discards that peripheral's entire parked
   backlog (the older writes included), keeps the link, and acknowledges the discarded writes
-  so your window reopens. So an app that releases far more than 64 writers on one
-  ``Peripheral/canSendWriteWithoutResponse`` signal against a peripheral that stays busy loses
-  payloads silently and is immediately told it may send again; CoreBluetooth would keep the
-  window shut. Pace `.withoutResponse` writes on the readiness signal as you would on device.
+  so your window reopens. ``Peripheral/write(_:to:type:timeout:)`` waits for that window on your
+  behalf, and ``Central`` resumes every waiting writer on one readiness signal — so an app with
+  far more than 64 concurrent `.withoutResponse` writers against a peripheral that stays busy
+  can overrun the ceiling, lose payloads silently, and be told at once that it may send again;
+  CoreBluetooth would keep the window shut. Bound the number of concurrent `.withoutResponse`
+  writers per peripheral as you would on device.
 - **Initial radio state.** A link-backed ``Central`` reports ``CentralState/unsupported`` until
   the provider answers — the same state the Simulator reports today, so an app that waits for
   `.poweredOn` simply waits — and then reports whatever state the provider does. If the provider
