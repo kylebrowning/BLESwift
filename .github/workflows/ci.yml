@@ -5,16 +5,41 @@ on:
     branches: [main]
   pull_request:
 
+# Every job runs on the project's self-hosted macOS runner (labels below). GitHub's hosted
+# macOS runners boot simulators in 100-600 s and starve the test process about one push in
+# four; a Mac on a desk does neither. A single runner executes one job at a time, so the
+# jobs in a run are effectively serial and a newer push on the same ref cancels the older
+# run rather than queueing behind it.
+#
+# The repository is public, so a pull request from a fork must never reach the self-hosted
+# machine: `runs-on` falls back to GitHub's hosted image for fork PRs (which also need a
+# maintainer's approval before any workflow runs — the repo's fork-PR approval policy is
+# "all external contributors"). Same-repository PRs and pushes use the self-hosted runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Strict build & test (macOS)
-    runs-on: macos-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Build (warnings as errors)
         run: BLESWIFT_STRICT=1 swift build
       - name: Test
         run: BLESWIFT_STRICT=1 swift test
+      - name: Test on the Swift 6.3 release toolchain
+        # The self-hosted Mac runs a beta Xcode, which has hidden Swift 6.3 release-toolchain
+        # failures before (an `Xcode 27 beta` build passed where consumers on 6.3.3 failed).
+        # The release toolchain installed on the runner is the canary for that; a hosted
+        # fallback runner (fork PRs) has no such toolchain and skips the step.
+        run: |
+          if xcrun --toolchain org.swift.633202606251a swift --version >/dev/null 2>&1; then
+            TOOLCHAINS=org.swift.633202606251a swift test --scratch-path .build-6.3
+          else
+            echo "::warning::Swift 6.3.3 release toolchain not installed on this runner; canary skipped"
+          fi
       - name: Consumer simulation (issue #20 regression guard)
         # Xcode compiles package dependencies with -suppress-warnings, which
         # hard-conflicts with -warnings-as-errors. This step fails if strict
@@ -27,13 +52,13 @@ jobs:
     # simulator so those tests — and the connection-event subscriber-refcount
     # concurrency code they cover — actually execute.
     name: Test (iOS Simulator)
-    runs-on: macos-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # Named devices drift with the runner image's Xcode — `iPhone 16` is gone from the
-      # current one — and a destination that matches nothing fails the job outright. So the
-      # name is resolved from what the runner actually has rather than pinned here.
+      # Named devices drift with the runner's Xcode — `iPhone 16` is gone from the current
+      # one — and a destination that matches nothing fails the job outright. So the name is
+      # resolved from what the runner actually has rather than pinned here.
       #
       # Ranked, not sorted alphabetically: a numbered model ("iPhone 17 Pro") outranks an
       # unnumbered or suffixed one ("iPhone Air", "iPhone 17e"), then the number decides, then
@@ -45,11 +70,10 @@ jobs:
           echo "SIM=$SIM" >> "$GITHUB_ENV"
           echo "Using $SIM"
       - name: Test on iOS Simulator
-        # Retried once. Twice on this branch the runner's simulator starved the test process
-        # outright: the (unchanged, macOS-green) `BLESwiftTests` suite froze for ~100 s inside
-        # the simulator — process-side timestamps show ~47 s stalls, and every test in that
-        # window reported 104-105 s — until the whole job timed out. It is the runner, not the
-        # suite: the same tests pass in the macOS job and passed here on an earlier push.
+        # Retried once. On GitHub's hosted runners the simulator starved the test process
+        # outright (the macOS-green `BLESwiftTests` suite froze for ~100 s inside the
+        # simulator until the job timed out). The self-hosted Mac has not shown it; the retry
+        # stays for the hosted fallback that fork PRs still use.
         run: |
           for attempt in 1 2; do
             xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,name=$SIM" && exit 0
@@ -61,7 +85,7 @@ jobs:
     # The manifest declares watchOS/tvOS/visionOS; the peripheral role's CoreBluetooth
     # APIs are unavailable there and must stay fenced out (issue #22 regression guard).
     name: Build (${{ matrix.platform }})
-    runs-on: macos-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}
     strategy:
       fail-fast: false
       matrix:
@@ -86,7 +110,7 @@ jobs:
     # so it stays compiling against the package. It depends on the package by path and
     # ships a committed .xcodeproj (via a .gitignore negation), so CI needs no xcodegen.
     name: Build sample app (${{ matrix.platform }})
-    runs-on: macos-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}
     strategy:
       fail-fast: false
       matrix:

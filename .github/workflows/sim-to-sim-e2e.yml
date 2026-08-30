@@ -1,21 +1,21 @@
 name: Sim-to-sim E2E
 
-# On demand only. Two simulator apps talk BLE to each other through bleswift-provider's
-# virtual radio, driven by grantiva. No hardware, no entitlements.
+# Two simulator apps talk BLE to each other through bleswift-provider's virtual radio,
+# driven by grantiva. No hardware, no entitlements. Runs on every push to main and every
+# same-repository pull request, on the project's self-hosted Mac: it boots two simulators in
+# seconds where GitHub's hosted image took 112-577 s and flaked on runner weather. A fork PR
+# skips this job — the self-hosted machine is never exposed to a fork, and the hosted image
+# cannot run the test reliably. There is no `continue-on-error`: when it is red, it is red.
 #
-# Not a PR gate, and deliberately not on `push`: GitHub's macOS runners boot simulators in
-# anywhere from 112 s to 577 s, and grantiva's runner is not yet reliable on that image — it
-# has passed there once. A job that flakes on runner weather teaches a reviewer to ignore it,
-# so it is run from the Actions tab when it is wanted, and it fails honestly when it does.
-# There is no `continue-on-error` here for that reason.
-#
-# The grantiva version this job runs is not pinned, and cannot be today: the tap ships a
-# single `grantiva.rb` and no versioned formulae, so there is no `grantiva@1.7.0` to ask brew
-# for. The `grantiva --version` step below is the signal instead — it prints what the tap's
-# HEAD formula actually installed, and is the first line to read when a run goes red after
-# passing. Pin the install here the day the tap publishes versioned formulae.
+# grantiva is whatever the runner has installed (`brew upgrade grantiva` on the Mac to move
+# it); the `grantiva --version` step records which. The script depends on 1.7.0 features
+# (`simulator ensure --name`, `run --ready-file`, `run --env`, `simulator teardown --udid
+# --force`), so a version older than that is the first thing to check when a run goes red.
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
     inputs:
       advertiser_sim:
@@ -27,26 +27,26 @@ on:
         required: false
         default: ''
 
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   sim-to-sim-e2e:
     name: Sim-to-sim E2E (grantiva)
-    runs-on: macos-latest
+    if: ${{ !github.event.pull_request.head.repo.fork }}
+    runs-on: [self-hosted, macOS, ARM64, bleswift]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Install grantiva
-        # Unpinned: the tap ships a single `grantiva.rb`, with no versioned formulae to pin
-        # to, so this installs whatever the tap's HEAD formula points at (1.7.0 or newer).
-        # Noted in Scripts/e2e/README.md.
-        run: brew install grantiva/tap/grantiva
+      - name: Homebrew on PATH
+        # The runner's LaunchAgent does not source a login shell, so grantiva's Homebrew
+        # prefix is added explicitly.
+        run: echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
       - name: grantiva version
-        # Printed as its own step: the script's behaviour depends on 1.7.0 features
-        # (`simulator ensure --name`, `run --ready-file`, `run --env`,
-        # `simulator teardown --udid --force`), and a tap that has moved backwards or
-        # forwards is the first thing to check when this run goes red.
         run: grantiva --version
       - name: Resolve two simulators
-        # Both inputs given, both are used as-is — that is what the dispatch inputs are for.
+        # Both dispatch inputs given, both are used as-is (they are empty on push and PR).
         # Otherwise the two newest *numbered* iPhone models the runner actually has: names are
         # ranked with a numbered model ("iPhone 17 Pro") above an unnumbered or suffixed one
         # ("iPhone Air", "iPhone 17e"), then by that number, then by name — so a plain
