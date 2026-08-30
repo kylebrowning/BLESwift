@@ -55,7 +55,7 @@ import Foundation
 /// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
 /// ``CompositeCentral``, including the requirement that **every child be confined to the
 /// same `queue`** and that ``init(backends:queue:log:)`` not be called from that queue.
-public final class CompositePeripheralManager: PeripheralManaging, Sendable {
+public final class CompositePeripheralManager: PeripheralManaging, HostedDeviceRemoving, Sendable {
 
     /// One outstanding fan-out awaiting its children's completions.
     private struct Pending {
@@ -546,6 +546,17 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
         guard _pendingAdvertisements[position].owing.isEmpty else { return }
         let settled = _pendingAdvertisements.remove(at: position)
         _eventHandler?(.didStartAdvertising(error: settled.error))
+    }
+
+    // MARK: - HostedDeviceRemoving
+
+    /// Takes every child's hosted device off its radio, for the children that host one.
+    /// Must be called on ``queue``.
+    func removeHostedDevice() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        for backend in backends {
+            (backend as? any HostedDeviceRemoving)?.removeHostedDevice()
+        }
     }
 
     // MARK: - PeripheralManaging

@@ -37,7 +37,19 @@ import Synchronization
 /// asynchronous, so every operation needing the device handle is appended to a serial
 /// `Task` chain that begins with that registration — nothing is lost or reordered when a
 /// call lands before the device exists.
-public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable {
+/// A peripheral-role backend hosting a device of its own on a ``VirtualRadio``, which can be
+/// taken back off it on demand.
+///
+/// Detaching a backend's event handler is reversible — the composites document a `nil`
+/// handler as a detach every child is re-installed from — so the teardown that really is
+/// final asks for the removal outright, through whichever backend a session was given.
+protocol HostedDeviceRemoving {
+
+    /// Takes the hosted device off the radio. Must be called on the backend's own queue.
+    func removeHostedDevice()
+}
+
+public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDeviceRemoving, Sendable {
 
     /// The queue every method and event delivery is confined to.
     public let queue: DispatchSerialQueue
@@ -212,9 +224,14 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
 
     /// Receives every `PeripheralHostEvent` this backend produces, on
     /// ``queue``. The first non-`nil` attachment also triggers the one-shot
-    /// `didUpdateState(.poweredOn)`; setting it back to `nil` removes the hosted device from
-    /// the radio, disconnecting any central attached to it with
-    /// ``VirtualRadio/deviceRemovedError``.
+    /// `didUpdateState(.poweredOn)`.
+    ///
+    /// Setting it back to `nil` *detaches* and nothing more: the hosted device stays on the
+    /// radio, and a request arriving with nobody listening is refused rather than parked.
+    /// Re-attaching re-installs a working backend — which is what
+    /// ``CompositePeripheralManager/eventHandler`` documents for every child it clears and
+    /// re-installs, and what a detach through it could not have honored while this one was
+    /// terminal. Removing the device is `removeHostedDevice()`'s job, and `deinit`'s.
     public var eventHandler: ((PeripheralHostEvent) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -224,14 +241,22 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
             dispatchPrecondition(condition: .onQueue(queue))
             _eventHandler = newValue
             handlerAttached.withLock { $0 = newValue != nil }
-            guard newValue != nil else {
-                removeDevice()
-                return
-            }
+            guard newValue != nil else { return }
             guard !_announcedState else { return }
             _announcedState = true
             queue.async { [self] in deliver(.didUpdateState(.poweredOn)) }
         }
+    }
+
+    /// Takes the hosted device off the radio, disconnecting any central attached to it with
+    /// ``VirtualRadio/deviceRemovedError`` and turning every later operation into a no-op
+    /// that fails its completion rather than parking it.
+    ///
+    /// The explicit teardown a session ending calls; `deinit` does the same work on its own
+    /// for a backend that is simply dropped. Must be called on ``queue``.
+    func removeHostedDevice() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        removeDevice()
     }
 
     /// Always `CentralState.poweredOn` — a virtual radio is never off.
@@ -348,10 +373,9 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
         return true
     }
 
-    /// Detaches ``eventHandler`` **without** removing the hosted device — the one state the
-    /// public setter cannot produce, and the one a request must be refused in rather than
-    /// parked. Test-only; production code sets `eventHandler = nil`, which also removes the
-    /// device.
+    /// Detaches ``eventHandler`` from off ``queue``, hopping onto it — what the public
+    /// setter does, for a test that is not already on the queue. The hosted device stays on
+    /// the radio either way; a request arriving in this state is refused rather than parked.
     package func detachEventHandlerForTesting() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async { [self] in

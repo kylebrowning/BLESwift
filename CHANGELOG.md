@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitions that coalesced before the handler drained them read as no change at all, so a
   child that power-cycled was never re-issued the scan and the connection-event registration,
   nor had its services republished and its advertisement restarted.
+- Clearing `VirtualPeripheralManagerBackend.eventHandler` (BLESwiftProvider) now detaches the
+  handler and nothing more, leaving the hosted device on the radio and re-attaching a working
+  backend — as `CompositePeripheralManager` documents for every child it clears and
+  re-installs. It used to remove the device and end the backend's work chain permanently, so a
+  detach through a composite was terminal. The device is still taken off the radio when the
+  backend is deallocated, and when a peripheral-role session closes.
 
 ## [2.0.0] - 2026-08-24
 
