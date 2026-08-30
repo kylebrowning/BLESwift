@@ -20,9 +20,11 @@ on:
 # a workflow file is not approved, it is rewritten by the maintainer on a same-repo branch.
 # Runner groups with pinned workflows would enforce this mechanically; they are an
 # organization feature and this is a personal repository.
+# A superseded pull-request run is cancelled; pushes to main queue, so every commit on main
+# keeps a CI verdict even when two merges land within one serialized run.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
