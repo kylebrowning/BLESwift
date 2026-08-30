@@ -4,6 +4,7 @@
 //
 
 import Dispatch
+import Synchronization
 import Testing
 import BLESwiftCore
 @testable import BLESwift
@@ -282,7 +283,7 @@ struct BroadcasterTests {
     }
 
     @Test("Stress: yielding while subscribers cancel never deadlocks")
-    func concurrentYieldAndCancellationDoNotDeadlock() {
+    func concurrentYieldAndCancellationDoNotDeadlock() async {
         // Regression coverage for a lock-order inversion: `yield(_:)` must not hold the
         // broadcaster's `Mutex` across `AsyncStream.Continuation.yield`, which — when it
         // resumes a suspended consumer — takes that consumer task's status lock. A
@@ -291,66 +292,72 @@ struct BroadcasterTests {
         // every fan-out resumes several consumers) plus constant subscribe/cancel churn
         // drives both halves at once.
         //
-        // A deadlock parks every cooperative thread rather than suspending tasks, so an
-        // `await`-based watchdog would never be scheduled to notice it. The stress work runs
-        // detached and signals a `DispatchSemaphore`; this test blocks on that semaphore with
-        // a deadline, so the inversion surfaces as a failed expectation, not a hung suite.
+        // Every call into the broadcaster — yielding, subscribing, cancelling — is made from
+        // `DispatchQueue.global()` threads, and the deadline is enforced by a blocking
+        // `DispatchSemaphore.wait` on one more of them, handed back to this test through a
+        // continuation. So no cooperative thread is ever blocked and the workload never
+        // competes with the watchdog for the pool (which matters under
+        // `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`, where the pool is a single thread): the
+        // pool is left to the subscriber tasks, which only iterate.
         let finishedSignal = DispatchSemaphore(value: 0)
+        let stopProducing = Mutex<Bool>(false)
 
-        let stress = Task.detached {
+        DispatchQueue.global().async {
             let broadcaster = Broadcaster<Int>(replay: .none)
 
             // Steady subscribers spend most of their time suspended, so each fan-out
             // resumes them one after another — the half of the inversion that touches
             // consumer status locks.
-            let steady = (0..<8).map { _ in
-                Task.detached {
-                    for await _ in broadcaster.stream() {}
+            let steady = (0..<8).map { _ -> Task<Void, Never> in
+                let stream = broadcaster.stream()
+                return Task.detached {
+                    for await _ in stream {}
                 }
             }
 
-            let producer = Task.detached {
+            let producing = DispatchGroup()
+            DispatchQueue.global().async(group: producing) {
                 var iteration = 0
-                while !Task.isCancelled {
+                while !stopProducing.withLock({ $0 }) {
                     broadcaster.yield(iteration)
                     iteration += 1
                     // Let the consumers drain and suspend again before the next fan-out.
-                    await Task.yield()
+                    usleep(50)
                 }
             }
 
-            await withTaskGroup(of: Void.self) { group in
-                for _ in 0..<4 {
-                    group.addTask {
-                        for _ in 0..<150 {
-                            let consumer = Task.detached {
-                                for await _ in broadcaster.stream() {}
-                            }
-                            await Task.yield()
-                            // Cancelling a consumer that is very likely suspended awaiting
-                            // the producer: cancellation runs `onTermination` synchronously,
-                            // under that consumer's status lock, on this thread.
-                            consumer.cancel()
-                            await consumer.value
+            let churning = DispatchGroup()
+            for _ in 0..<4 {
+                DispatchQueue.global().async(group: churning) {
+                    for _ in 0..<300 {
+                        let stream = broadcaster.stream()
+                        let consumer = Task.detached {
+                            for await _ in stream {}
                         }
+                        usleep(100)
+                        // Cancelling a consumer that is very likely suspended awaiting the
+                        // producer: cancellation runs `onTermination` synchronously, under
+                        // that consumer's status lock, on this thread.
+                        consumer.cancel()
                     }
                 }
             }
 
-            producer.cancel()
-            await producer.value
+            churning.wait()
+            stopProducing.withLock { $0 = true }
+            producing.wait()
             for task in steady {
                 task.cancel()
-            }
-            for task in steady {
-                await task.value
             }
             broadcaster.finish()
             finishedSignal.signal()
         }
 
-        let finished = finishedSignal.wait(timeout: .now() + 10) == .success
-        stress.cancel()
+        let finished = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            DispatchQueue.global().async {
+                continuation.resume(returning: finishedSignal.wait(timeout: .now() + 10) == .success)
+            }
+        }
 
         #expect(finished, "Broadcaster.yield deadlocked against subscriber cancellation")
     }
