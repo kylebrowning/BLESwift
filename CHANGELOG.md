@@ -59,7 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a completion for an open issued before a disconnect — arriving after the client had
   reconnected and opened again — was popped as the new one and bridged the new channel id to
   the previous connection's transport. Completions an ended connection still owes are now
-  consumed and their channels closed. (#28)
+  consumed and their channels closed; a completion the backend never delivers stops being owed
+  after ten seconds, or at that peripheral's next disconnect, rather than eating the next
+  connection's completion and pinning the remote in the session's table. (#28)
 
 - `Provider.addVirtualDevice(_:advertising:)` (BLESwiftProvider) recorded its device after a
   suspension the provider serves `stop()` across, so a stop overlapping the call left the

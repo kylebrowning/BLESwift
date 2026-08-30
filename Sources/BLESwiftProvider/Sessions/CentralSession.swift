@@ -84,6 +84,15 @@ final class CentralSession: Sendable {
     /// simultaneous opens than any honest client has.
     static let maximumPendingOpens = 16
 
+    /// How long this session waits for a completion an ended connection still owes it.
+    ///
+    /// Generous next to a channel open, which a backend answers in milliseconds or not at all,
+    /// and short next to the connections that follow it: the debt exists to keep one
+    /// completion from being paired with the *next* connection's open, and the risk of
+    /// keeping it past the point the backend was ever going to answer is the mirror image of
+    /// that — the next connection's own completion eaten instead.
+    static let defaultStrandedOpenLifetime: Duration = .seconds(10)
+
     /// How many peripheral remotes a session keeps by default.
     ///
     /// The same 1024 the client's own mirror table is capped at, for the same reason: a
@@ -141,6 +150,10 @@ final class CentralSession: Sendable {
     /// How many remotes this session keeps — ``defaultMaximumRemotes``, unless a test asked
     /// for a smaller table.
     private let maximumRemotes: Int
+
+    /// How long a stranded open completion is waited for — ``defaultStrandedOpenLifetime``,
+    /// unless a test asked for a shorter one.
+    let strandedOpenLifetime: Duration
     nonisolated(unsafe) private var pendingWrites: [UUID: [PendingWrite]] = [:]
 
     /// How many bytes of payload ``pendingWrites`` is holding per peripheral, against
@@ -149,18 +162,25 @@ final class CentralSession: Sendable {
     nonisolated(unsafe) private var pendingWriteBytes: [UUID: Int] = [:]
     nonisolated(unsafe) var pendingOpens: [UUID: [PendingOpen]] = [:]
 
-    /// How many `openL2CAPChannel` completions the backend still owes this session for opens
-    /// issued on a connection that has since ended, per peripheral — this session's connection
-    /// epoch, kept as the only thing it needs to encode.
+    /// The `openL2CAPChannel` completions the backend still owes this session for opens issued
+    /// on a connection that has since ended, per peripheral, each held until its deadline —
+    /// this session's connection epoch, kept as the only thing it needs to encode.
     ///
     /// ``pendingOpens`` pairs completions to the client's channel ids by FIFO, and
     /// ``discardPerConnectionState(for:)`` empties it. Without this, a `didOpenL2CAPChannel`
     /// for an open issued *before* a disconnect, landing after the client has reconnected and
     /// issued a fresh one, was popped as the new one — bridging the new channel id to the
-    /// previous connection's transport. Every completion counted here is answered by closing
-    /// the channel it carries and is never paired with anything; the client's own halves went
-    /// with the disconnect it was already told about. Session ``queue`` only.
-    nonisolated(unsafe) var strandedOpens: [UUID: Int] = [:]
+    /// previous connection's transport. Every debt honored here is answered by closing the
+    /// channel the completion carries and is never paired with anything; the client's own
+    /// halves went with the disconnect it was already told about.
+    ///
+    /// **A debt expires**, at ``strandedOpenLifetime``, and is dropped outright at the
+    /// peripheral's next disconnect. A backend is not obliged to complete an open its
+    /// connection outlived — CoreBluetooth may simply never call back — and a debt that stood
+    /// forever would eat the *next* connection's completion instead, hanging the client's
+    /// `openL2CAPChannel` for good and pinning a remote the cap could otherwise evict.
+    /// Session ``queue`` only.
+    nonisolated(unsafe) var strandedOpens: [UUID: [ContinuousClock.Instant]] = [:]
     nonisolated(unsafe) private var isClosed = false
 
     /// The L2CAP channels this session is bridging, keyed by the id the client allocated.
@@ -187,6 +207,7 @@ final class CentralSession: Sendable {
     ///     behind the hello. Called once, synchronously.
     ///   - log: Receives one line per notable session event.
     ///   - maximumRemotes: How many peripheral remotes this session keeps.
+    ///   - strandedOpenLifetime: How long a completion an ended connection owes is waited for.
     init(
         connection: LinkConnection,
         backend: any CentralManaging,
@@ -195,12 +216,14 @@ final class CentralSession: Sendable {
         hello: ServerHello,
         install: (@escaping @Sendable (LinkMessage) -> Void) -> Void,
         log: (@Sendable (String) -> Void)?,
-        maximumRemotes: Int = CentralSession.defaultMaximumRemotes
+        maximumRemotes: Int = CentralSession.defaultMaximumRemotes,
+        strandedOpenLifetime: Duration = CentralSession.defaultStrandedOpenLifetime
     ) {
         self.connection = connection
         self.backend = backend
         self.queue = queue
         self.maximumRemotes = maximumRemotes
+        self.strandedOpenLifetime = strandedOpenLifetime
         self.label = "central session \(ordinal)"
         self.log = log
         queue.async { [self] in
@@ -513,10 +536,10 @@ final class CentralSession: Sendable {
         guard pendingWrites[identifier]?.isEmpty ?? true, pendingOpens[identifier]?.isEmpty ?? true else {
             return false
         }
-        // A completion still owed by an ended connection has to find its count here when it
+        // A completion still owed by an ended connection has to find its debt here when it
         // lands, or it would be paired with whatever this session pends next for the
-        // peripheral.
-        guard strandedOpens[identifier] ?? 0 == 0 else { return false }
+        // peripheral. One the backend has stopped owing — its deadline passed — pins nothing.
+        guard purgeStrandedOpens(for: identifier).isEmpty else { return false }
         return !channels.values.contains { $0.peripheral == identifier }
     }
 
@@ -788,12 +811,40 @@ final class CentralSession: Sendable {
         // Forgotten as pairings, remembered as debts: the backend may still complete an open
         // this connection issued, and that completion belongs to no channel id this session
         // will hand out again. See ``strandedOpens``.
-        if let outstanding = pendingOpens.removeValue(forKey: peripheral), !outstanding.isEmpty {
-            strandedOpens[peripheral, default: 0] += outstanding.count
+        //
+        // The *previous* connection's debts go here, rather than accumulating: a completion
+        // that outlived two connections has been unanswered across a whole connect/disconnect
+        // cycle, which is longer than any backend takes to open a channel.
+        let outstanding = pendingOpens.removeValue(forKey: peripheral) ?? []
+        strandedOpens.removeValue(forKey: peripheral)
+        if !outstanding.isEmpty {
+            let deadline = ContinuousClock.now + strandedOpenLifetime
+            strandedOpens[peripheral] = Array(repeating: deadline, count: outstanding.count)
         }
         // The client tears its own halves down off the disconnect; closing the backend's
         // ends here is what stops their pumps and releases the transports.
         closeChannels(matching: { $0.peripheral == peripheral })
+    }
+
+    /// The debts still standing for `peripheral`, with the expired ones dropped — the only
+    /// way this session reads ``strandedOpens``. Must be called on ``queue``. Internal so the
+    /// L2CAP bridge reads them the same way.
+    ///
+    /// - Parameter peripheral: The peripheral whose debts to read.
+    /// - Returns: Its unexpired debts, oldest first.
+    @discardableResult
+    func purgeStrandedOpens(for peripheral: UUID) -> [ContinuousClock.Instant] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let owed = strandedOpens[peripheral] else { return [] }
+        let now = ContinuousClock.now
+        let live = owed.filter { $0 > now }
+        guard live.count != owed.count else { return owed }
+        log?(
+            "\(label): giving up on \(owed.count - live.count) L2CAP open completion(s) "
+                + "peripheral \(peripheral)'s previous connection never delivered"
+        )
+        strandedOpens[peripheral] = live.isEmpty ? nil : live
+        return live
     }
 
     /// Writes one event to the link. Must be called on ``queue``. Internal so the L2CAP

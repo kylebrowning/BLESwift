@@ -78,6 +78,12 @@ public struct ProviderConfiguration: Sendable {
     /// test that would otherwise have to connect a thousand peripherals to force an eviction.
     var maximumRemotesPerCentralSession: Int = CentralSession.defaultMaximumRemotes
 
+    /// Test hook: how long a central-role session waits for an `openL2CAPChannel` completion
+    /// an ended connection still owes it. Deliberately not `public`, for
+    /// ``maximumRemotesPerCentralSession``'s reason — the only reason to shorten it is a test
+    /// that would otherwise sit out the real deadline.
+    var strandedOpenLifetimePerCentralSession: Duration = CentralSession.defaultStrandedOpenLifetime
+
     /// Creates a configuration with every field at its default.
     public init() {}
 }

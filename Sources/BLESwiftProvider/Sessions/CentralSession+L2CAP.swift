@@ -160,13 +160,16 @@ extension CentralSession {
     /// the right connection's. A completion the *previous* connection is still owed is
     /// consumed first and paired with nothing: it belongs to a transport the client already
     /// tore its half of down, and pairing it would bridge a live channel id to a dead
-    /// connection. See ``CentralSession/strandedOpens``. Must be called on
+    /// connection. A debt the backend never honored expires rather than eating the next
+    /// connection's completion. See ``CentralSession/strandedOpens``. Must be called on
     /// ``CentralSession/queue``.
     func bridgeOpenedChannel(_ channel: (any L2CAPChannelRemote)?, error: NSError?, from peripheral: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
-        if let owed = strandedOpens[peripheral], owed > 0 {
+        var owed = purgeStrandedOpens(for: peripheral)
+        if !owed.isEmpty {
             log?("L2CAP open completion for a connection that has ended on peripheral \(peripheral); closing the channel")
-            strandedOpens[peripheral] = owed == 1 ? nil : owed - 1
+            owed.removeFirst()
+            strandedOpens[peripheral] = owed.isEmpty ? nil : owed
             channel?.close(error: nil)
             return
         }

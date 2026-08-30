@@ -483,7 +483,8 @@ public actor Provider {
                 hello: accepted,
                 install: install,
                 log: configuration.log,
-                maximumRemotes: configuration.maximumRemotesPerCentralSession
+                maximumRemotes: configuration.maximumRemotesPerCentralSession,
+                strandedOpenLifetime: configuration.strandedOpenLifetimePerCentralSession
             )
             configuration.log?("opened central session \(sessionOrdinal) for \(hello.clientName)")
         case .peripheral:

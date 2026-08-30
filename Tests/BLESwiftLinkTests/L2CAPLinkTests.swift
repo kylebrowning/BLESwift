@@ -333,6 +333,145 @@ struct L2CAPLinkTests {
         await provider.stop()
     }
 
+    @Test("A completion the backend never delivers stops being owed, and the next open is answered")
+    func anUnhonoredStrandedOpenExpiresRatherThanEatingTheNextCompletion() async throws {
+        let stalePSM = UInt16(0x0041)
+        let livePSM = UInt16(0x0043)
+        let box = PeripheralBox()
+        let centralBox = CentralBox()
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        // Short enough to sit out in a test: the real deadline is ten seconds.
+        configuration.strandedOpenLifetimePerCentralSession = .milliseconds(100)
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            let peripheral = FakePeripheral(identifier: Self.deviceID, name: "Fake L2CAP", queue: queue)
+            peripheral.l2capOpenBehavior = .hold
+            fake.retrievablePeripherals[Self.deviceID] = peripheral
+            fake.connectBehavior = .succeed
+            box.store(peripheral)
+            centralBox.store(fake)
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let client = RawClient(port: await provider.port, label: "l2cap.expiredopen")
+        await waitFor(timeout: .seconds(5)) { client.isAccepted }
+
+        func connect() async {
+            let before = client.events.filter {
+                if case .didConnect = $0 { return true } else { return false }
+            }.count
+            client.send(.connect(peripheral: Self.deviceID, options: nil, requiresANCS: false))
+            await waitFor(timeout: .seconds(5)) {
+                client.events.filter {
+                    if case .didConnect = $0 { return true } else { return false }
+                }.count > before
+            }
+        }
+
+        await connect()
+        let fake = try #require(box.peripheral)
+        // Issued on the first connection, and never completed on it or on any other — a
+        // backend is not obliged to call back for a channel whose connection went away.
+        client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: stalePSM, channel: 1))
+        await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.openL2CAPChannelCalls.count } == 1 }
+
+        let backend = try #require(centralBox.central)
+        backend.simulateDisconnect(PeripheralIdentifier(uuid: Self.deviceID, name: "Fake L2CAP"), error: nil)
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains { if case .didDisconnect = $0 { return true } else { return false } }
+        }
+        await connect()
+        client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: livePSM, channel: 2))
+        await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.openL2CAPChannelCalls.count } == 2 }
+
+        // Past the deadline, the debt is no longer owed — so the live connection's own
+        // completion answers the client's open rather than being eaten by it. Left standing,
+        // this client's `openL2CAPChannel` never returns.
+        try await Task.sleep(for: .milliseconds(200))
+        fake.simulateLastHeldL2CAPOpenCompletion()
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains { if case .didOpenL2CAPChannel = $0 { return true } else { return false } }
+        }
+        #expect(client.events.contains(.didOpenL2CAPChannel(
+            peripheral: Self.deviceID, channel: 2, psm: livePSM, error: nil
+        )))
+
+        client.send(.l2capClose(channel: 2))
+        client.shutdown()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
+    }
+
+    @Test("A remote owed only an expired completion is evictable again")
+    func aRemoteWithOnlyExpiredStrandedDebtIsEvicted() async throws {
+        let stranded = UUID()
+        let arriving = UUID()
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        // A table of one, so the second connect must evict the first remote or keep it.
+        configuration.maximumRemotesPerCentralSession = 1
+        configuration.strandedOpenLifetimePerCentralSession = .milliseconds(100)
+        let centralBox = CentralBox()
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            for identifier in [stranded, arriving] {
+                let peripheral = FakePeripheral(identifier: identifier, name: "Fake", queue: queue)
+                peripheral.l2capOpenBehavior = .hold
+                fake.retrievablePeripherals[identifier] = peripheral
+            }
+            // Held: every remote stays `.disconnected`, which is what the cap evicts.
+            fake.connectBehavior = .hang
+            centralBox.store(fake)
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let client = RawClient(port: await provider.port, label: "l2cap.evictexpired")
+        await waitFor(timeout: .seconds(5)) { client.isAccepted }
+
+        // A remote left owed one completion its connection never got.
+        client.send(.connect(peripheral: stranded, options: nil, requiresANCS: false))
+        client.send(.openL2CAPChannel(peripheral: stranded, psm: Self.psm.rawValue, channel: 1))
+        let session = try await centralSession(of: provider)
+        await waitFor(timeout: .seconds(5)) {
+            await onSessionQueue(session) { !(session.pendingOpens[stranded] ?? []).isEmpty }
+        }
+        let backend = try #require(centralBox.central)
+        backend.simulateDisconnect(PeripheralIdentifier(uuid: stranded, name: "Fake"), error: nil)
+        await waitFor(timeout: .seconds(5)) {
+            await onSessionQueue(session) { !(session.strandedOpens[stranded] ?? []).isEmpty }
+        }
+
+        // Past the deadline it pins nothing, so the arriving connect may have its slot.
+        try await Task.sleep(for: .milliseconds(200))
+        client.send(.connect(peripheral: arriving, options: nil, requiresANCS: false))
+        await waitFor(timeout: .seconds(5)) {
+            await onSessionQueue(session) { session.strandedOpens[stranded] == nil }
+        }
+
+        // Evicted: an open for a peripheral this session no longer has a remote for is
+        // answered as unknown rather than held by the backend.
+        client.send(.openL2CAPChannel(peripheral: stranded, psm: Self.psm.rawValue, channel: 3))
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains { if case .didOpenL2CAPChannel = $0 { return true } else { return false } }
+        }
+        let answered = client.events.compactMap { event -> Bool? in
+            guard case .didOpenL2CAPChannel(_, let channel, _, let error) = event, channel == 3 else { return nil }
+            return error != nil
+        }
+        #expect(answered == [true], "the evicted remote's open is refused, not held")
+
+        client.shutdown()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
+    }
+
     @Test("A pump send from a bridge whose channel id was reused is dropped")
     func aStalePumpSendUnderAReusedIdentifierIsDropped() async throws {
         let box = PeripheralBox()

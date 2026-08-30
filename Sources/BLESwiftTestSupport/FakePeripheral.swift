@@ -907,6 +907,24 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     /// The counterpart to ``simulateNextHeldServiceDiscoveryCompletion()`` for
     /// ``L2CAPOpenBehavior/hold``: it is what lets a test complete an open *after* something
     /// else has happened to the connection it was issued on.
+    /// Delivers the *newest* still-held `didOpenL2CAPChannel` completion as a success carrying
+    /// a fresh ``FakeL2CAPChannel`` for the PSM that open asked for, leaving every older held
+    /// open held. A no-op if none are held.
+    ///
+    /// The scenario ``simulateNextHeldL2CAPOpenCompletion()`` cannot produce: a backend that
+    /// answers the open the live connection issued and simply never answers one an earlier
+    /// connection left outstanding.
+    public func simulateLastHeldL2CAPOpenCompletion() {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            guard !_heldL2CAPOpens.isEmpty else { return }
+            let psm = _heldL2CAPOpens.removeLast()
+            let channel = FakeL2CAPChannel(psm: psm, queue: queue)
+            _lastOpenedL2CAPChannel = channel
+            deliver(.didOpenL2CAPChannel(channel: channel, error: nil))
+        }
+    }
+
     public func simulateNextHeldL2CAPOpenCompletion() {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
