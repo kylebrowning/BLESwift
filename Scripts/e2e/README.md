@@ -86,12 +86,14 @@ version it ran.
 
 It can also be dispatched from the Actions tab. The dispatch form takes two optional inputs,
 `advertiser_sim` and `scanner_sim`. Give both to
-pin the run to particular simulator names; leave both empty — the default — and the job
-resolves `ADVERTISER_SIM` / `SCANNER_SIM` at run time, taking the two newest distinct
-`iPhone …` names the runner image actually has from `xcrun simctl list devices available -j`.
-Nothing is pinned in the workflow, because named devices drift with the image's Xcode and a
-name that matches nothing fails the job outright. Giving only one of the two, or the same name
-twice, is refused with a readable error rather than silently running both roles on one device.
+pin the run to particular simulator names; leave both empty — the default — and the job uses
+two CI-only devices, `BLESwift CI Advertiser` and `BLESwift CI Scanner`, created on first use
+by `Scripts/ci/ensure-ci-simulator.sh` from the newest iPhone device type and iOS runtime on
+the runner (nothing is pinned, so they follow Xcode upgrades). The runner is also a
+workstation, and the job's reclaim step tears down every device of the names it used — so
+the names are CI's own, never "the two newest iPhones" someone is debugging on. Giving only
+one of the two inputs, or the same name twice, is refused with a readable error rather than
+silently running both roles on one device.
 
 **grantiva is whatever the runner has.** The job installs nothing: it puts Homebrew on
 `PATH` and runs the grantiva already on the Mac, printing `grantiva --version` as its own
