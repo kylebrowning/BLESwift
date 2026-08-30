@@ -94,6 +94,17 @@ public actor Provider {
     /// Numbers the per-session queue labels.
     private var sessionOrdinal = 0
 
+    /// Bumped by every ``stop()``, so work that suspended before one can tell on resuming
+    /// that the provider it was registering with has been torn down underneath it. See
+    /// ``addVirtualDevice(_:advertising:)``.
+    private var stopGeneration: UInt64 = 0
+
+    /// Whether a ``stop()`` is between its first line and its last — it suspends in the radio
+    /// several times, and this actor serves other calls while it does. A registration that
+    /// both began and finished inside that window would carry the *same* ``stopGeneration``
+    /// on both sides of its own suspension and still be emptied out of the tables behind it.
+    private var isStopping = false
+
     /// Creates a provider. Nothing is registered and no port is bound until ``start()``.
     ///
     /// - Parameter configuration: Where to listen, what to host, and how to log.
@@ -111,12 +122,25 @@ public actor Provider {
     ///   - device: The device to host.
     ///   - advertising: Whether it starts out advertising. Defaults to `true`.
     /// - Returns: The handle for pushing notifications and mutating the device afterwards.
-    ///   Stale once ``stop()`` has removed the device, exactly as a fixture's handle is.
+    ///   Stale once ``stop()`` has removed the device, exactly as a fixture's handle is —
+    ///   including a ``stop()`` that ran *during* this call, which takes the device straight
+    ///   back off the radio rather than leaving it there for nothing to remove.
     @discardableResult
     public func addVirtualDevice(_ device: VirtualDevice, advertising: Bool = true) async -> VirtualDeviceHandle {
         let identifier = device.descriptor.identifier
+        // Registering suspends, and this actor serves a `stop()` while it does — a stop that
+        // began before this call, or one that is suspended in the radio itself. Either way it
+        // empties both tables and the identifier set, so recording the device on resuming
+        // would leave it on a shared radio with nothing holding its handle and nothing
+        // defending its identifier — the one thing `stop()` promises it does not do. It goes
+        // straight back off instead.
+        let generation = stopGeneration
         providerOwnedIdentifiers.insert(identifier)
         let handle = await radio.register(device, advertising: advertising)
+        guard generation == stopGeneration, !isStopping else {
+            await handle.remove()
+            return handle
+        }
         addedDevices[identifier] = handle
         return handle
     }
@@ -258,12 +282,19 @@ public actor Provider {
     /// before the set of provider-owned identifiers is emptied, so no window exists in which a device is
     /// still on the radio and its identifier no longer refused to a client claiming it.
     ///
+    /// A ``addVirtualDevice(_:advertising:)`` that overlapped this — suspended in the radio
+    /// when it started, or begun while it was itself suspended there — takes its device back
+    /// off on resuming, for the same reason: this provider hosts nothing once it has stopped.
+    ///
     /// - Note: ``start()`` after a ``stop()`` registers the configured fixtures again, from
     ///   scratch: each one is a *new* registration under the same id, and ``handle(for:)``
     ///   vends the fresh ``VirtualDeviceHandle`` for it. A handle taken before the stop is
     ///   stale for good — every call on it is refused by the radio's generation guard rather
     ///   than applied to the device that replaced the one it was minted for.
     public func stop() async {
+        stopGeneration &+= 1
+        isStopping = true
+        defer { isStopping = false }
         listener?.cancel()
         listener = nil
         for connection in pending.withLock({ $0.drain() }) {

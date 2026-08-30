@@ -61,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the previous connection's transport. Completions an ended connection still owes are now
   consumed and their channels closed. (#28)
 
+- `Provider.addVirtualDevice(_:advertising:)` (BLESwiftProvider) recorded its device after a
+  suspension the provider serves `stop()` across, so a stop overlapping the call left the
+  device on the radio in neither of the tables `stop()` empties — never removed, and its
+  identifier no longer defended. Such a registration is now taken straight back off. (#29)
+
 ## [2.0.0] - 2026-08-24
 
 > **Breaking:** GATT read/write/notify now validate a characteristic's advertised
