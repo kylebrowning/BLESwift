@@ -27,14 +27,17 @@ on:
         required: false
         default: ''
 
+# Only a pull request's superseded run is cancelled; a push to main queues instead. A
+# cancelled run is SIGKILLed after a short grace period — too short for the script's own
+# cleanup — which is what the always-run "Reclaim the simulators" step below is for.
 concurrency:
   group: e2e-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   sim-to-sim-e2e:
     name: Sim-to-sim E2E (grantiva)
-    if: ${{ !github.event.pull_request.head.repo.fork }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, macOS, ARM64, bleswift]
     timeout-minutes: 25
     steps:
@@ -83,6 +86,20 @@ jobs:
           echo "Using $NAMES"
       - name: Run
         run: Scripts/sim-to-sim-e2e.sh
+      - name: Reclaim the simulators
+        # Runs on cancellation too. The script's EXIT trap does this on a normal end, but a
+        # cancelled step is killed before the trap finishes, and on a persistent runner a
+        # simulator still leased by a dead grantiva run fails the next run's `ensure`.
+        if: always()
+        run: |
+          pkill -f bleswift-provider || true
+          pkill -f grantiva-runner || true
+          for name in "$ADVERTISER_SIM" "$SCANNER_SIM"; do
+            [ -n "$name" ] || continue
+            for udid in $(xcrun simctl list devices -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(' '.join(x['udid'] for r in d for x in d[r] if x['name']==sys.argv[1] and x['state']=='Booted'))" "$name"); do
+              grantiva simulator teardown --udid "$udid" --force || true
+            done
+          done
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
