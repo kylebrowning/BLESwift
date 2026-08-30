@@ -50,7 +50,14 @@ existing=""
 while read -r action udid; do
     case "$action" in
         keep)
-            [[ -n "$existing" ]] || existing="$udid"
+            # Exactly one device of the name survives: a second current one (hand-created, or a
+            # second runner service) is deleted too, or the E2E's `ensure --name` sees a duplicate.
+            if [[ -n "$existing" ]]; then
+                echo "deleting \"$name\" ($udid): duplicate of $existing" >&2
+                xcrun simctl delete "$udid" >&2 || { echo "could not delete duplicate \"$name\" ($udid)" >&2; exit 1; }
+            else
+                existing="$udid"
+            fi
             ;;
         replace)
             echo "deleting \"$name\" ($udid): unavailable or not on $runtime" >&2

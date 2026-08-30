@@ -111,8 +111,10 @@ First things to check when a run goes red:
   `command not found` — `brew install grantiva/tap/grantiva` on the runner. On a cold
   machine the first `grantiva run` builds `GrantivaAgent` and a WebDriverAgent runner inside
   the first flow's clock. `grantiva doctor` reports what is missing.
-- **Simulator availability.** If no iOS runtime is installed at all, `grantiva simulator ensure`
-  has nothing to create the device from and the script fails immediately.
+- **Simulator availability.** If no iOS runtime is installed at all, the **Resolve two
+  simulators** step fails first — `Scripts/ci/ensure-ci-simulator.sh` exits with `no iOS
+  runtime is installed` before the script runs. On the dispatch-input path the same condition
+  reaches `grantiva simulator ensure`, which has nothing to create the device from.
 - **Uploaded artifacts.** The `sim-to-sim-e2e` artifact contains `provider.log` (which side
   connected: `opened central session …` / `opened host session …`), both `report.json`s and
   grantiva's failure screenshots. That is usually enough to tell a BLE failure from a UI one.
@@ -183,8 +185,10 @@ looks hung for a few minutes.
 
 **`simulator ensure --name` refuses a duplicated name.** A machine with two simulators of the
 same name gets `Multiple simulators are named "<name>"; delete duplicates or use a unique
-name` and a non-zero exit — and GitHub's runner image ships three "iPhone 17 Pro Max" devices,
-so a name the runner picks can genuinely be ambiguous. There is no `--udid` on `ensure` to
+name` and a non-zero exit. CI no longer meets this — its `BLESwift CI …` names are kept unique
+by `Scripts/ci/ensure-ci-simulator.sh` — but a local machine, or a dispatch that names a
+device the machine has twice (GitHub's hosted image shipped three "iPhone 17 Pro Max"), still
+can. There is no `--udid` on `ensure` to
 disambiguate with, and deleting a runner's devices is not this script's business, so
 `ensure_simulator` catches that one error and falls back to `xcrun simctl list devices
 available -j`: it picks a device of that name (preferring one already booted), boots it, and
