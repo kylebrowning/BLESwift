@@ -78,14 +78,22 @@ final class ThrowingBroadcaster<Element: Sendable>: Sendable {
     }
 
     /// Fans `element` out to every currently subscribed stream. A no-op after
-    /// ``finish(throwing:)``. Same reasoning as `Broadcaster.yield(_:)` for why fanning out
-    /// under `box`'s lock is sound.
+    /// ``finish(throwing:)``.
+    ///
+    /// As in `Broadcaster.yield(_:)`, the fan-out happens *outside* the lock — a
+    /// continuation removed between the snapshot and the call is harmlessly yielded to,
+    /// since `AsyncThrowingStream` drops values after termination.
     func yield(_ element: Element) {
-        box.withLock { state in
-            guard !state.finished else { return }
-            for continuation in state.continuations.values {
-                continuation.yield(element)
-            }
+        // Same lock-order inversion as `Broadcaster.yield(_:)`: `continuation.yield` takes
+        // the consuming task's status lock, while a concurrent cancellation of that task
+        // holds its status lock and re-enters `box.withLock` from `onTermination`.
+        let targets: [AsyncThrowingStream<Element, Error>.Continuation] = box.withLock { state in
+            guard !state.finished else { return [] }
+            return Array(state.continuations.values)
+        }
+
+        for continuation in targets {
+            continuation.yield(element)
         }
     }
 

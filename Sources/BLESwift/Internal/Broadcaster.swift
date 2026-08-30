@@ -122,9 +122,19 @@ final class Broadcaster<Element: Sendable>: Sendable {
 
     /// Fans `element` out to every currently subscribed stream and, per ``ReplayMode``,
     /// records it for future subscribers. A no-op after ``finish()``.
+    ///
+    /// Replay bookkeeping happens under the lock, but the fan-out itself happens *outside*
+    /// it — a continuation removed between the snapshot and the call is harmlessly yielded
+    /// to, since `AsyncStream` drops values after termination.
     func yield(_ element: Element) {
-        box.withLock { state in
-            guard !state.finished else { return }
+        // `continuation.yield` takes the consuming task's status lock (to resume it), while
+        // a concurrent cancellation of that same task holds its status lock and re-enters
+        // `box.withLock` via `onTermination` — holding the lock across the fan-out inverts
+        // that order and deadlocks. Snapshot under the lock, deliver after releasing it,
+        // exactly as `finish()` does. Ordering was only ever guaranteed per-caller anyway,
+        // so the snapshot weakens no documented guarantee.
+        let targets: [AsyncStream<Element>.Continuation] = box.withLock { state in
+            guard !state.finished else { return [] }
 
             switch replay {
             case .none:
@@ -137,9 +147,11 @@ final class Broadcaster<Element: Sendable>: Sendable {
                 }
             }
 
-            for continuation in state.continuations.values {
-                continuation.yield(element)
-            }
+            return Array(state.continuations.values)
+        }
+
+        for continuation in targets {
+            continuation.yield(element)
         }
     }
 

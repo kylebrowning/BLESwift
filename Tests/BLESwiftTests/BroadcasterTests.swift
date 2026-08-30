@@ -3,6 +3,8 @@
 //  BLESwiftTests
 //
 
+import Dispatch
+import Synchronization
 import Testing
 import BLESwiftCore
 @testable import BLESwift
@@ -279,4 +281,85 @@ struct BroadcasterTests {
         }
         return results
     }
+
+    @Test("Stress: yielding while subscribers cancel never deadlocks")
+    func concurrentYieldAndCancellationDoNotDeadlock() async {
+        // Regression coverage for a lock-order inversion: `yield(_:)` must not hold the
+        // broadcaster's `Mutex` across `AsyncStream.Continuation.yield`, which — when it
+        // resumes a suspended consumer — takes that consumer task's status lock. A
+        // concurrent cancellation of the same consumer holds that status lock while running
+        // `onTermination`, which re-enters the `Mutex`. Steadily-suspended subscribers (so
+        // every fan-out resumes several consumers) plus constant subscribe/cancel churn
+        // drives both halves at once.
+        //
+        // Every call into the broadcaster — yielding, subscribing, cancelling — is made from
+        // `DispatchQueue.global()` threads, and the deadline is enforced by a blocking
+        // `DispatchSemaphore.wait` on one more of them, handed back to this test through a
+        // continuation. So no cooperative thread is ever blocked and the workload never
+        // competes with the watchdog for the pool (which matters under
+        // `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`, where the pool is a single thread): the
+        // pool is left to the subscriber tasks, which only iterate.
+        let finishedSignal = DispatchSemaphore(value: 0)
+        let stopProducing = Mutex<Bool>(false)
+
+        DispatchQueue.global().async {
+            let broadcaster = Broadcaster<Int>(replay: .none)
+
+            // Steady subscribers spend most of their time suspended, so each fan-out
+            // resumes them one after another — the half of the inversion that touches
+            // consumer status locks.
+            let steady = (0..<8).map { _ -> Task<Void, Never> in
+                let stream = broadcaster.stream()
+                return Task.detached {
+                    for await _ in stream {}
+                }
+            }
+
+            let producing = DispatchGroup()
+            DispatchQueue.global().async(group: producing) {
+                var iteration = 0
+                while !stopProducing.withLock({ $0 }) {
+                    broadcaster.yield(iteration)
+                    iteration += 1
+                    // Let the consumers drain and suspend again before the next fan-out.
+                    usleep(50)
+                }
+            }
+
+            let churning = DispatchGroup()
+            for _ in 0..<4 {
+                DispatchQueue.global().async(group: churning) {
+                    for _ in 0..<300 {
+                        let stream = broadcaster.stream()
+                        let consumer = Task.detached {
+                            for await _ in stream {}
+                        }
+                        usleep(100)
+                        // Cancelling a consumer that is very likely suspended awaiting the
+                        // producer: cancellation runs `onTermination` synchronously, under
+                        // that consumer's status lock, on this thread.
+                        consumer.cancel()
+                    }
+                }
+            }
+
+            churning.wait()
+            stopProducing.withLock { $0 = true }
+            producing.wait()
+            for task in steady {
+                task.cancel()
+            }
+            broadcaster.finish()
+            finishedSignal.signal()
+        }
+
+        let finished = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            DispatchQueue.global().async {
+                continuation.resume(returning: finishedSignal.wait(timeout: .now() + 10) == .success)
+            }
+        }
+
+        #expect(finished, "Broadcaster.yield deadlocked against subscriber cancellation")
+    }
+
 }
