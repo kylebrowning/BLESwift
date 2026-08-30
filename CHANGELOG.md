@@ -61,9 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `LinkCentral.shutdown()` and `LinkPeripheralManager.shutdown()` (BLESwiftSimulatorLink) now
   run the same teardown a dropped link runs before they detach their event handler, so a
   consumer mid-operation is failed rather than stranded: every connected peripheral is
-  disconnected, every open L2CAP channel failed, every subscriber reported as departing, and
-  the state dropped to `.unsupported`. Stopping the session marks it stopped before its
-  connection reaches a terminal state, so none of that used to happen at all.
+  disconnected, every subscriber reported as departing, and the state dropped to
+  `.unsupported` (open L2CAP channels were already failed on shutdown; that teardown moved
+  into the shared path). Stopping the session marks it stopped before its connection
+  reaches a terminal state, so none of the rest used to happen at all.
 
 ## [2.0.0] - 2026-08-24
 

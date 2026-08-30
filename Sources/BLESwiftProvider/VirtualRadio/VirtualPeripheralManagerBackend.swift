@@ -9,6 +9,19 @@ import Dispatch
 import Foundation
 import Synchronization
 
+/// A peripheral-role backend hosting a device of its own on a ``VirtualRadio``, which can be
+/// taken back off it on demand.
+///
+/// Detaching a backend's event handler is reversible — the composites document a `nil`
+/// handler as a detach every child is re-installed from — so the teardown that really is
+/// final asks for the removal outright, through whichever backend a session was given.
+protocol HostedDeviceRemoving {
+
+    /// Takes the hosted device off the radio. Must be called on the backend's own queue.
+    func removeHostedDevice()
+}
+
+
 /// A `PeripheralManaging` served by a ``VirtualRadio`` instead of
 /// CoreBluetooth — hand one to `PeripheralHost(backend:queue:)` and the resulting host
 /// becomes a virtual device on that radio, reachable from any ``VirtualCentralBackend``
@@ -37,18 +50,6 @@ import Synchronization
 /// asynchronous, so every operation needing the device handle is appended to a serial
 /// `Task` chain that begins with that registration — nothing is lost or reordered when a
 /// call lands before the device exists.
-/// A peripheral-role backend hosting a device of its own on a ``VirtualRadio``, which can be
-/// taken back off it on demand.
-///
-/// Detaching a backend's event handler is reversible — the composites document a `nil`
-/// handler as a detach every child is re-installed from — so the teardown that really is
-/// final asks for the removal outright, through whichever backend a session was given.
-protocol HostedDeviceRemoving {
-
-    /// Takes the hosted device off the radio. Must be called on the backend's own queue.
-    func removeHostedDevice()
-}
-
 public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDeviceRemoving, Sendable {
 
     /// The queue every method and event delivery is confined to.

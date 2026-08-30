@@ -186,9 +186,9 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         session.isConnected
     }
 
-    /// Runs the teardown a dropped link runs — every subscriber reported as departing and the
-    /// state dropped to `.unsupported` — then stops the session and detaches the event
-    /// handler. Idempotent, and safe to call from any thread. Nothing calls it in production;
+    /// Stops the session, then runs the teardown a dropped link runs — every subscriber
+    /// reported as departing and the state dropped to `.unsupported` — and detaches the event
+    /// handler a turn behind it. Idempotent, and safe to call from any thread. Nothing calls it in production;
     /// `deinit` stops the session on its own.
     ///
     /// **The teardown runs before the handler goes, and the handler goes a turn behind it**,

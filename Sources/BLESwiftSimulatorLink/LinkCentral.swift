@@ -165,10 +165,10 @@ public final class LinkCentral: CentralManaging, Sendable {
         session.isConnected
     }
 
-    /// Runs the teardown a dropped link runs — every connected peripheral disconnected with
-    /// `LinkError.providerDisconnected`, every open L2CAP channel failed, and the state
-    /// dropped to `.unsupported` — then stops the session and detaches every event handler,
-    /// this central's and each of its peripherals'. Idempotent, and safe to call from any
+    /// Stops the session, then runs the teardown a dropped link runs — every connected
+    /// peripheral disconnected with `LinkError.providerDisconnected`, every open L2CAP channel
+    /// failed, and the state dropped to `.unsupported` — and detaches every event handler a
+    /// turn behind it, this central's and each of its peripherals'. Idempotent, and safe to call from any
     /// thread. Nothing calls it in production; `deinit` does the same work on its own.
     ///
     /// **The teardown runs before the handlers go, and the handlers go a turn behind it.**
