@@ -53,8 +53,8 @@ jobs:
       - name: Resolve two simulators
         # Both dispatch inputs given, both are used as-is (they are empty on push and PR).
         # Otherwise two CI-only devices, created on first use by
-        # `Scripts/ci/ensure-ci-simulator.sh` from the newest iPhone device type and iOS
-        # runtime on the machine. The runner is also someone's workstation: CI must not
+        # `Scripts/ci/ensure-ci-simulator.sh` from the newest iPhone device type and an
+        # installed iOS runtime of the highest version. The runner is also someone's workstation: CI must not
         # borrow "the two newest iPhones" — those are the devices they use — and the reclaim
         # step below tears down every device of these names, which is only safe when the
         # names are CI's own.
@@ -88,17 +88,20 @@ jobs:
         # cancelled step is killed before the trap finishes, and on a persistent runner a
         # simulator still leased by a dead grantiva run fails the next run's `ensure`.
         if: always()
-        # `teardown --udid --force` reclaims by live-process inspection — exactly the
-        # grantiva runner, WebDriverAgent and simulator for that device — and is called for
-        # every device of each name regardless of state (a cancelled run leaves them Booting
-        # or Shutting Down as often as Booted; tearing down an idle device is harmless). That
-        # is only safe because the names are CI's own; a dispatch that named the operator's
-        # devices gets them torn down too, which is what the inputs opt into.
+        # `teardown --udid --force` reclaims by live-process inspection — it kills the
+        # grantiva runner, the WebDriverAgent xcodebuild and any simctl diagnose holding that
+        # device and breaks the lease; it does not shut the simulator down, so `simctl
+        # shutdown` follows it. Both run for every device of each name regardless of state (a
+        # cancelled run leaves them Booting or Shutting Down as often as Booted; either call on
+        # an idle device is harmless). That is only safe because the names are CI's own; a
+        # dispatch that named the operator's devices gets them torn down too, which is what
+        # the inputs opt into.
         run: |
           for name in "$ADVERTISER_SIM" "$SCANNER_SIM"; do
             [ -n "$name" ] || continue
             for udid in $(xcrun simctl list devices -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(' '.join(x['udid'] for r in d for x in d[r] if x['name']==sys.argv[1]))" "$name"); do
               grantiva simulator teardown --udid "$udid" --force || true
+              xcrun simctl shutdown "$udid" 2>/dev/null || true
             done
           done
       - name: Upload reports
