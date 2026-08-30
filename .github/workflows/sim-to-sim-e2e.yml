@@ -62,6 +62,14 @@ jobs:
           ADVERTISER_INPUT: ${{ inputs.advertiser_sim }}
           SCANNER_INPUT: ${{ inputs.scanner_sim }}
         run: |
+          # Inputs are written into GITHUB_ENV line by line; the dispatch API accepts newlines
+          # in an input, so anything but a plain simulator name is refused first.
+          for value in "$ADVERTISER_INPUT" "$SCANNER_INPUT"; do
+            if [ -n "$value" ] && ! printf '%s' "$value" | grep -qE '^[A-Za-z0-9 ._()-]+$'; then
+              echo "::error::simulator inputs may contain only letters, digits, spaces, and . _ ( ) -"
+              exit 1
+            fi
+          done
           if [ -n "$ADVERTISER_INPUT" ] && [ -n "$SCANNER_INPUT" ]; then
             if [ "$ADVERTISER_INPUT" = "$SCANNER_INPUT" ]; then
               echo "::error::advertiser_sim and scanner_sim must name two distinct simulators"
