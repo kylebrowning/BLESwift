@@ -58,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-installs. It used to remove the device and end the backend's work chain permanently, so a
   detach through a composite was terminal. The device is still taken off the radio when the
   backend is deallocated, and when a peripheral-role session closes.
+- `LinkCentral.shutdown()` and `LinkPeripheralManager.shutdown()` (BLESwiftSimulatorLink) now
+  run the same teardown a dropped link runs before they detach their event handler, so a
+  consumer mid-operation is failed rather than stranded: every connected peripheral is
+  disconnected, every open L2CAP channel failed, every subscriber reported as departing, and
+  the state dropped to `.unsupported`. Stopping the session marks it stopped before its
+  connection reaches a terminal state, so none of that used to happen at all.
 
 ## [2.0.0] - 2026-08-24
 

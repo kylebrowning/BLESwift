@@ -186,12 +186,22 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         session.isConnected
     }
 
-    /// Stops the session and detaches the event handler. Idempotent, and safe to call from
-    /// any thread. Nothing calls it in production; `deinit` stops the session on its own.
+    /// Runs the teardown a dropped link runs — every subscriber reported as departing and the
+    /// state dropped to `.unsupported` — then stops the session and detaches the event
+    /// handler. Idempotent, and safe to call from any thread. Nothing calls it in production;
+    /// `deinit` stops the session on its own.
+    ///
+    /// **The teardown runs before the handler goes, and the handler goes a turn behind it**,
+    /// for the reason ``LinkCentral/shutdown()`` gives: the session is marked stopped before
+    /// its connection reaches a terminal state, so `onDisconnected` never fires, and a host
+    /// awaiting `add(_:)` or `startAdvertising(_:)` was stranded rather than failed.
     public func shutdown() {
         session.stop()
         queue.async { [self] in
-            _eventHandler = nil
+            handleLinkDropped()
+            queue.async { [self] in
+                _eventHandler = nil
+            }
         }
     }
 
