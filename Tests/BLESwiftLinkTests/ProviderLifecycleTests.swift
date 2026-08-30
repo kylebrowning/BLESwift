@@ -9,6 +9,7 @@ import BLESwiftLink
 @testable import BLESwiftProvider
 import Dispatch
 import Foundation
+import Synchronization
 import Testing
 
 /// What the provider leaves on a shared radio when its own lifecycle is interrupted — a
@@ -72,11 +73,34 @@ struct ProviderLifecycleTests {
         """
     }
 
-    /// A handler whose subscription callback takes its time, so removing its device — which
-    /// reports every subscription it still had — holds `stop()` at one of its suspension
-    /// points for as long as this test needs it held.
-    private struct SlowHandler: VirtualDeviceHandler {
-        let delay: Duration
+    /// A one-way flag two tasks can hand off on, polled rather than continued: a handler may
+    /// be called more than once, and a continuation resumed twice traps.
+    private final class Latch: Sendable {
+        private let flag = Mutex(false)
+
+        /// Whether ``signal()`` has been called.
+        var isSet: Bool { flag.withLock { $0 } }
+
+        func signal() { flag.withLock { $0 = true } }
+
+        /// Suspends — never blocks — until ``signal()`` has been called.
+        func wait() async {
+            while !isSet {
+                try? await Task.sleep(for: .milliseconds(2))
+            }
+        }
+    }
+
+    /// A handler that parks its device's *removal* until a test releases it, announcing on
+    /// ``entered`` that it has been reached.
+    ///
+    /// Suspends rather than blocking: a handler that slept its thread would starve a
+    /// cooperative pool of one, which is exactly what `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`
+    /// gives it. The subscribe that plants the subscription passes straight through — only
+    /// the unsubscribe a removal reports parks.
+    private struct ParkingHandler: VirtualDeviceHandler {
+        let entered: Latch
+        let release: Latch
 
         func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
             .failure(.unlikelyError)
@@ -87,7 +111,9 @@ struct ProviderLifecycleTests {
         }
 
         func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {
-            try? await Task.sleep(for: delay)
+            guard !isSubscribed else { return }
+            entered.signal()
+            await release.wait()
         }
     }
 
@@ -99,9 +125,11 @@ struct ProviderLifecycleTests {
         try await provider.start()
         let radio = provider.radio
 
-        // A device that takes its time being removed: `stop()` reports its subscription as an
-        // unsubscribe and waits for the handler, which parks the stop — with the provider's
-        // own actor released — right between emptying the tables and finishing.
+        // A device whose removal parks: `stop()` reports its subscription as an unsubscribe
+        // and waits for the handler, which holds the stop — with the provider's own actor
+        // released — right between emptying the tables and finishing.
+        let entered = Latch()
+        let release = Latch()
         let blockerID = UUID()
         let blocker = VirtualDevice(
             descriptor: VirtualDeviceDescriptor(
@@ -114,7 +142,7 @@ struct ProviderLifecycleTests {
                     ])
                 ]
             ),
-            handler: SlowHandler(delay: .milliseconds(500))
+            handler: ParkingHandler(entered: entered, release: release)
         )
         await provider.addVirtualDevice(blocker)
         let session = UUID()
@@ -123,13 +151,15 @@ struct ProviderLifecycleTests {
         #expect(await radio.setNotify(true, device: blockerID, characteristic: Self.measurement, session: session).isNotifying)
 
         let stopping = Task { await provider.stop() }
-        try await Task.sleep(for: .milliseconds(150))
+        try await bounded(seconds: 5) { await entered.wait() }
 
-        // Served while the stop is suspended: the tables this records into are emptied behind
-        // it, so the device would be left on a radio another provider may share, with nothing
+        // Served while the stop is parked: the tables this records into are emptied behind it,
+        // so the device would be left on a radio another provider may share, with nothing
         // holding its handle and its identifier no longer defended.
         let identifier = UUID()
         _ = try await bounded { await provider.addVirtualDevice(Self.device(identifier: identifier)) }
+
+        release.signal()
         _ = try await bounded { await stopping.value }
 
         // The radio is left as the provider found it.
@@ -140,29 +170,6 @@ struct ProviderLifecycleTests {
         await radio.detach(session: session)
     }
 
-    /// A handler whose subscription callback blocks the thread it is called on, holding the
-    /// radio itself — not merely its caller — for the duration.
-    ///
-    /// ``SlowHandler`` suspends instead, which releases the radio actor and lets everything
-    /// queued behind it run. This one is what keeps a registration parked at its one
-    /// suspension point long enough for a second `stop()` to open and close a window around
-    /// it.
-    private struct BlockingHandler: VirtualDeviceHandler {
-        let seconds: Double
-
-        func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
-            .failure(.unlikelyError)
-        }
-
-        func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> {
-            .failure(.unlikelyError)
-        }
-
-        func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {
-            usleep(useconds_t(seconds * 1_000_000))
-        }
-    }
-
     @Test("A second stop() returning cannot clear the window an add began inside")
     func addVirtualDeviceInsideOverlappingStopsLeavesNothingRegistered() async throws {
         var configuration = ProviderConfiguration()
@@ -171,6 +178,8 @@ struct ProviderLifecycleTests {
         try await provider.start()
         let radio = provider.radio
 
+        let entered = Latch()
+        let release = Latch()
         let blockerID = UUID()
         let blocker = VirtualDevice(
             descriptor: VirtualDeviceDescriptor(
@@ -183,7 +192,7 @@ struct ProviderLifecycleTests {
                     ])
                 ]
             ),
-            handler: BlockingHandler(seconds: 0.6)
+            handler: ParkingHandler(entered: entered, release: release)
         )
         await provider.addVirtualDevice(blocker)
         let session = UUID()
@@ -191,25 +200,26 @@ struct ProviderLifecycleTests {
         #expect(await radio.connect(session: session, device: blockerID, sink: { _ in }).error == nil)
         #expect(await radio.setNotify(true, device: blockerID, characteristic: Self.measurement, session: session).isNotifying)
 
-        // The long stop: parked reporting the blocker's subscription as an unsubscribe, which
-        // holds the radio itself, so everything below queues behind it in a known order.
+        // The long stop, parked reporting the blocker's subscription as an unsubscribe. The
+        // latch is what makes the rest of this ordering a fact rather than a hope: everything
+        // below happens inside this stop's window.
         let long = Task { await provider.stop() }
-        try await Task.sleep(for: .milliseconds(100))
+        try await bounded(seconds: 5) { await entered.wait() }
 
-        // The short stop, and then the registration: the second stop finds the device already
-        // gone from the radio, so it returns as soon as the radio frees up — before the
-        // registration behind it in the radio's queue has resumed.
-        let short = Task { await provider.stop() }
-        try await Task.sleep(for: .milliseconds(100))
+        // The short stop runs to completion inside it — the blocker is already off the radio,
+        // so it has nothing to wait for. A window tracked by a flag is now closed, though the
+        // stop that opened it has not returned.
+        _ = try await bounded { await provider.stop() }
+
+        // And only now the registration, which therefore begins — and ends — inside a window
+        // that is still open.
         let identifier = UUID()
-        let adding = Task { await provider.addVirtualDevice(Self.device(identifier: identifier)) }
+        _ = try await bounded { await provider.addVirtualDevice(Self.device(identifier: identifier)) }
 
-        _ = try await bounded { await short.value }
+        release.signal()
         _ = try await bounded { await long.value }
-        _ = try await bounded { await adding.value }
 
-        // Whichever stop returned first, the add began inside a window that had not closed:
-        // the radio is left as this provider found it.
+        // The radio is left as this provider found it.
         await waitFor(timeout: .seconds(5)) { !radio.knownDeviceIDs.withLock { $0.contains(identifier) } }
         #expect(!radio.knownDeviceIDs.withLock { $0.contains(identifier) })
         #expect(!radio.knownDeviceIDs.withLock { $0.contains(blockerID) })
