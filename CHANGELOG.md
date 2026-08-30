@@ -81,8 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   peripheral, which a few hundred writers released together by a single readiness signal
   reach honestly. Excess writes are now parked per peripheral (1024 writes or 1 MiB,
   whichever comes first) and drained on the backend's readiness; only past that cap does that
-  peripheral's queue go, reported as a failed write and acknowledged write by write so the
-  client's window is not left holding slots for payloads that were discarded. (#31)
+  peripheral's queue go — dropped with nothing reported, exactly as CoreBluetooth drops a
+  `.withoutResponse` write it cannot send, but acknowledged write by write so the client's
+  window is not left holding slots for payloads that were discarded. (#31)
 
 ## [2.0.0] - 2026-08-24
 

@@ -64,6 +64,8 @@ final class CentralSession: Sendable {
     /// peripheral is another matter: the client has stopped consuming acknowledgements
     /// altogether, and *this peripheral's* queue goes rather than the provider's memory — or
     /// the whole link, which took the scan and every other peripheral and channel with it.
+    /// Those writes are dropped with nothing reported, exactly as CoreBluetooth drops a
+    /// `.withoutResponse` write it cannot send.
     static let maximumPendingWrites = 1024
 
     /// How many bytes of unsent `.withoutResponse` writes this session parks for one
@@ -379,7 +381,8 @@ final class CentralSession: Sendable {
             // Parked, however far past its window the client is: writers released together by
             // one readiness signal are honest, and CoreBluetooth would queue them. Only a
             // queue past both caps is a client that has stopped consuming acknowledgements,
-            // and then this peripheral's queue is what goes — not the link.
+            // and then this peripheral's queue is what goes — dropped silently, as a
+            // `.withoutResponse` write always is — rather than the link.
             guard pendingWrites[peripheral, default: []].count < Self.maximumPendingWrites,
                   pendingWriteBytes[peripheral, default: 0] + value.count <= Self.maximumPendingWriteBytes else {
                 discardPendingWrites(for: peripheral, including:
@@ -603,9 +606,15 @@ final class CentralSession: Sendable {
     /// Each discarded write is still *acknowledged*: a `.withoutResponse` write holds a slot
     /// in the client's window until `writeWithoutResponseAccepted` reopens it, and enough
     /// unreturned slots wedge its writer for good — the same reason a write this session
-    /// cannot route is acknowledged rather than dropped in silence. The failure itself is
-    /// reported once per characteristic the discarded writes named, as a failed write, so a
-    /// client that watches for one is told rather than left believing every byte went out.
+    /// cannot route is acknowledged rather than dropped in silence.
+    ///
+    /// **Nothing else is reported.** A `.withoutResponse` write has no completion in
+    /// CoreBluetooth: the payload is dropped and the caller is told nothing, which is exactly
+    /// what a write too large for one packet does on device. Synthesizing a `didWriteValue`
+    /// would put an event on the wire that no real write of this type produces — invisible to
+    /// a client that has no API to surface it, and worse than invisible to one with a live
+    /// `.withResponse` write outstanding on the same characteristic, whose completion it would
+    /// be taken for. The discard is a provider-side fault, and it is logged there.
     ///
     /// - Parameters:
     ///   - peripheral: The peripheral whose queue is being given up on.
@@ -619,25 +628,9 @@ final class CentralSession: Sendable {
                 + "the client queued past \(Self.maximumPendingWrites) writes or "
                 + "\(Self.maximumPendingWriteBytes) bytes without consuming its acknowledgements"
         )
-        var reported: Set<CharacteristicIdentifier> = []
         for write in discarded {
             send(.writeWithoutResponseAccepted(peripheral: peripheral, sequence: write.sequence))
-            guard reported.insert(write.characteristic).inserted else { continue }
-            send(.didWriteValue(
-                peripheral: peripheral,
-                characteristic: WireCharacteristicRef(write.characteristic),
-                error: WireError(CentralSession.writeQueueOverflowed)
-            ))
         }
-    }
-
-    /// The error a discarded queue of `.withoutResponse` writes is reported with.
-    static var writeQueueOverflowed: NSError {
-        NSError(
-            domain: "BLESwiftProvider",
-            code: 11,
-            userInfo: [NSLocalizedDescriptionKey: "The queued writes for this peripheral were discarded"]
-        )
     }
 
     // MARK: - Events

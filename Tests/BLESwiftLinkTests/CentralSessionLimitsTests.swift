@@ -161,17 +161,9 @@ struct CentralSessionLimitsTests {
             )))
         }
 
-        // The peripheral's queue goes, reported as a failed write and acknowledged write by
-        // write so the client's own window is not left holding slots for payloads that were
-        // discarded. The link — the scan, every other peripheral, every channel — stays.
-        await waitFor(timeout: .seconds(10)) {
-            events.withLock { $0 }.contains { if case .didWriteValue(_, _, let error) = $0 { return error != nil } else { return false } }
-        }
-        #expect(events.withLock { $0 }.contains(.didWriteValue(
-            peripheral: Self.deviceID,
-            characteristic: WireCharacteristicRef(Self.control),
-            error: WireError(CentralSession.writeQueueOverflowed)
-        )))
+        // The peripheral's queue goes, acknowledged write by write so the client's own window
+        // is not left holding slots for payloads that were discarded. The link — the scan,
+        // every other peripheral, every channel — stays.
         await waitFor(timeout: .seconds(10)) {
             events.withLock { $0 }.filter {
                 if case .writeWithoutResponseAccepted = $0 { return true } else { return false }
@@ -181,6 +173,33 @@ struct CentralSessionLimitsTests {
             if case .writeWithoutResponseAccepted = $0 { return true } else { return false }
         }.count == overrun, "every discarded write gives the client back its window slot")
         #expect(await provider.sessionCount == 1)
+
+        // Nothing else is reported: a `.withoutResponse` write has no completion in
+        // CoreBluetooth, so a discarded one produces no event at all — least of all one a
+        // live `.withResponse` write on the same characteristic would be answered by.
+        #expect(!events.withLock { $0 }.contains {
+            if case .didWriteValue = $0 { return true } else { return false }
+        }, "a discarded withoutResponse write reports nothing")
+
+        connection.send(.centralRequest(.writeValue(
+            peripheral: Self.deviceID,
+            characteristic: WireCharacteristicRef(Self.control),
+            value: Data([0x02]),
+            type: .withResponse,
+            sequence: UInt64(overrun)
+        )))
+        await waitFor(timeout: .seconds(10)) {
+            events.withLock { $0 }.contains {
+                if case .didWriteValue = $0 { return true } else { return false }
+            }
+        }
+        let completions = events.withLock { $0 }.compactMap { event -> WireError?? in
+            guard case .didWriteValue(_, let characteristic, let error) = event,
+                  characteristic == WireCharacteristicRef(Self.control) else { return nil }
+            return .some(error)
+        }
+        #expect(completions.count == 1, "only the withResponse write is answered")
+        #expect(completions.first == .some(nil), "and with its own real result")
 
         connection.onStateChange = nil
         connection.onMessage = nil
