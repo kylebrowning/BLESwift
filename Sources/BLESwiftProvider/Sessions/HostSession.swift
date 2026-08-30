@@ -87,8 +87,18 @@ final class HostSession: Sendable {
     nonisolated(unsafe) private var pendingUpdates: [PendingUpdate] = []
     nonisolated(unsafe) private var isClosed = false
 
-    /// How many services this client has published, against ``maximumHostedServices``. Reset
-    /// by a `removeAllServices`, which empties the database it counts. Session ``queue`` only.
+    /// How many services this client has published or is waiting to have published, against
+    /// ``maximumHostedServices``.
+    ///
+    /// Raised by an `addService` request and lowered again by the `didAddService` that
+    /// *refuses* it — a duplicate identifier, or a device already removed from the radio —
+    /// so it measures the database this session is actually growing rather than the attempts
+    /// the client has made. Counting attempts alone let a client that re-added one service
+    /// sixty-four times, and was correctly told each time that it was a duplicate, lose its
+    /// link over a database holding one service. Counting only the *accepted* completions
+    /// would have lost the bound instead: the backend publishes asynchronously, so a burst of
+    /// fresh services all clears the guard before any completion lands. Reset by a
+    /// `removeAllServices`, which empties the database it counts. Session ``queue`` only.
     nonisolated(unsafe) private var hostedServices = 0
 
     /// Creates a session serving `connection` from `backend`.
@@ -193,7 +203,10 @@ final class HostSession: Sendable {
         case .addService(let service):
             // Bounded like every other client-driven queue in this session. Counted here
             // rather than read back from the backend: a composite's children answer for their
-            // own databases, and this is the count of what *this client* has published.
+            // own databases, and this is the count of what *this client* has published. The
+            // count is raised now — before the backend has answered — and given back by a
+            // refused `didAddService`, so an add that never reached the database does not
+            // hold a slot against the cap.
             guard hostedServices < Self.maximumHostedServices else {
                 failProtocol(ProtocolViolation.hostedServiceLimitExceeded)
                 return
@@ -363,6 +376,12 @@ final class HostSession: Sendable {
             send(.didStartAdvertising(error: error.wire))
 
         case .didAddService(let service, let error):
+            // A refusal published nothing, so the slot the request took goes back. Floored at
+            // zero because a `removeAllServices` may have emptied the count while this add
+            // was still in flight.
+            if error != nil {
+                hostedServices = max(0, hostedServices - 1)
+            }
             send(.didAddService(service: service.uuidString, error: error.wire))
 
         case .didReceiveRead(let request):

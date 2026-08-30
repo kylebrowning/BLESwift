@@ -156,6 +156,72 @@ struct HostSessionLimitsTests {
         await provider.stop()
     }
 
+    @Test("Re-adding one service past the hosted-service cap keeps the session")
+    func duplicateServiceAddsDoNotCloseTheSession() async throws {
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
+
+        let connection = LinkConnection.connect(
+            to: endpoint,
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "hostsession.duplicates")
+        )
+        let accepted = Mutex(false)
+        // Every `didAddService` the provider has answered with, `true` for a refusal.
+        let answers = Mutex<[Bool]>([])
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(
+                protocolVersion: LinkProtocol.version,
+                role: .peripheral,
+                clientName: "duplicate-publisher"
+            )))
+        }
+        connection.onMessage = { message in
+            switch message {
+            case .serverHello(let hello) where hello.accepted:
+                accepted.withLock { $0 = true }
+            case .hostEvent(.didAddService(_, let error)):
+                answers.withLock { $0.append(error != nil) }
+            default:
+                break
+            }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { accepted.withLock { $0 } }
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
+        #expect(await provider.sessionCount == 1)
+
+        // One service, published once and then re-added far past the cap — each add answered
+        // before the next is sent, exactly as an honest client that reads its completions
+        // would. The database never holds more than the one service, so the cap has nothing
+        // to defend against and the link stays up.
+        let service = GATTService(
+            identifier: ServiceIdentifier(uuid: UUID().uuidString),
+            characteristics: [
+                GATTCharacteristic(identifier: Self.measurement, properties: [.read], permissions: [.readable])
+            ]
+        )
+        for attempt in 0...HostSession.maximumHostedServices {
+            connection.send(.hostRequest(.addService(WireGATTService(service))))
+            await waitFor(timeout: .seconds(5)) { answers.withLock { $0.count } > attempt }
+        }
+
+        #expect(await provider.sessionCount == 1, "a refused duplicate must not spend a slot against the cap")
+        let refusals = answers.withLock { $0 }
+        #expect(refusals.count == HostSession.maximumHostedServices + 1)
+        #expect(refusals.first == false, "the first add publishes the service")
+        #expect(refusals.dropFirst().allSatisfy { $0 }, "every re-add is refused as a duplicate")
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+        await provider.stop()
+    }
+
     @Test("A respond carrying an ATT code no ATTError holds loses the session")
     func unknownATTErrorClosesTheSession() async throws {
         var configuration = ProviderConfiguration()

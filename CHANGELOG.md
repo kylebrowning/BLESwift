@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `HostSession` (BLESwiftProvider) counted every `addService` request against
+  `maximumHostedServices`, including the ones the backend refused as duplicates: a client that
+  re-added one service sixty-four times — and was correctly told each time that it was a
+  duplicate — lost its link over a database holding one service. A refused `didAddService` now
+  gives the slot back. (#26)
+
 ## [2.0.0] - 2026-08-24
 
 > **Breaking:** GATT read/write/notify now validate a characteristic's advertised
