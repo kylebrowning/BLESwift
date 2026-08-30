@@ -53,8 +53,9 @@ jobs:
       - name: Resolve two simulators
         # Both dispatch inputs given, both are used as-is (they are empty on push and PR).
         # Otherwise two CI-only devices, created on first use by
-        # `Scripts/ci/ensure-ci-simulator.sh` from the newest iPhone device type and an
-        # installed iOS runtime of the highest version. The runner is also someone's workstation: CI must not
+        # `Scripts/ci/ensure-ci-simulator.sh` from the newest iPhone device type on the
+        # highest-version iOS runtime installed, and recreated there when a newer runtime
+        # is installed. The runner is also someone's workstation: CI must not
         # borrow "the two newest iPhones" — those are the devices they use — and the reclaim
         # step below tears down every device of these names, which is only safe when the
         # names are CI's own.
@@ -63,12 +64,16 @@ jobs:
           SCANNER_INPUT: ${{ inputs.scanner_sim }}
         run: |
           # Inputs are written into GITHUB_ENV line by line; the dispatch API accepts newlines
-          # in an input, so anything but a plain simulator name is refused first.
+          # in an input, so anything but a plain simulator name is refused first. The check is
+          # on the whole string (a `case` glob), not per line — `grep -q` would pass a value
+          # whose first line is a name and whose second is `PATH=…`.
           for value in "$ADVERTISER_INPUT" "$SCANNER_INPUT"; do
-            if [ -n "$value" ] && ! printf '%s' "$value" | grep -qE '^[A-Za-z0-9 ._()-]+$'; then
-              echo "::error::simulator inputs may contain only letters, digits, spaces, and . _ ( ) -"
-              exit 1
-            fi
+            case "$value" in
+              *[!A-Za-z0-9\ ._\(\)-]*)
+                echo "::error::simulator inputs may contain only letters, digits, spaces, and . _ ( ) -"
+                exit 1
+                ;;
+            esac
           done
           if [ -n "$ADVERTISER_INPUT" ] && [ -n "$SCANNER_INPUT" ]; then
             if [ "$ADVERTISER_INPUT" = "$SCANNER_INPUT" ]; then

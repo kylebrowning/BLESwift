@@ -73,9 +73,9 @@ jobs:
       - uses: actions/checkout@v4
       # A CI-only device, by UDID. The runner is also someone's workstation, so the job must
       # not borrow "the newest iPhone" — that is the device they are debugging on. The script
-      # reuses a device of this name or creates one from the newest iPhone device type and an
-      # installed iOS runtime of the highest version; nothing is pinned, so it follows Xcode
-      # upgrades.
+      # reuses a device of this name when it is on the highest-version iOS runtime installed,
+      # and otherwise recreates it from the newest iPhone device type on that runtime; nothing
+      # is pinned, so the device follows runtime installs.
       - name: Resolve the CI simulator
         run: |
           SIM_UDID=$(Scripts/ci/ensure-ci-simulator.sh "BLESwift CI Test")
