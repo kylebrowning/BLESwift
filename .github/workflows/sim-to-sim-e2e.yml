@@ -52,11 +52,12 @@ jobs:
         run: grantiva --version
       - name: Resolve two simulators
         # Both dispatch inputs given, both are used as-is (they are empty on push and PR).
-        # Otherwise the two newest *numbered* iPhone models the runner actually has: names are
-        # ranked with a numbered model ("iPhone 17 Pro") above an unnumbered or suffixed one
-        # ("iPhone Air", "iPhone 17e"), then by that number, then by name — so a plain
-        # alphabetical sort cannot hand back "iPhone Air" as one of the two newest. Pinned
-        # names drift with the runner image's Xcode, which is why nothing is pinned here.
+        # Otherwise two CI-only devices, created on first use by
+        # `Scripts/ci/ensure-ci-simulator.sh` from the newest iPhone device type and iOS
+        # runtime on the machine. The runner is also someone's workstation: CI must not
+        # borrow "the two newest iPhones" — those are the devices they use — and the reclaim
+        # step below tears down every device of these names, which is only safe when the
+        # names are CI's own.
         env:
           ADVERTISER_INPUT: ${{ inputs.advertiser_sim }}
           SCANNER_INPUT: ${{ inputs.scanner_sim }}
@@ -75,17 +76,11 @@ jobs:
             echo "::error::give both advertiser_sim and scanner_sim, or neither"
             exit 1
           fi
-          NAMES=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; names={x['name'] for r in d for x in d[r] if x['name'].startswith('iPhone')}; rank=lambda n: (1, int(n.split()[1]), n) if len(n.split()) > 1 and n.split()[1].isdigit() else (0, 0, n); print('\n'.join(sorted(names, key=rank)[-2:]))")
-          # Two *distinct* names are the whole point: the advertiser and the scanner have to
-          # boot as separate simulators. One name would silently run both roles on one
-          # device, so fail here with something readable instead.
-          if [ "$(echo "$NAMES" | grep -c .)" -lt 2 ]; then
-            echo "::error::need two distinct iPhone simulator names, found: ${NAMES:-none}"
-            exit 1
-          fi
-          echo "ADVERTISER_SIM=$(echo "$NAMES" | tail -1)" >> "$GITHUB_ENV"
-          echo "SCANNER_SIM=$(echo "$NAMES" | head -1)" >> "$GITHUB_ENV"
-          echo "Using $NAMES"
+          ADV=$(Scripts/ci/ensure-ci-simulator.sh "BLESwift CI Advertiser")
+          SCN=$(Scripts/ci/ensure-ci-simulator.sh "BLESwift CI Scanner")
+          echo "ADVERTISER_SIM=BLESwift CI Advertiser" >> "$GITHUB_ENV"
+          echo "SCANNER_SIM=BLESwift CI Scanner" >> "$GITHUB_ENV"
+          echo "Using BLESwift CI Advertiser ($ADV) and BLESwift CI Scanner ($SCN)"
       - name: Run
         run: Scripts/sim-to-sim-e2e.sh
       - name: Reclaim the simulators
@@ -94,10 +89,11 @@ jobs:
         # simulator still leased by a dead grantiva run fails the next run's `ensure`.
         if: always()
         # `teardown --udid --force` reclaims by live-process inspection — exactly the
-        # grantiva runner, WebDriverAgent and simulator for that device, and nothing else on
-        # a Mac that is also someone's workstation — so it is called for every device of each
-        # name regardless of state (a cancelled run leaves them Booting or Shutting Down as
-        # often as Booted; tearing down an idle device is harmless). No process-name kills.
+        # grantiva runner, WebDriverAgent and simulator for that device — and is called for
+        # every device of each name regardless of state (a cancelled run leaves them Booting
+        # or Shutting Down as often as Booted; tearing down an idle device is harmless). That
+        # is only safe because the names are CI's own; a dispatch that named the operator's
+        # devices gets them torn down too, which is what the inputs opt into.
         run: |
           for name in "$ADVERTISER_SIM" "$SCANNER_SIM"; do
             [ -n "$name" ] || continue

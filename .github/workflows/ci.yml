@@ -8,8 +8,8 @@ on:
 # Every job runs on the project's self-hosted macOS runner (labels below). GitHub's hosted
 # macOS runners boot simulators in 100-600 s and starve the test process about one push in
 # four; a Mac on a desk does neither. A single runner executes one job at a time, so the
-# jobs in a run are effectively serial and a newer push on the same ref cancels the older
-# run rather than queueing behind it.
+# jobs in a run are effectively serial; a newer pull-request run on the same ref cancels
+# the older one, and pushes to main queue (see `concurrency` below).
 #
 # The repository is public. A pull request from a fork falls back to GitHub's hosted image
 # in `runs-on` below — but that expression lives in this file, and a `pull_request` run uses
@@ -71,19 +71,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # Named devices drift with the runner's Xcode — `iPhone 16` is gone from the current
-      # one — and a destination that matches nothing fails the job outright. So the name is
-      # resolved from what the runner actually has rather than pinned here.
-      #
-      # Ranked, not sorted alphabetically: a numbered model ("iPhone 17 Pro") outranks an
-      # unnumbered or suffixed one ("iPhone Air", "iPhone 17e"), then the number decides, then
-      # the name. A plain sort hands back "iPhone Air" as the newest, which it is not. Same
-      # ranking as `sim-to-sim-e2e.yml`, which takes the newest two rather than the newest one.
-      - name: Resolve a simulator
+      # A CI-only device, by UDID. The runner is also someone's workstation, so the job must
+      # not borrow "the newest iPhone" — that is the device they are debugging on. The script
+      # reuses a device of this name or creates one from the newest iPhone device type and
+      # iOS runtime the machine has; nothing is pinned, so it follows Xcode upgrades.
+      - name: Resolve the CI simulator
         run: |
-          SIM=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; names={x['name'] for r in d for x in d[r] if x['name'].startswith('iPhone')}; rank=lambda n: (1, int(n.split()[1]), n) if len(n.split()) > 1 and n.split()[1].isdigit() else (0, 0, n); print(sorted(names, key=rank)[-1])")
-          echo "SIM=$SIM" >> "$GITHUB_ENV"
-          echo "Using $SIM"
+          SIM_UDID=$(Scripts/ci/ensure-ci-simulator.sh "BLESwift CI Test")
+          echo "SIM_UDID=$SIM_UDID" >> "$GITHUB_ENV"
+          xcrun simctl list devices -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(*[f\"Using {x['name']} ({r}) {x['udid']}\" for r in d for x in d[r] if x['udid']==sys.argv[1]])" "$SIM_UDID"
       - name: Test on iOS Simulator
         # Retried once. On GitHub's hosted runners the simulator starved the test process
         # outright (the macOS-green `BLESwiftTests` suite froze for ~100 s inside the
@@ -91,10 +87,16 @@ jobs:
         # stays for the hosted fallback that fork PRs still use.
         run: |
           for attempt in 1 2; do
-            xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,name=$SIM" && exit 0
+            xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,id=$SIM_UDID" && exit 0
             echo "attempt $attempt failed"
           done
           exit 1
+      - name: Shut the CI simulator down
+        # Runs on cancellation too: a cancelled `xcodebuild test` leaves the device booted
+        # with a half-torn-down session on a persistent runner.
+        if: always()
+        run: |
+          [ -n "$SIM_UDID" ] && xcrun simctl shutdown "$SIM_UDID" 2>/dev/null || true
 
   platform-build:
     # The manifest declares watchOS/tvOS/visionOS; the peripheral role's CoreBluetooth
