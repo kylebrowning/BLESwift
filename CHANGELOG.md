@@ -54,6 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancellation check just before its bridge was torn down could put the dead channel's bytes
   on the wire under a channel id the session had since re-issued. (#27)
 
+- `CentralSession` (BLESwiftProvider) paired `didOpenL2CAPChannel` completions to client
+  channel ids by a per-peripheral FIFO with no notion of which connection issued the open, so
+  a completion for an open issued before a disconnect — arriving after the client had
+  reconnected and opened again — was popped as the new one and bridged the new channel id to
+  the previous connection's transport. Completions an ended connection still owes are now
+  consumed and their channels closed. (#28)
+
 ## [2.0.0] - 2026-08-24
 
 > **Breaking:** GATT read/write/notify now validate a characteristic's advertised

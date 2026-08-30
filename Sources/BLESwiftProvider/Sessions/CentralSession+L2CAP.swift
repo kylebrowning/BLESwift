@@ -156,10 +156,20 @@ extension CentralSession {
     /// registers the bridge, answers the client, and starts the inbound pump.
     ///
     /// The backend's completions for one peripheral arrive in the order the opens were
-    /// issued, so a FIFO per peripheral is enough to pair them up. Must be called on
+    /// issued, so a FIFO per peripheral is enough to pair them up — as long as the FIFO is
+    /// the right connection's. A completion the *previous* connection is still owed is
+    /// consumed first and paired with nothing: it belongs to a transport the client already
+    /// tore its half of down, and pairing it would bridge a live channel id to a dead
+    /// connection. See ``CentralSession/strandedOpens``. Must be called on
     /// ``CentralSession/queue``.
     func bridgeOpenedChannel(_ channel: (any L2CAPChannelRemote)?, error: NSError?, from peripheral: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
+        if let owed = strandedOpens[peripheral], owed > 0 {
+            log?("L2CAP open completion for a connection that has ended on peripheral \(peripheral); closing the channel")
+            strandedOpens[peripheral] = owed == 1 ? nil : owed - 1
+            channel?.close(error: nil)
+            return
+        }
         var queued = pendingOpens[peripheral] ?? []
         let pending = queued.isEmpty ? nil : queued.removeFirst()
         pendingOpens[peripheral] = queued

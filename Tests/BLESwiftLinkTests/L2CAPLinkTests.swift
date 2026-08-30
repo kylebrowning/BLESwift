@@ -44,6 +44,16 @@ struct L2CAPLinkTests {
         func store(_ peripheral: FakePeripheral) { storage.withLock { $0 = peripheral } }
     }
 
+    /// A `Sendable` hand-off for the `FakeCentral` the backend factory builds on the
+    /// session's queue, so a test can drive its scripting after the session exists.
+    private final class CentralBox: Sendable {
+        private let storage = Mutex<FakeCentral?>(nil)
+
+        var central: FakeCentral? { storage.withLock { $0 } }
+
+        func store(_ central: FakeCentral) { storage.withLock { $0 = central } }
+    }
+
     /// A provider whose passthrough central backend is a `FakeCentral` serving one
     /// `FakePeripheral`, plus a `Central` linked to it and already connected to that
     /// peripheral.
@@ -241,6 +251,86 @@ struct L2CAPLinkTests {
     /// The one central-role session `provider` is serving.
     private func centralSession(of provider: Provider) async throws -> CentralSession {
         try #require(await provider.liveSessions.compactMap { $0 as? CentralSession }.first)
+    }
+
+    @Test("A channel-open completion from a connection that has ended is not paired with the next open")
+    func aStaleOpenCompletionIsNotPairedWithTheNextConnectionsOpen() async throws {
+        let stalePSM = UInt16(0x0041)
+        let livePSM = UInt16(0x0043)
+        let box = PeripheralBox()
+        let centralBox = CentralBox()
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.centralBackendFactory = { queue in
+            let fake = FakeCentral(queue: queue, state: .poweredOn)
+            let peripheral = FakePeripheral(identifier: Self.deviceID, name: "Fake L2CAP", queue: queue)
+            // Every open is held, so this test decides when — and in which connection's
+            // lifetime — each completion lands.
+            peripheral.l2capOpenBehavior = .hold
+            fake.retrievablePeripherals[Self.deviceID] = peripheral
+            fake.connectBehavior = .succeed
+            box.store(peripheral)
+            centralBox.store(fake)
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+        let client = RawClient(port: await provider.port, label: "l2cap.staleopen")
+        await waitFor(timeout: .seconds(5)) { client.isAccepted }
+
+        /// Waits for the `didConnect` after the `connect` this sends.
+        func connect() async {
+            let before = client.events.filter {
+                if case .didConnect = $0 { return true } else { return false }
+            }.count
+            client.send(.connect(peripheral: Self.deviceID, options: nil, requiresANCS: false))
+            await waitFor(timeout: .seconds(5)) {
+                client.events.filter {
+                    if case .didConnect = $0 { return true } else { return false }
+                }.count > before
+            }
+        }
+
+        await connect()
+        let fake = try #require(box.peripheral)
+        // Issued on the first connection and never completed on it.
+        client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: stalePSM, channel: 1))
+        await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.openL2CAPChannelCalls.count } == 1 }
+
+        // The connection ends underneath it, and the client reconnects and opens again —
+        // taking a fresh channel id, as a client that saw the disconnect does.
+        let backend = try #require(centralBox.central)
+        backend.simulateDisconnect(PeripheralIdentifier(uuid: Self.deviceID, name: "Fake L2CAP"), error: nil)
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains { if case .didDisconnect = $0 { return true } else { return false } }
+        }
+        await connect()
+        client.send(.openL2CAPChannel(peripheral: Self.deviceID, psm: livePSM, channel: 2))
+        await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.openL2CAPChannelCalls.count } == 2 }
+
+        // The *first* connection's completion lands now. It answers nothing: channel id 2
+        // belongs to an open the live connection issued, and bridging it here would hand the
+        // client the previous connection's transport.
+        fake.simulateNextHeldL2CAPOpenCompletion()
+        let firstChannel = try #require(await fake.onQueue { fake.lastOpenedL2CAPChannel })
+        await waitFor(timeout: .seconds(5)) { await firstChannel.onQueue { firstChannel.isClosed } }
+        #expect(await firstChannel.onQueue { firstChannel.isClosed }, "a stranded completion's channel is closed, not leaked")
+        #expect(!client.events.contains { if case .didOpenL2CAPChannel = $0 { return true } else { return false } })
+
+        // The live connection's own completion is what answers channel id 2 — and it carries
+        // the PSM that open asked for, not the dead connection's.
+        fake.simulateNextHeldL2CAPOpenCompletion()
+        await waitFor(timeout: .seconds(5)) {
+            client.events.contains { if case .didOpenL2CAPChannel = $0 { return true } else { return false } }
+        }
+        #expect(client.events.contains(.didOpenL2CAPChannel(
+            peripheral: Self.deviceID, channel: 2, psm: livePSM, error: nil
+        )))
+
+        client.shutdown()
+        await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
+        await provider.stop()
     }
 
     @Test("A pump send from a bridge whose channel id was reused is dropped")

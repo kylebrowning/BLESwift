@@ -131,6 +131,19 @@ final class CentralSession: Sendable {
     private let maximumRemotes: Int
     nonisolated(unsafe) private var pendingWrites: [UUID: [PendingWrite]] = [:]
     nonisolated(unsafe) var pendingOpens: [UUID: [PendingOpen]] = [:]
+
+    /// How many `openL2CAPChannel` completions the backend still owes this session for opens
+    /// issued on a connection that has since ended, per peripheral — this session's connection
+    /// epoch, kept as the only thing it needs to encode.
+    ///
+    /// ``pendingOpens`` pairs completions to the client's channel ids by FIFO, and
+    /// ``discardPerConnectionState(for:)`` empties it. Without this, a `didOpenL2CAPChannel`
+    /// for an open issued *before* a disconnect, landing after the client has reconnected and
+    /// issued a fresh one, was popped as the new one — bridging the new channel id to the
+    /// previous connection's transport. Every completion counted here is answered by closing
+    /// the channel it carries and is never paired with anything; the client's own halves went
+    /// with the disconnect it was already told about. Session ``queue`` only.
+    nonisolated(unsafe) var strandedOpens: [UUID: Int] = [:]
     nonisolated(unsafe) private var isClosed = false
 
     /// The L2CAP channels this session is bridging, keyed by the id the client allocated.
@@ -216,6 +229,7 @@ final class CentralSession: Sendable {
             connectOrder.removeAll()
             pendingWrites.removeAll()
             pendingOpens.removeAll()
+            strandedOpens.removeAll()
             // Nothing to detach on the connection: the provider's table routes its
             // messages, and it drops this session's handler when the link ends — which
             // cancelling it below is what brings about.
@@ -464,6 +478,7 @@ final class CentralSession: Sendable {
             // otherwise outlive it, so the side tables stay bounded by this one.
             pendingWrites.removeValue(forKey: identifier)
             pendingOpens.removeValue(forKey: identifier)
+            strandedOpens.removeValue(forKey: identifier)
             overflow -= 1
         }
         connectOrder = kept
@@ -478,6 +493,10 @@ final class CentralSession: Sendable {
         guard pendingWrites[identifier]?.isEmpty ?? true, pendingOpens[identifier]?.isEmpty ?? true else {
             return false
         }
+        // A completion still owed by an ended connection has to find its count here when it
+        // lands, or it would be paired with whatever this session pends next for the
+        // peripheral.
+        guard strandedOpens[identifier] ?? 0 == 0 else { return false }
         return !channels.values.contains { $0.peripheral == identifier }
     }
 
@@ -701,7 +720,12 @@ final class CentralSession: Sendable {
     private func discardPerConnectionState(for peripheral: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         pendingWrites.removeValue(forKey: peripheral)
-        pendingOpens.removeValue(forKey: peripheral)
+        // Forgotten as pairings, remembered as debts: the backend may still complete an open
+        // this connection issued, and that completion belongs to no channel id this session
+        // will hand out again. See ``strandedOpens``.
+        if let outstanding = pendingOpens.removeValue(forKey: peripheral), !outstanding.isEmpty {
+            strandedOpens[peripheral, default: 0] += outstanding.count
+        }
         // The client tears its own halves down off the disconnect; closing the backend's
         // ends here is what stops their pumps and releases the transports.
         closeChannels(matching: { $0.peripheral == peripheral })
