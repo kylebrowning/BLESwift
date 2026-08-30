@@ -88,10 +88,10 @@ It can also be dispatched from the Actions tab. The dispatch form takes two opti
 `advertiser_sim` and `scanner_sim`. Give both to
 pin the run to particular simulator names; leave both empty — the default — and the job uses
 two CI-only devices, `BLESwift CI Advertiser` and `BLESwift CI Scanner`, created on first use
-by `Scripts/ci/ensure-ci-simulator.sh` from the newest iPhone device type and an installed iOS
-runtime of the highest version (nothing is pinned, so they follow Xcode upgrades; a same-named
-device left unavailable by a runtime upgrade is deleted first, and a delete that fails stops
-the job rather than creating a duplicate of the name). The runner is also a
+by `Scripts/ci/ensure-ci-simulator.sh` from the newest iPhone device type on the highest-version
+iOS runtime installed. A device of that name on an older runtime, or left unavailable by a
+runtime removal, is deleted and recreated — so the CI devices follow runtime installs — and a
+delete that fails stops the job rather than creating a duplicate of the name. The runner is also a
 workstation, and the job's reclaim step tears down every device of the names it used — so
 the names are CI's own, never "the two newest iPhones" someone is debugging on. Giving only
 one of the two inputs, or the same name twice, is refused with a readable error rather than
