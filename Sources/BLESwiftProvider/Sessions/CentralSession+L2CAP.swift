@@ -222,7 +222,7 @@ extension CentralSession {
                         guard !Task.isCancelled else { return }
                         await open.waitForCredit(piece.count)
                         guard !Task.isCancelled else { return }
-                        self?.sendFromPump(.l2capData(channel: channel, data: piece))
+                        self?.sendFromPump(.l2capData(channel: channel, data: piece), channel: channel, open: open)
                     }
                 }
                 self?.finishChannel(channel, open: open, error: nil)
@@ -389,8 +389,16 @@ extension CentralSession {
 
     /// Sends one event from the pump, hopping onto ``CentralSession/queue`` first. The queue
     /// is serial, so the pump's frames keep their order.
-    private func sendFromPump(_ event: CentralWireEvent) {
+    ///
+    /// The identity check every other off-queue completion makes is made here too: the pump
+    /// clears its cancellation check *before* the hop, so a teardown landing in between —
+    /// which drops the id, and may have re-issued it to another channel by the time this runs
+    /// — would otherwise put the old bridge's bytes on the wire under an id that is no longer
+    /// its own. Internal so a test can drive it with a bridge the session has already
+    /// dropped.
+    func sendFromPump(_ event: CentralWireEvent, channel: UInt32, open: OpenChannel) {
         queue.async { [self] in
+            guard isCurrent(channel, open) else { return }
             send(event)
         }
     }

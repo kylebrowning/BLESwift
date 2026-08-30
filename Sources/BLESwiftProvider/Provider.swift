@@ -239,6 +239,13 @@ public actor Provider {
         sessions.count
     }
 
+    /// Every live session, in no particular order. Internal, and there for the tests that
+    /// drive one session's off-queue completions directly — nothing in the public surface
+    /// hands a session out.
+    var liveSessions: [any ProviderSession] {
+        Array(sessions.values)
+    }
+
     /// Stops listening, closes every live session — dropping each client's link — and takes
     /// this provider's own devices, the configured fixtures and everything
     /// ``addVirtualDevice(_:advertising:)`` registered alike, back off the radio. Idempotent.

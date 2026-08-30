@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   duplicate — lost its link over a database holding one service. A refused `didAddService` now
   gives the slot back. (#26)
 
+- `CentralSession`'s L2CAP pump (BLESwiftProvider) sent inbound bytes onto the link without
+  the identity check every other off-queue completion makes: a pump that had cleared its
+  cancellation check just before its bridge was torn down could put the dead channel's bytes
+  on the wire under a channel id the session had since re-issued. (#27)
+
 ## [2.0.0] - 2026-08-24
 
 > **Breaking:** GATT read/write/notify now validate a characteristic's advertised
