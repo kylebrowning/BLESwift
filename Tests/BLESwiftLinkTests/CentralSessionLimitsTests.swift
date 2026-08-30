@@ -31,6 +31,22 @@ struct CentralSessionLimitsTests {
         func store(_ peripheral: FakePeripheral) { storage.withLock { $0 = peripheral } }
     }
 
+    /// Runs `body` on `session`'s own serial queue and returns its result — the sanctioned
+    /// way for a test to touch session state, which is queue-confined rather than locked.
+    private func onSessionQueue<T: Sendable>(
+        _ session: CentralSession,
+        _ body: @escaping @Sendable () -> T
+    ) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            session.queue.async { continuation.resume(returning: body()) }
+        }
+    }
+
+    /// The one central-role session `provider` is serving.
+    private func centralSession(of provider: Provider) async throws -> CentralSession {
+        try #require(await provider.liveSessions.compactMap { $0 as? CentralSession }.first)
+    }
+
 #if !targetEnvironment(simulator)
     // Sockets in a CI simulator are unreliable; the simulator-side path is covered by the
     // two-simulator E2E on real simulators.
@@ -89,9 +105,17 @@ struct CentralSessionLimitsTests {
             }
         }
 
-        // Parked: the scan, every other peripheral and every L2CAP channel this session holds
+        // Parked — every one of them, watched arriving rather than assumed: a machine slow
+        // enough to still be delivering the burst would otherwise let this test pass without
+        // the session ever holding more than the old cap allowed.
+        let session = try await centralSession(of: provider)
+        await waitFor(timeout: .seconds(10)) {
+            await onSessionQueue(session) { session.pendingWrites[Self.deviceID]?.count ?? 0 } == burst
+        }
+        #expect(await onSessionQueue(session) { session.pendingWrites[Self.deviceID]?.count ?? 0 } == burst)
+
+        // And the scan, every other peripheral and every L2CAP channel this session holds
         // survive a burst on one characteristic.
-        await waitFor(timeout: .seconds(2)) { await provider.sessionCount == 0 }
         #expect(await provider.sessionCount == 1)
 
         link.shutdown()

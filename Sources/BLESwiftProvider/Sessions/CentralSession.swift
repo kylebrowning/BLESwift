@@ -31,8 +31,9 @@ import Foundation
 ///   loop refers to itself weakly.
 final class CentralSession: Sendable {
 
-    /// One `.withoutResponse` write waiting for the peripheral to be ready for it.
-    private struct PendingWrite {
+    /// One `.withoutResponse` write waiting for the peripheral to be ready for it. Internal
+    /// for ``pendingWrites``' reason.
+    struct PendingWrite {
         let sequence: UInt64
         let characteristic: CharacteristicIdentifier
         let value: Data
@@ -156,7 +157,11 @@ final class CentralSession: Sendable {
     /// How long a stranded open completion is waited for — ``defaultStrandedOpenLifetime``,
     /// unless a test asked for a shorter one.
     let strandedOpenLifetime: Duration
-    nonisolated(unsafe) private var pendingWrites: [UUID: [PendingWrite]] = [:]
+    /// The `.withoutResponse` writes parked for each peripheral, oldest first, against
+    /// ``maximumPendingWrites`` and ``maximumPendingWriteBytes``. Internal rather than private
+    /// so a test can watch a burst arrive rather than guess at when it has. Session ``queue``
+    /// only.
+    nonisolated(unsafe) var pendingWrites: [UUID: [PendingWrite]] = [:]
 
     /// How many bytes of payload ``pendingWrites`` is holding per peripheral, against
     /// ``maximumPendingWriteBytes``. Kept rather than summed on every arrival, which would be
