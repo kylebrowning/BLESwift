@@ -72,6 +72,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every handle the first attempt had vended. A failed start now rolls its registrations
   back. (#30)
 
+- `CentralSession` (BLESwiftProvider) dropped the whole link — the scan, every peripheral,
+  every L2CAP channel — when a client queued more than 256 `.withoutResponse` writes for one
+  peripheral, which a few hundred writers released together by a single readiness signal
+  reach honestly. Excess writes are now parked per peripheral (1024 writes or 1 MiB,
+  whichever comes first) and drained on the backend's readiness; only past that cap does that
+  peripheral's queue go, reported as a failed write and acknowledged write by write so the
+  client's window is not left holding slots for payloads that were discarded. (#31)
+
 ## [2.0.0] - 2026-08-24
 
 > **Breaking:** GATT read/write/notify now validate a characteristic's advertised

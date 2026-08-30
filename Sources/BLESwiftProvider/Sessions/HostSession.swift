@@ -47,12 +47,13 @@ final class HostSession: Sendable {
     /// How many unsent `updateValue` pushes this session holds before it stops believing the
     /// client.
     ///
-    /// Four times the window the client agreed to honor, for the same reason
-    /// ``CentralSession/maximumPendingWrites`` is: a client that has stopped waiting for
-    /// `updateValueDelivered` can otherwise grow this queue — and the provider's memory —
+    /// Four times the window the client agreed to honor: a client that has stopped waiting
+    /// for `updateValueDelivered` can otherwise grow this queue — and the provider's memory —
     /// without bound, and a backend that never reports `readyToUpdateSubscribers` would let
     /// it. The factor of four is slack for the acknowledgements still in flight, not a second
-    /// window.
+    /// window. Unlike ``CentralSession/maximumPendingWrites``, which parks a burst of honest
+    /// writers, a push past this one has no such reading: the client is handed one
+    /// acknowledgement per push and cannot have run ahead of them by accident.
     static let maximumPendingUpdates = 4 * LinkFlowControl.updateValueWindow
 
     /// How many services one client may publish before this session stops believing it.
