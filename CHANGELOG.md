@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a fixture attached formed a retain cycle — radio → device table → `FixtureDeviceHandler` →
   handle → radio — and never deallocated unless `Provider.stop()` explicitly removed the
   device.
+- `CompositeCentral` and `CompositePeripheralManager` (BLESwiftProvider) now reconcile a
+  child from the `didUpdateState` payload instead of re-reading its live `radioState`. Two
+  transitions that coalesced before the handler drained them read as no change at all, so a
+  child that power-cycled was never re-issued the scan and the connection-event registration,
+  nor had its services republished and its advertisement restarted.
 
 ## [2.0.0] - 2026-08-24
 

@@ -286,8 +286,8 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     private func handle(_ event: PeripheralHostEvent, from index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         switch event {
-        case .didUpdateState:
-            childChangedState(index)
+        case .didUpdateState(let state):
+            childChangedState(index, to: state)
             emitState()
         case .willRestoreState:
             break
@@ -303,10 +303,18 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     }
 
     /// Reconciles child `index` entering or leaving `poweredOn`. Must be called on ``queue``.
-    private func childChangedState(_ index: Int) {
+    ///
+    /// Driven by the state the child *reported*, never by its live `radioState`: two
+    /// transitions that coalesce before this handler drains both read the same live value, so
+    /// re-reading it would see `was == now` for each and skip both the power-down and the
+    /// republish the cycle earned.
+    ///
+    /// - Parameters:
+    ///   - index: The child that reported a state.
+    ///   - now: The state it reported, from the `didUpdateState` payload.
+    private func childChangedState(_ index: Int, to now: CentralState) {
         dispatchPrecondition(condition: .onQueue(queue))
         let was = _childStates[index]
-        let now = backends[index].radioState
         guard was != now else { return }
         _childStates[index] = now
         if was == .poweredOn, now != .poweredOn {
