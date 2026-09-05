@@ -12,7 +12,7 @@ import BLESwiftSimulatorLink
 import BLESwiftTestSupport
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 @Suite("Central role end to end over the link")
@@ -41,7 +41,7 @@ struct CentralEndToEndTests {
 
     /// A `Central` driven by a `LinkCentral` dialing `port`, plus the link itself.
     private func makeCentral(port: UInt16, label: String) -> (Central, LinkCentral) {
-        let queue = DispatchSerialQueue(label: label)
+        let queue = DispatchQueue(label: label)
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
             queue: queue,

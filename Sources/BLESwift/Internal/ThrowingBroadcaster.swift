@@ -3,7 +3,7 @@
 //  BLESwift
 //
 
-import Synchronization
+import BLESwiftCompat17
 
 /// The throwing counterpart to ``Broadcaster``: a multicast primitive that fans out each
 /// ``yield(_:)``ed `Element` to every currently subscribed `AsyncThrowingStream`, and can

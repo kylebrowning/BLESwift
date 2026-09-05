@@ -3,7 +3,7 @@
 //  BLESwift
 //
 
-import Synchronization
+import BLESwiftCompat17
 
 /// How a ``Broadcaster`` replays previously-``yield(_:)``ed elements to a stream created
 /// after those elements were yielded.

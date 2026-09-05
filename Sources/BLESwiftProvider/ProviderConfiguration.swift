@@ -65,13 +65,15 @@ public struct ProviderConfiguration: Sendable {
 
     /// Test/consumer hook: replaces the real CoreBluetooth central backend used when
     /// ``passthrough`` is true. The factory is called once per central-role session, on that
-    /// session's own serial queue, and must return a backend confined to that queue.
-    public var centralBackendFactory: (@Sendable (DispatchSerialQueue) -> any CentralManaging)?
+    /// session's own serial queue, and must return a backend confined to that queue. The
+    /// queue handed to the factory is always serial (`DispatchQueue(label:)` is).
+    public var centralBackendFactory: (@Sendable (DispatchQueue) -> any CentralManaging)?
 
     /// Test/consumer hook: the peripheral-manager counterpart of
     /// ``centralBackendFactory``. The factory is called once per peripheral-role session, on
-    /// that session's own serial queue, and must return a backend confined to that queue.
-    public var peripheralManagerBackendFactory: (@Sendable (DispatchSerialQueue) -> any PeripheralManaging)?
+    /// that session's own serial queue, and must return a backend confined to that queue. The
+    /// queue handed to the factory is always serial (`DispatchQueue(label:)` is).
+    public var peripheralManagerBackendFactory: (@Sendable (DispatchQueue) -> any PeripheralManaging)?
 
     /// Test hook: how many peripheral remotes each central-role session keeps. Deliberately
     /// not `public` — a client cannot see this table, and the only reason to shrink it is a

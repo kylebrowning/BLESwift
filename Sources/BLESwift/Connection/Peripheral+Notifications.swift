@@ -3,6 +3,7 @@
 //  BLESwift
 //
 
+import BLESwiftCompat16
 import BLESwiftCore
 import Foundation
 
@@ -90,7 +91,7 @@ extension Peripheral {
         // Enqueued before this method returns, so by the serial queue's FIFO ordering,
         // registration always runs before `onTermination`'s release.
         central.queue.async {
-            central.assumeIsolated { central in
+            central.assumeIsolated(onQueue: central.queue) { central in
                 central.startNotificationPump(
                     peripheral: id,
                     characteristic: characteristic,
@@ -106,7 +107,7 @@ extension Peripheral {
             // Same sanctioned hop as every other arbitrary-thread entry point: `queue.async`
             // + `assumeIsolated`, never `Task { }`.
             central.queue.async {
-                central.assumeIsolated { central in
+                central.assumeIsolated(onQueue: central.queue) { central in
                     central.handleNotificationStreamTermination(peripheral: id, characteristic: characteristic, token: token)
                 }
             }

@@ -7,7 +7,7 @@ remote centrals with ``PeripheralHost``.
 
 Where ``Central`` is the *central* role — scanning for and connecting to remote peripherals —
 ``PeripheralHost`` is the other half of CoreBluetooth: the *peripheral* role. It wraps a single
-`CBPeripheralManager` in an actor whose isolation is tied directly to the `DispatchSerialQueue`
+`CBPeripheralManager` in an actor whose isolation is tied directly to the serial `DispatchQueue`
 its manager delivers delegate callbacks on, exactly like ``Central``. You build a GATT database
 from value types, advertise it, and respond to remote centrals through `async`/`AsyncSequence`
 APIs — no delegate, no callbacks.

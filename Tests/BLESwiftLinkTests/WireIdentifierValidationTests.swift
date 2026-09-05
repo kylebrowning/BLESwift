@@ -9,7 +9,7 @@ import BLESwiftLink
 import BLESwiftSimulatorLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 #if os(macOS)
@@ -153,7 +153,7 @@ struct WireIdentifierValidationTests {
     func duplicateDiscoveredCharacteristicsCollapse() async throws {
         let provider = try ScriptedProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "wireidvalidation.duplicates")
+        let queue = DispatchQueue(label: "wireidvalidation.duplicates")
         let link = LinkCentral(
             endpoint: provider.endpoint,
             queue: queue,
@@ -210,7 +210,7 @@ struct WireIdentifierValidationTests {
     func clientDropsAProviderThatSendsAMalformedIdentifier() async throws {
         let provider = try ScriptedProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "wireidvalidation.client")
+        let queue = DispatchQueue(label: "wireidvalidation.client")
         let link = LinkCentral(
             endpoint: provider.endpoint,
             queue: queue,
@@ -245,7 +245,7 @@ struct WireIdentifierValidationTests {
         let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
 
         // An innocent bystander, to prove the provider closes one session and not the link.
-        let bystanderQueue = DispatchSerialQueue(label: "wireidvalidation.bystander")
+        let bystanderQueue = DispatchQueue(label: "wireidvalidation.bystander")
         let bystander = LinkCentral(
             endpoint: endpoint,
             queue: bystanderQueue,

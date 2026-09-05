@@ -5,7 +5,7 @@
 
 #if os(iOS)
 import BLESwiftCore
-import Synchronization
+import BLESwiftCompat17
 
 /// Per-peripheral ANCS-authorization broadcasters, keyed by ``PeripheralIdentifier`` —
 /// the ANCS mirror of ``ServiceChangesRegistry``, with the same synchronous-fetch

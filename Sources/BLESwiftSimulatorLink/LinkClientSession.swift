@@ -6,7 +6,7 @@
 import BLESwiftLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// The client half of a link: dials a provider, performs the handshake, and reconnects.
 ///
@@ -65,7 +65,7 @@ package final class LinkClientSession: Sendable {
     /// nothing.
     private let hostIdentifier: UUID?
     private let codec: LinkCodec
-    private let queue: DispatchSerialQueue
+    private let queue: DispatchQueue
     private let retryInterval: Duration
     private let state = Mutex(State())
 
@@ -97,7 +97,7 @@ package final class LinkClientSession: Sendable {
         clientName: String,
         hostIdentifier: UUID? = nil,
         codec: LinkCodec = .binaryPropertyList,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         retryInterval: Duration = .seconds(2)
     ) {
         self.endpoint = endpoint

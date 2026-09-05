@@ -14,7 +14,7 @@ import BLESwiftLink
 import BLESwiftSimulatorLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// A scripted provider: accepts the handshake, records requests, lets tests inject events.
@@ -69,7 +69,7 @@ struct LinkCentralTests {
 
     /// Hops onto `queue` to run `body` and returns its result — the door for off-queue test
     /// code to touch queue-confined state.
-    private func onQueue<T: Sendable>(_ queue: DispatchSerialQueue, _ body: @Sendable @escaping () -> T) async -> T {
+    private func onQueue<T: Sendable>(_ queue: DispatchQueue, _ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async { continuation.resume(returning: body()) }
         }
@@ -78,7 +78,7 @@ struct LinkCentralTests {
     private func makeRig() async throws -> (Central, LinkCentral, ScriptedProvider) {
         let provider = try ScriptedProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "LinkCentralTests")
+        let queue = DispatchQueue(label: "LinkCentralTests")
         let link = LinkCentral(endpoint: provider.endpoint, queue: queue, clientName: "test", retryInterval: .milliseconds(50))
         let central = Central(backend: link, queue: queue)
         // Generous, and asserted: a starved runner can take seconds to hand over a loopback
@@ -191,7 +191,7 @@ struct LinkCentralTests {
 
     @Test("Reports .unsupported until the provider is reachable, then the provider's state")
     func stateBeforeAndAfterConnect() async throws {
-        let queue = DispatchSerialQueue(label: "state")
+        let queue = DispatchQueue(label: "state")
         let link = LinkCentral(endpoint: LinkEndpoint(host: "127.0.0.1", port: 1), queue: queue, clientName: "t", retryInterval: .milliseconds(50))
         let central = Central(backend: link, queue: queue)
         await waitFor { central.state == .unsupported }
@@ -203,7 +203,7 @@ struct LinkCentralTests {
     func stateDeliveredWhenHandlerAttachesLate() async throws {
         let provider = try ScriptedProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "late")
+        let queue = DispatchQueue(label: "late")
         let link = LinkCentral(endpoint: provider.endpoint, queue: queue, clientName: "late", retryInterval: .milliseconds(50))
         defer { provider.stop(); link.shutdown() }
 
@@ -354,7 +354,7 @@ struct LinkCentralTests {
     func nameIsReadableOffQueue() async throws {
         let provider = try ScriptedProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "LinkCentralTests.name")
+        let queue = DispatchQueue(label: "LinkCentralTests.name")
         let link = LinkCentral(endpoint: provider.endpoint, queue: queue, clientName: "test", retryInterval: .milliseconds(50))
         let central = Central(backend: link, queue: queue)
         defer { provider.stop(); link.shutdown() }
@@ -576,7 +576,7 @@ struct LinkCentralTests {
         _ provider: ScriptedProvider,
         _ peripheral: LinkPeripheral,
         for identifier: UUID,
-        on queue: DispatchSerialQueue
+        on queue: DispatchQueue
     ) async {
         provider.emit(.didDiscoverServices(peripheral: identifier, services: [Self.service.uuidString], error: nil))
         provider.emit(.didDiscoverCharacteristics(
@@ -591,7 +591,7 @@ struct LinkCentralTests {
         await waitFor(timeout: .seconds(30)) { await onQueue(queue) { peripheral.isDiscovered(Self.measurement) } }
     }
 
-    private static func fillWindow(_ peripheral: LinkPeripheral, on queue: DispatchSerialQueue, count: Int) async {
+    private static func fillWindow(_ peripheral: LinkPeripheral, on queue: DispatchQueue, count: Int) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async {
                 for _ in 0..<count {
@@ -613,7 +613,7 @@ struct LinkCentralTests {
 
     @Test("The peripheral table is capped, keeping the ones a connect still refers to")
     func peripheralTableIsCapped() async throws {
-        let queue = DispatchSerialQueue(label: "LinkCentralTests.cap")
+        let queue = DispatchQueue(label: "LinkCentralTests.cap")
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: try closedPort()),
             queue: queue,
@@ -647,7 +647,7 @@ struct LinkCentralTests {
 
     @Test("The peripheral mirror cap evicts the least recently sighted disconnected mirror")
     func peripheralCapEvictsTheOldestMirror() async throws {
-        let queue = DispatchSerialQueue(label: "LinkCentralTests.evict")
+        let queue = DispatchQueue(label: "LinkCentralTests.evict")
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: try closedPort()),
             queue: queue,
@@ -670,7 +670,7 @@ struct LinkCentralTests {
 
     @Test("An evicted mirror is detached from its event handler before it is forgotten")
     func peripheralCapDetachesTheMirrorItEvicts() async throws {
-        let queue = DispatchSerialQueue(label: "LinkCentralTests.evictDetach")
+        let queue = DispatchQueue(label: "LinkCentralTests.evictDetach")
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: try closedPort()),
             queue: queue,
@@ -698,7 +698,7 @@ struct LinkCentralTests {
 
     @Test("A table full of busy mirrors cannot make the cap evict the mirror it is minting")
     func peripheralCapNeverEvictsTheMirrorItJustCreated() async throws {
-        let queue = DispatchSerialQueue(label: "LinkCentralTests.reserve")
+        let queue = DispatchQueue(label: "LinkCentralTests.reserve")
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: try closedPort()),
             queue: queue,
@@ -730,7 +730,7 @@ struct LinkCentralTests {
     func connectRefilesAnEvictedPeripheral() async throws {
         let provider = try ScriptedProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "LinkCentralTests.evictedConnect")
+        let queue = DispatchQueue(label: "LinkCentralTests.evictedConnect")
         let link = LinkCentral(
             endpoint: provider.endpoint,
             queue: queue,
@@ -764,7 +764,7 @@ struct LinkCentralTests {
     func connectToAStaleMirrorFails() async throws {
         let provider = try ScriptedProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "LinkCentralTests.staleConnect")
+        let queue = DispatchQueue(label: "LinkCentralTests.staleConnect")
         let link = LinkCentral(
             endpoint: provider.endpoint,
             queue: queue,

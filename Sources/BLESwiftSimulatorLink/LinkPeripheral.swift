@@ -7,7 +7,7 @@ import BLESwiftCore
 import BLESwiftLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// A `PeripheralRemote` whose GATT operations travel over the link to a provider's real
 /// `CBPeripheral`, backed by a local mirror of that peripheral's discovery state.
@@ -60,7 +60,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     /// The queue every mirroring method, property accessor, and event delivery is confined
     /// to — the same queue the owning `Central` was constructed with.
-    private let queue: DispatchSerialQueue
+    private let queue: DispatchQueue
 
     /// The last name the provider reported. `Mutex`-protected rather than queue-confined:
     /// ``name`` is read off-queue, and every writer already runs on ``queue``.
@@ -95,7 +95,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     ///   - name: The last name the provider reported, if any.
     ///   - central: The owning central, referenced `unowned`.
     ///   - queue: The central's serial queue.
-    init(identifier: UUID, name: String?, central: LinkCentral, queue: DispatchSerialQueue) {
+    init(identifier: UUID, name: String?, central: LinkCentral, queue: DispatchQueue) {
         self.identifier = identifier
         self.nameBox = Mutex(name)
         self.central = central
