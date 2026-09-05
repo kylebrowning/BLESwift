@@ -6,7 +6,7 @@
 import BLESwiftCore
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// A scriptable stand-in for `CBPeripheralManager`, conforming to `PeripheralManaging` — the
 /// peripheral-role counterpart to ``FakeCentral``.
@@ -47,7 +47,7 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
     }
 
     /// The queue every CB-mirroring method and event delivery is confined to.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     nonisolated(unsafe) private var _radioState: CentralState
     nonisolated(unsafe) private var _eventHandler: ((PeripheralHostEvent) -> Void)?
@@ -80,9 +80,10 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
     ///
     /// - Parameters:
     ///   - queue: The queue every CB-mirroring method and event delivery is confined to — the
-    ///     same queue the `PeripheralHost` actor's executor must be tied to.
+    ///     same queue the `PeripheralHost` actor's executor must be tied to. Must be
+    ///     serial (`DispatchQueue(label:)` is).
     ///   - state: The initial `CentralState`. Defaults to `.unknown`.
-    public init(queue: DispatchSerialQueue, state: CentralState = .unknown) {
+    public init(queue: DispatchQueue, state: CentralState = .unknown) {
         self.queue = queue
         self._radioState = state
     }

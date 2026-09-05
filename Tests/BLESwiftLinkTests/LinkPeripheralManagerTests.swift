@@ -11,7 +11,7 @@ import BLESwiftLink
 import BLESwiftSimulatorLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// A scripted provider for the peripheral role: accepts the handshake, records the requests a
@@ -72,7 +72,7 @@ struct LinkPeripheralManagerTests {
 
     /// Hops onto `queue` to run `body` and returns its result — the door for off-queue test
     /// code to touch queue-confined state.
-    private func onQueue<T: Sendable>(_ queue: DispatchSerialQueue, _ body: @Sendable @escaping () -> T) async -> T {
+    private func onQueue<T: Sendable>(_ queue: DispatchQueue, _ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async { continuation.resume(returning: body()) }
         }
@@ -92,7 +92,7 @@ struct LinkPeripheralManagerTests {
     func negativeReadOffsetDropsTheSession() async throws {
         let provider = try ScriptedHostProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "linkperipheralmanager.badoffset")
+        let queue = DispatchQueue(label: "linkperipheralmanager.badoffset")
         let link = LinkPeripheralManager(
             endpoint: provider.endpoint,
             queue: queue,
@@ -135,7 +135,7 @@ struct LinkPeripheralManagerTests {
     func stopBehindStartDoesNotLatchAdvertising() async throws {
         let provider = try ScriptedHostProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "linkperipheralmanager.advertising")
+        let queue = DispatchQueue(label: "linkperipheralmanager.advertising")
         let link = LinkPeripheralManager(
             endpoint: provider.endpoint,
             queue: queue,
@@ -190,7 +190,7 @@ struct LinkPeripheralManagerTests {
     func staleUpdateAcknowledgementIsIgnored() async throws {
         let provider = try ScriptedHostProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "linkperipheralmanager.staleack")
+        let queue = DispatchQueue(label: "linkperipheralmanager.staleack")
         let link = LinkPeripheralManager(
             endpoint: provider.endpoint,
             queue: queue,

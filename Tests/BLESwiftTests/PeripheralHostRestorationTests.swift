@@ -25,8 +25,8 @@ struct PeripheralHostRestorationTests {
     /// `RestorationConfiguration.swift`).
     private func makeRestorationHost(
         label: String = "BLESwiftTests.FakePeripheralManager.restoration"
-    ) -> (PeripheralHost, FakePeripheralManager, DispatchSerialQueue) {
-        let queue = DispatchSerialQueue(label: label)
+    ) -> (PeripheralHost, FakePeripheralManager, DispatchQueue) {
+        let queue = DispatchQueue(label: label)
         let fake = FakePeripheralManager(queue: queue)
         var configuration = Configuration()
         configuration.peripheralRestoration = PeripheralRestorationConfiguration(

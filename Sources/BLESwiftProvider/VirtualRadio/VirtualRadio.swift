@@ -7,7 +7,7 @@
 import BLESwiftCore
 import Foundation
 import Logging
-import Synchronization
+import BLESwiftCompat17
 
 /// An in-process BLE radio hosting ``VirtualDevice``s and serving them to any number of
 /// ``VirtualCentralBackend``s — fixture devices and simulator-to-simulator BLE with no
@@ -135,7 +135,7 @@ public actor VirtualRadio {
     /// snapshot arrived and be told no such device exists. This is the same set, written
     /// inside ``register(_:advertising:)`` and the removal path before either returns, so a
     /// registration is visible to every backend the instant it has happened.
-    public nonisolated let knownDeviceIDs = Mutex<Set<UUID>>([])
+    package nonisolated let knownDeviceIDs = Mutex<Set<UUID>>([])
 
     /// Notification subscriptions, keyed by device, then characteristic, to the set of
     /// session identifiers currently subscribed.

@@ -8,7 +8,7 @@ import BLESwiftCore
 import BLESwiftLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// One L2CAP channel a ``CentralSession`` is bridging: the backend's real transport, the
 /// task pumping its inbound bytes onto the link, the chain keeping outbound writes ordered,

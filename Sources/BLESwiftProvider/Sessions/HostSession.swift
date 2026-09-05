@@ -71,7 +71,7 @@ final class HostSession: Sendable {
     private let connection: LinkConnection
 
     /// The serial queue the backend and every piece of session state are confined to.
-    private let queue: DispatchSerialQueue
+    private let queue: DispatchQueue
 
     /// Receives one line per notable session event.
     private let log: (@Sendable (String) -> Void)?
@@ -111,7 +111,7 @@ final class HostSession: Sendable {
     init(
         connection: LinkConnection,
         backend: any PeripheralManaging,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         ordinal: Int,
         hello: ServerHello,
         install: (@escaping @Sendable (LinkMessage) -> Void) -> Void,

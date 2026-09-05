@@ -10,14 +10,14 @@ import Dispatch
 import Foundation
 
 /// Creates a fresh ``FakeCentral``/``FakePeripheral`` pair sharing one
-/// `DispatchSerialQueue`, ready for a test to script.
+/// `DispatchQueue`, ready for a test to script.
 ///
-/// - Parameter label: A label for the underlying `DispatchSerialQueue`, useful for
+/// - Parameter label: A label for the underlying `DispatchQueue`, useful for
 ///   debugging (e.g. visible in Instruments/lldb thread names). Defaults to a generic
 ///   label.
 /// - Returns: A fake central, a fake peripheral, and the queue both were created with.
-func makeFakeCentral(label: String = "BLESwiftTests.FakeCentral") -> (FakeCentral, FakePeripheral, DispatchSerialQueue) {
-    let queue = DispatchSerialQueue(label: label)
+func makeFakeCentral(label: String = "BLESwiftTests.FakeCentral") -> (FakeCentral, FakePeripheral, DispatchQueue) {
+    let queue = DispatchQueue(label: label)
     let central = FakeCentral(queue: queue)
     let peripheral = FakePeripheral(queue: queue)
     return (central, peripheral, queue)

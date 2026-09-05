@@ -28,8 +28,8 @@ struct LinkPeripheralTests {
 
     /// A mirror for a peripheral nothing will ever answer for, on a central dialing a port
     /// nothing listens on — every request it sends is dropped by the unconnected session.
-    private func makeMirror(label: String) -> (LinkCentral, LinkPeripheral, DispatchSerialQueue) {
-        let queue = DispatchSerialQueue(label: label)
+    private func makeMirror(label: String) -> (LinkCentral, LinkPeripheral, DispatchQueue) {
+        let queue = DispatchQueue(label: label)
         let central = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: 1),
             queue: queue,

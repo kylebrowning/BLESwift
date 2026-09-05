@@ -4,7 +4,7 @@
 //
 
 import Dispatch
-import Synchronization
+import BLESwiftCompat17
 
 /// A process-wide override point for the backends `Central()` and `PeripheralHost()`
 /// construct by default.
@@ -19,11 +19,13 @@ import Synchronization
 /// passed directly always wins.
 public enum BackendRegistry {
 
-    /// Builds a `CentralManaging` backend confined to the given `DispatchSerialQueue`.
-    public typealias CentralFactory = @Sendable (DispatchSerialQueue) -> any CentralManaging
+    /// Builds a `CentralManaging` backend confined to the given `DispatchQueue`, which is
+    /// always serial (`DispatchQueue(label:)` is).
+    public typealias CentralFactory = @Sendable (DispatchQueue) -> any CentralManaging
 
-    /// Builds a `PeripheralManaging` backend confined to the given `DispatchSerialQueue`.
-    public typealias PeripheralManagerFactory = @Sendable (DispatchSerialQueue) -> any PeripheralManaging
+    /// Builds a `PeripheralManaging` backend confined to the given `DispatchQueue`, which is
+    /// always serial (`DispatchQueue(label:)` is).
+    public typealias PeripheralManagerFactory = @Sendable (DispatchQueue) -> any PeripheralManaging
 
     private static let centralBox = Mutex<CentralFactory?>(nil)
     private static let peripheralManagerBox = Mutex<PeripheralManagerFactory?>(nil)

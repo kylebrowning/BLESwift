@@ -6,7 +6,7 @@
 import BLESwiftCore
 import CoreBluetooth
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// Bridges real `CBPeripheralDelegate` callbacks into a `PeripheralEvent` handler closure
 /// — the `PeripheralRemote` conformance's implementation of `eventHandler` for

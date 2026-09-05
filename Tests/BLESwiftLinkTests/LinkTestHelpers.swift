@@ -5,7 +5,7 @@
 
 import BLESwiftCore
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// Collects a `PeripheralHost`'s subscription events off its actor, so a test can assert on
 /// what it was told and when. A `Mutex` is noncopyable, so it is wrapped rather than passed

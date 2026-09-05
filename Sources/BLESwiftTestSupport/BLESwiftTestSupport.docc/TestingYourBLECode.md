@@ -20,7 +20,7 @@ import BLESwiftTestSupport
 import Dispatch
 
 // 1. One serial queue, shared by every fake and by `Central` itself.
-let queue = DispatchSerialQueue(label: "MyAppTests.rig")
+let queue = DispatchQueue(label: "MyAppTests.rig")
 // 2. The fakes, confined to that queue.
 let fakeCentral = FakeCentral(queue: queue)
 let fakePeripheral = FakePeripheral(queue: queue)

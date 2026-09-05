@@ -40,13 +40,13 @@ import BLESwiftTestSupport
 import Dispatch
 
 // Central role, on its own queue.
-let centralQueue = DispatchSerialQueue(label: "Example.Central")
+let centralQueue = DispatchQueue(label: "Example.Central")
 let fakeCentral = FakeCentral(queue: centralQueue)
 let fakePeripheral = FakePeripheral(name: "Rig", queue: centralQueue)
 let central = Central(backend: fakeCentral, queue: centralQueue)
 
 // Peripheral role, on its own distinct queue.
-let hostQueue = DispatchSerialQueue(label: "Example.Host")
+let hostQueue = DispatchQueue(label: "Example.Host")
 let fakeManager = FakePeripheralManager(queue: hostQueue)
 let host = PeripheralHost(backend: fakeManager, queue: hostQueue)
 

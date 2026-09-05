@@ -6,7 +6,7 @@
 import BLESwiftCore
 import BLESwiftLink
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// Failures a link-backed L2CAP channel raises on its own behalf, as distinct from the ones
 /// the provider reports over the wire.

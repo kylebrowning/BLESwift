@@ -140,7 +140,7 @@ struct RetrievalTests {
         // CentralTests.adoptingInitWiresGivenManager — the only way to make `.stopped`
         // reachable for a `Central` backed by a real (rather than test-adopted `nil`)
         // manager.
-        let mainQueue = DispatchQueue.main as! DispatchSerialQueue
+        let mainQueue = DispatchQueue.main
         let manager = CBCentralManager(delegate: nil, queue: mainQueue)
         let central = Central(adopting: manager, callbackQueue: mainQueue)
 
@@ -170,8 +170,8 @@ struct RetrievalTests {
     /// Like `makeFakeCentral()`, but returns the queue directly rather than pairing the
     /// fake central with a single fake peripheral — the service-intersection tests above
     /// script multiple independent `FakePeripheral`s on the same queue.
-    private func makeFakeCentralOnly(label: String = "RetrievalTests.FakeCentral") -> (Central, FakeCentral, DispatchSerialQueue) {
-        let queue = DispatchSerialQueue(label: label)
+    private func makeFakeCentralOnly(label: String = "RetrievalTests.FakeCentral") -> (Central, FakeCentral, DispatchQueue) {
+        let queue = DispatchQueue(label: label)
         let fakeCentral = FakeCentral(queue: queue)
         let central = Central(backend: fakeCentral, queue: queue)
         return (central, fakeCentral, queue)

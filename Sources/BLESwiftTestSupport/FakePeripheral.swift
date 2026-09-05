@@ -30,7 +30,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     public let name: String?
 
     /// The queue every CB-mirroring method and event delivery is confined to.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     nonisolated(unsafe) private var _connectionState: PeripheralConnectionState
     nonisolated(unsafe) private var _canSendWriteWithoutResponse: Bool
@@ -81,12 +81,13 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     ///   - canSendWriteWithoutResponse: The initial back-pressure state. Defaults to
     ///     `true` (ready).
     ///   - queue: The queue every CB-mirroring method and event delivery is confined to.
+    ///     Must be serial (`DispatchQueue(label:)` is).
     public init(
         identifier: UUID = UUID(),
         name: String? = "Fake Peripheral",
         state: PeripheralConnectionState = .disconnected,
         canSendWriteWithoutResponse: Bool = true,
-        queue: DispatchSerialQueue
+        queue: DispatchQueue
     ) {
         self.identifier = identifier
         self.name = name

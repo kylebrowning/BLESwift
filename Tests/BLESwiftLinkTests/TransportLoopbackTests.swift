@@ -11,7 +11,7 @@
 import BLESwiftLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 @Suite("Transport loopback")

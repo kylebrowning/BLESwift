@@ -52,7 +52,7 @@ public final class CompositeCentral: CentralManaging, Sendable {
 
     /// The queue every method, property access, and event delivery is confined to — and
     /// the queue every child backend must also be confined to.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     /// The children, in priority order: the first backend wins identifier collisions in
     /// ``retrievePeripherals(withIdentifiers:)`` and supplies the fallback
@@ -115,10 +115,11 @@ public final class CompositeCentral: CentralManaging, Sendable {
     /// - Parameters:
     ///   - backends: The children, in priority order. Must all be confined to `queue`.
     ///   - queue: The shared queue — the same one the owning `Central` is constructed with.
+    ///     Must be serial (`DispatchQueue(label:)` is).
     ///   - log: Where to report a child skipped for not being powered on, if anywhere.
     public init(
         backends: [any CentralManaging],
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         log: (@Sendable (String) -> Void)? = nil
     ) {
         self.backends = backends
@@ -141,7 +142,7 @@ public final class CompositeCentral: CentralManaging, Sendable {
     ///   - log: Where to report a child skipped for not being powered on, if anywhere.
     package init(
         backends: [any CentralManaging],
-        onQueue queue: DispatchSerialQueue,
+        onQueue queue: DispatchQueue,
         log: (@Sendable (String) -> Void)? = nil
     ) {
         dispatchPrecondition(condition: .onQueue(queue))
