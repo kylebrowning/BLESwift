@@ -11,7 +11,7 @@ import BLESwiftProvider
 import BLESwiftTestSupport
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// ``CompositeCentral``/``CompositePeripheralManager``: one backend made of several, with
@@ -24,7 +24,7 @@ struct CompositeBackendTests {
     /// Hops onto `queue` to run `body` and returns its result — the sanctioned door for
     /// off-queue test code to touch queue-confined state, and (because `queue` is serial)
     /// a flush of every previously-scheduled `.async` delivery.
-    private func onQueue<T: Sendable>(_ queue: DispatchSerialQueue, _ body: @Sendable @escaping () -> T) async -> T {
+    private func onQueue<T: Sendable>(_ queue: DispatchQueue, _ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async { continuation.resume(returning: body()) }
         }
@@ -44,7 +44,7 @@ struct CompositeBackendTests {
 
     @Test("Composite state is .poweredOn when any child is, and is announced once on attach")
     func stateIsPoweredOnWhenAnyChildIs() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.state")
+        let queue = DispatchQueue(label: "CompositeBackendTests.state")
         let off = FakeCentral(queue: queue, state: .poweredOff)
         let on = FakeCentral(queue: queue, state: .poweredOn)
         let composite = CompositeCentral(backends: [off, on], queue: queue)
@@ -63,7 +63,7 @@ struct CompositeBackendTests {
 
     @Test("Composite state flips to .poweredOff only when every child is off, emitting once")
     func stateFlipsOffOnlyWhenEveryChildIsOff() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.stateFlip")
+        let queue = DispatchQueue(label: "CompositeBackendTests.stateFlip")
         let first = FakeCentral(queue: queue, state: .poweredOn)
         let second = FakeCentral(queue: queue, state: .poweredOn)
         let composite = CompositeCentral(backends: [first, second], queue: queue)
@@ -93,7 +93,7 @@ struct CompositeBackendTests {
 
     @Test("Every call fans out to every child")
     func callsFanOutToEveryChild() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.fanOut")
+        let queue = DispatchQueue(label: "CompositeBackendTests.fanOut")
         let first = FakeCentral(queue: queue, state: .poweredOn)
         let second = FakeCentral(queue: queue, state: .poweredOn)
         let composite = CompositeCentral(backends: [first, second], queue: queue)
@@ -117,7 +117,7 @@ struct CompositeBackendTests {
 
     @Test("retrievePeripherals concatenates across children, de-duplicated by identifier")
     func retrieveReachesEveryChild() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.retrieve")
+        let queue = DispatchQueue(label: "CompositeBackendTests.retrieve")
         let first = FakeCentral(queue: queue, state: .poweredOff)
         let second = FakeCentral(queue: queue, state: .poweredOn)
         let composite = CompositeCentral(backends: [first, second], queue: queue)
@@ -148,7 +148,7 @@ struct CompositeBackendTests {
 
     @Test("retrieveConnectedPeripherals concatenates across children")
     func retrieveConnectedReachesEveryChild() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.retrieveConnected")
+        let queue = DispatchQueue(label: "CompositeBackendTests.retrieveConnected")
         let first = FakeCentral(queue: queue, state: .poweredOn)
         let second = FakeCentral(queue: queue, state: .poweredOn)
         let composite = CompositeCentral(backends: [first, second], queue: queue)
@@ -168,7 +168,7 @@ struct CompositeBackendTests {
 
     @Test("connect on a peripheral from one child delivers didConnect through the composite")
     func connectDeliversDidConnect() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.connect")
+        let queue = DispatchQueue(label: "CompositeBackendTests.connect")
         let first = FakeCentral(queue: queue, state: .poweredOff)
         let second = FakeCentral(queue: queue, state: .poweredOn)
         let composite = CompositeCentral(backends: [first, second], queue: queue)
@@ -208,7 +208,7 @@ struct CompositeBackendTests {
 
     @Test("A real Central over the composite connects a peripheral end-to-end")
     func realCentralOverCompositeConnects() async throws {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.central")
+        let queue = DispatchQueue(label: "CompositeBackendTests.central")
         let first = FakeCentral(queue: queue, state: .poweredOff)
         let second = FakeCentral(queue: queue, state: .poweredOn)
         let composite = CompositeCentral(backends: [first, second], queue: queue)
@@ -229,7 +229,7 @@ struct CompositeBackendTests {
 
     @Test("Clearing the composite's handler detaches every child")
     func clearingHandlerDetachesChildren() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.detach")
+        let queue = DispatchQueue(label: "CompositeBackendTests.detach")
         let first = FakeCentral(queue: queue, state: .poweredOn)
         let second = FakeCentral(queue: queue, state: .poweredOn)
         let composite = CompositeCentral(backends: [first, second], queue: queue)
@@ -243,7 +243,7 @@ struct CompositeBackendTests {
 
     @Test("A child powering on is re-issued the scan and the connection-event registration")
     func aChildPoweringOnIsReissuedTheScan() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.rescan")
+        let queue = DispatchQueue(label: "CompositeBackendTests.rescan")
         let first = FakeCentral(queue: queue, state: .poweredOn)
         let second = FakeCentral(queue: queue, state: .poweredOff)
         let skipped = Mutex<[String]>([])
@@ -280,7 +280,7 @@ struct CompositeBackendTests {
 
     @Test("A scan stopped before a child powers on is not re-issued to it")
     func aStoppedScanIsNotReissued() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.rescanStopped")
+        let queue = DispatchQueue(label: "CompositeBackendTests.rescanStopped")
         let first = FakeCentral(queue: queue, state: .poweredOn)
         let second = FakeCentral(queue: queue, state: .poweredOff)
         let composite = CompositeCentral(backends: [first, second], queue: queue)
@@ -307,7 +307,7 @@ struct CompositeBackendTests {
 
     @Test("add emits exactly one didAddService after every child has reported")
     func addEmitsOneCompletion() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.add")
+        let queue = DispatchQueue(label: "CompositeBackendTests.add")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -332,7 +332,7 @@ struct CompositeBackendTests {
 
     @Test("An addServiceError on the last child surfaces in the aggregated didAddService")
     func addServiceErrorSurfaces() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.addError")
+        let queue = DispatchQueue(label: "CompositeBackendTests.addError")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -356,7 +356,7 @@ struct CompositeBackendTests {
 
     @Test("startAdvertising emits exactly one didStartAdvertising; isAdvertising follows the children")
     func startAdvertisingEmitsOnce() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.advertise")
+        let queue = DispatchQueue(label: "CompositeBackendTests.advertise")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -387,7 +387,7 @@ struct CompositeBackendTests {
 
     @Test("isAdvertising ignores a child that is not powered on")
     func isAdvertisingIgnoresAnOfflineChild() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.advertise.offline")
+        let queue = DispatchQueue(label: "CompositeBackendTests.advertise.offline")
         let online = FakePeripheralManager(queue: queue, state: .poweredOn)
         let offline = FakePeripheralManager(queue: queue, state: .poweredOff)
         let composite = CompositePeripheralManager(backends: [online, offline], queue: queue)
@@ -418,7 +418,7 @@ struct CompositeBackendTests {
 
     @Test("Every child is offered every push, and a refusal does not stop the fan-out")
     func everyChildIsOfferedEveryPush() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.update")
+        let queue = DispatchQueue(label: "CompositeBackendTests.update")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -443,7 +443,7 @@ struct CompositeBackendTests {
 
     @Test("A push one child refused reaches it once, from its own FIFO, after it is ready")
     func aRefusedPushIsDeliveredOnceFromTheChildsQueue() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.retry")
+        let queue = DispatchQueue(label: "CompositeBackendTests.retry")
         let accepting = FakePeripheralManager(queue: queue, state: .poweredOn)
         let refusing = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [accepting, refusing], queue: queue)
@@ -487,7 +487,7 @@ struct CompositeBackendTests {
 
     @Test("A child that falls a whole window behind closes the composite's window")
     func afullChildQueueClosesTheWindow() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.window")
+        let queue = DispatchQueue(label: "CompositeBackendTests.window")
         let accepting = FakePeripheralManager(queue: queue, state: .poweredOn)
         let refusing = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [accepting, refusing], queue: queue)
@@ -536,7 +536,7 @@ struct CompositeBackendTests {
 
     @Test("A child whose FIFO fills is logged once, by index and characteristic")
     func afullChildQueueIsLoggedOnce() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.windowLog")
+        let queue = DispatchQueue(label: "CompositeBackendTests.windowLog")
         let accepting = FakePeripheralManager(queue: queue, state: .poweredOn)
         let refusing = FakePeripheralManager(queue: queue, state: .poweredOn)
         let lines = Mutex<[String]>([])
@@ -575,7 +575,7 @@ struct CompositeBackendTests {
 
     @Test("A child that never takes a push cannot latch the composite's window shut")
     func aChildWithADeadHandleNeverClosesTheWindow() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.deadHandle")
+        let queue = DispatchQueue(label: "CompositeBackendTests.deadHandle")
         let healthy = FakePeripheralManager(queue: queue, state: .poweredOn)
         let dead = FakePeripheralManager(queue: queue, state: .poweredOn)
         let lines = Mutex<[String]>([])
@@ -625,7 +625,7 @@ struct CompositeBackendTests {
 
     @Test("Concurrent pushes reach every child exactly once, in per-child order")
     func concurrentPushesAreDeliveredOncePerChild() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.concurrent")
+        let queue = DispatchQueue(label: "CompositeBackendTests.concurrent")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -658,7 +658,7 @@ struct CompositeBackendTests {
 
     @Test("Two distinct pushes carrying the same bytes each reach every child")
     func identicalPayloadsAreNotMistakenForARetry() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.identicalPayloads")
+        let queue = DispatchQueue(label: "CompositeBackendTests.identicalPayloads")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -678,7 +678,7 @@ struct CompositeBackendTests {
 
     @Test("readyToUpdateSubscribers from any child is forwarded")
     func readyToUpdateIsForwarded() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.ready")
+        let queue = DispatchQueue(label: "CompositeBackendTests.ready")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -701,7 +701,7 @@ struct CompositeBackendTests {
 
     @Test("Peripheral composite state is .poweredOn when any child is; other events forward")
     func peripheralStateAndForwarding() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.peripheralState")
+        let queue = DispatchQueue(label: "CompositeBackendTests.peripheralState")
         let off = FakePeripheralManager(queue: queue, state: .poweredOff)
         let on = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [off, on], queue: queue)
@@ -728,7 +728,7 @@ struct CompositeBackendTests {
 
     @Test("add and startAdvertising complete over a child that is not powered on")
     func addAndAdvertiseSkipAPoweredOffChild() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.addPoweredOff")
+        let queue = DispatchQueue(label: "CompositeBackendTests.addPoweredOff")
         let virtual = FakePeripheralManager(queue: queue, state: .poweredOn)
         let real = FakePeripheralManager(queue: queue, state: .poweredOff)
         let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
@@ -765,7 +765,7 @@ struct CompositeBackendTests {
 
     @Test("With no powered-on child, add and startAdvertising complete with an error")
     func addAndAdvertiseFailWithNoOnlineChild() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.allPoweredOff")
+        let queue = DispatchQueue(label: "CompositeBackendTests.allPoweredOff")
         let first = FakePeripheralManager(queue: queue, state: .poweredOff)
         let second = FakePeripheralManager(queue: queue, state: .unauthorized)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -811,7 +811,7 @@ struct CompositeBackendTests {
 
     @Test("A child that is not powered on never fills a FIFO, so the window never latches")
     func aPoweredOffChildNeverClosesTheWindow() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.windowPoweredOff")
+        let queue = DispatchQueue(label: "CompositeBackendTests.windowPoweredOff")
         let virtual = FakePeripheralManager(queue: queue, state: .poweredOn)
         let real = FakePeripheralManager(queue: queue, state: .poweredOff)
         let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
@@ -831,7 +831,7 @@ struct CompositeBackendTests {
 
     @Test("With no powered-on child, updateValue is refused until one powers on")
     func updateValueIsRefusedWithNoOnlineChild() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.pushAllOff")
+        let queue = DispatchQueue(label: "CompositeBackendTests.pushAllOff")
         let first = FakePeripheralManager(queue: queue, state: .poweredOff)
         let second = FakePeripheralManager(queue: queue, state: .unauthorized)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -869,7 +869,7 @@ struct CompositeBackendTests {
 
     @Test("A child powering on later is caught up with the services and the advertisement")
     func aChildPoweringOnIsCaughtUp() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.powerUp")
+        let queue = DispatchQueue(label: "CompositeBackendTests.powerUp")
         let virtual = FakePeripheralManager(queue: queue, state: .poweredOn)
         let real = FakePeripheralManager(queue: queue, state: .poweredOff)
         let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
@@ -915,7 +915,7 @@ struct CompositeBackendTests {
 
     @Test("A child powering off mid-add settles the pending it still owed")
     func aChildPoweringOffMidAddSettlesThePending() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.powerDownMidAdd")
+        let queue = DispatchQueue(label: "CompositeBackendTests.powerDownMidAdd")
         let virtual = FakePeripheralManager(queue: queue, state: .poweredOn)
         let real = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
@@ -946,7 +946,7 @@ struct CompositeBackendTests {
 
     @Test("A handler that re-enters add() from a power-down keeps its own batches")
     func aReentrantAddFromPowerDownKeepsItsBatch() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.reentrantAdd")
+        let queue = DispatchQueue(label: "CompositeBackendTests.reentrantAdd")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         // Abandons what it had in flight, so every batch is settled by its power-down rather
@@ -1013,7 +1013,7 @@ struct CompositeBackendTests {
 
     @Test("respond and removeAllHostedServices fan out to every child")
     func respondAndRemoveFanOut() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.respond")
+        let queue = DispatchQueue(label: "CompositeBackendTests.respond")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -1032,7 +1032,7 @@ struct CompositeBackendTests {
 
     @Test("A child that abandons what it had in flight still hears its own completions again")
     func aChildThatAbandonsInFlightWorkIsNotOverCounted() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.abandon")
+        let queue = DispatchQueue(label: "CompositeBackendTests.abandon")
         let virtual = FakePeripheralManager(queue: queue, state: .poweredOn)
         let real = AbandoningPeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
@@ -1089,7 +1089,7 @@ struct CompositeBackendTests {
 
     @Test("A child's coalesced power cycle still re-issues the scan")
     func coalescedCentralTransitionsStillReconcile() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.coalescedScan")
+        let queue = DispatchQueue(label: "CompositeBackendTests.coalescedScan")
         let first = FakeCentral(queue: queue, state: .poweredOn)
         let second = FakeCentral(queue: queue, state: .poweredOn)
         let composite = CompositeCentral(backends: [first, second], queue: queue)
@@ -1116,7 +1116,7 @@ struct CompositeBackendTests {
 
     @Test("A peripheral child's coalesced power cycle still republishes and re-advertises")
     func coalescedPeripheralTransitionsStillReconcile() async {
-        let queue = DispatchSerialQueue(label: "CompositeBackendTests.coalescedPublish")
+        let queue = DispatchQueue(label: "CompositeBackendTests.coalescedPublish")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
@@ -1164,7 +1164,7 @@ struct CompositeBackendTests {
 private final class AbandoningPeripheralManager: PeripheralManaging, Sendable {
 
     /// The queue every method and every event delivery is confined to.
-    let queue: DispatchSerialQueue
+    let queue: DispatchQueue
 
     nonisolated(unsafe) private var _radioState: CentralState
     nonisolated(unsafe) private var _eventHandler: ((PeripheralHostEvent) -> Void)?
@@ -1173,7 +1173,7 @@ private final class AbandoningPeripheralManager: PeripheralManaging, Sendable {
     nonisolated(unsafe) private var _onAdd: ((GATTService) -> Void)?
     nonisolated(unsafe) private var _completesAdds = true
 
-    init(queue: DispatchSerialQueue, state: CentralState) {
+    init(queue: DispatchQueue, state: CentralState) {
         self.queue = queue
         self._radioState = state
     }

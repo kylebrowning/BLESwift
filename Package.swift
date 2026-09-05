@@ -14,7 +14,7 @@ let sharedSwiftSettings: [SwiftSetting] = [
 
 let package = Package(
     name: "BLESwift",
-    platforms: [.iOS(.v18), .macOS(.v15), .watchOS(.v11), .tvOS(.v18), .visionOS(.v2)],
+    platforms: [.iOS(.v16), .macOS(.v13), .watchOS(.v9), .tvOS(.v16), .visionOS(.v1)],
     products: [
         .library(name: "BLESwift", targets: ["BLESwift"]),
         .library(name: "BLESwiftCore", targets: ["BLESwiftCore"]),
@@ -30,14 +30,38 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0")
     ],
     targets: [
+        // Back-deployment tiers. Non-products: consumers never import them. Each one is
+        // deleted, with its test target, when the floor is raised past the OS it serves —
+        // see the "Back-deployment" DocC article in BLESwift.
+        .target(
+            name: "BLESwiftCompat17",
+            resources: [.copy("BLESwiftCompat17.docc")],
+            swiftSettings: sharedSwiftSettings
+        ),
+        .testTarget(
+            name: "BLESwiftCompat17Tests",
+            dependencies: ["BLESwiftCompat17"]
+        ),
+        .target(
+            name: "BLESwiftCompat16",
+            resources: [.copy("BLESwiftCompat16.docc")],
+            swiftSettings: sharedSwiftSettings
+        ),
+        .testTarget(
+            name: "BLESwiftCompat16Tests",
+            dependencies: ["BLESwiftCompat16"]
+        ),
         .target(
             name: "BLESwiftCore",
+            dependencies: ["BLESwiftCompat17"],
             resources: [.copy("BLESwiftCore.docc")],
             swiftSettings: sharedSwiftSettings
         ),
         .target(
             name: "BLESwift",
             dependencies: [
+                "BLESwiftCompat16",
+                "BLESwiftCompat17",
                 "BLESwiftCore",
                 .product(name: "Logging", package: "swift-log")
             ],
@@ -52,17 +76,24 @@ let package = Package(
         ),
         .target(
             name: "BLESwiftTestSupport",
-            dependencies: ["BLESwiftCore"],
+            dependencies: ["BLESwiftCompat17", "BLESwiftCore"],
             resources: [.copy("BLESwiftTestSupport.docc")],
             swiftSettings: sharedSwiftSettings
         ),
         .testTarget(
             name: "BLESwiftTests",
-            dependencies: ["BLESwift", "BLESwiftCore", "BLESwiftProfiles", "BLESwiftTestSupport"]
+            dependencies: [
+                "BLESwiftCompat17",
+                "BLESwift",
+                "BLESwiftCore",
+                "BLESwiftProfiles",
+                "BLESwiftTestSupport"
+            ]
         ),
         .target(
             name: "BLESwiftLink",
             dependencies: [
+                "BLESwiftCompat17",
                 "BLESwiftCore",
                 .product(name: "Logging", package: "swift-log")
             ],
@@ -72,6 +103,7 @@ let package = Package(
         .target(
             name: "BLESwiftSimulatorLink",
             dependencies: [
+                "BLESwiftCompat17",
                 "BLESwiftCore",
                 "BLESwiftLink",
                 .product(name: "Logging", package: "swift-log")
@@ -82,6 +114,7 @@ let package = Package(
         .target(
             name: "BLESwiftProvider",
             dependencies: [
+                "BLESwiftCompat17",
                 "BLESwift",
                 "BLESwiftLink",
                 .product(name: "Logging", package: "swift-log")
@@ -97,8 +130,13 @@ let package = Package(
         .testTarget(
             name: "BLESwiftLinkTests",
             dependencies: [
-                "BLESwift", "BLESwiftCore", "BLESwiftTestSupport",
-                "BLESwiftLink", "BLESwiftSimulatorLink", "BLESwiftProvider"
+                "BLESwiftCompat17",
+                "BLESwift",
+                "BLESwiftCore",
+                "BLESwiftTestSupport",
+                "BLESwiftLink",
+                "BLESwiftSimulatorLink",
+                "BLESwiftProvider"
             ]
         )
     ]

@@ -13,26 +13,33 @@ import BLESwiftCore
 import Dispatch
 import Foundation
 import Logging
-import Synchronization
+import BLESwiftCompat16
+import BLESwiftCompat17
 #if os(iOS)
 import UIKit
 #endif
 
 /// BLESwift's entry point: an actor wrapping a single `CBCentralManager`.
 ///
-/// `Central`'s isolation is tied directly to the `DispatchSerialQueue` its `CBCentralManager`
+/// `Central`'s isolation is tied directly to the `DispatchQueue` its `CBCentralManager`
 /// delivers delegate callbacks on (see ``unownedExecutor``), so every `CentralDelegateProxy`
 /// callback already runs on `Central`'s own executor and forwards into actor-isolated code
 /// via `assumeIsolated` with no thread hop.
 public actor Central {
 
-    /// The `DispatchSerialQueue` backing ``unownedExecutor`` and CoreBluetooth's delegate callbacks.
-    nonisolated let queue: DispatchSerialQueue
+    /// The serial `DispatchQueue` backing ``unownedExecutor`` and CoreBluetooth's delegate
+    /// callbacks. Must be serial: `DispatchQueue(label:)` is; a concurrent queue is rejected
+    /// on the 17 tier and undefined below it.
+    nonisolated let queue: DispatchQueue
+
+    /// Binds the actor to ``queue``: `DispatchSerialQueue`'s executor on the 17 tier and
+    /// later, `BLESwiftCompat16.SerialQueueExecutor` below it.
+    nonisolated let executor: QueueExecutor
 
     /// Ties this actor's isolation to ``queue`` (SE-0424 custom executors). Public only
     /// because it satisfies the `Actor` protocol requirement — not for direct client use.
     public nonisolated var unownedExecutor: UnownedSerialExecutor {
-        queue.asUnownedSerialExecutor()
+        executor.asUnownedSerialExecutor()
     }
 
     /// The CoreBluetooth shim this `Central` drives — a real `CBCentralManager` in
@@ -155,7 +162,7 @@ public actor Central {
     private var startupWindowOpen = false
 
     /// Creates a `Central`, synchronously creating its underlying `CBCentralManager` on a
-    /// fresh, dedicated `DispatchSerialQueue`. Manager creation is synchronous (not deferred
+    /// fresh, dedicated `DispatchQueue`. Manager creation is synchronous (not deferred
     /// behind an async `start()`) so background restoration events arriving before an async
     /// step could run are never missed.
     ///
@@ -163,8 +170,9 @@ public actor Central {
     ///   a non-`nil` `configuration.restoration` registers its identifier with CoreBluetooth
     ///   at manager creation and opens the startup restoration window.
     public init(configuration: Configuration = Configuration()) {
-        let queue = DispatchSerialQueue(label: "com.bleswift.Central")
+        let queue = DispatchQueue(label: "com.bleswift.Central")
         self.queue = queue
+        self.executor = QueueExecutor(queue: queue)
         self.configuration = configuration
 
         // A registered backend (see `BackendRegistry`) replaces CoreBluetooth wholesale.
@@ -180,7 +188,7 @@ public actor Central {
             queue.sync {
                 backend.eventHandler = { [weak self] event in
                     guard let self else { return }
-                    self.assumeIsolated { $0.handle(event) }
+                    self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
                 }
             }
             return
@@ -214,7 +222,7 @@ public actor Central {
         // directly (see `proxy`'s doc comment) rather than `manager.eventHandler`.
         proxy.handler = { [weak self] event in
             guard let self else { return }
-            self.assumeIsolated { $0.handle(event) }
+            self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
         }
 
         // Opens the startup background-time window (a no-op runner off-iOS/without
@@ -224,7 +232,7 @@ public actor Central {
             startupBackgroundTask.begin { [weak self] in
                 guard let self else { return }
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         central.handleStartupBackgroundTaskExpiration()
                     }
                 }
@@ -235,28 +243,29 @@ public actor Central {
     /// Creates a `Central` adopting an existing `CBCentralManager` (and, optionally, an
     /// already-connected `CBPeripheral`) — the counterpart to ``stopAndExtractState()``.
     ///
-    /// - Important: `callbackQueue` **must be the exact `DispatchSerialQueue` instance**
+    /// - Important: `callbackQueue` **must be the exact `DispatchQueue` instance**
     ///   `manager` was created with. `CBCentralManager` has no public API to report which
     ///   queue it delivers callbacks on, so a mismatch is not detectable eagerly — it
     ///   surfaces only as an `assumeIsolated` trap on the first off-queue callback. If
-    ///   `manager` was created with `queue: nil`, pass `DispatchQueue.main as! DispatchSerialQueue`.
+    ///   `manager` was created with `queue: nil`, pass `DispatchQueue.main`.
     ///
     /// - Parameters:
     ///   - manager: The existing `CBCentralManager` to adopt, replacing its current delegate.
     ///   - connectedPeripherals: Every already-connected `CBPeripheral`, if any, adopted as a
     ///     live session with ``ReconnectPolicy/never`` (no `connect` call existed to specify
     ///     one). Defaults to `[]`.
-    ///   - callbackQueue: The exact `DispatchSerialQueue` `manager` delivers callbacks on.
-    ///     Required — see the invariant above.
+    ///   - callbackQueue: The exact `DispatchQueue` `manager` delivers callbacks on.
+    ///     Required — see the invariant above. Must be serial (`DispatchQueue(label:)` is).
     ///   - configuration: Start-time options. `showPowerAlert` has no effect here since
     ///     `manager` already exists. Defaults to `Configuration()`.
     public init(
         adopting manager: CBCentralManager,
         connectedPeripherals: [CBPeripheral] = [],
-        callbackQueue: DispatchSerialQueue,
+        callbackQueue: DispatchQueue,
         configuration: Configuration = Configuration()
     ) {
         self.queue = callbackQueue
+        self.executor = QueueExecutor(queue: callbackQueue)
         self.configuration = configuration
 
         // Restoration can never apply: a restore identifier must be supplied when the
@@ -295,12 +304,12 @@ public actor Central {
         // last, after every session already exists.
         manager.eventHandler = { [weak self] event in
             guard let self else { return }
-            self.assumeIsolated { $0.handle(event) }
+            self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
         }
         for (identifier, connectedPeripheral) in adopted {
             connectedPeripheral.eventHandler = { [weak self] event in
                 guard let self else { return }
-                self.assumeIsolated { $0.handle(event, from: identifier) }
+                self.assumeIsolated(onQueue: self.queue) { $0.handle(event, from: identifier) }
             }
         }
     }
@@ -310,7 +319,7 @@ public actor Central {
     /// stand in for a real `CBCentralManager`. Production code uses ``init(configuration:)``
     /// or ``init(adopting:connectedPeripherals:callbackQueue:configuration:)`` instead.
     ///
-    /// - Important: `queue` **must be the exact `DispatchSerialQueue` instance** `backend`
+    /// - Important: `queue` **must be the exact `DispatchQueue` instance** `backend`
     ///   confines its event deliveries to — a mismatch is not detectable eagerly and
     ///   surfaces only as an `assumeIsolated` trap on the first off-queue event.
     ///
@@ -325,8 +334,8 @@ public actor Central {
     ///
     /// - Parameters:
     ///   - backend: The `CentralManaging` conformance to drive.
-    ///   - queue: The `DispatchSerialQueue` `backend`'s events are confined to — see the
-    ///     invariant above.
+    ///   - queue: The `DispatchQueue` `backend`'s events are confined to — see the
+    ///     invariant above. Must be serial (`DispatchQueue(label:)` is).
     ///   - configuration: Start-time options. Defaults to `Configuration()`.
     ///   - startupBackgroundTask: An injected startup background-task seam; `nil` (the
     ///     default) uses a no-op.
@@ -335,12 +344,13 @@ public actor Central {
     ///     structure. Defaults to `[]`.
     public init(
         backend: any CentralManaging,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         configuration: Configuration = Configuration(),
         startupBackgroundTask: (any StartupBackgroundTaskRunning)? = nil,
         connectedPeripherals: [any PeripheralRemote] = []
     ) {
         self.queue = queue
+        self.executor = QueueExecutor(queue: queue)
         self.configuration = configuration
         self.manager = backend
         self.proxy = nil
@@ -372,11 +382,11 @@ public actor Central {
         // Retention note on this initializer's doc comment.
         queue.sync {
             backend.eventHandler = { event in
-                self.assumeIsolated { $0.handle(event) }
+                self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
             }
             for (identifier, connectedPeripheral) in adopted {
                 connectedPeripheral.eventHandler = { event in
-                    self.assumeIsolated { $0.handle(event, from: identifier) }
+                    self.assumeIsolated(onQueue: self.queue) { $0.handle(event, from: identifier) }
                 }
             }
         }
@@ -385,7 +395,7 @@ public actor Central {
             runner.begin { [weak self] in
                 guard let self else { return }
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         central.handleStartupBackgroundTaskExpiration()
                     }
                 }
@@ -566,7 +576,7 @@ public actor Central {
         continuation.onTermination = { [weak self] _ in
             guard let self else { return }
             self.queue.async {
-                self.assumeIsolated { central in
+                self.assumeIsolated(onQueue: self.queue) { central in
                     central.removeConnectionEventSubscriber(token)
                 }
             }
@@ -919,7 +929,7 @@ public actor Central {
         // attached its continuation, so nothing can be delivered here first.
         target.eventHandler = { [weak self] event in
             guard let self else { return }
-            self.assumeIsolated { $0.handle(event, from: identifier) }
+            self.assumeIsolated(onQueue: self.queue) { $0.handle(event, from: identifier) }
         }
 
         connections[identifier] = .connecting(Connecting(
@@ -990,7 +1000,7 @@ public actor Central {
             #endif
         } onCancel: {
             self.queue.async {
-                self.assumeIsolated { central in
+                self.assumeIsolated(onQueue: self.queue) { central in
                     central.failPendingConnect(for: id, error: BLESwiftError.operationCancelled)
                 }
             }
@@ -1583,7 +1593,7 @@ public actor Central {
                 }
                 target.eventHandler = { [weak self] event in
                     guard let self else { return }
-                    self.assumeIsolated { $0.handle(event, from: peripheralIdentifier) }
+                    self.assumeIsolated(onQueue: self.queue) { $0.handle(event, from: peripheralIdentifier) }
                 }
             }
 
@@ -2013,7 +2023,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         central.cancelPendingRead(identifier: identifier, characteristic: characteristic)
                     }
                 }
@@ -2147,7 +2157,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         central.cancelPendingWrite(identifier: identifier, characteristic: characteristic)
                     }
                 }
@@ -2181,7 +2191,7 @@ public actor Central {
                 // `assignedToken` is always set by the time this can fire — `register` runs
                 // synchronously before cancellation can be observed.
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         guard let token = assignedToken.withLock({ $0 }) else { return }
                         central.cancelWriteWithoutResponseWaiter(identifier: identifier, token: token)
                     }
@@ -2223,7 +2233,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         central.cancelPendingDescriptorRead(identifier: identifier, descriptor: descriptor)
                     }
                 }
@@ -2264,7 +2274,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         central.cancelPendingDescriptorWrite(identifier: identifier, descriptor: descriptor)
                     }
                 }
@@ -2303,7 +2313,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         central.cancelPendingRSSIRead(identifier: identifier)
                     }
                 }
@@ -2407,7 +2417,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         guard let token = assignedToken.withLock({ $0 }) else { return }
                         central.cancelDiscoverServicesWaiter(identifier: identifier, token: token)
                     }
@@ -2443,7 +2453,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         guard let token = assignedToken.withLock({ $0 }) else { return }
                         central.cancelDiscoverCharacteristicsWaiter(identifier: identifier, service: characteristic.service, token: token)
                     }
@@ -2491,7 +2501,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         guard let token = assignedToken.withLock({ $0 }) else { return }
                         central.cancelDiscoverDescriptorsWaiter(identifier: identifier, characteristic: characteristic, token: token)
                     }
@@ -2626,7 +2636,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         guard let token = assignedToken.withLock({ $0 }) else { return }
                         central.cancelDiscoverServicesWaiter(identifier: identifier, token: token)
                     }
@@ -2659,7 +2669,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         guard let token = assignedToken.withLock({ $0 }) else { return }
                         central.cancelDiscoverCharacteristicsWaiter(identifier: identifier, service: service, token: token)
                     }
@@ -2691,7 +2701,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         guard let token = assignedToken.withLock({ $0 }) else { return }
                         central.cancelDiscoverDescriptorsWaiter(identifier: identifier, characteristic: characteristic, token: token)
                     }
@@ -2848,7 +2858,7 @@ public actor Central {
             #endif
         } onCancel: {
             self.queue.async {
-                self.assumeIsolated { central in
+                self.assumeIsolated(onQueue: self.queue) { central in
                     central.cancelResubscriptionWaiter(identifier: identifier, characteristic: characteristic, token: token)
                 }
             }
@@ -2997,7 +3007,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         central.cancelPendingNotifyStateChange(identifier: identifier, characteristic: characteristic)
                     }
                 }
@@ -3201,7 +3211,7 @@ public actor Central {
                 },
                 onCancelled: {
                     self.queue.async {
-                        self.assumeIsolated { central in
+                        self.assumeIsolated(onQueue: self.queue) { central in
                             central.cancelNotificationEnablementWaiter(identifier: identifier, characteristic: characteristic, token: token)
                         }
                     }
@@ -3547,7 +3557,7 @@ public actor Central {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { central in
+                    self.assumeIsolated(onQueue: self.queue) { central in
                         central.cancelPendingL2CAPOpen(identifier: identifier, token: token)
                     }
                 }
@@ -3837,7 +3847,7 @@ public actor Central {
         continuation.onTermination = { [weak self] _ in
             guard let self else { return }
             self.queue.async {
-                self.assumeIsolated { central in
+                self.assumeIsolated(onQueue: self.queue) { central in
                     central.finishActiveScan()
                 }
             }
@@ -4077,7 +4087,7 @@ public actor Central {
         ) { [weak self] _ in
             guard let self else { return }
             self.queue.async {
-                self.assumeIsolated { central in
+                self.assumeIsolated(onQueue: self.queue) { central in
                     if allowDuplicates {
                         central.failActiveScan(.allowDuplicatesInBackgroundNotSupported)
                     } else if missingServices {
@@ -4183,7 +4193,7 @@ public actor Central {
         // wiring `handle(_: CentralEvent)`'s `.willRestoreState` case performs.
         target.eventHandler = { [weak self] event in
             guard let self else { return }
-            self.assumeIsolated { $0.handle(event, from: identifier) }
+            self.assumeIsolated(onQueue: self.queue) { $0.handle(event, from: identifier) }
         }
 
         connections[identifier] = .connected(Session.adopted(

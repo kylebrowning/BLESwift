@@ -4,7 +4,7 @@
 //
 
 import BLESwiftCore
-import Synchronization
+import BLESwiftCompat17
 
 /// Per-peripheral `didModifyServices` broadcasters, keyed by ``PeripheralIdentifier``, so
 /// peripheral A's invalidations never reach peripheral B's ``Peripheral/serviceChanges()``

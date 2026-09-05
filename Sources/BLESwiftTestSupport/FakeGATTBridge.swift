@@ -6,7 +6,7 @@
 import BLESwiftCore
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// Interconnects ``FakeCentral``/``FakePeripheral`` (central-side) and
 /// ``FakePeripheralManager`` (peripheral-side) — which don't otherwise interconnect — so a
@@ -18,7 +18,7 @@ import Synchronization
 /// discovery, reads, writes, subscriptions, and notifications between the two roles.
 ///
 /// ## Concurrency
-/// The two sides live on distinct `DispatchSerialQueue`s. Each bridge hook runs on the queue
+/// The two sides live on distinct `DispatchQueue`s. Each bridge hook runs on the queue
 /// of the fake that fired it and forwards to the other side only via that side's
 /// off-queue-safe `simulate…` methods, preserving each fake's queue-confinement. The
 /// request-correlation table (``RequestToken`` → pending central operation) is the only

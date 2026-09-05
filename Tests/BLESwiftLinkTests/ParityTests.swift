@@ -12,7 +12,7 @@ import BLESwiftSimulatorLink
 import BLESwiftTestSupport
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// Conformance parity: the link must be behaviorally indistinguishable from a local
@@ -204,7 +204,7 @@ struct ParityTests {
 
     /// The scenario against a `Central` sitting directly on the scripted fake.
     private func runLocal() async throws -> [String] {
-        let queue = DispatchSerialQueue(label: "parity.local")
+        let queue = DispatchQueue(label: "parity.local")
         let fake = FakeCentral(queue: queue, state: .poweredOn)
         let peripheral = FakePeripheral(identifier: Self.deviceID, name: Self.deviceName, queue: queue)
         // The `Central` is wired before the script runs, so it sees the `.poweredOn` event
@@ -243,7 +243,7 @@ struct ParityTests {
         let provider = Provider(configuration: configuration)
         try await provider.start()
 
-        let queue = DispatchSerialQueue(label: "parity.linked")
+        let queue = DispatchQueue(label: "parity.linked")
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             queue: queue,

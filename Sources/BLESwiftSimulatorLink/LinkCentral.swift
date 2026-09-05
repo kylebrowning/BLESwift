@@ -13,10 +13,10 @@ import Foundation
 /// and every `CentralWireEvent` the provider sends back is translated into a `CentralEvent`
 /// or a ``LinkPeripheral``'s `PeripheralEvent`.
 ///
-/// Hand one to `Central(backend:queue:)`, passing the *same* `DispatchSerialQueue`:
+/// Hand one to `Central(backend:queue:)`, passing the *same* `DispatchQueue`:
 ///
 /// ```swift
-/// let queue = DispatchSerialQueue(label: "ble")
+/// let queue = DispatchQueue(label: "ble")
 /// let central = Central(backend: LinkCentral(endpoint: endpoint, queue: queue), queue: queue)
 /// ```
 ///
@@ -37,7 +37,7 @@ public final class LinkCentral: CentralManaging, Sendable {
 
     /// The queue every request, mirror update, and event delivery is confined to — the same
     /// queue the owning `Central` must be constructed with.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     /// The client session this central owns; held strongly for its whole lifetime.
     private let session: LinkClientSession
@@ -85,7 +85,8 @@ public final class LinkCentral: CentralManaging, Sendable {
     /// - Parameters:
     ///   - endpoint: The provider's host and port.
     ///   - queue: The serial queue this central is confined to — the same instance the
-    ///     owning `Central` is constructed with.
+    ///     owning `Central` is constructed with. Must be serial (`DispatchQueue(label:)`
+    ///     is).
     ///   - clientName: A human-readable name sent in the handshake, for provider-side
     ///     logging. Defaults to the current process's name.
     ///   - codec: The codec used to encode messages. Defaults to
@@ -94,7 +95,7 @@ public final class LinkCentral: CentralManaging, Sendable {
     ///     seconds.
     public convenience init(
         endpoint: LinkEndpoint,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         clientName: String = ProcessInfo.processInfo.processName,
         codec: LinkCodec = .binaryPropertyList,
         retryInterval: Duration = .seconds(2)
@@ -122,7 +123,7 @@ public final class LinkCentral: CentralManaging, Sendable {
     ///   - maximumPeripherals: How many peripheral mirrors to keep.
     package init(
         endpoint: LinkEndpoint,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         clientName: String = ProcessInfo.processInfo.processName,
         codec: LinkCodec = .binaryPropertyList,
         retryInterval: Duration = .seconds(2),

@@ -19,7 +19,7 @@ let sharedSwiftSettings: [SwiftSetting] = [
 
 let package = Package(
     name: "ConsumerTests",
-    platforms: [.iOS(.v18), .macOS(.v15), .watchOS(.v11), .tvOS(.v18), .visionOS(.v2)],
+    platforms: [.iOS(.v16), .macOS(.v13), .watchOS(.v9), .tvOS(.v16), .visionOS(.v1)],
     dependencies: [
         .package(path: "../..")
     ],

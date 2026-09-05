@@ -14,10 +14,10 @@ import Logging
 /// over one `LinkClientSession`, and every `HostWireEvent` the provider
 /// sends back is translated into a `PeripheralHostEvent`.
 ///
-/// Hand one to `PeripheralHost(backend:queue:)`, passing the *same* `DispatchSerialQueue`:
+/// Hand one to `PeripheralHost(backend:queue:)`, passing the *same* `DispatchQueue`:
 ///
 /// ```swift
-/// let queue = DispatchSerialQueue(label: "ble")
+/// let queue = DispatchQueue(label: "ble")
 /// let host = PeripheralHost(backend: LinkPeripheralManager(endpoint: endpoint, queue: queue), queue: queue)
 /// ```
 ///
@@ -57,7 +57,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
 
     /// The queue every request, state update, and event delivery is confined to — the same
     /// queue the owning `PeripheralHost` must be constructed with.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     /// The client session this manager owns; held strongly for its whole lifetime.
     private let session: LinkClientSession
@@ -135,7 +135,8 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// - Parameters:
     ///   - endpoint: The provider's host and port.
     ///   - queue: The serial queue this manager is confined to — the same instance the
-    ///     owning `PeripheralHost` is constructed with.
+    ///     owning `PeripheralHost` is constructed with. Must be serial
+    ///     (`DispatchQueue(label:)` is).
     ///   - clientName: A human-readable name sent in the handshake. The provider both logs
     ///     it and gives it to the hosted device, so it is the name remote centrals see.
     ///     Defaults to the current process's name.
@@ -145,7 +146,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     ///     seconds.
     public init(
         endpoint: LinkEndpoint,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         clientName: String = ProcessInfo.processInfo.processName,
         codec: LinkCodec = .binaryPropertyList,
         retryInterval: Duration = .seconds(2)

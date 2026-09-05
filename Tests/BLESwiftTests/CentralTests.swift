@@ -114,9 +114,8 @@ struct CentralTests {
     func adoptingInitWiresGivenManager() async throws {
         // A manager created with `queue: nil` delivers on main — exactly the case
         // `init(adopting:callbackQueue:)`'s doc comment tells callers to pass
-        // `DispatchQueue.main as! DispatchSerialQueue` for. Verified runtime-castable
-        // (Phase 0 finding).
-        let mainQueue = DispatchQueue.main as! DispatchSerialQueue
+        // `DispatchQueue.main` for.
+        let mainQueue = DispatchQueue.main
         let manager = CBCentralManager(delegate: nil, queue: mainQueue)
 
         let central = Central(adopting: manager, callbackQueue: mainQueue)
