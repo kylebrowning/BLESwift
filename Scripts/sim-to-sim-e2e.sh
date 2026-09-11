@@ -87,8 +87,10 @@ trap cleanup EXIT INT TERM
 
 # --- Simulators -------------------------------------------------------------
 # `grantiva simulator ensure --name <name>` is find-or-create: it reuses a simulator of that
-# name if one exists, and otherwise creates it from the device type read out of the name and
-# the newest installed iOS runtime. It boots by default and reports the UDID, which is what
+# name if one exists, and otherwise creates it on the newest installed iOS runtime. grantiva
+# 2.0 no longer infers a device type from a name without a model in it ("BLESwift CI
+# Advertiser" has none, on purpose — see the workflow), so the newest numbered iPhone type is
+# resolved once here and passed as `--device-type`; it only matters on the create path. It boots by default and reports the UDID, which is what
 # every downstream command takes — so a machine that happens to have two simulators sharing a
 # name can never make this run ambiguous.
 #
@@ -114,6 +116,17 @@ print(chosen[0]["udid"] if chosen else "")
 ' "$1"
 }
 
+ci_device_type="$(xcrun simctl list devicetypes -j | python3 -c '
+import json, sys
+types = [t for t in json.load(sys.stdin)["devicetypes"] if t["name"].startswith("iPhone")]
+if not types:
+    sys.exit("no iPhone device type is installed")
+def rank(t):
+    parts = t["name"].split()
+    return (1, int(parts[1]), t["name"]) if len(parts) > 1 and parts[1].isdigit() else (0, 0, t["name"])
+print(sorted(types, key=rank)[-1]["identifier"])
+')"
+
 ensure_simulator() {
     local name="$1"
     local start=$SECONDS
@@ -122,7 +135,7 @@ ensure_simulator() {
     # warning line into it would break the parse on the very path that succeeded.
     errors_file="$(mktemp)"
     set +e
-    output="$(grantiva simulator ensure --name "$name" --json 2>"$errors_file")"
+    output="$(grantiva simulator ensure --name "$name" --device-type "$ci_device_type" --json 2>"$errors_file")"
     status=$?
     set -e
     errors="$(cat "$errors_file")"
