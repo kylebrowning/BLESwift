@@ -10,7 +10,7 @@ import BLESwiftLink
 import BLESwiftTestSupport
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// What a peripheral-role session refuses to hold on a misbehaving client's behalf — the
@@ -136,7 +136,7 @@ struct HostSessionLimitsTests {
         #expect(await provider.sessionCount == 1)
 
         // One more distinct service than the session will hold.
-        for index in 0...HostSession.maximumHostedServices {
+        for _ in 0...HostSession.maximumHostedServices {
             let service = GATTService(
                 identifier: ServiceIdentifier(uuid: UUID().uuidString),
                 characteristics: [

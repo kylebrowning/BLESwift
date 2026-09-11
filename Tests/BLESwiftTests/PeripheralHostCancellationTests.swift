@@ -16,8 +16,8 @@ import BLESwift
 /// this is a separate file.
 private func makeFakePeripheralHost(
     label: String = "BLESwiftTests.FakePeripheralManager.Cancellation"
-) -> (PeripheralHost, FakePeripheralManager, DispatchSerialQueue) {
-    let queue = DispatchSerialQueue(label: label)
+) -> (PeripheralHost, FakePeripheralManager, DispatchQueue) {
+    let queue = DispatchQueue(label: label)
     let fake = FakePeripheralManager(queue: queue)
     let host = PeripheralHost(backend: fake, queue: queue)
     return (host, fake, queue)

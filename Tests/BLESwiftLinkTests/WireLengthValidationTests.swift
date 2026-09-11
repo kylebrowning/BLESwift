@@ -9,7 +9,7 @@ import BLESwiftLink
 import BLESwiftSimulatorLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// The wire boundary's rule for a negotiated maximum payload length: what it refuses, what it
@@ -117,7 +117,7 @@ struct WireLengthValidationTests {
     func clientDropsAProviderThatReportsAnUnusableMaximum(maximum: Int) async throws {
         let provider = try ScriptedProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "wirelengthvalidation.client")
+        let queue = DispatchQueue(label: "wirelengthvalidation.client")
         let link = LinkCentral(
             endpoint: provider.endpoint,
             queue: queue,
@@ -156,7 +156,7 @@ struct WireLengthValidationTests {
     func clientClampsAnAbsurdMaximum() async throws {
         let provider = try ScriptedProvider()
         try await provider.start()
-        let queue = DispatchSerialQueue(label: "wirelengthvalidation.clamp")
+        let queue = DispatchQueue(label: "wirelengthvalidation.clamp")
         let link = LinkCentral(
             endpoint: provider.endpoint,
             queue: queue,

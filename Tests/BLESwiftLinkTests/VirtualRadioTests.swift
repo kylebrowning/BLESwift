@@ -11,7 +11,7 @@ import BLESwiftLink
 @testable import BLESwiftSimulatorLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 @Suite("VirtualRadio")
@@ -33,7 +33,7 @@ struct VirtualRadioTests {
         let (device, handler) = VirtualDevice.fixture(fixture)
         let handle = await radio.register(device)
         await handler.attach(handle)
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests")
+        let queue = DispatchQueue(label: "VirtualRadioTests")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: queue), queue: queue)
         await waitFor { central.state == .poweredOn }
         return (central, radio, handle)
@@ -80,7 +80,7 @@ struct VirtualRadioTests {
         #expect(await radio.services(of: identifier, matching: nil) == [Self.service])
 
         // And still advertising, so a scan started after the teardown finds it.
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.generation")
+        let queue = DispatchQueue(label: "VirtualRadioTests.generation")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: queue), queue: queue)
         await waitFor { central.state == .poweredOn }
         var found: Discovery?
@@ -202,7 +202,7 @@ struct VirtualRadioTests {
         let handle = await radio.register(device)
         await handler.attach(handle)
 
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.immediate")
+        let queue = DispatchQueue(label: "VirtualRadioTests.immediate")
         let retrieved = queue.sync { () -> [UUID] in
             let backend = VirtualCentralBackend(radio: radio, queue: queue)
             return backend.retrievePeripherals(withIdentifiers: [identifier]).map(\.identifier)
@@ -286,7 +286,7 @@ struct VirtualRadioTests {
         let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
         let (device, handler) = VirtualDevice.fixture(fixture)
         await handler.attach(await radio.register(device))
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.writes")
+        let queue = DispatchQueue(label: "VirtualRadioTests.writes")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
 
@@ -336,7 +336,7 @@ struct VirtualRadioTests {
         let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
         let (device, handler) = VirtualDevice.fixture(fixture)
         await handler.attach(await radio.register(device))
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.stopscan")
+        let queue = DispatchQueue(label: "VirtualRadioTests.stopscan")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
 
         // A duplicate-allowing scan installs a repeater; a `stopScan` that reached the radio
@@ -353,7 +353,7 @@ struct VirtualRadioTests {
 
     /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.
     private static func onQueue<T: Sendable>(
-        _ queue: DispatchSerialQueue,
+        _ queue: DispatchQueue,
         _ body: @escaping @Sendable () -> T
     ) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
@@ -397,7 +397,7 @@ struct VirtualRadioTests {
     @Test("The sighting history is capped, forgetting the oldest sighting first")
     func sightingHistoryIsCapped() async throws {
         let radio = VirtualRadio()
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.sightings")
+        let queue = DispatchQueue(label: "VirtualRadioTests.sightings")
         // A history of one, so a second sighting is all it takes to forget the first.
         let backend = VirtualCentralBackend(radio: radio, queue: queue, maximumDiscovered: 1)
 
@@ -457,7 +457,7 @@ struct VirtualRadioTests {
     @Test("The remote table is capped, forgetting the least recently vended disconnected remote")
     func remoteTableIsCapped() async throws {
         let radio = VirtualRadio()
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.remotecap")
+        let queue = DispatchQueue(label: "VirtualRadioTests.remotecap")
         // A table of one, so the second remote is all it takes to forget the first.
         let backend = VirtualCentralBackend(radio: radio, queue: queue, maximumDiscovered: 8, maximumRemotes: 1)
         let oldest = await Self.register(on: radio)
@@ -475,7 +475,7 @@ struct VirtualRadioTests {
     @Test("The remote cap keeps a connected remote and re-files one it evicted")
     func remoteCapKeepsConnectedRemotesAndRefilesEvictedOnes() async throws {
         let radio = VirtualRadio()
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.remotecap.connected")
+        let queue = DispatchQueue(label: "VirtualRadioTests.remotecap.connected")
         let backend = VirtualCentralBackend(radio: radio, queue: queue, maximumDiscovered: 8, maximumRemotes: 1)
         let connected = await Self.register(on: radio)
         let other = await Self.register(on: radio)
@@ -509,7 +509,7 @@ struct VirtualRadioTests {
     @Test("A connect to a remote this backend has replaced fails instead of being dropped")
     func connectToAStaleRemoteFails() async throws {
         let radio = VirtualRadio()
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.staleconnect")
+        let queue = DispatchQueue(label: "VirtualRadioTests.staleconnect")
         let backend = VirtualCentralBackend(radio: radio, queue: queue, maximumDiscovered: 8, maximumRemotes: 1)
         let target = await Self.register(on: radio)
         let filler = await Self.register(on: radio)
@@ -547,7 +547,7 @@ struct VirtualRadioTests {
         let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
         let (device, handler) = VirtualDevice.fixture(fixture)
         await handler.attach(await radio.register(device))
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.undiscoveredread")
+        let queue = DispatchQueue(label: "VirtualRadioTests.undiscoveredread")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
 
@@ -589,7 +589,7 @@ struct VirtualRadioTests {
         let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
         let (device, handler) = VirtualDevice.fixture(fixture)
         await handler.attach(await radio.register(device))
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.undiscoveredchars")
+        let queue = DispatchQueue(label: "VirtualRadioTests.undiscoveredchars")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
 
@@ -632,7 +632,7 @@ struct VirtualRadioTests {
         let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
         let (device, handler) = VirtualDevice.fixture(fixture)
         await handler.attach(await radio.register(device))
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.readafterdisconnect")
+        let queue = DispatchQueue(label: "VirtualRadioTests.readafterdisconnect")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
 
@@ -693,7 +693,7 @@ struct VirtualRadioTests {
     @Test("A disconnected session cannot plant a subscription, and detach leaves no ghost")
     func setNotifyWhileDisconnectedPlantsNoSubscription() async throws {
         let radio = VirtualRadio()
-        let hostQueue = DispatchSerialQueue(label: "VirtualRadioTests.ghost.host")
+        let hostQueue = DispatchQueue(label: "VirtualRadioTests.ghost.host")
         let identifier = UUID()
         let host = PeripheralHost(
             backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier),
@@ -813,7 +813,7 @@ struct VirtualRadioTests {
         #expect(handler.received.map(\.count) == [400, VirtualRadio.maximumWriteWithoutResponseLength, 512])
 
         // And the remote reports the two ceilings it is held to.
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.ceilings")
+        let queue = DispatchQueue(label: "VirtualRadioTests.ceilings")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         await waitFor { await Self.onQueue(queue) { !backend.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
         let remote = try #require(await Self.remote(backend, queue, identifier))
@@ -972,7 +972,7 @@ struct VirtualRadioTests {
     @Test("Notifying a characteristic that declares no notify or indicate is refused")
     func setNotifyEnforcesTheNotifiableProperty() async throws {
         let radio = VirtualRadio()
-        let hostQueue = DispatchSerialQueue(label: "VirtualRadioTests.notifiable.host")
+        let hostQueue = DispatchQueue(label: "VirtualRadioTests.notifiable.host")
         let identifier = UUID()
         let host = PeripheralHost(
             backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier),
@@ -1018,7 +1018,7 @@ struct VirtualRadioTests {
     private static func discoveredRemote(
         radio: VirtualRadio,
         backend: VirtualCentralBackend,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         identifier: UUID
     ) async throws -> VirtualPeripheralRemote {
         await waitFor { await onQueue(queue) { !backend.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
@@ -1037,7 +1037,7 @@ struct VirtualRadioTests {
         let radio = VirtualRadio()
         let identifier = UUID()
         let handle = await radio.register(Self.device(identifier: identifier, name: "cancel", services: Self.twoServices))
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.cancel")
+        let queue = DispatchQueue(label: "VirtualRadioTests.cancel")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         let remote = try await Self.discoveredRemote(radio: radio, backend: backend, queue: queue, identifier: identifier)
 
@@ -1071,7 +1071,7 @@ struct VirtualRadioTests {
         let radio = VirtualRadio()
         let identifier = UUID()
         _ = await radio.register(Self.device(identifier: identifier, name: "order", services: Self.twoServices))
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.order")
+        let queue = DispatchQueue(label: "VirtualRadioTests.order")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         let remote = try await Self.discoveredRemote(radio: radio, backend: backend, queue: queue, identifier: identifier)
 
@@ -1116,7 +1116,7 @@ struct VirtualRadioTests {
         let radio = VirtualRadio()
         let identifier = UUID()
         let handle = await radio.register(Self.device(identifier: identifier, name: "two", services: Self.twoServices))
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.replace")
+        let queue = DispatchQueue(label: "VirtualRadioTests.replace")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         let remote = try await Self.discoveredRemote(radio: radio, backend: backend, queue: queue, identifier: identifier)
 
@@ -1169,7 +1169,7 @@ struct VirtualRadioTests {
         let radio = VirtualRadio()
         let identifier = UUID()
         let handle = await radio.register(Self.device(identifier: identifier, name: "two", services: Self.twoServices))
-        let queue = DispatchSerialQueue(label: "VirtualRadioTests.modify")
+        let queue = DispatchQueue(label: "VirtualRadioTests.modify")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         let remote = try await Self.discoveredRemote(radio: radio, backend: backend, queue: queue, identifier: identifier)
         let modified = Mutex<[[ServiceIdentifier]]>([])
@@ -1284,7 +1284,7 @@ struct VirtualRadioTests {
     /// The remote `backend` vends for `identifier`, fetched on its own queue.
     private static func remote(
         _ backend: VirtualCentralBackend,
-        _ queue: DispatchSerialQueue,
+        _ queue: DispatchQueue,
         _ identifier: UUID
     ) async -> VirtualPeripheralRemote? {
         await onQueue(queue) {
@@ -1389,7 +1389,7 @@ struct FilteredDiscoveryTests {
     /// A real `Central` on a `LinkCentral` dialing `provider`, already powered on and
     /// connected to the fixture device.
     private func connect(to provider: Provider, label: String) async throws -> (Central, LinkCentral, Peripheral) {
-        let queue = DispatchSerialQueue(label: label)
+        let queue = DispatchQueue(label: label)
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             queue: queue,

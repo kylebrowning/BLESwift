@@ -7,7 +7,7 @@
 import BLESwiftCore
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// A `PeripheralManaging` served by a ``VirtualRadio`` instead of
 /// CoreBluetooth — hand one to `PeripheralHost(backend:queue:)` and the resulting host
@@ -24,7 +24,7 @@ import Synchronization
 ///
 /// ```swift
 /// let radio = VirtualRadio()
-/// let queue = DispatchSerialQueue(label: "host")
+/// let queue = DispatchQueue(label: "host")
 /// let host = PeripheralHost(backend: VirtualPeripheralManagerBackend(radio: radio, queue: queue), queue: queue)
 /// try await host.add(service)
 /// try await host.startAdvertising(PeripheralAdvertisement(localName: "Virtual HRM", serviceUUIDs: [service.identifier]))
@@ -40,7 +40,7 @@ import Synchronization
 public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable {
 
     /// The queue every method and event delivery is confined to.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     /// The identifier the registered device is reachable at — the peripheral identifier
     /// every ``VirtualCentralBackend`` reports for this host.
@@ -89,12 +89,13 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
     /// - Parameters:
     ///   - radio: The radio to host this peripheral on.
     ///   - queue: The queue every method and event delivery is confined to — the same queue
-    ///     the owning `PeripheralHost` is constructed with.
+    ///     the owning `PeripheralHost` is constructed with. Must be serial
+    ///     (`DispatchQueue(label:)` is).
     ///   - identifier: The identifier to register the device under. Defaults to a fresh
     ///     `UUID`.
     ///   - name: The device name centrals see on discovery and connection. Defaults to
     ///     `nil`; ``startAdvertising(_:)`` supplies the advertised local name separately.
-    public convenience init(radio: VirtualRadio, queue: DispatchSerialQueue, identifier: UUID = UUID(), name: String? = nil) {
+    public convenience init(radio: VirtualRadio, queue: DispatchQueue, identifier: UUID = UUID(), name: String? = nil) {
         self.init(radio: radio, queue: queue, identifier: identifier, name: name, attTimeout: VirtualRadio.attTimeout)
     }
 
@@ -111,7 +112,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, Sendable
     ///     is refused with ``BLESwiftCore/ATTError/unlikelyError``.
     package init(
         radio: VirtualRadio,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         identifier: UUID = UUID(),
         name: String? = nil,
         attTimeout: Duration

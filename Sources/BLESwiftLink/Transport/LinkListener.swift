@@ -6,7 +6,7 @@
 import Dispatch
 import Foundation
 import Network
-import Synchronization
+import BLESwiftCompat17
 
 /// TCP parameters shared by ``LinkConnection`` and ``LinkListener``.
 enum LinkTransportParameters {

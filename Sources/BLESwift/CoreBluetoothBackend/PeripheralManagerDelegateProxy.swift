@@ -10,7 +10,7 @@
 import BLESwiftCore
 import CoreBluetooth
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// Bridges real `CBPeripheralManagerDelegate` callbacks into a ``PeripheralHostEvent``
 /// handler closure — the `PeripheralManaging` conformance's implementation of
@@ -19,7 +19,7 @@ import Synchronization
 ///
 /// Every callback forwards **synchronously** to ``handler``, no `Task {}`: sound because
 /// CoreBluetooth only ever calls back on the queue the manager was created with, exactly
-/// the `DispatchSerialQueue` backing `PeripheralHost`'s custom `SerialExecutor`.
+/// the `DispatchQueue` backing `PeripheralHost`'s custom `SerialExecutor`.
 ///
 /// Beyond forwarding, this proxy owns three CoreBluetooth-object registries the
 /// `CBPeripheralManager` conformance reaches via the shared associated object, so raw

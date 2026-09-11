@@ -67,7 +67,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
 
     /// The queue every method, property access, and event delivery is confined to — and the
     /// queue every child backend must also be confined to.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     /// The children, in priority order (the first supplies the fallback ``radioState``).
     /// `nonisolated(unsafe)` because `any PeripheralManaging` is not itself `Sendable`; the
@@ -186,12 +186,12 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     /// - Parameters:
     ///   - backends: The children, in priority order. Must all be confined to `queue`.
     ///   - queue: The shared queue — the same one the owning `PeripheralHost` is
-    ///     constructed with.
+    ///     constructed with. Must be serial (`DispatchQueue(label:)` is).
     ///   - log: Where to report a child whose FIFO has filled, or that was skipped for being
     ///     powered off, if anywhere.
     public init(
         backends: [any PeripheralManaging],
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         log: (@Sendable (String) -> Void)? = nil
     ) {
         self.backends = backends
@@ -216,7 +216,7 @@ public final class CompositePeripheralManager: PeripheralManaging, Sendable {
     ///     powered off, if anywhere.
     package init(
         backends: [any PeripheralManaging],
-        onQueue queue: DispatchSerialQueue,
+        onQueue queue: DispatchQueue,
         log: (@Sendable (String) -> Void)? = nil
     ) {
         dispatchPrecondition(condition: .onQueue(queue))

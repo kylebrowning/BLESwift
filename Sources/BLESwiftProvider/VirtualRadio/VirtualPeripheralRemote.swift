@@ -8,7 +8,7 @@ import BLESwiftCore
 import BLESwiftLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// A `PeripheralRemote` backed by a ``VirtualRadio`` device, vended by
 /// ``VirtualCentralBackend/retrievePeripherals(withIdentifiers:)``.
@@ -27,7 +27,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     public let identifier: UUID
 
     /// The queue every method and event delivery is confined to.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     private let radio: VirtualRadio
     private let session: UUID
@@ -51,7 +51,7 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _work: Task<Void, Never>?
 
     /// Creates a remote for `identifier`, served by `radio` under `session`.
-    init(identifier: UUID, radio: VirtualRadio, session: UUID, queue: DispatchSerialQueue, name: String?) {
+    init(identifier: UUID, radio: VirtualRadio, session: UUID, queue: DispatchQueue, name: String?) {
         self.identifier = identifier
         self.radio = radio
         self.session = session

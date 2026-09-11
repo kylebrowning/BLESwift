@@ -10,7 +10,7 @@ import BLESwiftLink
 @testable import BLESwiftProvider
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// Sim-to-sim in one process: a real `PeripheralHost` driven by a
@@ -41,7 +41,7 @@ struct VirtualPeripheralManagerTests {
         let radio = VirtualRadio()
 
         // ---- Peripheral role: its own queue, backed by the radio ----
-        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.Host")
+        let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.Host")
         let host = PeripheralHost(
             backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue),
             queue: hostQueue
@@ -68,7 +68,7 @@ struct VirtualPeripheralManagerTests {
         #expect(host.isAdvertising)
 
         // ---- Central role: a different queue, same radio ----
-        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.Central")
+        let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.Central")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
         await waitFor { central.state == .poweredOn }
 
@@ -126,7 +126,7 @@ struct VirtualPeripheralManagerTests {
     @Test("A read with no event handler attached fails promptly instead of parking forever")
     func readWithNoHandlerAttached() async throws {
         let radio = VirtualRadio()
-        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.OrphanHost")
+        let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.OrphanHost")
         let identifier = UUID()
         let backend = VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier)
         let host = PeripheralHost(backend: backend, queue: hostQueue)
@@ -136,7 +136,7 @@ struct VirtualPeripheralManagerTests {
         // would otherwise be parked with nothing left to answer it.
         await backend.detachEventHandlerForTesting()
 
-        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.OrphanCentral")
+        let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.OrphanCentral")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
         await waitFor { central.state == .poweredOn }
 
@@ -155,7 +155,7 @@ struct VirtualPeripheralManagerTests {
     @Test("A request the host never answers times out, and the remote keeps working")
     func unansweredRequestTimesOut() async throws {
         let radio = VirtualRadio()
-        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.SilentHost")
+        let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.SilentHost")
         let identifier = UUID()
         // A short stand-in for `VirtualRadio.attTimeout`, so the test need not wait 30 s.
         let backend = VirtualPeripheralManagerBackend(
@@ -178,7 +178,7 @@ struct VirtualPeripheralManagerTests {
             }
         }
 
-        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.SilentCentral")
+        let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.SilentCentral")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
         await waitFor { central.state == .poweredOn }
         let peripheral = try await central.connect(PeripheralIdentifier(uuid: identifier, name: nil))
@@ -204,7 +204,7 @@ struct VirtualPeripheralManagerTests {
     func writeWithoutResponseWindowBoundsTheChain() async throws {
         let radio = VirtualRadio()
         let identifier = UUID()
-        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.WindowHost")
+        let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.WindowHost")
         // Long enough that nothing times out while the window is being filled and asserted —
         // the subject here is the window, not the ATT timeout — but far short of the 30 s
         // default, which would leave the writes this test holds parked for the rest of the run.
@@ -234,7 +234,7 @@ struct VirtualPeripheralManagerTests {
 
         // The backend is driven directly: `Peripheral`'s own writer honors the window, and the
         // window itself is what is under test.
-        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.WindowCentral")
+        let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.WindowCentral")
         let central = VirtualCentralBackend(radio: radio, queue: centralQueue)
         await waitFor { await Self.onQueue(centralQueue) { !central.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
         let remote = try #require(await Self.onQueue(centralQueue) {
@@ -285,7 +285,7 @@ struct VirtualPeripheralManagerTests {
     @Test("A host's ATT failure surfaces to the central as a CBATTErrorDomain error")
     func readFailure() async throws {
         let radio = VirtualRadio()
-        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.FailingHost")
+        let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.FailingHost")
         let host = PeripheralHost(
             backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue),
             queue: hostQueue
@@ -299,7 +299,7 @@ struct VirtualPeripheralManagerTests {
         }
         try await host.startAdvertising(PeripheralAdvertisement(localName: "Grumpy HRM", serviceUUIDs: [Self.heartRate]))
 
-        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.FailingCentral")
+        let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.FailingCentral")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
         await waitFor { central.state == .poweredOn }
 
@@ -325,7 +325,7 @@ struct VirtualPeripheralManagerTests {
     func writeToAReadOnlyCharacteristicIsRefusedAtTheRadio() async throws {
         let radio = VirtualRadio()
         let identifier = UUID()
-        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.ReadOnlyHost")
+        let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.ReadOnlyHost")
         let host = PeripheralHost(
             backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier),
             queue: hostQueue
@@ -347,7 +347,7 @@ struct VirtualPeripheralManagerTests {
         // characteristic that declares no write property before it ever reaches a radio, and
         // the radio's refusal — what real hardware does at the ATT layer, for a host that has
         // no fixture handler to refuse for it — is what is under test.
-        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.ReadOnlyCentral")
+        let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.ReadOnlyCentral")
         let central = VirtualCentralBackend(radio: radio, queue: centralQueue)
         await waitFor { await Self.onQueue(centralQueue) { !central.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
         let remote = try #require(await Self.onQueue(centralQueue) {
@@ -398,7 +398,7 @@ struct VirtualPeripheralManagerTests {
         // Registered under a placeholder name, the way `Provider` names a host session's
         // device after its link client. CoreBluetooth reports the *advertised* local name, and
         // so must the radio: otherwise a scanner sees the placeholder, not the advertiser.
-        let hostQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.RenamedHost")
+        let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.RenamedHost")
         let host = PeripheralHost(
             backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, name: "PlaceholderClient"),
             queue: hostQueue
@@ -408,7 +408,7 @@ struct VirtualPeripheralManagerTests {
             PeripheralAdvertisement(localName: "Renamed", serviceUUIDs: [Self.heartRate])
         )
 
-        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.RenamedCentral")
+        let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.RenamedCentral")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
         await waitFor { central.state == .poweredOn }
 
@@ -424,7 +424,7 @@ struct VirtualPeripheralManagerTests {
     @Test("A stop right behind a start leaves the backend reporting not advertising")
     func stopBehindStartDoesNotLatchAdvertising() async {
         let radio = VirtualRadio()
-        let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.advertising")
+        let queue = DispatchQueue(label: "VirtualPeripheralManagerTests.advertising")
         let backend = VirtualPeripheralManagerBackend(radio: radio, queue: queue)
         let started = Mutex(false)
 
@@ -446,7 +446,7 @@ struct VirtualPeripheralManagerTests {
         #expect(await Self.onQueue(queue) { !backend.isAdvertising })
 
         // And the radio agrees: a scan started now finds nothing to report.
-        let centralQueue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.advertising.central")
+        let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.advertising.central")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
         await waitFor { central.state == .poweredOn }
         var found: Discovery?
@@ -466,7 +466,7 @@ struct VirtualPeripheralManagerTests {
 
     /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.
     private static func onQueue<T: Sendable>(
-        _ queue: DispatchSerialQueue,
+        _ queue: DispatchQueue,
         _ body: @escaping @Sendable () -> T
     ) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
@@ -484,7 +484,7 @@ struct VirtualPeripheralManagerTests {
         label: String,
         identifier: UUID
     ) async throws -> (host: PeripheralHost, log: SubscriptionLog, observer: Task<Void, Never>) {
-        let hostQueue = DispatchSerialQueue(label: label)
+        let hostQueue = DispatchQueue(label: label)
         let host = PeripheralHost(
             backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier),
             queue: hostQueue
@@ -503,7 +503,7 @@ struct VirtualPeripheralManagerTests {
     /// unsubscribes when it terminates, which is the one thing these tests must *not* do.
     private static func subscribedRemote(
         _ backend: VirtualCentralBackend,
-        on queue: DispatchSerialQueue,
+        on queue: DispatchQueue,
         to identifier: UUID,
         host: PeripheralHost,
         radio: VirtualRadio
@@ -542,7 +542,7 @@ struct VirtualPeripheralManagerTests {
         )
         defer { observer.cancel() }
 
-        let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.DisconnectCentral")
+        let queue = DispatchQueue(label: "VirtualPeripheralManagerTests.DisconnectCentral")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         let remote = try await Self.subscribedRemote(backend, on: queue, to: identifier, host: host, radio: radio)
         #expect(await host.subscribers(for: Self.measurement).map(\.id) == [backend.sessionID])
@@ -572,7 +572,7 @@ struct VirtualPeripheralManagerTests {
         )
         defer { observer.cancel() }
 
-        let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.DetachCentral")
+        let queue = DispatchQueue(label: "VirtualPeripheralManagerTests.DetachCentral")
         var backend: VirtualCentralBackend? = VirtualCentralBackend(radio: radio, queue: queue)
         let session = try #require(backend?.sessionID)
         var remote: VirtualPeripheralRemote? = try await Self.subscribedRemote(
@@ -611,7 +611,7 @@ struct VirtualPeripheralManagerTests {
         )
         defer { observer.cancel() }
 
-        let queue = DispatchSerialQueue(label: "VirtualPeripheralManagerTests.RemoveCentral")
+        let queue = DispatchQueue(label: "VirtualPeripheralManagerTests.RemoveCentral")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         _ = try await Self.subscribedRemote(backend, on: queue, to: identifier, host: host, radio: radio)
         #expect(await host.subscribers(for: Self.measurement).map(\.id) == [backend.sessionID])

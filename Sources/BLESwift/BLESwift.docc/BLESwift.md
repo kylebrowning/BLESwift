@@ -5,17 +5,18 @@ Async/await-first Bluetooth Low Energy for Swift 6.2.
 ## Overview
 
 BLESwift ("BLE Interface") wraps CoreBluetooth in a single actor, ``Central``, whose isolation is
-tied directly to the `DispatchSerialQueue` its underlying `CBCentralManager` delivers delegate
+tied directly to the serial `DispatchQueue` its underlying `CBCentralManager` delivers delegate
 callbacks on. There is no closure or callback compatibility layer: connecting, reading, writing,
 and scanning are all `async throws` or `AsyncSequence`-based, and every multi-consumer feed
 (Bluetooth state, connection lifecycle, notifications) is a proper multicast stream that every
 subscriber sees independently.
 
-BLESwift targets every platform CoreBluetooth ships on — iOS, macOS, watchOS, tvOS, and visionOS —
-at each platform's floor needed for Swift 6.2's custom-executor isolation checking (SE-0424):
-iOS 18, macOS 15, watchOS 11, tvOS 18, visionOS 2. The central role is available everywhere;
-the peripheral role (``PeripheralHost``) is iOS/macOS-only because CoreBluetooth does not
-support it on the other platforms — see <doc:PeripheralRole>.
+BLESwift targets every platform CoreBluetooth ships on — iOS 16, macOS 13, watchOS 9, tvOS 16,
+and visionOS 1 and later. Its source is written against the iOS 18-era standard library; two
+internal modules back-deploy the pieces older systems lack — see <doc:BackDeployment>. The
+central role is available everywhere; the peripheral role (``PeripheralHost``) is
+iOS/macOS-only because CoreBluetooth does not support it on the other platforms — see
+<doc:PeripheralRole>.
 
 BLESwift is built around Swift's structured concurrency from the ground up — see the articles
 below for the resulting flows.
@@ -51,6 +52,7 @@ CoreBluetooth is non-functional — see <doc:SimulatorSupport>:
 
 - <doc:GettingStarted>
 - <doc:SimulatorSupport>
+- <doc:BackDeployment>
 - ``Central``
 - ``Configuration``
 - ``WarningOptions``

@@ -7,7 +7,7 @@ import BLESwiftCore
 import BLESwiftLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// The app-facing entry point for routing BLESwift's backends over the link.
 ///
@@ -142,7 +142,7 @@ public enum SimulatorLink {
         with endpoint: LinkEndpoint,
         within budget: Duration
     ) async -> HandshakeOutcome {
-        let queue = DispatchSerialQueue(label: "bleswift.simulatorlink.probe")
+        let queue = DispatchQueue(label: "bleswift.simulatorlink.probe")
         let connection = LinkConnection.connect(to: endpoint, codec: .binaryPropertyList, queue: queue)
         defer { connection.cancel() }
 

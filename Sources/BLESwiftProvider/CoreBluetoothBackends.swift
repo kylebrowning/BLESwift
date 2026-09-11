@@ -44,10 +44,11 @@ public enum CoreBluetoothBackends {
     /// with the virtual half.
     ///
     /// - Parameter queue: The serial queue CoreBluetooth delivers on and the returned
-    ///   backend is confined to. Must be the queue this call is made from.
+    ///   backend is confined to. Must be the queue this call is made from, and must be
+    ///   serial (`DispatchQueue(label:)` is).
     /// - Returns: The manager, with no delegate installed yet — set `eventHandler` on
     ///   `queue` before yielding it.
-    public static func makeCentral(queue: DispatchSerialQueue) -> any CentralManaging {
+    public static func makeCentral(queue: DispatchQueue) -> any CentralManaging {
         CBCentralManager(
             delegate: nil,
             queue: queue,
@@ -65,10 +66,11 @@ public enum CoreBluetoothBackends {
     /// half, and picks the Mac's radio up when the user turns it on.
     ///
     /// - Parameter queue: The serial queue CoreBluetooth delivers on and the returned
-    ///   backend is confined to. Must be the queue this call is made from.
+    ///   backend is confined to. Must be the queue this call is made from, and must be
+    ///   serial (`DispatchQueue(label:)` is).
     /// - Returns: The manager, with no delegate installed yet — set `eventHandler` on
     ///   `queue` before yielding it.
-    public static func makePeripheralManager(queue: DispatchSerialQueue) -> any PeripheralManaging {
+    public static func makePeripheralManager(queue: DispatchQueue) -> any PeripheralManaging {
         CBPeripheralManager(
             delegate: nil,
             queue: queue,

@@ -6,7 +6,7 @@
 import BLESwiftCore
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// A scriptable stand-in for `CBCentralManager`, conforming to `CentralManaging`.
 ///
@@ -40,7 +40,7 @@ public final class FakeCentral: CentralManaging, Sendable {
     }
 
     /// The queue every CB-mirroring method and event delivery is confined to.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     nonisolated(unsafe) private var _radioState: CentralState
     nonisolated(unsafe) private var _eventHandler: ((CentralEvent) -> Void)?
@@ -78,10 +78,11 @@ public final class FakeCentral: CentralManaging, Sendable {
     ///
     /// - Parameters:
     ///   - queue: The queue every CB-mirroring method and event delivery is confined to —
-    ///     the same queue the `Central` actor's executor must be tied to.
+    ///     the same queue the `Central` actor's executor must be tied to. Must be serial
+    ///     (`DispatchQueue(label:)` is).
     ///   - state: The initial `CentralState`. Defaults to `.unknown`, matching a real
     ///     `CBCentralManager` before its first `centralManagerDidUpdateState(_:)`.
-    public init(queue: DispatchSerialQueue, state: CentralState = .unknown) {
+    public init(queue: DispatchQueue, state: CentralState = .unknown) {
         self.queue = queue
         self._radioState = state
     }

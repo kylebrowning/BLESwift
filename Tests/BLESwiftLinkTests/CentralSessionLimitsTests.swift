@@ -12,7 +12,7 @@ import BLESwiftLink
 import BLESwiftTestSupport
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// What a central-role session refuses to hold on a misbehaving client's behalf.
@@ -59,7 +59,7 @@ struct CentralSessionLimitsTests {
         let provider = Provider(configuration: configuration)
         try await provider.start()
 
-        let queue = DispatchSerialQueue(label: "centralsession.writewindow")
+        let queue = DispatchQueue(label: "centralsession.writewindow")
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             queue: queue,
@@ -115,7 +115,7 @@ struct CentralSessionLimitsTests {
         let provider = Provider(configuration: configuration)
         try await provider.start()
 
-        let queue = DispatchSerialQueue(label: "centralsession.openwindow")
+        let queue = DispatchQueue(label: "centralsession.openwindow")
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             queue: queue,
@@ -226,7 +226,7 @@ struct CentralSessionLimitsTests {
         let provider = Provider(configuration: configuration)
         try await provider.start()
 
-        let queue = DispatchSerialQueue(label: label)
+        let queue = DispatchQueue(label: label)
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             queue: queue,
@@ -322,7 +322,7 @@ struct CentralSessionLimitsTests {
         let provider = Provider(configuration: configuration)
         try await provider.start()
 
-        let queue = DispatchSerialQueue(label: "centralsession.busytable")
+        let queue = DispatchQueue(label: "centralsession.busytable")
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             queue: queue,
