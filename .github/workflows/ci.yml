@@ -91,11 +91,14 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
+      # One simulator per cell, never shared (#48). One runner serialises the cells today, but
+      # a second `bleswift` runner on the same Mac would run two at once, and two cells on one
+      # device would boot, install into and shut down the same UDID under each other.
       matrix:
         include:
-          - { label: "newest runtime",                  sim: "BLESwift CI Test",       major: "",   compat16: "0" }
-          - { label: "newest runtime, iOS 16 executor", sim: "BLESwift CI Test",       major: "",   compat16: "1" }
-          - { label: "iOS 17 runtime",                  sim: "BLESwift CI Test iOS17", major: "17", compat16: "0" }
+          - { label: "newest runtime",                  sim: "BLESwift CI Test",          major: "",   compat16: "0" }
+          - { label: "newest runtime, iOS 16 executor", sim: "BLESwift CI Test Compat16", major: "",   compat16: "1" }
+          - { label: "iOS 17 runtime",                  sim: "BLESwift CI Test iOS17",    major: "17", compat16: "0" }
     steps:
       - uses: actions/checkout@v4
       # A CI-only device, by UDID. The runner is also someone's workstation, so the job must
