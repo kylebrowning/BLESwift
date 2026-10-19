@@ -10,7 +10,7 @@ import BLESwiftSimulatorLink
 import BLESwiftTestSupport
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 #if os(macOS)
@@ -198,7 +198,7 @@ struct BackendRegistrySerializedTests {
 
         @Test("isProviderReachable times out promptly against a listener that accepts but never replies")
         func isProviderReachableTimesOutOnSilentListener() async throws {
-            let queue = DispatchSerialQueue(label: "silent-listener")
+            let queue = DispatchQueue(label: "silent-listener")
             let listener = try LinkListener(
                 endpoint: LinkEndpoint(host: "127.0.0.1", port: 0),
                 codec: .binaryPropertyList,

@@ -4,7 +4,7 @@
 //
 
 import Dispatch
-import Synchronization
+import BLESwiftCompat17
 import BLESwiftCore
 #if os(iOS)
 import UIKit

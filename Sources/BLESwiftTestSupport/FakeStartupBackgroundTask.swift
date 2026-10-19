@@ -4,7 +4,7 @@
 //
 
 import BLESwiftCore
-import Synchronization
+import BLESwiftCompat17
 
 /// A scriptable stand-in for `StartupBackgroundTaskRunning`; records the `begin`/`end`
 /// lifecycle and lets you fire the captured expiration handler as UIKit would.

@@ -12,7 +12,7 @@ import BLESwiftLink
 import BLESwiftSimulatorLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// What a stand-in provider recorded, carried out of the helpers by reference.
@@ -64,7 +64,7 @@ struct LinkClientSessionTests {
     func connects() async throws {
         let (listener, hellos) = try await makeServer(accept: true)
         defer { listener.cancel() }
-        let queue = DispatchSerialQueue(label: "client")
+        let queue = DispatchQueue(label: "client")
         let session = LinkClientSession(endpoint: LinkEndpoint(host: "127.0.0.1", port: listener.port), role: .peripheral, clientName: "unit", queue: queue)
         let received = Mutex<[LinkMessage]>([])
         session.onMessage = { message in received.withLock { $0.append(message) } }
@@ -85,7 +85,7 @@ struct LinkClientSessionTests {
         // taking it between the probe and the bind is all that is left, hence the attempts.
         for _ in 0..<5 {
             let port = try closedPort()
-            let queue = DispatchSerialQueue(label: "client")
+            let queue = DispatchQueue(label: "client")
             let session = LinkClientSession(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), role: .central, clientName: "unit", queue: queue, retryInterval: .milliseconds(50))
             session.start()
             try await Task.sleep(for: .milliseconds(200))
@@ -120,7 +120,7 @@ struct LinkClientSessionTests {
         // a provider that appears half a second in would not be found for another 1.5 s.
         for _ in 0..<5 {
             let port = try closedPort()
-            let queue = DispatchSerialQueue(label: "client")
+            let queue = DispatchQueue(label: "client")
             let session = LinkClientSession(
                 endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
                 role: .central,
@@ -166,7 +166,7 @@ struct LinkClientSessionTests {
         // Below the ephemeral range: the dials must keep being refused, which they would not
         // be if a parallel test were handed this port and bound a listener on it.
         let port = try closedPort()
-        let queue = DispatchSerialQueue(label: "client")
+        let queue = DispatchQueue(label: "client")
         let session = LinkClientSession(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
             role: .central,
@@ -196,7 +196,7 @@ struct LinkClientSessionTests {
     @Test("Reconnects after the provider drops, reporting disconnect first")
     func reconnects() async throws {
         let (listener, server) = try await makeServer(accept: true)
-        let queue = DispatchSerialQueue(label: "client")
+        let queue = DispatchQueue(label: "client")
         let session = LinkClientSession(endpoint: LinkEndpoint(host: "127.0.0.1", port: listener.port), role: .central, clientName: "unit", queue: queue, retryInterval: .milliseconds(50))
         let connects = Mutex(0), disconnects = Mutex(0)
         session.onConnected = { _ in connects.withLock { $0 += 1 } }
@@ -219,7 +219,7 @@ struct LinkClientSessionTests {
     func versionMismatch() async throws {
         let (listener, hellos) = try await makeServer(accept: true, version: LinkProtocol.version + 1)
         defer { listener.cancel() }
-        let queue = DispatchSerialQueue(label: "client")
+        let queue = DispatchQueue(label: "client")
         let session = LinkClientSession(endpoint: LinkEndpoint(host: "127.0.0.1", port: listener.port), role: .central, clientName: "unit", queue: queue, retryInterval: .milliseconds(30))
         let errors = Mutex<[NSError?]>([])
         session.onDisconnected = { error in errors.withLock { $0.append(error) } }

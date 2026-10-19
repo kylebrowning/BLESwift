@@ -7,7 +7,7 @@
 import BLESwiftCore
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// A `CentralManaging` served by a ``VirtualRadio`` instead of CoreBluetooth
 /// — hand one to `Central(backend:queue:)` and the resulting `Central` talks to the radio's
@@ -25,7 +25,7 @@ import Synchronization
 public final class VirtualCentralBackend: CentralManaging, Sendable {
 
     /// The queue every method and event delivery is confined to.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     /// This backend's identity to the radio. Also the `Subscriber` id that
     /// device handlers see for traffic originating here.
@@ -109,8 +109,9 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// - Parameters:
     ///   - radio: The radio hosting the virtual devices to serve.
     ///   - queue: The queue every method and event delivery is confined to — the same
-    ///     queue the owning `Central` is constructed with.
-    public convenience init(radio: VirtualRadio, queue: DispatchSerialQueue) {
+    ///     queue the owning `Central` is constructed with. Must be serial
+    ///     (`DispatchQueue(label:)` is).
+    public convenience init(radio: VirtualRadio, queue: DispatchQueue) {
         self.init(
             radio: radio,
             queue: queue,
@@ -131,7 +132,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     ///   - maximumRemotes: How many peripheral remotes to keep.
     package init(
         radio: VirtualRadio,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         maximumDiscovered: Int,
         maximumRemotes: Int = VirtualCentralBackend.defaultMaximumRemotes
     ) {

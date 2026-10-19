@@ -18,14 +18,15 @@ import BLESwiftCore
 import Dispatch
 import Foundation
 import Logging
-import Synchronization
+import BLESwiftCompat16
+import BLESwiftCompat17
 
 /// BLESwift's peripheral-role entry point: an actor wrapping a single `CBPeripheralManager`.
 ///
 /// Where ``Central`` is the *central* role, `PeripheralHost` is the *peripheral* role — it
 /// hosts a GATT database, advertises it, and answers reads / writes / subscriptions from
 /// remote centrals. Its architecture mirrors ``Central`` exactly: the actor's isolation is
-/// tied directly to the `DispatchSerialQueue` its `CBPeripheralManager` delivers delegate
+/// tied directly to the `DispatchQueue` its `CBPeripheralManager` delivers delegate
 /// callbacks on (see ``unownedExecutor``), so every proxy callback already runs on the
 /// actor's own executor with no thread hop.
 ///
@@ -37,15 +38,20 @@ import Synchronization
 ///   **before** you ``startAdvertising(_:)``. Those streams do not replay.
 public actor PeripheralHost {
 
-    /// The `DispatchSerialQueue` this actor's executor is tied to (see ``unownedExecutor``),
-    /// and the same queue the underlying `CBPeripheralManager` delivers delegate callbacks on.
-    nonisolated let queue: DispatchSerialQueue
+    /// The serial `DispatchQueue` backing ``unownedExecutor`` and the `CBPeripheralManager`
+    /// delegate callbacks. Must be serial: `DispatchQueue(label:)` is; a concurrent queue is
+    /// rejected on the 17 tier and undefined below it.
+    nonisolated let queue: DispatchQueue
+
+    /// Binds `PeripheralHost` to ``queue``: `DispatchSerialQueue`'s executor on the 17 tier
+    /// and later, `BLESwiftCompat16.SerialQueueExecutor` below it.
+    nonisolated let executor: QueueExecutor
 
     /// Ties this actor's isolation directly to ``queue`` (SE-0424 custom executors), exactly
     /// as ``Central/unownedExecutor`` does. Declared `public` because it satisfies a
     /// requirement of the public `Actor` protocol; not meant for direct use by clients.
     public nonisolated var unownedExecutor: UnownedSerialExecutor {
-        queue.asUnownedSerialExecutor()
+        executor.asUnownedSerialExecutor()
     }
 
     /// The CoreBluetooth shim this host drives. `Optional`/`var` so ``stopAndExtractState()``
@@ -112,14 +118,15 @@ public actor PeripheralHost {
     private let restorationBroadcaster = Broadcaster<PeripheralRestorationEvent>(replay: .allUntilFirstConsumer)
 
     /// Creates a `PeripheralHost`, synchronously creating its underlying `CBPeripheralManager`
-    /// on a fresh, dedicated `DispatchSerialQueue`. Creation is synchronous (not deferred
+    /// on a fresh, dedicated `DispatchQueue`. Creation is synchronous (not deferred
     /// behind an async `start()`) so restoration can register its restore identifier before
     /// `willRestoreState` can arrive — same reason as ``Central/init(configuration:)``.
     ///
     /// - Parameter configuration: Start-time options. Defaults to `Configuration()`.
     public init(configuration: Configuration = Configuration()) {
-        let queue = DispatchSerialQueue(label: "com.bleswift.PeripheralHost")
+        let queue = DispatchQueue(label: "com.bleswift.PeripheralHost")
         self.queue = queue
+        self.executor = QueueExecutor(queue: queue)
         self.configuration = configuration
 
         // A registered backend (see `BackendRegistry`) replaces CoreBluetooth wholesale.
@@ -132,7 +139,7 @@ public actor PeripheralHost {
             queue.sync {
                 backend.eventHandler = { [weak self] event in
                     guard let self else { return }
-                    self.assumeIsolated { $0.handle(event) }
+                    self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
                 }
             }
             return
@@ -166,7 +173,7 @@ public actor PeripheralHost {
         // mechanism (which would create a second, wrong proxy) — same as `Central.init`.
         proxy.handler = { [weak self] event in
             guard let self else { return }
-            self.assumeIsolated { $0.handle(event) }
+            self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
         }
     }
 
@@ -174,7 +181,7 @@ public actor PeripheralHost {
     /// fake stand in for a real `CBPeripheralManager`. Production apps use
     /// ``init(configuration:)``.
     ///
-    /// - Important: `queue` **must be the exact `DispatchSerialQueue` instance** `backend`
+    /// - Important: `queue` **must be the exact `DispatchQueue` instance** `backend`
     ///   confines its event deliveries to. A mismatch surfaces only as an `assumeIsolated`
     ///   trap the first time an event arrives off-queue.
     ///
@@ -185,14 +192,16 @@ public actor PeripheralHost {
     ///
     /// - Parameters:
     ///   - backend: The ``PeripheralManaging`` conformance to drive.
-    ///   - queue: The `DispatchSerialQueue` `backend`'s events are confined to.
+    ///   - queue: The `DispatchQueue` `backend`'s events are confined to. Must be serial
+    ///     (`DispatchQueue(label:)` is).
     ///   - configuration: Start-time options. Defaults to `Configuration()`.
     public init(
         backend: any PeripheralManaging,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         configuration: Configuration = Configuration()
     ) {
         self.queue = queue
+        self.executor = QueueExecutor(queue: queue)
         self.configuration = configuration
         self.manager = backend
         self.proxy = nil
@@ -201,7 +210,7 @@ public actor PeripheralHost {
         // self-capture forms the deliberate cycle documented above.
         queue.sync {
             backend.eventHandler = { event in
-                self.assumeIsolated { $0.handle(event) }
+                self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
             }
         }
     }
@@ -289,7 +298,7 @@ public actor PeripheralHost {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { host in
+                    self.assumeIsolated(onQueue: self.queue) { host in
                         host.cancelPendingAddService(service.identifier)
                     }
                 }
@@ -330,7 +339,7 @@ public actor PeripheralHost {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { host in
+                    self.assumeIsolated(onQueue: self.queue) { host in
                         host.cancelPendingStartAdvertising()
                     }
                 }
@@ -559,7 +568,7 @@ public actor PeripheralHost {
             },
             onCancelled: {
                 self.queue.async {
-                    self.assumeIsolated { host in
+                    self.assumeIsolated(onQueue: self.queue) { host in
                         guard let token = assignedToken.withLock({ $0 }) else { return }
                         host.cancelReadyWaiter(token: token)
                     }

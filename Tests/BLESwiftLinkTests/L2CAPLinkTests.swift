@@ -12,7 +12,7 @@ import BLESwiftLink
 import BLESwiftTestSupport
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// The client half of an L2CAP channel driven over a real link against a provider whose
@@ -69,7 +69,7 @@ struct L2CAPLinkTests {
         let provider = Provider(configuration: configuration)
         try await provider.start()
 
-        let queue = DispatchSerialQueue(label: label)
+        let queue = DispatchQueue(label: label)
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             queue: queue,
@@ -367,7 +367,7 @@ struct L2CAPLinkTests {
 
     @Test("A writer suspended for credit is resumed when its LinkCentral is deallocated")
     func deallocatingTheCentralResumesSuspendedWriters() async throws {
-        let queue = DispatchSerialQueue(label: "l2cap.dealloc")
+        let queue = DispatchQueue(label: "l2cap.dealloc")
         // Dialing a port nothing is listening on: this central never connects, so no credit
         // can ever arrive from a provider and the only thing that can resume a parked writer
         // is the central's own teardown.
@@ -421,7 +421,7 @@ struct L2CAPLinkTests {
 
     /// Hops onto `queue` to run `body` and returns its result — the door for off-queue test
     /// code to touch queue-confined state.
-    private static func onQueue<T: Sendable>(_ queue: DispatchSerialQueue, _ body: @Sendable @escaping () -> T) async -> T {
+    private static func onQueue<T: Sendable>(_ queue: DispatchQueue, _ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async { continuation.resume(returning: body()) }
         }

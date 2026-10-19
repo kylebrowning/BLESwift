@@ -20,7 +20,7 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
     /// The queue every method and delivery is confined to. A `FakePeripheral` hands its own
     /// queue down when it vends a channel, so the channel shares the peripheral's serial
     /// event ordering.
-    public let queue: DispatchSerialQueue
+    public let queue: DispatchQueue
 
     private let inboundStream: AsyncThrowingStream<Data, Error>
     private let inboundContinuation: AsyncThrowingStream<Data, Error>.Continuation
@@ -40,8 +40,9 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
     nonisolated(unsafe) private var _writeBehavior: WriteBehavior = .complete
     nonisolated(unsafe) private var _heldWrites: [CheckedContinuation<Void, Error>] = []
 
-    /// Creates a `FakeL2CAPChannel` for `psm`, confined to `queue`.
-    public init(psm: L2CAPPSM, queue: DispatchSerialQueue) {
+    /// Creates a `FakeL2CAPChannel` for `psm`, confined to `queue`, which must be serial
+    /// (`DispatchQueue(label:)` is).
+    public init(psm: L2CAPPSM, queue: DispatchQueue) {
         self.psm = psm
         self.queue = queue
         let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()

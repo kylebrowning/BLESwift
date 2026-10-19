@@ -105,7 +105,7 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import Dispatch
 
-let queue = DispatchSerialQueue(label: "MyAppTests.rig")
+let queue = DispatchQueue(label: "MyAppTests.rig")
 let fakeCentral = FakeCentral(queue: queue)
 let central = Central(backend: fakeCentral, queue: queue)
 ```

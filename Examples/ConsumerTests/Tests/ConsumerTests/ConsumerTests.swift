@@ -29,7 +29,7 @@ struct ConsumerTests {
     func rigConstruction() async {
         // 1. One serial queue, shared by every fake and by `Central` itself — this is the
         //    queue-confined contract's foundation (see `FakeCentral`'s doc comment).
-        let queue = DispatchSerialQueue(label: "ConsumerTests.rigConstruction")
+        let queue = DispatchQueue(label: "ConsumerTests.rigConstruction")
         // 2. The fakes, confined to that queue.
         let fakeCentral = FakeCentral(queue: queue)
         let fakePeripheral = FakePeripheral(queue: queue)
@@ -45,7 +45,7 @@ struct ConsumerTests {
 
     @Test("Power on the radio, connect, and read-decode a heart rate measurement")
     func powerOnConnectAndRead() async throws {
-        let queue = DispatchSerialQueue(label: "ConsumerTests.powerOnConnectAndRead")
+        let queue = DispatchQueue(label: "ConsumerTests.powerOnConnectAndRead")
         let fakeCentral = FakeCentral(queue: queue)
         let fakePeripheral = FakePeripheral(queue: queue)
         let central = Central(backend: fakeCentral, queue: queue)
@@ -106,7 +106,7 @@ struct ConsumerTests {
 
     @Test("connect() failure surfaces the backend-reported error")
     func connectFailureSurfacesError() async throws {
-        let queue = DispatchSerialQueue(label: "ConsumerTests.connectFailureSurfacesError")
+        let queue = DispatchQueue(label: "ConsumerTests.connectFailureSurfacesError")
         let fakeCentral = FakeCentral(queue: queue)
         let fakePeripheral = FakePeripheral(queue: queue)
         let central = Central(backend: fakeCentral, queue: queue)
@@ -160,7 +160,7 @@ struct ConsumerTests {
     /// Builds the documented 4-line rig, powers the radio on, and connects — the standard
     /// starting point for the GATT-level tests above.
     private func connectedRig() async throws -> (Central, FakeCentral, FakePeripheral, Peripheral) {
-        let queue = DispatchSerialQueue(label: "ConsumerTests.connectedRig")
+        let queue = DispatchQueue(label: "ConsumerTests.connectedRig")
         let fakeCentral = FakeCentral(queue: queue)
         let fakePeripheral = FakePeripheral(queue: queue)
         let central = Central(backend: fakeCentral, queue: queue)
