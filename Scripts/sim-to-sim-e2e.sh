@@ -90,8 +90,15 @@ trap cleanup EXIT INT TERM
 # name if one exists, and otherwise creates it on the newest installed iOS runtime. grantiva
 # 2.0 no longer infers a device type from a name without a model in it ("BLESwift CI
 # Advertiser" has none, on purpose — see the workflow), so the newest numbered iPhone type is
-# resolved once here and passed as `--device-type`; it only matters on the create path. It
-# boots by default and reports the UDID, which is what every downstream command takes.
+# resolved once here for the create path. It boots by default and reports the UDID, which is
+# what every downstream command takes.
+#
+# `--device-type` is not create-only, though: `ensure` checks an existing device against it,
+# and against the newest runtime it defaults to, and refuses a mismatch ("exists with
+# incompatible configuration"). So a device that already exists is ensured on its own type and
+# runtime (`existing_configuration`). Which device CI runs on is decided before this script —
+# `Scripts/ci/ensure-ci-simulator.sh` creates and refreshes CI's own, a dispatch names the
+# user's — and second-guessing it here broke the day Xcode added a newer iPhone.
 #
 # `--json`, not the plain output: without it `ensure` prints a human sentence
 # ("Reused iPhone 17 Pro (<UDID>) — Booted") that would have to be scraped.
@@ -115,6 +122,20 @@ print(chosen[0]["udid"] if chosen else "")
 ' "$1"
 }
 
+# "<device type identifier> <runtime identifier>" of an available device of that name (a booted
+# one first, as above), or nothing when there is none and `ensure` will create it.
+existing_configuration() {
+    xcrun simctl list devices available -j | python3 -c '
+import json, sys
+name = sys.argv[1]
+devices = json.load(sys.stdin)["devices"]
+matches = [(runtime, d) for runtime in devices for d in devices[runtime] if d["name"] == name]
+matches.sort(key=lambda m: m[1].get("state") != "Booted")
+if matches:
+    print(matches[0][1]["deviceTypeIdentifier"], matches[0][0])
+' "$1"
+}
+
 ci_device_type="$(xcrun simctl list devicetypes -j | python3 -c '
 import json, sys
 types = [t for t in json.load(sys.stdin)["devicetypes"] if t["name"].startswith("iPhone")]
@@ -132,9 +153,15 @@ ensure_simulator() {
     local udid output errors status errors_file
     # stderr kept apart from stdout: the JSON `--json` promises is on stdout, and folding a
     # warning line into it would break the parse on the very path that succeeded.
+    local existing_type existing_runtime
+    local configuration=(--device-type "$ci_device_type")
+    read -r existing_type existing_runtime <<<"$(existing_configuration "$name")" || true
+    if [[ -n "$existing_type" ]]; then
+        configuration=(--device-type "$existing_type" --runtime "$existing_runtime")
+    fi
     errors_file="$(mktemp)"
     set +e
-    output="$(grantiva simulator ensure --name "$name" --device-type "$ci_device_type" --json 2>"$errors_file")"
+    output="$(grantiva simulator ensure --name "$name" "${configuration[@]}" --json 2>"$errors_file")"
     status=$?
     set -e
     errors="$(cat "$errors_file")"
