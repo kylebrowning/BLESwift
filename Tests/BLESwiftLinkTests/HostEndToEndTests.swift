@@ -11,7 +11,7 @@ import BLESwiftLink
 import BLESwiftSimulatorLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// Sim-to-sim over a real socket: a `PeripheralHost` driven by a ``LinkPeripheralManager``
@@ -48,7 +48,7 @@ struct HostEndToEndTests {
 
     /// A `PeripheralHost` driven by a `LinkPeripheralManager` dialing `port`, plus the link.
     private func makeHost(port: UInt16, label: String) -> (PeripheralHost, LinkPeripheralManager) {
-        let queue = DispatchSerialQueue(label: label)
+        let queue = DispatchQueue(label: label)
         let link = LinkPeripheralManager(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
             queue: queue,
@@ -60,7 +60,7 @@ struct HostEndToEndTests {
 
     /// A `Central` driven by a `LinkCentral` dialing `port`, plus the link.
     private func makeCentral(port: UInt16, label: String) -> (Central, LinkCentral) {
-        let queue = DispatchSerialQueue(label: label)
+        let queue = DispatchQueue(label: label)
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
             queue: queue,
@@ -72,7 +72,7 @@ struct HostEndToEndTests {
 
     /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.
     private static func onQueue<T: Sendable>(
-        _ queue: DispatchSerialQueue,
+        _ queue: DispatchQueue,
         _ body: @escaping @Sendable () -> T
     ) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
@@ -169,7 +169,7 @@ struct HostEndToEndTests {
     func advertisingResumesAfterAStopBehindAStart() async throws {
         let provider = try await makeProvider()
         let port = await provider.port
-        let queue = DispatchSerialQueue(label: "host.e2e.restart")
+        let queue = DispatchQueue(label: "host.e2e.restart")
         let link = LinkPeripheralManager(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
             queue: queue,
@@ -215,7 +215,7 @@ struct HostEndToEndTests {
     @Test("The updateValue window closes after 32 unacknowledged pushes and reopens on the acknowledgement")
     func updateValueWindow() async throws {
         let provider = try await makeProvider()
-        let queue = DispatchSerialQueue(label: "host.e2e.window")
+        let queue = DispatchQueue(label: "host.e2e.window")
         let link = LinkPeripheralManager(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             queue: queue,
@@ -319,7 +319,7 @@ struct HostEndToEndTests {
         let scripted = try ScriptedHostProvider()
         try await scripted.start()
         let port = scripted.listener.port
-        let queue = DispatchSerialQueue(label: "host.e2e.drop")
+        let queue = DispatchQueue(label: "host.e2e.drop")
         let link = LinkPeripheralManager(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
             queue: queue,
@@ -381,7 +381,7 @@ struct HostEndToEndTests {
     func windowFilledWhileDisconnectedClearsOnReconnect() async throws {
         let first = try await makeProvider()
         let port = await first.port
-        let queue = DispatchSerialQueue(label: "host.e2e.downfill")
+        let queue = DispatchQueue(label: "host.e2e.downfill")
         let link = LinkPeripheralManager(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
             queue: queue,
@@ -433,7 +433,7 @@ struct HostEndToEndTests {
         // from below the ephemeral range, so no test running in parallel can be handed it and
         // accept this link's handshake.
         let port = try closedPort()
-        let queue = DispatchSerialQueue(label: "host.e2e.prefill")
+        let queue = DispatchQueue(label: "host.e2e.prefill")
         let link = LinkPeripheralManager(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
             queue: queue,

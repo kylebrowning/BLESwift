@@ -8,7 +8,7 @@ import BLESwiftCore
 import BLESwiftLink
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// The host-side half of the simulator link: it hosts virtual devices on a
 /// ``VirtualRadio``, listens on a TCP port, and serves each client that connects from a
@@ -474,7 +474,7 @@ public actor Provider {
         switch hello.role {
         case .central:
             sessionOrdinal += 1
-            let queue = DispatchSerialQueue(label: "bleswift-provider.central.\(sessionOrdinal)")
+            let queue = DispatchQueue(label: "bleswift-provider.central.\(sessionOrdinal)")
             sessions[key] = CentralSession(
                 connection: connection,
                 backend: makeCentralBackend(queue: queue),
@@ -488,7 +488,7 @@ public actor Provider {
             configuration.log?("opened central session \(sessionOrdinal) for \(hello.clientName)")
         case .peripheral:
             sessionOrdinal += 1
-            let queue = DispatchSerialQueue(label: "bleswift-provider.host.\(sessionOrdinal)")
+            let queue = DispatchQueue(label: "bleswift-provider.host.\(sessionOrdinal)")
             // Reported back in the hello: the client asked to be hosted under an identity, and
             // only the provider knows whether it got it.
             let identifier = hostedIdentifier(for: hello)
@@ -553,7 +553,7 @@ public actor Provider {
     }
 
     /// Builds the backend for one central-role session, on that session's own queue.
-    private func makeCentralBackend(queue: DispatchSerialQueue) -> any CentralManaging {
+    private func makeCentralBackend(queue: DispatchQueue) -> any CentralManaging {
         guard configuration.passthrough else {
             return queue.sync { VirtualCentralBackend(radio: radio, queue: queue) }
         }
@@ -582,7 +582,7 @@ public actor Provider {
     ///     its ``BLESwiftLink/ClientHello``, so its reconnect is the same device to every
     ///     central that had seen it.
     private func makePeripheralBackend(
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         clientName: String,
         identifier: UUID
     ) -> any PeripheralManaging {

@@ -7,7 +7,7 @@ import Dispatch
 import Foundation
 import Logging
 import Network
-import Synchronization
+import BLESwiftCompat17
 
 /// A framed message connection over TCP.
 ///

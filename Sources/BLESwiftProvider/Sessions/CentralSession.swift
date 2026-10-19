@@ -111,7 +111,7 @@ final class CentralSession: Sendable {
     /// The serial queue the backend, its remotes, and every piece of session state are
     /// confined to. Internal rather than private so the L2CAP bridge in
     /// `CentralSession+L2CAP.swift` shares it.
-    let queue: DispatchSerialQueue
+    let queue: DispatchQueue
 
     /// Receives one line per notable session event. Internal for the same reason as
     /// ``queue``.
@@ -185,7 +185,7 @@ final class CentralSession: Sendable {
     init(
         connection: LinkConnection,
         backend: any CentralManaging,
-        queue: DispatchSerialQueue,
+        queue: DispatchQueue,
         ordinal: Int,
         hello: ServerHello,
         install: (@escaping @Sendable (LinkMessage) -> Void) -> Void,

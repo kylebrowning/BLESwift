@@ -12,7 +12,7 @@ import BLESwiftSimulatorLink
 import BLESwiftTestSupport
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// What a passthrough ``BLESwiftProvider/Provider`` owes its clients: every call a linked
@@ -72,8 +72,8 @@ struct PassthroughWiringTests {
     /// their scripting setters are queue-confined.
     private func makeProvider(
         fixtures: [FixtureDevice] = [],
-        centralFactory: (@Sendable (DispatchSerialQueue) -> any CentralManaging)? = nil,
-        peripheralFactory: (@Sendable (DispatchSerialQueue) -> any PeripheralManaging)? = nil
+        centralFactory: (@Sendable (DispatchQueue) -> any CentralManaging)? = nil,
+        peripheralFactory: (@Sendable (DispatchQueue) -> any PeripheralManaging)? = nil
     ) async throws -> Provider {
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
@@ -87,8 +87,8 @@ struct PassthroughWiringTests {
     }
 
     /// A `LinkCentral` dialing `port` on a queue of its own.
-    private func makeLink(port: UInt16, label: String) -> (LinkCentral, DispatchSerialQueue) {
-        let queue = DispatchSerialQueue(label: label)
+    private func makeLink(port: UInt16, label: String) -> (LinkCentral, DispatchQueue) {
+        let queue = DispatchQueue(label: label)
         let link = LinkCentral(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
             queue: queue,
@@ -100,7 +100,7 @@ struct PassthroughWiringTests {
 
     /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.
     private static func onQueue<T: Sendable>(
-        _ queue: DispatchSerialQueue,
+        _ queue: DispatchQueue,
         _ body: @escaping @Sendable () -> T
     ) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
@@ -281,7 +281,7 @@ struct PassthroughWiringTests {
 
     /// A `PeripheralHost` linked to `provider`, plus its link.
     private func makeHost(port: UInt16, label: String) -> (PeripheralHost, LinkPeripheralManager) {
-        let queue = DispatchSerialQueue(label: label)
+        let queue = DispatchQueue(label: label)
         let link = LinkPeripheralManager(
             endpoint: LinkEndpoint(host: "127.0.0.1", port: port),
             queue: queue,
@@ -314,7 +314,7 @@ struct PassthroughWiringTests {
         #expect(await fake.onQueue { fake.lastAdvertisement?.localName } == "Passthrough Host")
 
         // The virtual half: a `Central` on the provider's own radio finds the same host.
-        let virtualQueue = DispatchSerialQueue(label: "passthrough.host.virtual")
+        let virtualQueue = DispatchQueue(label: "passthrough.host.virtual")
         let virtualCentral = Central(
             backend: VirtualCentralBackend(radio: provider.radio, queue: virtualQueue),
             queue: virtualQueue
@@ -433,7 +433,7 @@ struct PassthroughWiringTests {
 
     @Test("CoreBluetoothBackends vends a live, queue-confined real central")
     func realCentralBackendSmokeTest() async {
-        let queue = DispatchSerialQueue(label: "passthrough.corebluetooth.central")
+        let queue = DispatchQueue(label: "passthrough.corebluetooth.central")
         // No hardware assumption: whatever `radioState` answers is a pass. What is asserted
         // is that the object exists, answers on `queue`, and takes an `eventHandler` — the
         // set that installs the delegate proxy — and gives it back.
@@ -450,7 +450,7 @@ struct PassthroughWiringTests {
 
     @Test("CoreBluetoothBackends vends a live, queue-confined real peripheral manager")
     func realPeripheralManagerBackendSmokeTest() async {
-        let queue = DispatchSerialQueue(label: "passthrough.corebluetooth.peripheral")
+        let queue = DispatchQueue(label: "passthrough.corebluetooth.peripheral")
         let probe = await Self.onQueue(queue) { () -> [Bool] in
             let backend = CoreBluetoothBackends.makePeripheralManager(queue: queue)
             _ = backend.radioState

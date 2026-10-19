@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-10-19
+
+### Changed
+
+- **Breaking:** every public API that took or exposed a `DispatchSerialQueue` now uses
+  `DispatchQueue` (`BackendRegistry` factories, `ProviderConfiguration` factories,
+  `CoreBluetoothBackends`, `Central(adopting:connectedPeripherals:callbackQueue:)`,
+  `Central(backend:queue:…)`, `PeripheralHost(backend:queue:…)`, the
+  `queue` of every fake, virtual, and composite backend). The queue must be serial; a
+  concurrent queue traps on iOS 17 and later. Code that passed a `DispatchSerialQueue`
+  keeps working unchanged.
+- **Breaking (floors lowered):** minimum platforms are now iOS 16, macOS 13, watchOS 9,
+  tvOS 16, visionOS 1 (were iOS 18, macOS 15, watchOS 11, tvOS 18, visionOS 2). The
+  back-deployment code lives in two internal modules, `BLESwiftCompat17` and
+  `BLESwiftCompat16`, documented in the "Back-deployment" article.
+- **Breaking:** `VirtualRadio.knownDeviceIDs` is no longer public; it was an implementation
+  detail.
+
 ## [2.1.0] - 2026-09-01
 
 ### Added
@@ -303,7 +321,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed a deadlock when connecting to the same peripheral concurrently.
 - Restoring multiple peripherals now happens concurrently.
 
-[Unreleased]: https://github.com/kylebrowning/BLESwift/compare/2.1.0...HEAD
+[Unreleased]: https://github.com/kylebrowning/BLESwift/compare/3.0.0...HEAD
+[3.0.0]: https://github.com/kylebrowning/BLESwift/compare/2.1.0...3.0.0
 [2.1.0]: https://github.com/kylebrowning/BLESwift/compare/2.0.0...2.1.0
 [2.0.0]: https://github.com/kylebrowning/BLESwift/compare/1.0.2...2.0.0
 [1.0.2]: https://github.com/kylebrowning/BLESwift/compare/1.0.1...1.0.2

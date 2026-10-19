@@ -14,8 +14,8 @@ import BLESwift
 /// Creates a `PeripheralHost` wired to a fresh queue-confined `FakePeripheralManager`.
 private func makeFakePeripheralHost(
     label: String = "BLESwiftTests.FakePeripheralManager"
-) -> (PeripheralHost, FakePeripheralManager, DispatchSerialQueue) {
-    let queue = DispatchSerialQueue(label: label)
+) -> (PeripheralHost, FakePeripheralManager, DispatchQueue) {
+    let queue = DispatchQueue(label: label)
     let fake = FakePeripheralManager(queue: queue)
     let host = PeripheralHost(backend: fake, queue: queue)
     return (host, fake, queue)

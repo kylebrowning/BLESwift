@@ -5,7 +5,7 @@
 
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 import BLESwiftCore
 import BLESwiftTestSupport
@@ -41,13 +41,13 @@ struct CrossRoleEndToEndTests {
     /// Builds both roles on their own serial queues and bridges them.
     private func makeRig() async -> Rig {
         // Central role — its own queue.
-        let centralQueue = DispatchSerialQueue(label: "CrossRole.Central")
+        let centralQueue = DispatchQueue(label: "CrossRole.Central")
         let fakeCentral = FakeCentral(queue: centralQueue)
         let fakePeripheral = FakePeripheral(name: "Rig Peripheral", queue: centralQueue)
         let central = Central(backend: fakeCentral, queue: centralQueue)
 
         // Peripheral role — its own, distinct queue.
-        let hostQueue = DispatchSerialQueue(label: "CrossRole.Host")
+        let hostQueue = DispatchQueue(label: "CrossRole.Host")
         let fakeManager = FakePeripheralManager(queue: hostQueue)
         let host = PeripheralHost(backend: fakeManager, queue: hostQueue)
 

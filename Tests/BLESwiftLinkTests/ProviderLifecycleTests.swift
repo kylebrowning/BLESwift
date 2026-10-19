@@ -9,7 +9,7 @@ import BLESwiftLink
 @testable import BLESwiftProvider
 import Dispatch
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 import Testing
 
 /// What the provider leaves on a shared radio when its own lifecycle is interrupted — a

@@ -6,7 +6,7 @@
 import BLESwiftCore
 import CoreBluetooth
 import Foundation
-import Synchronization
+import BLESwiftCompat17
 
 /// Bridges real `CBCentralManagerDelegate` callbacks into a `CentralEvent` handler
 /// closure — the `CentralManaging` conformance's implementation of `eventHandler` for
@@ -18,7 +18,7 @@ import Synchronization
 ///
 /// Every callback forwards synchronously to ``handler``: sound because CoreBluetooth only
 /// ever calls back on the queue the manager was created with, which is exactly the
-/// `DispatchSerialQueue` backing `Central`'s custom `SerialExecutor`.
+/// `DispatchQueue` backing `Central`'s custom `SerialExecutor`.
 ///
 /// This proxy is also the ONLY place BLESwift touches a raw `[String: Any]` advertisement
 /// dictionary: `didDiscover` converts it into ``AdvertisementData`` eagerly, before
