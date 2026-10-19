@@ -218,12 +218,11 @@ BLESwift's own code is written against the iOS 18-era standard library. Two inte
 fill the gaps on older systems: `BLESwiftCompat17` (a `Mutex` for iOS 17 / macOS 14 /
 watchOS 10 / tvOS 17 / visionOS 1) and `BLESwiftCompat16` (a serial-queue executor and
 `assumeIsolated` for iOS 16 / macOS 13 / watchOS 9 / tvOS 16). Neither is API. On every
-commit CI runs the full suite on the newest iOS simulator under both executors and under
-Thread Sanitizer. The CI lane for an iOS 17 simulator is in place and pending the runtime
-install on the CI runner; it is required to be green before 3.0.0 is tagged. iOS 16 is
-build-verified (no iOS 16 simulator runs on current macOS). Every public API takes a serial `DispatchQueue`; passing a concurrent queue is a
-programming error and traps on iOS 17 and later. The BLESwiftExplorer sample app itself
-targets iOS 18 / macOS 15.
+commit CI runs the full suite on the newest iOS simulator under both executors, on an iOS 17
+simulator, and on macOS under Thread Sanitizer. iOS 16 is build-verified (no iOS 16 simulator
+runs on current macOS). Every public API takes a serial `DispatchQueue`; passing a concurrent
+queue is a programming error and traps on iOS 17 and later. The BLESwiftExplorer sample app
+itself targets iOS 18 / macOS 15.
 
 ## Installation
 

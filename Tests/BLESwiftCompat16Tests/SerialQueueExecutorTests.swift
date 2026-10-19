@@ -57,8 +57,9 @@ struct SerialQueueExecutorTests {
         #expect(done)
     }
 
-    // `checkIsolated()` is the only isolation check that works from a non-task context, and
-    // it exists from the 18 tier up (macOS 15 here). These two pin both of its answers.
+    // `checkIsolated()` is the only isolation check that works from a non-task context. The
+    // method is declared at the module floor, but the runtime only consults it from the 18
+    // tier up (Swift 6.0 runtimes; macOS 15 here). These two pin both of its answers.
     #if os(macOS)
     @Test("preconditionIsolated succeeds on the queue from a non-task context")
     func preconditionIsolatedOnQueue() async {
