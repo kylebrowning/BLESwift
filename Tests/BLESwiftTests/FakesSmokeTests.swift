@@ -63,10 +63,14 @@ struct FakesSmokeTests {
             }
         }
 
-        central.simulateStateChange(.poweredOn)
-        // No flush yet: simulateStateChange only *schedules* the delivery via
-        // queue.async, so nothing should have been observed synchronously.
-        #expect(observedStates.withLock { $0 }.isEmpty)
+        // simulateStateChange only *schedules* the delivery via queue.async. Scheduled and
+        // checked from inside one block on that serial queue, the delivery provably cannot run
+        // before the check (#50): checked from the test thread instead, the queue could
+        // deliver first on a busy machine and the expectation failed with nothing wrong.
+        await central.onQueue {
+            central.simulateStateChange(.poweredOn)
+            #expect(observedStates.withLock { $0 }.isEmpty)
+        }
 
         await central.onQueue {} // now flush
         #expect(observedStates.withLock { $0 } == [.poweredOn])

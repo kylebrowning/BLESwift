@@ -363,7 +363,10 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
                 enabled, device: identifier, characteristic: characteristic, session: session
             )
             queue.async { [self] in
-                if outcome.isNotifying {
+                // Re-armed only while the characteristic is still discovered: the answer can
+                // land after a `didModifyServices` that pruned its service, and re-inserting
+                // then would leave the remote notifying on a characteristic that is gone.
+                if outcome.isNotifying, _discoveredCharacteristics.contains(characteristic) {
                     _notifying.insert(characteristic)
                 } else {
                     _notifying.remove(characteristic)
