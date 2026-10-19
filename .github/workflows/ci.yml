@@ -44,11 +44,21 @@ jobs:
         # absence on the self-hosted runner is a failure, not a skip: a canary that goes
         # green when it is uninstalled is not one. Only GitHub's hosted image — the fork-PR
         # fallback, which has no such toolchain — may skip it.
+        #
+        # It builds against the macOS 26 SDK, not the beta Xcode's: a 6.3 consumer has a 26-era
+        # SDK, and the macOS 27 SDK's interfaces carry flags only Swift 6.4 parses (6.3.3
+        # rejects `-target-arch-variant` and crashes rebuilding Foundation). The Command Line
+        # Tools keep that SDK; `MacOSX26.sdk` follows its newest 26.x. Missing is a failure too.
         env:
           HOSTED: ${{ runner.environment == 'github-hosted' }}
+          SDK_26: /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk
         run: |
           if xcrun --toolchain org.swift.633202606251a swift --version >/dev/null 2>&1; then
-            TOOLCHAINS=org.swift.633202606251a swift test --scratch-path .build-6.3
+            if [ ! -d "$SDK_26" ]; then
+              echo "::error::macOS 26 SDK ($SDK_26) is not installed on this runner"
+              exit 1
+            fi
+            SDKROOT="$SDK_26" TOOLCHAINS=org.swift.633202606251a swift test --scratch-path .build-6.3
           elif [ "$HOSTED" = "true" ]; then
             echo "::warning::hosted runner has no Swift 6.3.3 toolchain; canary skipped"
           else
