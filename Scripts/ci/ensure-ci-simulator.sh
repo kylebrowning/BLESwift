@@ -4,8 +4,8 @@
 #   Scripts/ci/ensure-ci-simulator.sh <name> [<ios-major>]
 #
 # The optional second argument pins an iOS major (e.g. "17"): the runtime is then the
-# highest installed one of that major, and no such runtime is an error naming the
-# `xcodebuild -downloadPlatform` command that installs it, not a fall back to a newer one.
+# highest installed one of that major, and no such runtime is an error saying how to install
+# one, not a fall back to a newer one.
 # Without it the runtime is the highest installed of any major.
 #
 # CI on a self-hosted runner shares the machine with whoever sits at it. A job that picks
@@ -35,7 +35,12 @@ runtimes = [r for r in json.load(sys.stdin)["runtimes"] if r["platform"] == "iOS
 if major:
     runtimes = [r for r in runtimes if r["version"].split(".")[0] == major]
     if not runtimes:
-        sys.exit(f"no iOS {major} runtime is installed; install one with: xcodebuild -downloadPlatform iOS -buildVersion {major}.5")
+        sys.exit(
+            f"no iOS {major} runtime is installed; install an iOS {major}.x runtime, e.g. "
+            f"`xcodebuild -downloadPlatform iOS -buildVersion {major}.5`. An Xcode newer than "
+            f"that runtime may refuse to download it; then download its .dmg from "
+            f"developer.apple.com and run `xcodebuild -importPlatform <dmg>`"
+        )
 if not runtimes:
     sys.exit("no iOS runtime is installed")
 runtimes.sort(key=lambda r: [int(x) for x in r["version"].split(".")])
@@ -86,7 +91,9 @@ device_type="$(xcrun simctl list runtimes -j | python3 -c '
 import json, sys
 runtime = sys.argv[1]
 rts = [r for r in json.load(sys.stdin)["runtimes"] if r["identifier"] == runtime]
-types = [t for t in rts[0]["supportedDeviceTypes"] if t["name"].startswith("iPhone")] if rts else []
+if not rts:
+    sys.exit(f"{runtime} is no longer installed; it was removed after this script chose it")
+types = [t for t in rts[0].get("supportedDeviceTypes", []) if t["name"].startswith("iPhone")]
 if not types:
     sys.exit(f"{runtime} supports no iPhone device type")
 def rank(t):
