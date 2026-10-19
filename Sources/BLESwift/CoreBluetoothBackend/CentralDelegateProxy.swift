@@ -37,12 +37,23 @@ final class CentralDelegateProxy: NSObject, CBCentralManagerDelegate {
     /// across isolation domains, which the protocol's plain, non-`@Sendable`
     /// `eventHandler` closure type cannot satisfy — `CBCentralManager`'s `eventHandler`
     /// setter bridges the two with a narrowly justified `nonisolated(unsafe)` wrap.
-    private let handlerBox = Mutex<(@Sendable (CentralEvent) -> Void)?>(nil)
+    ///
+    /// Wrapped in a struct, never stored as the `Mutex`'s `Value` directly (#53). `withLock`
+    /// hands its `Value` to the body `inout`; when that `Value` is a function type the
+    /// compiler reabstracts the closure on the way in and writes a reabstracted copy back on
+    /// the way out, even from a read (swiftlang/swift#91348). Each `get` then nested the
+    /// stored handler two thunks deeper, and after some thousands of events calling it
+    /// overflowed the stack. A struct `Value` has no function-type abstraction to convert.
+    /// Every closure-holding `Mutex` in BLESwift uses the same shape.
+    private struct HandlerStorage: Sendable {
+        var handler: (@Sendable (CentralEvent) -> Void)?
+    }
+    private let handlerBox = Mutex(HandlerStorage())
 
     /// The `CentralEvent` handler this proxy forwards to. Set once, by `Central`.
     var handler: (@Sendable (CentralEvent) -> Void)? {
-        get { handlerBox.withLock { $0 } }
-        set { handlerBox.withLock { $0 = newValue } }
+        get { handlerBox.withLock { $0.handler } }
+        set { handlerBox.withLock { $0.handler = newValue } }
     }
 
     #if os(iOS)

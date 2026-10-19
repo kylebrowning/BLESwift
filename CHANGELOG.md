@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `VirtualRadio.knownDeviceIDs` is no longer public; it was an implementation
   detail.
 
+### Fixed
+
+- A long-running app crashed with `EXC_BAD_ACCESS` (a stack overflow) after some thousands of
+  CoreBluetooth events — within minutes of a scan with `allowDuplicates: true`. Each delegate
+  proxy stored its event handler directly as a `Mutex` value, and every read of a
+  function-typed `Mutex` value wrapped the stored closure in two more reabstraction thunks
+  (swiftlang/swift#91348), until calling it overflowed the stack. The handlers, and
+  `BackendRegistry`'s factories, now sit inside a struct. (#53)
+
 ## [2.1.0] - 2026-09-01
 
 ### Added
