@@ -121,11 +121,26 @@ jobs:
         # outright (the macOS-green `BLESwiftTests` suite froze for ~100 s inside the
         # simulator until the job timed out). The self-hosted Mac has not shown it; the retry
         # stays for the hosted fallback that fork PRs still use.
+        #
+        # A green run must also show the executor this cell asked for (#47). If the
+        # `TEST_RUNNER_` variable stopped reaching the test process, the forced cell would test
+        # the default executor and still pass, and nothing inside the process can tell, since
+        # it reads the same missing variable. `ExecutorSelectionTests` prints the executor a
+        # `Central` really bound; that line is checked here, from outside.
         env:
           TEST_RUNNER_BLESWIFT_FORCE_COMPAT16_EXECUTOR: ${{ matrix.compat16 }}
+          EXPECTED_EXECUTOR: ${{ matrix.compat16 == '1' && 'compat16' || 'default' }}
         run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/xcodebuild-test.log"
           for attempt in 1 2; do
-            xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,id=$SIM_UDID" && exit 0
+            if xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,id=$SIM_UDID" 2>&1 | tee "$log"; then
+              if grep -q "BLESwift executor: $EXPECTED_EXECUTOR\$" "$log"; then
+                exit 0
+              fi
+              echo "::error::tests passed, but not on the $EXPECTED_EXECUTOR executor: $(grep -o 'BLESwift executor: .*' "$log" || echo 'no executor line')"
+              exit 1
+            fi
             echo "attempt $attempt failed"
           done
           exit 1
