@@ -19,7 +19,7 @@ Every API that takes a queue requires a serial one. `DispatchQueue(label:)` and 
 
 ### Testing
 
-CI runs the full suite on the newest iOS simulator with the default executor and with `BLESWIFT_FORCE_COMPAT16_EXECUTOR=1` (which makes `QueueExecutor` pick `SerialQueueExecutor` everywhere), and on macOS under Thread Sanitizer with the forced executor; both run on every commit. The CI lane for an iOS 17 simulator is in place and pending the runtime install on the CI runner; it is required to be green before 3.0.0 is tagged. iOS 16 is build-verified only, because no iOS 16 simulator runtime runs on current macOS.
+CI runs the full suite on the newest iOS simulator with the default executor and with `BLESWIFT_FORCE_COMPAT16_EXECUTOR=1` (which makes `QueueExecutor` pick `SerialQueueExecutor` everywhere), and on macOS under Thread Sanitizer with the forced executor, and on an iOS 17 simulator with the default executor — the only lane that runs on a pre-iOS 18 Swift runtime. All of them run on every commit. iOS 16 is build-verified only, because no iOS 16 simulator runtime runs on current macOS.
 
 ### Raising the floor to iOS 17 (drop `BLESwiftCompat16`)
 
@@ -34,10 +34,12 @@ CI runs the full suite on the newest iOS simulator with the default executor and
    ```
 
    This preserves the trap for concurrent queues that `QueueExecutor.init` performs today. Public signatures keep `DispatchQueue`, so there is no second API break.
+
+   The two `init(configuration:)` initializers take no queue; they create their own with `DispatchQueue(label:)`. Change those to `DispatchSerialQueue(label:)`, which needs no downcast.
 4. Replace every `assumeIsolated(onQueue: self.queue)` and `assumeIsolated(onQueue: central.queue)` with the standard library's `assumeIsolated`, and remove `import BLESwiftCompat16`.
-5. Remove the "iOS 16 executor" simulator matrix cell and the Thread Sanitizer step's environment variable from `.github/workflows/ci.yml`.
+5. In `.github/workflows/ci.yml`, remove the "iOS 16 executor" simulator matrix cell, and from the Thread Sanitizer step remove `BLESWIFT_FORCE_COMPAT16_EXECUTOR=1` and the "with the iOS 16 executor" in its name.
 
 ### Raising the floor to iOS 18 (drop `BLESwiftCompat17`)
 
 1. Delete `Sources/BLESwiftCompat17`, `Tests/BLESwiftCompat17Tests`, and their `Package.swift` entries.
-2. Replace `import BLESwiftCompat17` with `import Synchronization` everywhere.
+2. Replace `import BLESwiftCompat17` with `import Synchronization` everywhere. The swap is not quite mechanical: the real `Synchronization.Mutex` uses typed throws and `sending` on `withLock`, where the shim uses `rethrows`, so a handful of call sites may need `sending`-related fixes once the import is reversed.
