@@ -5,14 +5,20 @@
 
 import Dispatch
 import Testing
-import BLESwiftCompat16
+@_spi(Testing) import BLESwiftCompat16
 
+/// Bound through `QueueExecutor`, as `Central` and `PeripheralHost` are. `forceCompat16`
+/// defaults to the 16-tier `SerialQueueExecutor`; `false` takes the production path, which is
+/// `DispatchSerialQueue`'s own executor on the 17 tier and later.
 actor Recorder {
     nonisolated let queue: DispatchQueue
-    nonisolated let executor: SerialQueueExecutor
+    nonisolated let executor: QueueExecutor
     nonisolated var unownedExecutor: UnownedSerialExecutor { executor.asUnownedSerialExecutor() }
     private(set) var events: [String] = []
-    init(queue: DispatchQueue) { self.queue = queue; executor = SerialQueueExecutor(queue: queue) }
+    init(queue: DispatchQueue, forceCompat16: Bool = true) {
+        self.queue = queue
+        executor = QueueExecutor(queue: queue, forceCompat16: forceCompat16)
+    }
     func record(_ s: String) { events.append(s) }
 
     /// Simulates a delegate callback arriving on the queue outside any task.
@@ -38,10 +44,13 @@ struct AssumeIsolatedTests {
         #expect(await recorder.events == ["x"])
     }
 
-    @Test("callbacks from the queue interleave in order with actor calls")
-    func ordering() async {
+    /// Under both executors (#51): the forced 16-tier one, and the one production uses on the
+    /// 17 tier and later — `DispatchSerialQueue`'s own, the path Central's delegate callbacks
+    /// take on every current OS.
+    @Test("callbacks from the queue interleave in order with actor calls", arguments: [true, false])
+    func ordering(forceCompat16: Bool) async {
         let queue = DispatchQueue(label: "compat16.tests.order")
-        let recorder = Recorder(queue: queue)
+        let recorder = Recorder(queue: queue, forceCompat16: forceCompat16)
         recorder.simulateCallback("a")
         await recorder.record("b")
         recorder.simulateCallback("c")
