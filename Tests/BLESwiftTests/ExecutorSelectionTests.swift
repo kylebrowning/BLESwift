@@ -24,7 +24,7 @@ struct ExecutorSelectionTests {
         let queue = DispatchQueue(label: "ExecutorSelectionTests.central")
         let central = Central(backend: FakeCentral(queue: queue), queue: queue)
         let usesCompat16 = central.executor.usesCompat16Executor
-        print("BLESwift executor: \(usesCompat16 ? "compat16" : "default")")
+        print("BLESwift executor: [\(usesCompat16 ? "compat16" : "default")]")
 
         if #available(iOS 17, macOS 14, watchOS 10, tvOS 17, visionOS 1, *) {
             #expect(usesCompat16 == ExecutorPolicy.forceCompat16)
