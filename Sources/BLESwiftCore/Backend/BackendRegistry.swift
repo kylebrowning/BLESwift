@@ -27,18 +27,25 @@ public enum BackendRegistry {
     /// always serial (`DispatchQueue(label:)` is).
     public typealias PeripheralManagerFactory = @Sendable (DispatchQueue) -> any PeripheralManaging
 
-    private static let centralBox = Mutex<CentralFactory?>(nil)
-    private static let peripheralManagerBox = Mutex<PeripheralManagerFactory?>(nil)
+    /// The factories live in a struct, never as the `Mutex`'s `Value` directly (#53):
+    /// `withLock` passes its `Value` `inout`, and for a function-typed `Value` the compiler
+    /// writes back a reabstracted copy even on a read (swiftlang/swift#91348), so every `get`
+    /// would nest the stored factory two thunks deeper until calling it overflowed the stack.
+    private struct Factories: Sendable {
+        var central: CentralFactory?
+        var peripheralManager: PeripheralManagerFactory?
+    }
+    private static let box = Mutex(Factories())
 
     /// The factory `Central(configuration:)` consults, or `nil` to use CoreBluetooth.
     public static var centralFactory: CentralFactory? {
-        get { centralBox.withLock { $0 } }
-        set { centralBox.withLock { $0 = newValue } }
+        get { box.withLock { $0.central } }
+        set { box.withLock { $0.central = newValue } }
     }
 
     /// The factory `PeripheralHost(configuration:)` consults, or `nil` to use CoreBluetooth.
     public static var peripheralManagerFactory: PeripheralManagerFactory? {
-        get { peripheralManagerBox.withLock { $0 } }
-        set { peripheralManagerBox.withLock { $0 = newValue } }
+        get { box.withLock { $0.peripheralManager } }
+        set { box.withLock { $0.peripheralManager = newValue } }
     }
 }

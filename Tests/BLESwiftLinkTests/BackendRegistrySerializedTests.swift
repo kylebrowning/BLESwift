@@ -82,6 +82,26 @@ struct BackendRegistrySerializedTests {
             BackendRegistry.peripheralManagerFactory = nil
             #expect(BackendRegistry.peripheralManagerFactory == nil)
         }
+
+        /// #53: a function-typed `Mutex` value gained two reabstraction thunks per read, so a
+        /// factory read often enough overflowed the stack when finally called. Before the fix
+        /// this crashed (SIGBUS) well inside the read count used here.
+        @Test("Reading the factories repeatedly does not nest them deeper (#53)")
+        func repeatedReadsDoNotNest() {
+            BackendRegistry.centralFactory = { queue in FakeCentral(queue: queue) }
+            BackendRegistry.peripheralManagerFactory = { queue in FakePeripheralManager(queue: queue) }
+            defer {
+                BackendRegistry.centralFactory = nil
+                BackendRegistry.peripheralManagerFactory = nil
+            }
+            for _ in 0..<200_000 {
+                _ = BackendRegistry.centralFactory
+                _ = BackendRegistry.peripheralManagerFactory
+            }
+            let queue = DispatchQueue(label: "BackendRegistryTests.repeatedReadsDoNotNest")
+            #expect(BackendRegistry.centralFactory?(queue) is FakeCentral)
+            #expect(BackendRegistry.peripheralManagerFactory?(queue) is FakePeripheralManager)
+        }
     }
 
     /// `SimulatorLink` mutates the process-wide `BackendRegistry`, so every test here restores

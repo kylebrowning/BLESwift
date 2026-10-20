@@ -35,13 +35,18 @@ final class PeripheralManagerDelegateProxy: NSObject, CBPeripheralManagerDelegat
 
     /// Receives every ``PeripheralHostEvent`` this proxy converts from a real CoreBluetooth
     /// callback. `Mutex`-guarded (assigned off-queue during construction). Typed `@Sendable`
-    /// for the same reason as ``CentralDelegateProxy/handler`` — see that type.
-    private let handlerBox = Mutex<(@Sendable (PeripheralHostEvent) -> Void)?>(nil)
+    /// for the same reason as ``CentralDelegateProxy/handler`` — see that type — and wrapped in
+    /// a struct rather than stored as the `Mutex`'s `Value` directly, as documented on
+    /// `CentralDelegateProxy.handlerBox` (#53).
+    private struct HandlerStorage: Sendable {
+        var handler: (@Sendable (PeripheralHostEvent) -> Void)?
+    }
+    private let handlerBox = Mutex(HandlerStorage())
 
     /// The `PeripheralHostEvent` handler this proxy forwards to. Set once, by `PeripheralHost`.
     var handler: (@Sendable (PeripheralHostEvent) -> Void)? {
-        get { handlerBox.withLock { $0 } }
-        set { handlerBox.withLock { $0 = newValue } }
+        get { handlerBox.withLock { $0.handler } }
+        set { handlerBox.withLock { $0.handler = newValue } }
     }
 
     /// In-flight read/write requests, keyed by the ``RequestToken`` this proxy minted for

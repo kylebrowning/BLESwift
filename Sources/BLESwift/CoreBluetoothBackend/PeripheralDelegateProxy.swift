@@ -21,14 +21,17 @@ import BLESwiftCompat17
 /// is already running on `Central`'s own executor queue.
 final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate {
 
-    /// Typed `@Sendable` for the same `Mutex`-storage reason documented on
-    /// `CentralDelegateProxy.handlerBox`.
-    private let handlerBox = Mutex<(@Sendable (PeripheralEvent) -> Void)?>(nil)
+    /// Typed `@Sendable`, and wrapped in a struct rather than stored as the `Mutex`'s `Value`
+    /// directly, for the reasons documented on `CentralDelegateProxy.handlerBox` (#53).
+    private struct HandlerStorage: Sendable {
+        var handler: (@Sendable (PeripheralEvent) -> Void)?
+    }
+    private let handlerBox = Mutex(HandlerStorage())
 
     /// The `PeripheralEvent` handler this proxy forwards to.
     var handler: (@Sendable (PeripheralEvent) -> Void)? {
-        get { handlerBox.withLock { $0 } }
-        set { handlerBox.withLock { $0 = newValue } }
+        get { handlerBox.withLock { $0.handler } }
+        set { handlerBox.withLock { $0.handler = newValue } }
     }
 
     // MARK: - CBPeripheralDelegate
