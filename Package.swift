@@ -83,6 +83,7 @@ let package = Package(
         .testTarget(
             name: "BLESwiftTests",
             dependencies: [
+                "BLESwiftCompat16",
                 "BLESwiftCompat17",
                 "BLESwift",
                 "BLESwiftCore",
