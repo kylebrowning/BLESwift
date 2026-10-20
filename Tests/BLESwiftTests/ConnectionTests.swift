@@ -797,16 +797,23 @@ struct MultiPeripheralConnectionTests {
         }
     }
 
-    @Test("Independent reconnect loops: A (.always) reconnects on unexpected disconnect, B (.never) does not; disconnect(A) mid-backoff cancels only A's loop")
+    @Test("Independent reconnect loops: A (reconnecting policy) reconnects on unexpected disconnect, B (.never) does not; disconnect(A) mid-backoff cancels only A's loop")
     func independentReconnectLoops() async throws {
         let (central, fakeCentral, fakePeripheralA) = makeTestCentral()
         let fakePeripheralB = await addFakePeripheral(to: central, fakeCentral: fakeCentral)
         await register(fakePeripheralA, on: fakeCentral)
         await fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
 
+        // A's backoff is held open by the test rather than timed (#42): with a 300 ms timer, a
+        // starved runner let the backoff expire, and A reconnect, before `disconnect(A)` below
+        // ran, so the test failed with nothing wrong. The gate makes "mid-backoff" certain.
+        let backoff = BackoffGate()
         _ = try await central.connect(
             fakePeripheralA.peripheralIdentifier,
-            reconnect: .always(maxAttempts: nil, backoff: .milliseconds(300))
+            reconnect: .custom { _, _ in
+                await backoff.wait()
+                return .zero
+            }
         )
         _ = try await central.connect(fakePeripheralB.peripheralIdentifier, reconnect: .never)
 
@@ -844,10 +851,14 @@ struct MultiPeripheralConnectionTests {
         try await Task.sleep(for: .milliseconds(100))
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCounts[fakePeripheralB.identifier] } == 1)
 
-        // A's reconnect loop is mid-backoff (300ms); cancel it via disconnect(A).
+        // A's reconnect loop is mid-backoff, parked on the gate; cancel it via disconnect(A),
+        // then open the gate. A loop that survived the cancellation would reconnect at once.
+        await waitFor { backoff.entered }
+        #expect(backoff.entered)
         try await central.disconnect(fakePeripheralA.peripheralIdentifier)
+        backoff.release()
 
-        try await Task.sleep(for: .milliseconds(450))
+        try await Task.sleep(for: .milliseconds(200))
 
         guard case .disconnected = await central.connectionState(of: fakePeripheralA.peripheralIdentifier) else {
             Issue.record("expected A .disconnected — no reconnect should have completed after disconnect() cancelled the backoff")
@@ -1077,6 +1088,42 @@ extension ConnectionState {
     fileprivate var isDisconnecting: Bool {
         if case .disconnecting = self { return true }
         return false
+    }
+}
+
+/// Holds a `ReconnectPolicy.custom` backoff open until the test calls ``release()``, so a test
+/// can act mid-backoff without racing a timer. ``entered`` turns true once the reconnect loop
+/// is waiting on it.
+private final class BackoffGate: Sendable {
+    private struct State {
+        var entered = false
+        var released = false
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+    private let box = Mutex(State())
+
+    var entered: Bool {
+        box.withLock { $0.entered }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let releasedAlready = box.withLock { state -> Bool in
+                state.entered = true
+                if !state.released { state.waiters.append(continuation) }
+                return state.released
+            }
+            if releasedAlready { continuation.resume() }
+        }
+    }
+
+    func release() {
+        let waiters = box.withLock { state -> [CheckedContinuation<Void, Never>] in
+            state.released = true
+            defer { state.waiters = [] }
+            return state.waiters
+        }
+        for waiter in waiters { waiter.resume() }
     }
 }
 

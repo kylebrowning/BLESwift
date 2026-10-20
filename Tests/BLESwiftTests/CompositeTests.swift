@@ -135,31 +135,43 @@ struct CompositeTests {
 
     @Test("flush completes only after a full quiet period: a mid-window packet resets the window")
     func flushWindowResetsOnPacket() async throws {
-        let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-        let quietPeriod: Duration = .milliseconds(250)
+        // Timed, so built to fail only on a real regression (#42). With a 1 s window and the
+        // packet ~300 ms in, a flush that resets ends a full second after the packet, and one
+        // that does not ends ~700 ms after it; the 950 ms bound sits between the two and a
+        // busy machine can only lengthen the first. What a busy machine *can* break is the
+        // setup: if the test oversleeps past the window, the flush is already over and the
+        // packet tests nothing. Such an attempt is detected and retried, not misreported.
+        let quietPeriod: Duration = .seconds(1)
         let clock = ContinuousClock()
 
-        let flushTask = Task {
-            try await peripheral.flush(Self.rxCharacteristic, quietPeriod: quietPeriod)
+        for _ in 1...3 {
+            let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
+            let flushReturned = Mutex(false)
+            let flushTask = Task {
+                try await peripheral.flush(Self.rxCharacteristic, quietPeriod: quietPeriod)
+                flushReturned.withLock { $0 = true }
+            }
+
+            // Wait until the flush's subscription is live, then land a packet mid-window.
+            await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.rxCharacteristic) } }
+            let subscribedTime = clock.now
+            try await Task.sleep(for: .milliseconds(300))
+            let packetTime = clock.now
+            let packetLandedMidWindow = packetTime - subscribedTime < .milliseconds(600) && !flushReturned.withLock { $0 }
+            fakePeripheral.simulateNotification(for: Self.rxCharacteristic, value: Data([0xEE]))
+
+            try await flushTask.value
+            guard packetLandedMidWindow else { continue }
+            let elapsedSincePacket = clock.now - packetTime
+
+            #expect(elapsedSincePacket >= .milliseconds(950), "a packet mid-window must restart the quiet period")
+
+            // The flush's one-shot subscription is released afterward.
+            await waitFor { await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
+            #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.last?.enabled } == false)
+            return
         }
-
-        // Wait until the flush's subscription is live, then land a packet mid-window.
-        await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.rxCharacteristic) } }
-        try await Task.sleep(for: .milliseconds(100))
-        let packetTime = clock.now
-        fakePeripheral.simulateNotification(for: Self.rxCharacteristic, value: Data([0xEE]))
-
-        try await flushTask.value
-        let elapsedSincePacket = clock.now - packetTime
-
-        // Without the reset, the flush would have completed ~150 ms after the packet
-        // (the remainder of the original window). With it, a full fresh quiet period must
-        // elapse after the packet. 240 ms leaves slop for timer coalescing.
-        #expect(elapsedSincePacket >= .milliseconds(240), "a packet mid-window must restart the quiet period")
-
-        // The flush's one-shot subscription is released afterward.
-        await waitFor { await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
-        #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.last?.enabled } == false)
+        Issue.record("in three attempts the runner never let the test land a packet inside the quiet period")
     }
 
     @Test("flush with a silent characteristic completes after one quiet period")

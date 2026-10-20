@@ -115,27 +115,33 @@ struct CentralTests {
         // A manager created with `queue: nil` delivers on main — exactly the case
         // `init(adopting:callbackQueue:)`'s doc comment tells callers to pass
         // `DispatchQueue.main` for.
-        let mainQueue = DispatchQueue.main
-        let manager = CBCentralManager(delegate: nil, queue: mainQueue)
+        //
+        // Created, adopted and read in one block on main (#42): the manager delivers its first
+        // `centralManagerDidUpdateState(_:)` on main too, so it cannot land until the block
+        // returns. Read from a test thread instead, that update could arrive first and the
+        // `.unknown` expectations below failed on a busy runner.
+        let (central, managerID) = await MainActor.run { () -> (Central, ObjectIdentifier) in
+            let manager = CBCentralManager(delegate: nil, queue: .main)
+            let central = Central(adopting: manager, callbackQueue: .main)
 
-        let central = Central(adopting: manager, callbackQueue: mainQueue)
-
-        // The adopting init seeds its synchronous `state` snapshot from the adopted
-        // manager's current state at adoption time, rather than leaving it `.unknown`
-        // until a delegate callback that may never re-fire. A freshly created
-        // `CBCentralManager` always starts in `.unknown` (before its first
-        // `centralManagerDidUpdateState(_:)`) — asserted directly rather than via the
-        // `CentralState(_: CBManagerState)` bridging init, which is `internal` to
-        // `BLESwift` (this file no longer uses `@testable import`).
-        #expect(manager.state == .unknown)
-        #expect(central.state == .unknown)
+            // The adopting init seeds its synchronous `state` snapshot from the adopted
+            // manager's current state at adoption time, rather than leaving it `.unknown`
+            // until a delegate callback that may never re-fire. A freshly created
+            // `CBCentralManager` always starts in `.unknown` (before its first
+            // `centralManagerDidUpdateState(_:)`) — asserted directly rather than via the
+            // `CentralState(_: CBManagerState)` bridging init, which is `internal` to
+            // `BLESwift` (this file no longer uses `@testable import`).
+            #expect(manager.state == .unknown)
+            #expect(central.state == .unknown)
+            return (central, ObjectIdentifier(manager))
+        }
 
         let (extractedManager, extractedPeripherals) = try await central.stopAndExtractState()
 
         // Same instance, not merely an equal one — proves the adopting init actually
         // stored (and stopAndExtractState() handed back) the manager passed in, rather
         // than, say, silently creating a fresh one.
-        #expect(extractedManager === manager)
+        #expect(ObjectIdentifier(extractedManager) == managerID)
         #expect(extractedPeripherals.isEmpty)
 
         // A second call throws — this Central gave up its reference above.

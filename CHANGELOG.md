@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   function-typed `Mutex` value wrapped the stored closure in two more reabstraction thunks
   (swiftlang/swift#91348), until calling it overflowed the stack. The handlers, and
   `BackendRegistry`'s factories, now sit inside a struct. (#53)
+- `VirtualPeripheralRemote` (BLESwiftProvider) and `LinkPeripheral` (BLESwiftSimulatorLink)
+  could report `isNotifying` on a characteristic whose service had just been removed: the
+  answer to a notify request that landed after the `didModifyServices` re-armed the pruned
+  characteristic. The notification state is now re-armed only while the characteristic is
+  still discovered. (#42)
 
 ## [2.1.0] - 2026-09-01
 

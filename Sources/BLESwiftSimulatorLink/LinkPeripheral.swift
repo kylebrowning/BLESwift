@@ -433,10 +433,13 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Records `characteristic`'s new notification state.
+    /// Records `characteristic`'s new notification state. An enabled state is recorded only
+    /// while the characteristic is still in the mirror: the answer to a notify request can
+    /// arrive after a `didModifyServices` that ``invalidate(services:)`` already applied, and
+    /// re-arming then would report notifying on a characteristic that is gone.
     func setNotifying(_ isNotifying: Bool, for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
-        if isNotifying {
+        if isNotifying, _characteristics[characteristic.service]?[characteristic] != nil {
             _notifying.insert(characteristic)
         } else {
             _notifying.remove(characteristic)
