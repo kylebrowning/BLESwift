@@ -129,7 +129,9 @@ jobs:
         # `TEST_RUNNER_` variable stopped reaching the test process, the forced cell would test
         # the default executor and still pass, and nothing inside the process can tell, since
         # it reads the same missing variable. `ExecutorSelectionTests` prints the executor a
-        # `Central` really bound; that line is checked here, from outside.
+        # `Central` really bound; that line is checked here, from outside. The value sits in
+        # brackets and the match is unanchored: the test's logger writes to the same pipe, and a
+        # log line can land around the marker (`…poweredOBLESwift executor: defaultn`).
         env:
           TEST_RUNNER_BLESWIFT_FORCE_COMPAT16_EXECUTOR: ${{ matrix.compat16 }}
           EXPECTED_EXECUTOR: ${{ matrix.compat16 == '1' && 'compat16' || 'default' }}
@@ -138,10 +140,10 @@ jobs:
           log="$RUNNER_TEMP/xcodebuild-test.log"
           for attempt in 1 2; do
             if xcodebuild test -scheme BLESwift-Package -destination "platform=iOS Simulator,id=$SIM_UDID" 2>&1 | tee "$log"; then
-              if grep -q "BLESwift executor: $EXPECTED_EXECUTOR\$" "$log"; then
+              if grep -qF "BLESwift executor: [$EXPECTED_EXECUTOR]" "$log"; then
                 exit 0
               fi
-              echo "::error::tests passed, but not on the $EXPECTED_EXECUTOR executor: $(grep -o 'BLESwift executor: .*' "$log" || echo 'no executor line')"
+              echo "::error::tests passed, but not on the $EXPECTED_EXECUTOR executor: $(grep -o 'BLESwift executor: \[[a-z0-9]*\]' "$log" || echo 'no executor line')"
               exit 1
             fi
             echo "attempt $attempt failed"
