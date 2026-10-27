@@ -103,11 +103,12 @@ enum RecordingDevice {
         return (central, backend, queue)
     }
 
-    /// Polls `condition` every 5 ms until it is `true` or `timeout` elapses, for the one thing
-    /// the public surface offers no event for: the backend reaching `.poweredOn`.
-    static func waitFor(timeout: Duration = .seconds(5), _ condition: () -> Bool) async {
+    /// Polls `condition` every 5 ms until it is `true` or `timeout` elapses, for the things
+    /// the public surface offers no event for: the backend reaching `.poweredOn`, and a
+    /// synchronous radio table change a test must see before it goes on.
+    static func waitFor(timeout: Duration = .seconds(5), _ condition: () async -> Bool) async {
         let deadline = ContinuousClock.now + timeout
-        while !condition() {
+        while await !condition() {
             if ContinuousClock.now >= deadline { return }
             try? await Task.sleep(for: .milliseconds(5))
         }

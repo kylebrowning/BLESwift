@@ -544,15 +544,18 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// **The race runs both ways, and the radio's answer settles the other direction.** The
     /// entry guard covers a radio-initiated disconnect that landed *before* this call; one
     /// that lands *after* it — a forced ``VirtualDeviceHandle/disconnect(_:error:)`` or a
-    /// removal reaching the actor between this call and the `radio.disconnect` it queued — has
-    /// already delivered its `didDisconnect` and settled the remote by the time the chain
-    /// answers. So the continuation delivers only when the radio reports that *this* call
-    /// removed the connection. Delivered regardless, it sent a second `didDisconnect(nil)`
-    /// behind the radio's, and if the consumer had reconnected in between it overwrote the
-    /// remote's `.connecting` with `.disconnected`: `Central` then failed the reconnect while
-    /// the radio's `didConnect` left the remote connected. A cancel racing an armed
-    /// connection failure is the same shape — the failed connect settled the remote and sent
-    /// `didFailToConnect`, and nothing may follow it.
+    /// removal reaching the actor between this call and the `radio.disconnect` it queued —
+    /// owns the `didDisconnect`: the radio has already dropped the connection, so this call
+    /// removes nothing and delivers nothing, and the forced event settles the remote when it
+    /// arrives on the queue — which may be after this call's answer, since the radio holds
+    /// it behind the device's in-flight subscription reports. So the continuation delivers
+    /// only when the radio reports that *this* call removed the connection. Delivered
+    /// regardless, it sent a second `didDisconnect(nil)` behind the radio's, and if the
+    /// consumer had reconnected in between it overwrote the remote's `.connecting` with
+    /// `.disconnected`: `Central` then failed the reconnect while the radio's `didConnect`
+    /// left the remote connected. A cancel racing an armed connection failure is the same
+    /// shape — the failed connect settled the remote and sent `didFailToConnect`, and
+    /// nothing may follow it.
     ///
     /// **A cancel that catches an attempt still sleeping out its connect delay never reaches
     /// the radio.** The attempt has not either, so the radio holds nothing for it: a

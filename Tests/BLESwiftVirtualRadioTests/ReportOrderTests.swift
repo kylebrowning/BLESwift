@@ -13,7 +13,8 @@ import Testing
 /// changes (#76): a subscribe whose report is still in flight is finished before the
 /// unsubscribe of whatever drops it, whichever path drops it, and a handler that calls back
 /// into the radio from inside a report neither deadlocks nor sees its own reports out of
-/// order.
+/// order. `burstLeavesNoChain` is a chain-hygiene test only: the remote's serial chain
+/// already orders the calls it makes, so it proves nothing about ordering.
 @Suite("Subscription report order")
 struct ReportOrderTests {
 
@@ -130,9 +131,11 @@ struct ReportOrderTests {
         return nil
     }
 
-    /// Runs `trigger` off the test task and suspends until it is under way, so the drop is
-    /// in flight before the gate opens: the ordering under test is of a drop that lands
-    /// while the subscribe report is suspended, not one that arrives after it returned.
+    /// Runs `trigger` off the test task, since it cannot return until the gate opens. The
+    /// test then waits for the synchronous table change the drop makes before it opens the
+    /// gate: the ordering under test is of a drop that has *landed* while the subscribe
+    /// report is suspended, not one that arrives after it returned — and the gate opening
+    /// first would let the unfixed radio pass by luck.
     private static func launch(_ trigger: @escaping @Sendable () async -> Void) async -> Task<Void, Never> {
         let (started, startedContinuation) = AsyncStream<Void>.makeStream()
         let task = Task {
@@ -156,6 +159,7 @@ struct ReportOrderTests {
         let events = await central.connectionEvents()
 
         let drop = await Self.launch { await handle.disconnect() }
+        await RecordingDevice.waitFor { await !radio.isConnected(session: backend.sessionID, device: id.uuid) }
         release.yield(())
 
         #expect(await RecordingDevice.first(of: handler.subscriptions) == true)
@@ -184,6 +188,7 @@ struct ReportOrderTests {
         let events = await central.connectionEvents()
 
         let removal = await Self.launch { await handle.remove() }
+        await RecordingDevice.waitFor { await !radio.isConnected(session: backend.sessionID, device: id.uuid) }
         release.yield(())
 
         #expect(await RecordingDevice.first(of: handler.subscriptions) == true)
@@ -212,6 +217,7 @@ struct ReportOrderTests {
         )
 
         let republish = await Self.launch { await handle.setServices([]) }
+        await RecordingDevice.waitFor { await radio.subscriberCount(device: id.uuid, characteristic: RecordingDevice.control) == 0 }
         release.yield(())
 
         #expect(await RecordingDevice.first(of: handler.subscriptions) == true)
@@ -245,6 +251,7 @@ struct ReportOrderTests {
         let reregister = await Self.launch {
             await radio.register(RecordingDevice.make(identifier: id.uuid, handler: newHandler))
         }
+        await RecordingDevice.waitFor { await !radio.isConnected(session: backend.sessionID, device: id.uuid) }
         release.yield(())
 
         #expect(await RecordingDevice.first(of: oldHandler.subscriptions) == true)
@@ -315,6 +322,51 @@ struct ReportOrderTests {
         #expect(await radio.reportChainCount == 0)
 
         stream.cancel()
+    }
+
+    /// Every `CentralEvent` a backend delivered, read and written on the backend's queue only.
+    private final class EventLog: @unchecked Sendable {
+        var events: [CentralEvent] = []
+    }
+
+    @Test("A forced disconnect with nothing in flight delivers didDisconnect before it returns", .timeLimit(.minutes(1)))
+    func forcedDisconnectWithNothingInFlightIsImmediate() async throws {
+        let radio = VirtualRadio()
+        let handler = RecordingHandler()
+        let device = RecordingDevice.make(handler: handler)
+        let handle = await radio.register(device)
+        let identifier = device.descriptor.identifier
+        let queue = DispatchQueue(label: "ReportOrderTests.immediate")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        let log = EventLog()
+        let remote = await RecordingDevice.onQueue(queue) {
+            backend.eventHandler = { log.events.append($0) }
+            return backend.retrievePeripherals(withIdentifiers: [identifier]).first as! VirtualPeripheralRemote
+        }
+        await RecordingDevice.onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
+        await backend.waitForPendingWork()
+        await RecordingDevice.onQueue(queue) {}
+        #expect(await RecordingDevice.onQueue(queue) { remote.connectionState } == .connected)
+        #expect(await radio.reportChainCount == 0)
+
+        // No subscription to drop and no report queued: the didDisconnect went out in the
+        // same actor turn as the drop, so once the queue has run what the radio sent it,
+        // before `disconnect()` returned, the event is there — nothing else to wait for.
+        await RecordingDevice.onQueue(queue) { log.events.removeAll() }
+        await handle.disconnect()
+        await RecordingDevice.onQueue(queue) {}
+        let disconnects = await RecordingDevice.onQueue(queue) {
+            log.events.compactMap { event -> NSError?? in
+                if case .didDisconnect(let peripheral, let error) = event, peripheral.uuid == identifier { return .some(error) }
+                return nil
+            }
+        }
+        #expect(disconnects.count == 1)
+        #expect(disconnects.first??.code == VirtualRadio.peripheralDisconnectedError.code)
+        #expect(await RecordingDevice.onQueue(queue) { remote.connectionState } == .disconnected)
+        #expect(await !radio.isConnected(session: backend.sessionID, device: identifier))
+        #expect(await radio.reportChainCount == 0)
+        #expect(await handler.subscriptionLog.isEmpty)
     }
 
     @Test("A burst of subscribes and unsubscribes leaves no report chain behind", .timeLimit(.minutes(1)))

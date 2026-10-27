@@ -109,6 +109,11 @@ public protocol VirtualDeviceHandler: Sendable {
     /// re-``VirtualRadio/register(_:advertising:)`` — gets its call back before the reports
     /// it caused are delivered; they follow once this returns.
     ///
+    /// **A report that never returns blocks every later report for the device**, and with
+    /// them every call that waits on those reports: another central's `setNotifyValue`, a
+    /// disconnect or cancel that drops a subscription, `remove()`, `setServices(_:)`, a
+    /// re-`register`, and a backend's detach. Return promptly, or hand long work to a task.
+    ///
     /// - Parameters:
     ///   - characteristic: The characteristic whose subscription changed.
     ///   - central: The remote central whose subscription changed.

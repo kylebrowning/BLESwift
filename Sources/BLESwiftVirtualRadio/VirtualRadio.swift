@@ -236,6 +236,13 @@ public actor VirtualRadio {
     /// the whole of every chain step, and so inside every handler's `subscriptionChanged`
     /// and every task it spawns from there (a `Task.detached` drops it).
     ///
+    /// **A task spawned during a report keeps this for its whole lifetime**, not only while
+    /// the report is open: a notification loop a handler starts on `didSubscribe` runs with
+    /// it set until the loop ends, so every radio call that loop makes — a `setServices`, a
+    /// forced disconnect — returns before its reports are delivered, exactly as a call made
+    /// from inside the report does. A handler that needs to wait for those reports starts
+    /// the loop with `Task.detached`.
+    ///
     /// Every entry point that enqueues reports awaits its chain's tail before returning,
     /// so a caller knows its reports have been delivered. Called from inside a report, that
     /// wait would be on the very step the caller is running inside — a deadlock — so an
@@ -565,8 +572,15 @@ public actor VirtualRadio {
     /// other report for the identifier, including a subscribe still in flight when the
     /// registration was retired.
     ///
+    /// **With nothing to order against, the `didDisconnect`s go out in this actor turn**, as
+    /// they did before the chain existed: a registration that held no subscription enqueues
+    /// no unsubscribe, and if the identifier's chain is empty too, nothing is in flight for
+    /// a `didDisconnect` to overtake. Put on the chain anyway, it hopped through a task and
+    /// opened the window ``VirtualDeviceHandle/disconnect(_:error:)`` describes on every
+    /// teardown, even a bare one. See ``deliverDisconnects(_:device:after:_:)``.
+    ///
     /// - Returns: The chain's tail once everything is enqueued, for ``settle(_:)``; `nil`
-    ///   when the registration had nothing to report.
+    ///   when nothing was put on the chain.
     private func report(_ retired: Retirement) -> Task<Void, Never>? {
         var tail: Task<Void, Never>?
         if !retired.departing.isEmpty {
@@ -576,14 +590,43 @@ public actor VirtualRadio {
                 }
             }
         }
-        if !retired.disconnected.isEmpty {
-            tail = enqueueReport(device: retired.identifier.uuid) {
-                for sink in retired.disconnected {
-                    sink(.didDisconnect(retired.identifier, error: Self.deviceRemovedError))
-                }
+        return deliverDisconnects(retired.disconnected, device: retired.identifier.uuid, after: tail) {
+            .didDisconnect(retired.identifier, error: Self.deviceRemovedError)
+        }
+    }
+
+    /// Delivers a teardown's `didDisconnect`s to `sinks`: as a chain step behind
+    /// `unsubscribes` — the step this teardown enqueued, if any — or, when it enqueued none
+    /// and `device`'s chain is empty, synchronously, in the calling actor turn.
+    ///
+    /// The chain step is what keeps a `didDisconnect` behind every report in flight for the
+    /// device, this teardown's unsubscribes included (see ``report(_:)`` and
+    /// ``disconnect(centrals:error:device:generation:)``). The synchronous path is for a
+    /// teardown with nothing in flight to stay behind: it delivers before the caller's next
+    /// `await`, so a central that held no subscription hears the drop in the same turn the
+    /// radio dropped it, with no window in between.
+    ///
+    /// - Returns: The chain's tail once everything is enqueued — the step delivering the
+    ///   `didDisconnect`s, or `unsubscribes` — for ``settle(_:)``; `nil` when nothing was
+    ///   put on the chain.
+    func deliverDisconnects(
+        _ sinks: [@Sendable (CentralEvent) -> Void],
+        device: UUID,
+        after unsubscribes: Task<Void, Never>?,
+        _ event: @escaping @Sendable () -> CentralEvent
+    ) -> Task<Void, Never>? {
+        guard !sinks.isEmpty else { return unsubscribes }
+        guard unsubscribes != nil || reportChains[device] != nil else {
+            for sink in sinks {
+                sink(event())
+            }
+            return nil
+        }
+        return enqueueReport(device: device) {
+            for sink in sinks {
+                sink(event())
             }
         }
-        return tail
     }
 
     /// Chains `step` behind every report already enqueued for `device`, and returns the
@@ -598,6 +641,11 @@ public actor VirtualRadio {
     /// that is no longer the tail leaves the entry to its successor. Each step runs with
     /// ``isReporting`` set, which is how an entry point called from inside a handler's
     /// report knows not to wait on the chain.
+    ///
+    /// The step runs in its own unstructured task, not the caller's: cancelling the caller —
+    /// a `Central` operation timing out, a test task ending — neither reaches the handler
+    /// nor cuts the caller's wait in ``settle(_:)`` short. The report is delivered, and
+    /// waited for, in full.
     func enqueueReport(device: UUID, _ step: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
         let previous = reportChains[device]?.tail
         lastReportSequence += 1

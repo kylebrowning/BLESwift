@@ -65,7 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `didDisconnect` behind the unsubscribes it follows. The entry points still return once
   their reports are delivered — except when called from inside a report (a handler's
   `subscriptionChanged`, or a task it spawned there), where they return first and the
-  reports follow once the handler returns, since waiting would deadlock. (#76)
+  reports follow once the handler returns, since waiting would deadlock. A report that
+  never returns now blocks every later report for its device and every call waiting on
+  them — other centrals' `setNotifyValue`, a disconnect that drops a subscription,
+  `remove()`, `setServices(_:)`, a re-`register`, a detach — so handlers must return
+  promptly. A teardown with no report in flight still delivers its `didDisconnect` in the
+  same actor turn. (#76)
 - Re-registering an identifier that still had connections left them, and their
   subscriptions, attached to the new registration: the new handler inherited subscribers it
   was never told about, the old one never heard the unsubscribes, and the centrals stayed
