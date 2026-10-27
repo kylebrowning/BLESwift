@@ -97,6 +97,59 @@ On iOS and macOS, where `PeripheralHost` exists, it works the same way with
 ``VirtualPeripheralManagerBackend``, and hosts a
 device of its own on the radio that any ``VirtualCentralBackend`` on that radio can discover.
 
+### Simulating MTU
+
+Real peripherals negotiate different ATT MTUs, and code that sizes its chunks from
+`maximumWriteValueLength(for:)` — a firmware update, a file transfer — behaves differently
+against each. Give a device its own one-packet length with
+``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength`` (20 through 512; the default
+is ``VirtualRadio/maximumWriteWithoutResponseLength``, 182). A connected `Central` reports
+it for `.withoutResponse`, the radio drops a write without response longer than it, and a
+notification is truncated to it — exactly what hardware does. A `.withResponse` write is
+unaffected: ATT long writes reach ``VirtualRadio/maximumValueLength`` whatever the MTU.
+
+```swift
+let descriptor = VirtualDeviceDescriptor(
+    name: "Small-MTU HRM",
+    advertisement: AdvertisementData(localName: "Small-MTU HRM", serviceUUIDs: [heartRate], isConnectable: true),
+    services: services,
+    maximumWriteWithoutResponseLength: 20
+)
+```
+
+### Injecting faults
+
+The failures a real peripheral produces and a handler cannot are armed through the device's
+``VirtualDeviceHandle``. Each one goes with the registration: `remove()` and registering the
+identifier again starts clean, and a handle from an earlier registration is ignored.
+
+- ``VirtualDeviceHandle/failConnections(with:times:)`` fails the next `times` connection
+  attempts (`nil` for every attempt until ``VirtualDeviceHandle/clearConnectionFailures()``)
+  with an `NSError` the `Central` receives unchanged, so pass the one CoreBluetooth would.
+- ``VirtualDeviceHandle/disconnect(_:error:)`` drops every connected central, or only the
+  ones named, as a peripheral-initiated disconnect: the `Central` sees the error (by default
+  ``VirtualRadio/peripheralDisconnectedError``, `CBError.peripheralDisconnected`), its
+  subscriptions are reported to the handler as unsubscribes, and it is free to reconnect.
+- ``VirtualDeviceHandle/setATTError(_:for:operations:)`` answers reads, writes with
+  response, and subscribes on one characteristic with an `ATTError`, ahead of the database
+  and the handler, so even a static value fails. A write without response has no ATT
+  response to carry an error, so it reaches the handler as usual. Note that on iOS,
+  CoreBluetooth answers `.insufficientEncryption` and `.insufficientAuthentication` by
+  starting pairing and retrying, so an app sees those errors only if pairing fails; the
+  radio returns them on the first attempt, so a test asserting on them is testing the
+  pairing-failed path.
+
+```swift
+// The next connect fails the way a peripheral that forgot its bond does.
+await handle.failConnections(with: NSError(domain: "CBErrorDomain", code: 14))
+
+// Reads of the measurement need encryption the central does not have.
+await handle.setATTError(.insufficientEncryption, for: measurement, operations: .read)
+
+// Then the link drops.
+await handle.disconnect()
+```
+
 ### Limits
 
 The radio is a harness, not a simulation of the air:

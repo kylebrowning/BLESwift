@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `VirtualRadio.install(_:)`, `uninstall()` and `installed`, which route every
   `Central()` / `PeripheralHost()` to a radio through `BackendRegistry`, with no TCP and no
   provider. (#65)
+- `VirtualDeviceDescriptor.maximumWriteWithoutResponseLength`, a per-device one-packet
+  length (20...512, default 182) that a connected `Central` reports for `.withoutResponse`,
+  past which the radio drops a write without response and truncates a notification.
+  `VirtualRadio.register(_:advertising:)` traps on a value outside that range. (#66)
+- Fault injection on `VirtualDeviceHandle`: `failConnections(with:times:)` and
+  `clearConnectionFailures()`, `disconnect(_:error:)` for a peripheral-initiated drop, and
+  `setATTError(_:for:operations:)` with `VirtualGATTOperations` to answer reads, writes
+  with response, and subscribes with a chosen `ATTError`; plus
+  `VirtualRadio.peripheralDisconnectedError` (`CBErrorDomain` code 7). (#67)
 
 ### Changed
 

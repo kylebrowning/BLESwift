@@ -43,6 +43,43 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// answered — the transmit queue a real `CBPeripheral` reports back-pressure from.
     nonisolated(unsafe) private var _inFlightWrites = 0
 
+    /// The one-packet length the device negotiated at the last connect, which
+    /// ``maximumWriteValueLength(for:)`` reports for `.withoutResponse`. The default stands
+    /// in until a connection has answered with the device's own. The last answer is kept
+    /// across a disconnect by choice: the value describes the device, not the link, so code
+    /// that sizes its chunks before reconnecting sees the device it is about to talk to
+    /// rather than a default that is wrong for it.
+    nonisolated(unsafe) private var _maximumWriteWithoutResponseLength = VirtualRadio.maximumWriteWithoutResponseLength
+
+    /// Which connect attempt is current, so the hop that answers an attempt can tell it is
+    /// still answering for the right one.
+    ///
+    /// A connect's radio call and the hop that applies its answer are two steps with a gap
+    /// between them, and a forced disconnect can land in that gap: it settles this remote
+    /// `.disconnected`, the consumer — a `Central`'s auto-reconnect, or the provider's
+    /// `CentralSession` re-sending a link client's connect — connects again at once, and
+    /// the first attempt's hop then finds the remote `.connecting` for the *second* attempt
+    /// and would mark it `.connected`, with the first attempt's name and length, while the
+    /// radio holds nothing. Every attempt takes a fresh token (``beginConnectAttempt()``)
+    /// and its hop applies nothing unless the token is still current. A cancel does not
+    /// take one: a cancel queued behind a connect still gets that connect's `didConnect`,
+    /// then its own `didDisconnect`.
+    nonisolated(unsafe) private var _connectAttempt: UInt64 = 0
+
+    /// The current connect attempt's token. Must be called on ``queue``.
+    var connectAttempt: UInt64 {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _connectAttempt
+    }
+
+    /// Starts a new connect attempt and returns its token, invalidating every earlier
+    /// attempt's hop. Must be called on ``queue``.
+    func beginConnectAttempt() -> UInt64 {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _connectAttempt += 1
+        return _connectAttempt
+    }
+
     /// The serial chain of radio work this remote has queued. Swift guarantees no ordering
     /// between independent `Task`s, so two back-to-back writes — or a `setNotifyValue(true)`
     /// and the write that triggers the notification it arms — could otherwise reach the actor
@@ -68,6 +105,14 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     func updateName(_ name: String?) {
         guard let name else { return }
         nameBox.withLock { $0 = name }
+    }
+
+    /// Records the one-packet length the device answered a connect with. Called by
+    /// ``VirtualCentralBackend`` before it marks the remote `.connected`, so the value is in
+    /// place by the time `didConnect` is delivered. Must be called on ``queue``.
+    func updateMaximumWriteWithoutResponseLength(_ length: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _maximumWriteWithoutResponseLength = length
     }
 
     /// Whether `candidate` is the session identifier of the backend that vended this remote.
@@ -421,14 +466,15 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     }
 
     /// The length ceiling for `type`: ``VirtualRadio/maximumValueLength`` for a
-    /// `.withResponse` write, which ATT long writes really do reach, and
-    /// ``VirtualRadio/maximumWriteWithoutResponseLength`` for a `.withoutResponse` write,
-    /// which is one ATT packet on hardware. The radio enforces both.
+    /// `.withResponse` write, which ATT long writes really do reach, and the device's
+    /// ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength`` — learned at connect,
+    /// ``VirtualRadio/maximumWriteWithoutResponseLength`` before the first — for a
+    /// `.withoutResponse` write, which is one ATT packet on hardware. The radio enforces both.
     public func maximumWriteValueLength(for type: WriteType) -> Int {
         dispatchPrecondition(condition: .onQueue(queue))
         switch type {
         case .withResponse: return VirtualRadio.maximumValueLength
-        case .withoutResponse: return VirtualRadio.maximumWriteWithoutResponseLength
+        case .withoutResponse: return _maximumWriteWithoutResponseLength
         }
     }
 

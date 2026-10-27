@@ -33,14 +33,17 @@ public actor VirtualRadio {
     /// Virtual devices have no radio distance, so a single plausible value stands in.
     public static let rssi = -50
 
-    /// The length ceiling for a `.withResponse` write. 512 is the maximum ATT attribute
-    /// length, the natural ceiling for a link with no real MTU negotiation — and the length a
-    /// `.withResponse` write really does reach on hardware, through ATT long writes.
+    /// The length ceiling for a `.withResponse` write, on every device. 512 is the maximum
+    /// ATT attribute length, the natural ceiling for a link with no real MTU negotiation —
+    /// and the length a `.withResponse` write really does reach on hardware, through ATT long
+    /// writes.
     public static let maximumValueLength = 512
 
-    /// The length a single ATT packet may carry: 182, iOS's ATT_MTU of 185 less the three
-    /// bytes of ATT header. The ceiling for a `.withoutResponse` write, and the
-    /// `maximumUpdateValueLength` every subscriber of a virtual device reports.
+    /// The default length a single ATT packet may carry: 182, iOS's ATT_MTU of 185 less the
+    /// three bytes of ATT header. The ceiling for a `.withoutResponse` write, and the
+    /// `maximumUpdateValueLength` a subscriber of a virtual device reports. A device sets its
+    /// own with ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``; this is what
+    /// one that does not gets.
     ///
     /// **The two write types differ sharply on hardware, and a harness that hides it is worse
     /// than useless.** A `.withResponse` write reaches 512 bytes because ATT splits it into
@@ -92,9 +95,13 @@ public actor VirtualRadio {
     /// for, and a session teardown that quietly did nothing is worth a line.
     private static let logger = Logger(label: "BLESwiftProvider.VirtualRadio")
 
-    /// One registered device: its description, whether it is currently advertising, and which
-    /// registration of its identifier it belongs to.
-    private struct DeviceState {
+    /// One registered device: its description, whether it is currently advertising, which
+    /// registration of its identifier it belongs to, and the faults armed on it.
+    ///
+    /// Fault state lives here, with the registration, so it goes when the device does:
+    /// `remove()` followed by registering the identifier again starts clean, and a stale
+    /// handle can no more arm a fault on its successor than it can unadvertise it.
+    struct DeviceState {
         var descriptor: VirtualDeviceDescriptor
         let handler: any VirtualDeviceHandler
         var isAdvertising: Bool
@@ -102,24 +109,62 @@ public actor VirtualRadio {
         /// handle from an earlier registration of the same identifier carries an older one
         /// and is refused. See ``VirtualDeviceHandle/generation``.
         let generation: UInt64
+        /// The ATT answers injected per characteristic. See
+        /// ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
+        var attErrors: [CharacteristicIdentifier: InjectedATTErrors] = [:]
+        /// The error the next connection attempts fail with, and how many of them —
+        /// `nil` for every attempt until cleared. See
+        /// ``VirtualDeviceHandle/failConnections(with:times:)``.
+        var connectionFailure: (error: NSError, remaining: Int?)?
+    }
+
+    /// The ATT error injected for each operation on one characteristic, `nil` where the
+    /// operation is served normally. An entry with all three `nil` is not kept.
+    struct InjectedATTErrors {
+        var read: ATTError?
+        var write: ATTError?
+        var subscribe: ATTError?
+
+        /// Whether every slot is clear, so the entry can be dropped.
+        var isEmpty: Bool { read == nil && write == nil && subscribe == nil }
+    }
+
+    /// What ``connect(session:device:sink:)`` answers: the error to fail the attempt with,
+    /// or the connected device's name and the one-packet length it negotiates.
+    ///
+    /// Answered in the one hop rather than left to follow-up calls: the device could be
+    /// removed or re-registered between them, and a connection that just succeeded would then
+    /// be named `nil` or report a ceiling that belongs to a different registration.
+    package struct ConnectOutcome: Sendable {
+        /// The error to fail the attempt with; `nil` when it succeeded.
+        package let error: NSError?
+        /// The connected device's name; `nil` on failure or for an unnamed device.
+        package let name: String?
+        /// The connected device's ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``.
+        package let maximumWriteWithoutResponseLength: Int
+
+        /// A failed attempt.
+        static func failure(_ error: NSError) -> ConnectOutcome {
+            ConnectOutcome(error: error, name: nil, maximumWriteWithoutResponseLength: VirtualRadio.maximumWriteWithoutResponseLength)
+        }
     }
 
     /// One backend's active scan.
-    private struct Scanner {
+    struct Scanner {
         var services: [ServiceIdentifier]?
         var repeater: Task<Void, Never>?
     }
 
     /// Everything the radio holds on behalf of one attached backend.
-    private struct Session {
+    struct Session {
         let centralSink: @Sendable (CentralEvent) -> Void
         var peripheralSinks: [UUID: @Sendable (PeripheralEvent) -> Void] = [:]
         var scanner: Scanner?
         var connections: Set<UUID> = []
     }
 
-    private var devices: [UUID: DeviceState] = [:]
-    private var sessions: [UUID: Session] = [:]
+    var devices: [UUID: DeviceState] = [:]
+    var sessions: [UUID: Session] = [:]
 
     /// Stamps every registration, so a handle can be told from one the same identifier was
     /// re-registered under since. Monotonic across the radio — nothing reads it as a count,
@@ -158,6 +203,11 @@ public actor VirtualRadio {
     @discardableResult
     public func register(_ device: VirtualDevice, advertising: Bool = true) -> VirtualDeviceHandle {
         let identifier = device.descriptor.identifier
+        let packetLength = device.descriptor.maximumWriteWithoutResponseLength
+        precondition(
+            (20...512).contains(packetLength),
+            "maximumWriteWithoutResponseLength must be in 20...512 (ATT_MTU 23 − 3 up to the attribute maximum); got \(packetLength)"
+        )
         lastGeneration += 1
         let generation = lastGeneration
         devices[identifier] = DeviceState(
@@ -185,7 +235,7 @@ public actor VirtualRadio {
     /// *new* session's device: the reconnect would come up registered, then be unregistered,
     /// unadvertised, or emptied a moment later by a session that no longer exists. The
     /// generation is what tells the two apart.
-    private func isCurrent(_ device: UUID, generation: UInt64, operation: String) -> Bool {
+    func isCurrent(_ device: UUID, generation: UInt64, operation: String) -> Bool {
         guard let state = devices[device] else { return false }
         guard state.generation == generation else {
             Self.logger.debug(
@@ -267,15 +317,18 @@ public actor VirtualRadio {
         devices[device]?.descriptor.services = services
         let invalidated = before.subtracting(services.map(\.identifier))
         guard !invalidated.isEmpty else { return }
-        var dropped: [(session: UUID, characteristics: [CharacteristicIdentifier])] = []
+        guard let handler = devices[device]?.handler else { return }
+        var dropped: [(central: Subscriber, characteristics: [CharacteristicIdentifier])] = []
         for (sessionID, session) in sessions where session.connections.contains(device) {
             session.peripheralSinks[device]?(.didModifyServices(Array(invalidated)))
-            dropped.append((sessionID, dropSubscriptions(session: sessionID, device: device, under: invalidated)))
+            dropped.append((subscriber(sessionID, device: device), dropSubscriptions(session: sessionID, device: device, under: invalidated)))
         }
         // Every table is settled before the first `await`, as in ``detach(session:)``, so a
-        // handler that calls back into the radio cannot observe a half-applied database.
+        // handler that calls back into the radio cannot observe a half-applied database —
+        // and the handler and subscribers are taken now, so a removal or re-registration
+        // landing between the reports cannot redirect them.
         for entry in dropped {
-            await reportUnsubscribed(entry.characteristics, device: device, session: entry.session)
+            await reportUnsubscribed(entry.characteristics, handler: handler, central: entry.central)
         }
     }
 
@@ -303,9 +356,15 @@ public actor VirtualRadio {
             sessions[sessionID]?.connections.remove(device)
             sessions[sessionID]?.centralSink(.didDisconnect(identifier, error: Self.deviceRemovedError))
         }
+        // Built from the removed descriptor, not looked up: the device is gone from the
+        // table, and the handler should see the same `Subscriber` leave as it saw arrive.
         for (characteristic, subscribers) in departing {
             for sessionID in subscribers {
-                await state.handler.subscriptionChanged(characteristic, central: subscriber(sessionID), isSubscribed: false)
+                let central = Subscriber(
+                    id: sessionID,
+                    maximumUpdateValueLength: state.descriptor.maximumWriteWithoutResponseLength
+                )
+                await state.handler.subscriptionChanged(characteristic, central: central, isSubscribed: false)
             }
         }
     }
@@ -313,7 +372,8 @@ public actor VirtualRadio {
     /// Pushes a notification to every subscribed, connected central. See
     /// ``VirtualDeviceHandle/notify(_:for:to:)``.
     ///
-    /// **The value is truncated to each subscriber's `maximumUpdateValueLength`**, as
+    /// **The value is truncated to each subscriber's `maximumUpdateValueLength`** — the
+    /// device's own ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength`` — as
     /// CoreBluetooth truncates a notification that will not fit the subscriber's MTU. Passed
     /// whole, a payload larger than the maximum this radio reports arrived intact here and
     /// arrived clipped on device — the same divergence an unenforced write ceiling is.
@@ -330,7 +390,7 @@ public actor VirtualRadio {
         for sessionID in subscribers {
             if let allowed, !allowed.contains(sessionID) { continue }
             guard let session = sessions[sessionID], session.connections.contains(device) else { continue }
-            let delivered = Data(value.prefix(subscriber(sessionID).maximumUpdateValueLength))
+            let delivered = Data(value.prefix(subscriber(sessionID, device: device).maximumUpdateValueLength))
             session.peripheralSinks[device]?(.didUpdateValue(characteristic: characteristic, value: delivered, error: nil))
         }
     }
@@ -356,14 +416,17 @@ public actor VirtualRadio {
     func detach(session: UUID) async {
         guard let removed = sessions.removeValue(forKey: session) else { return }
         removed.scanner?.repeater?.cancel()
-        var dropped: [(device: UUID, characteristics: [CharacteristicIdentifier])] = []
+        var dropped: [(handler: any VirtualDeviceHandler, central: Subscriber, characteristics: [CharacteristicIdentifier])] = []
         for device in removed.connections {
-            dropped.append((device, dropSubscriptions(session: session, device: device)))
+            guard let handler = devices[device]?.handler else { continue }
+            dropped.append((handler, subscriber(session, device: device), dropSubscriptions(session: session, device: device)))
         }
         // Every table is settled before the first `await`, so a handler that calls back into
-        // the radio cannot observe a half-detached session.
+        // the radio cannot observe a half-detached session; each handler and subscriber is
+        // taken now too, so a removal or re-registration landing between the reports cannot
+        // redirect them.
         for entry in dropped {
-            await reportUnsubscribed(entry.characteristics, device: entry.device, session: session)
+            await reportUnsubscribed(entry.characteristics, handler: entry.handler, central: entry.central)
         }
     }
 
@@ -423,6 +486,14 @@ public actor VirtualRadio {
         return false
     }
 
+    /// Whether `session` currently holds a connection to `device`, as the radio sees it.
+    ///
+    /// Not API: it exists so a test can assert that a backend's remote agrees with the radio
+    /// about a connection once a race between a connect and a forced disconnect has settled.
+    package func isConnected(session: UUID, device: UUID) -> Bool {
+        isConnected(session: session, to: device)
+    }
+
     /// Stops `session`'s scan, if any.
     func stopScan(session: UUID) {
         sessions[session]?.scanner?.repeater?.cancel()
@@ -471,35 +542,73 @@ public actor VirtualRadio {
     /// the backend's queue). Registering the sink as part of the connection is what keeps a
     /// notification from ever outrunning its own delivery path.
     ///
-    /// The device's name is answered here rather than left to a second
-    /// ``name(of:)`` hop: the device could be removed between the two, and the connection that
-    /// just succeeded would then be named `nil`.
+    /// The device's name and one-packet length are answered here rather than left to a
+    /// second ``name(of:)`` hop: the device could be removed between the two, and the
+    /// connection that just succeeded would then be named `nil`.
     ///
-    /// - Returns: The error to fail the attempt with, or the connected device's name on
-    ///   success — both `nil` when the connection succeeded to an unnamed device.
+    /// **An armed connection failure is consumed here**, behind the session and device
+    /// guards — an unregistered device fails with ``unknownDeviceError`` as it always has,
+    /// never with a fault armed on a registration that is gone. A failed attempt records
+    /// neither the connection nor the sink, so the device never learns of it, exactly as a
+    /// peripheral that refused the link never sees the central. See
+    /// ``VirtualDeviceHandle/failConnections(with:times:)``. A session already connected to
+    /// the device succeeds without consuming the armed failure: failing it would leave a
+    /// remote the radio still holds connected reporting itself disconnected.
+    ///
+    /// - Returns: The outcome: the error to fail the attempt with, or the connected device's
+    ///   name and ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``.
     func connect(
         session: UUID,
         device: UUID,
         sink: @escaping @Sendable (PeripheralEvent) -> Void
-    ) -> (error: NSError?, name: String?) {
-        guard sessions[session] != nil else { return (Self.unknownDeviceError, nil) }
-        guard let state = devices[device] else { return (Self.unknownDeviceError, nil) }
+    ) -> ConnectOutcome {
+        guard sessions[session] != nil else { return .failure(Self.unknownDeviceError) }
+        guard let state = devices[device] else { return .failure(Self.unknownDeviceError) }
+        if sessions[session]?.connections.contains(device) != true, let failure = state.connectionFailure {
+            switch failure.remaining {
+            case .some(1):
+                devices[device]?.connectionFailure = nil
+            case .some(let remaining):
+                devices[device]?.connectionFailure = (failure.error, remaining - 1)
+            case .none:
+                break
+            }
+            return .failure(failure.error)
+        }
         sessions[session]?.peripheralSinks[device] = sink
         sessions[session]?.connections.insert(device)
-        return (nil, state.descriptor.name)
+        return ConnectOutcome(
+            error: nil,
+            name: state.descriptor.name,
+            maximumWriteWithoutResponseLength: state.descriptor.maximumWriteWithoutResponseLength
+        )
     }
 
     /// Disconnects `session` from `device`, dropping its subscriptions and reporting each of
     /// them to the device's handler as an unsubscribe. The backend delivers the resulting
-    /// `didDisconnect` itself, mirroring CoreBluetooth's `cancelPeripheralConnection(_:)`.
-    func disconnect(session: UUID, device: UUID) async {
-        sessions[session]?.connections.remove(device)
+    /// `didDisconnect` itself, mirroring CoreBluetooth's `cancelPeripheralConnection(_:)` —
+    /// but only when this call is what ended the connection.
+    ///
+    /// - Returns: Whether a connection was removed. `false` when the session was not
+    ///   connected to the device — never was, or a forced disconnect, a removal, or a failed
+    ///   connect already settled it — in which case the backend must deliver nothing: the
+    ///   path that did the settling has already reported the outcome, and a second
+    ///   `didDisconnect` on top of it reported the peripheral gone twice and overwrote the
+    ///   state of a reconnect that had started in between. Sinks and subscriptions are
+    ///   dropped either way; they are idempotent.
+    @discardableResult
+    func disconnect(session: UUID, device: UUID) async -> Bool {
+        let removed = sessions[session]?.connections.remove(device) != nil
         // Goes with the connection: the sink was registered by ``connect(session:device:sink:)``
         // and the backend delivers the `didDisconnect` itself, so nothing is left to route
         // through it.
         sessions[session]?.peripheralSinks.removeValue(forKey: device)
         let dropped = dropSubscriptions(session: session, device: device)
-        await reportUnsubscribed(dropped, device: device, session: session)
+        if let handler = devices[device]?.handler {
+            let central = subscriber(session, device: device)
+            await reportUnsubscribed(dropped, handler: handler, central: central)
+        }
+        return removed
     }
 
     /// Removes every subscription `session` holds on `device` — or, when `services` is given,
@@ -507,7 +616,7 @@ public actor VirtualRadio {
     ///
     /// - Returns: The characteristics `session` really was subscribed to, so exactly those —
     ///   and no others — are reported to the device's handler.
-    private func dropSubscriptions(
+    func dropSubscriptions(
         session: UUID,
         device: UUID,
         under services: Set<ServiceIdentifier>? = nil
@@ -526,19 +635,22 @@ public actor VirtualRadio {
         return dropped
     }
 
-    /// Tells `device`'s handler that `session` is no longer subscribed to `characteristics`.
+    /// Tells `handler` that `central` is no longer subscribed to `characteristics`.
     ///
     /// This is what keeps a hosted `PeripheralHost` — fixture, code-defined, or link-hosted —
     /// from holding a ghost subscriber after the central behind it disconnected, cancelled,
     /// or had its backend detached. CoreBluetooth reports `didUnsubscribe` in exactly those
     /// cases.
-    private func reportUnsubscribed(
+    ///
+    /// Takes the handler and the subscriber rather than looking them up: the caller is
+    /// reporting across `await`s, and a `remove()` or re-`register` landing between two of
+    /// them would otherwise drop the rest or hand them to a handler that never saw these
+    /// subscribers. Every caller captures both before its first `await`.
+    func reportUnsubscribed(
         _ characteristics: [CharacteristicIdentifier],
-        device: UUID,
-        session: UUID
+        handler: any VirtualDeviceHandler,
+        central: Subscriber
     ) async {
-        guard !characteristics.isEmpty, let handler = devices[device]?.handler else { return }
-        let central = subscriber(session)
         for characteristic in characteristics {
             await handler.subscriptionChanged(characteristic, central: central, isSubscribed: false)
         }
@@ -596,6 +708,11 @@ public actor VirtualRadio {
     /// would let exactly the write-only characteristics that declare a value be read by any
     /// connected central. Real hardware refuses that read at the ATT layer, and so does this
     /// radio, whatever the value behind the handle.
+    ///
+    /// **An injected ATT error comes right after the handle is found**, before permission,
+    /// the static short-circuit, and the handler: it simulates the peripheral's ATT answer for
+    /// a valid handle, so a static-value characteristic fails under it too. See
+    /// ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
     func read(
         device: UUID,
         characteristic: CharacteristicIdentifier,
@@ -605,6 +722,7 @@ public actor VirtualRadio {
         guard isConnected(session: session, to: device) else { return .failure(.invalidHandle) }
         guard let state = devices[device] else { return .failure(.invalidHandle) }
         guard let definition = definition(of: characteristic, in: state) else { return .failure(.attributeNotFound) }
+        if let injected = state.attErrors[characteristic]?.read { return .failure(injected) }
         guard definition.properties.contains(.read) || definition.properties.isNotifiable else {
             return .failure(.readNotPermitted)
         }
@@ -612,7 +730,7 @@ public actor VirtualRadio {
             guard offset >= 0, offset <= value.count else { return .failure(.invalidOffset) }
             return .success(Data(value.dropFirst(offset)))
         }
-        return await state.handler.read(characteristic, offset: offset, from: subscriber(session))
+        return await state.handler.read(characteristic, offset: offset, from: subscriber(session, device: device))
     }
 
     /// Writes `value` to `characteristic` through the device's handler. A session that is not
@@ -621,11 +739,17 @@ public actor VirtualRadio {
     ///
     /// **Each write type carries its own length ceiling**, the one hardware imposes: a
     /// `.withResponse` write past ``maximumValueLength`` is refused with
-    /// `ATTError.invalidAttributeValueLength`, and a `.withoutResponse` write past
-    /// ``maximumWriteWithoutResponseLength`` is *dropped* — it never reaches the device's
-    /// handler, and the caller hears nothing, exactly as CoreBluetooth drops one too large for
-    /// a single ATT packet. Enforced here rather than in the remote so that every route to a
-    /// virtual device, hosted or fixture, is held to the same ceiling.
+    /// `ATTError.invalidAttributeValueLength`, and a `.withoutResponse` write past the
+    /// device's ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength`` is *dropped* —
+    /// it never reaches the device's handler, and the caller hears nothing, exactly as
+    /// CoreBluetooth drops one too large for a single ATT packet. Enforced here rather than
+    /// in the remote so that every route to a virtual device, hosted or fixture, is held to
+    /// the same ceiling.
+    ///
+    /// **An injected ATT error fails a `.withResponse` write only.** A `.withoutResponse`
+    /// write has no ATT response to carry an error back on, so it reaches the handler as if
+    /// nothing were armed — which is what the peripheral's application code sees on hardware
+    /// too. See ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
     ///
     /// **The permission check is the radio's, not the handler's.** It mirrors the one
     /// ``read(device:characteristic:offset:session:)`` makes, and for the same reason: a
@@ -644,6 +768,7 @@ public actor VirtualRadio {
         guard isConnected(session: session, to: device) else { return .failure(.invalidHandle) }
         guard let state = devices[device] else { return .failure(.invalidHandle) }
         guard let definition = definition(of: characteristic, in: state) else { return .failure(.attributeNotFound) }
+        if type == .withResponse, let injected = state.attErrors[characteristic]?.write { return .failure(injected) }
         guard definition.properties.isWritable else { return .failure(.writeNotPermitted) }
         switch type {
         case .withResponse:
@@ -654,17 +779,18 @@ public actor VirtualRadio {
             // Dropped, not refused: an unacknowledged write has no response to fail, and
             // CoreBluetooth reports nothing for one it could not fit in a packet either. The
             // `.success` releases the caller's transmit slot; nothing reached the device.
-            guard value.count <= Self.maximumWriteWithoutResponseLength else {
+            let ceiling = state.descriptor.maximumWriteWithoutResponseLength
+            guard value.count <= ceiling else {
                 Self.logger.debug(
                     """
                     Dropping a \(value.count)-byte .withoutResponse write to \(characteristic) on device \(device): \
-                    the ceiling is \(Self.maximumWriteWithoutResponseLength) bytes
+                    the ceiling is \(ceiling) bytes
                     """
                 )
                 return .success(())
             }
         }
-        let central = subscriber(session)
+        let central = subscriber(session, device: device)
         let entry = WriteRequest.Entry(central: central, characteristic: characteristic, offset: 0, value: value)
         return await state.handler.write([entry], from: central)
     }
@@ -696,6 +822,11 @@ public actor VirtualRadio {
     /// A characteristic that is not in the database at all is refused the same way `read` and
     /// `write` refuse it, with `ATTError.attributeNotFound`.
     ///
+    /// **An injected ATT error refuses enabling and disabling alike** — both are writes to
+    /// the same CCCD, and hardware that rejects one rejects the other. The set is left as it
+    /// was and the handler hears nothing, since no transition happened. See
+    /// ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
+    ///
     /// - Returns: Whether `session` is subscribed to `characteristic` now the call has been
     ///   applied — `enabled` for a connected session, and the unchanged current state for one
     ///   that is not or for a request the checks above refused — together with the `ATTError`
@@ -714,6 +845,9 @@ public actor VirtualRadio {
         guard let definition = definition(of: characteristic, in: state) else {
             return (unchanged, .attributeNotFound)
         }
+        if let injected = state.attErrors[characteristic]?.subscribe {
+            return (unchanged, injected)
+        }
         guard definition.properties.isNotifiable else {
             return (unchanged, .requestNotSupported)
         }
@@ -730,7 +864,7 @@ public actor VirtualRadio {
             }
         }
         guard didChange else { return (enabled, nil) }
-        await state.handler.subscriptionChanged(characteristic, central: subscriber(session), isSubscribed: enabled)
+        await state.handler.subscriptionChanged(characteristic, central: subscriber(session, device: device), isSubscribed: enabled)
         return (enabled, nil)
     }
 
@@ -742,13 +876,21 @@ public actor VirtualRadio {
             .first { $0.identifier == characteristic }
     }
 
-    /// The ``BLESwiftCore/Subscriber`` a backend session appears as to device handlers.
+    /// The ``BLESwiftCore/Subscriber`` a backend session appears as to `device`'s handler.
     ///
-    /// Its `maximumUpdateValueLength` is ``maximumWriteWithoutResponseLength``, not
+    /// Its `maximumUpdateValueLength` is the device's
+    /// ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``, not
     /// ``maximumValueLength``: a notification is a single ATT packet, exactly as a
-    /// `.withoutResponse` write is. See that constant.
-    private func subscriber(_ session: UUID) -> Subscriber {
-        Subscriber(id: session, maximumUpdateValueLength: Self.maximumWriteWithoutResponseLength)
+    /// `.withoutResponse` write is. See ``maximumWriteWithoutResponseLength``, which stands
+    /// in for a device that is not registered. Every caller looks up a device that is;
+    /// ``remove(device:generation:)`` builds its departing subscribers from the removed
+    /// descriptor itself rather than through here.
+    func subscriber(_ session: UUID, device: UUID) -> Subscriber {
+        Subscriber(
+            id: session,
+            maximumUpdateValueLength: devices[device]?.descriptor.maximumWriteWithoutResponseLength
+                ?? Self.maximumWriteWithoutResponseLength
+        )
     }
 }
 

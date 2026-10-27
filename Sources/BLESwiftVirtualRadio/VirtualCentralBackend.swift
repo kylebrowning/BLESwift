@@ -187,6 +187,20 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
+    /// Suspends until every piece of radio work queued so far has run — the chain's tail
+    /// at the moment this reads it, on ``queue``. Deliveries the chain hopped onto the queue
+    /// are not awaited; a caller that needs them flushed runs an empty block on the queue
+    /// after this returns.
+    ///
+    /// Not API: a test hook, for asserting on what a race left behind once both sides of
+    /// it have run.
+    package func waitForPendingWork() async {
+        let work = await withCheckedContinuation { (continuation: CheckedContinuation<Task<Void, Never>?, Never>) in
+            queue.async { continuation.resume(returning: self._work) }
+        }
+        await work?.value
+    }
+
     /// Delivers `event` to ``eventHandler``. Must be called on ``queue``.
     ///
     /// A disconnect also settles the affected remote's ``BLESwiftCore/PeripheralRemote/connectionState``
@@ -324,7 +338,31 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     }
 
     /// Connects to a virtual device. Succeeds for any registered device, advertising or
-    /// not; an unregistered identifier fails with ``VirtualRadio/unknownDeviceError``.
+    /// not; an unregistered identifier fails with ``VirtualRadio/unknownDeviceError``, and a
+    /// device with a connection failure armed (``VirtualDeviceHandle/failConnections(with:times:)``)
+    /// fails with that error, delivered unchanged as `didFailToConnect`.
+    ///
+    /// **What happens depends on the remote's current `connectionState`:**
+    /// - `.disconnected`: the attempt goes to the radio, and `didConnect` or
+    ///   `didFailToConnect` reports its outcome.
+    /// - `.connected`: nothing goes to the radio and nothing changes; `didConnect` is
+    ///   delivered (hopped, never inline). The caller asked to be connected and is, and must
+    ///   not be left waiting on an attempt the radio would only have answered "still so".
+    /// - `.connecting`: a no-op. The pending attempt's own `didConnect` or
+    ///   `didFailToConnect` answers both requests.
+    /// - `.disconnecting`: nothing goes to the radio and the state is left alone;
+    ///   `didFailToConnect` with ``connectWhileDisconnectingError`` is delivered (hopped). The
+    ///   cancel in flight will settle the remote `.disconnected`, and a caller that wants a
+    ///   connection can ask again then. `BLESwiftProvider`'s `CentralSession` treats that
+    ///   `didFailToConnect` as a termination and discards the peripheral's per-connection
+    ///   state — pending writes, L2CAP bridges — slightly before the cancel's own
+    ///   `didDisconnect` would have.
+    ///
+    /// A connect that reached the radio for a remote already connected was what let a forced
+    /// disconnect racing it strand the radio with a connection no remote stood behind. A
+    /// `Central` only ever connects a `.disconnected` remote — it reserves its slot only once
+    /// the previous connection's termination event has arrived — so the three other cases
+    /// matter only to a consumer driving the backend directly.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         // **A remote the cap evicted is re-filed rather than refused.** The table is bounded,
@@ -351,20 +389,59 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         } else {
             file(remote)
         }
+        switch remote.connectionState {
+        case .connected:
+            queue.async { [self] in deliver(.didConnect(remote.peripheralIdentifier)) }
+            return
+        case .connecting:
+            return
+        case .disconnecting:
+            queue.async { [self] in
+                deliver(.didFailToConnect(remote.peripheralIdentifier, error: Self.connectWhileDisconnectingError))
+            }
+            return
+        case .disconnected:
+            break
+        }
         remote.setConnectionState(.connecting)
+        let attempt = remote.beginConnectAttempt()
         let device = remote.identifier
         enqueue { [radio, sessionID, queue] in
             // Connect-and-name in one actor hop: a second hop for the name could observe a
             // `remove()` that landed in between and rename a live connection to `nil`.
-            let (failure, name) = await radio.connect(session: sessionID, device: device) { event in
+            let outcome = await radio.connect(session: sessionID, device: device) { event in
                 queue.async { remote.deliver(event) }
             }
             queue.async { [self] in
-                if let failure {
+                // Only the current attempt's hop applies anything. A forced disconnect
+                // landing between the radio call and this hop settles the remote and the
+                // consumer connects again at once — a `Central` reconnecting, or the
+                // provider's `CentralSession` re-sending a link client's connect — so this
+                // hop would otherwise mark the *new* attempt's `.connecting` remote
+                // `.connected` with the old attempt's answer (or fail it with the old
+                // attempt's armed failure) while the radio holds nothing. See
+                // `VirtualPeripheralRemote.connectAttempt`.
+                guard remote.connectAttempt == attempt else { return }
+                if let failure = outcome.error {
                     remote.setConnectionState(.disconnected)
                     deliver(.didFailToConnect(remote.peripheralIdentifier, error: failure))
                 } else {
-                    remote.updateName(name)
+                    // A disconnect that already settled the remote wins, even with no newer
+                    // attempt behind it. The radio's `connect` returned success on the actor,
+                    // but this hop is enqueued only afterwards — and a forced disconnect (or
+                    // a removal) landing on the actor in between enqueues its `didDisconnect`
+                    // first. `deliver` then set the remote `.disconnected` and the consumer
+                    // failed its connect; marking the remote `.connected` here on top left it
+                    // connected with no radio connection behind it, and a later cancel
+                    // delivered nothing. A cancel in between sets `.disconnecting`, not
+                    // `.disconnected`, so a cancel queued behind a connect still gets its
+                    // `didConnect` and then its `didDisconnect`.
+                    guard remote.connectionState != .disconnected else { return }
+                    remote.updateName(outcome.name)
+                    // Before `.connected` and `didConnect`: a handler that sizes its chunks
+                    // from `maximumWriteValueLength(for:)` inside its connect callback must see
+                    // the negotiated value, not last connection's.
+                    remote.updateMaximumWriteWithoutResponseLength(outcome.maximumWriteWithoutResponseLength)
                     remote.setConnectionState(.connected)
                     deliver(.didConnect(remote.peripheralIdentifier))
                 }
@@ -386,6 +463,19 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         )
     }
 
+    /// The error a connect fails with when the remote it was handed is `.disconnecting` — a
+    /// ``cancelPeripheralConnection(_:)`` is in flight and will settle it `.disconnected`.
+    /// See ``connect(_:options:requiresANCS:)``.
+    ///
+    /// Code 11: 1 through 10 are taken across the `BLESwiftProvider` domain.
+    public static var connectWhileDisconnectingError: NSError {
+        NSError(
+            domain: "BLESwiftProvider",
+            code: 11,
+            userInfo: [NSLocalizedDescriptionKey: "connect requested while a disconnect is in progress"]
+        )
+    }
+
     /// Cancels a connection, delivering `didDisconnect` with no error — CoreBluetooth
     /// reports an explicit cancellation as an error-free disconnect.
     ///
@@ -394,6 +484,19 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// peripheral that is neither connected nor connecting. Answered anyway, this fabricated a
     /// second `didDisconnect` — so a cancel racing a radio-initiated disconnect (a device
     /// removed from under it) reported the peripheral gone twice here and once on device.
+    ///
+    /// **The race runs both ways, and the radio's answer settles the other direction.** The
+    /// entry guard covers a radio-initiated disconnect that landed *before* this call; one
+    /// that lands *after* it — a forced ``VirtualDeviceHandle/disconnect(_:error:)`` or a
+    /// removal reaching the actor between this call and the `radio.disconnect` it queued — has
+    /// already delivered its `didDisconnect` and settled the remote by the time the chain
+    /// answers. So the continuation delivers only when the radio reports that *this* call
+    /// removed the connection. Delivered regardless, it sent a second `didDisconnect(nil)`
+    /// behind the radio's, and if the consumer had reconnected in between it overwrote the
+    /// remote's `.connecting` with `.disconnected`: `Central` then failed the reconnect while
+    /// the radio's `didConnect` left the remote connected. A cancel racing an armed
+    /// connection failure is the same shape — the failed connect settled the remote and sent
+    /// `didFailToConnect`, and nothing may follow it.
     public func cancelPeripheralConnection(_ peripheral: any PeripheralRemote) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let remote = peripheral as? VirtualPeripheralRemote, remote === _remotes[remote.identifier] else { return }
@@ -401,8 +504,9 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         remote.setConnectionState(.disconnecting)
         let device = remote.identifier
         enqueue { [radio, sessionID, queue] in
-            await radio.disconnect(session: sessionID, device: device)
+            let removed = await radio.disconnect(session: sessionID, device: device)
             queue.async { [self] in
+                guard removed else { return }
                 remote.setConnectionState(.disconnected)
                 deliver(.didDisconnect(remote.peripheralIdentifier, error: nil))
             }
