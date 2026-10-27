@@ -21,10 +21,18 @@ struct IdentifierTests {
         #expect(a.hashValue == b.hashValue)
     }
 
-    @Test("PeripheralIdentifier defaults to \"No Name\" when name is nil")
+    @Test("PeripheralIdentifier keeps a missing name as nil and displays it as \"No Name\"")
     func peripheralIdentifierDefaultName() {
         let identifier = PeripheralIdentifier(uuid: UUID(), name: nil)
+        #expect(identifier.cachedName == nil)
         #expect(identifier.name == "No Name")
+    }
+
+    @Test("A peripheral actually named \"No Name\" is distinguishable from an unnamed one")
+    func peripheralIdentifierLiteralNoName() {
+        let named = PeripheralIdentifier(uuid: UUID(), name: "No Name")
+        #expect(named.cachedName == "No Name")
+        #expect(named.name == "No Name")
     }
 
     @Test("ServiceIdentifier normalizes short-form UUIDs to their canonical string")

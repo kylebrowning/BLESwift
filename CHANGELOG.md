@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `PeripheralIdentifier.cachedName`: the peripheral's name exactly as CoreBluetooth reported
+  it, `nil` when it has none. `name` is unchanged — it still returns `"No Name"` for an
+  unnamed peripheral — but it now comes from `cachedName`, so an unnamed peripheral can be
+  told apart from one actually named "No Name". (#63)
+
+### Fixed
+
+- `ScanFilter`'s `namePrefix` and `nameExact` matched an unnamed peripheral against the
+  `"No Name"` display fallback, so `ScanFilter(namePrefix: "No")` let unnamed peripherals
+  through. An unnamed peripheral now fails any name filter. (#63)
+
 ## [3.0.0] - 2026-10-20
 
 ### Changed
