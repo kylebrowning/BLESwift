@@ -359,12 +359,14 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// - `.connecting`: a no-op. The pending attempt's own `didConnect` or
     ///   `didFailToConnect` answers both requests.
     /// - `.disconnecting`: nothing goes to the radio and the state is left alone;
-    ///   `didFailToConnect` with ``connectWhileDisconnectingError`` is delivered (hopped). The
-    ///   cancel in flight will settle the remote `.disconnected`, and a caller that wants a
-    ///   connection can ask again then. `BLESwiftProvider`'s `CentralSession` treats that
-    ///   `didFailToConnect` as a termination and discards the peripheral's per-connection
-    ///   state — pending writes, L2CAP bridges — slightly before the cancel's own
-    ///   `didDisconnect` would have.
+    ///   `didFailToConnect` with ``connectWhileDisconnectingError`` is delivered (hopped),
+    ///   **after the in-progress cancel's `didDisconnect`**: it goes through the serial
+    ///   chain, behind the cancel's step, so the two never arrive in the other order — which
+    ///   they could when the failure was posted from this turn and the cancel's step raced
+    ///   it. The caller sees the remote settle `.disconnected` first and the attempt refused
+    ///   second, and can ask again then. `BLESwiftProvider`'s `CentralSession` discards the
+    ///   peripheral's per-connection state — pending writes, L2CAP bridges — on the
+    ///   `didDisconnect`; the `didFailToConnect` behind it finds nothing left to discard.
     ///
     /// A connect that reached the radio for a remote already connected was what let a forced
     /// disconnect racing it strand the radio with a connection no remote stood behind. A
@@ -416,8 +418,14 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         case .connecting:
             return
         case .disconnecting:
-            queue.async { [self] in
-                deliver(.didFailToConnect(remote.peripheralIdentifier, error: Self.connectWhileDisconnectingError))
+            // Through the chain, not a bare `queue.async` from this turn: the cancel's own
+            // `didDisconnect` is posted from its chain step, which can finish its radio round
+            // trip before or after this turn ends — so a failure posted from here raced it.
+            // Behind that step, the failure always follows the `didDisconnect`.
+            enqueue { [queue] in
+                queue.async { [self] in
+                    deliver(.didFailToConnect(remote.peripheralIdentifier, error: Self.connectWhileDisconnectingError))
+                }
             }
             return
         case .disconnected:

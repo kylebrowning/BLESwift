@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On the virtual radio, a connect issued while a cancel was in progress could report its
+  `didFailToConnect` (code 11) before or after the cancel's `didDisconnect`, depending on
+  thread scheduling. The failure is now delivered behind the cancel's `didDisconnect`,
+  always. (#89)
 - A virtual device's `subscriptionChanged(isSubscribed: true)` report still in flight could
   be overtaken by the unsubscribe report of a forced disconnect, removal, re-registration,
   `setServices`, or detach that dropped the same subscription, so a handler that awaits

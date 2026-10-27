@@ -543,7 +543,7 @@ struct FaultInjectionRaceTests {
         #expect(await RecordingDevice.onQueue(queue) { remote.connectionState } == .connected)
     }
 
-    @Test("A connect on a disconnecting remote fails with connectWhileDisconnectingError, then the cancel completes", .timeLimit(.minutes(1)))
+    @Test("A connect on a disconnecting remote fails with connectWhileDisconnectingError, behind the cancel's didDisconnect", .timeLimit(.minutes(1)))
     func connectWhileDisconnecting() async throws {
         let radio = VirtualRadio()
         let device = RecordingDevice.make(handler: RecordingHandler())
@@ -561,8 +561,43 @@ struct FaultInjectionRaceTests {
             backend.connect(remote, options: nil, requiresANCS: false)
         }
         await Self.drain(backend, on: queue)
-        #expect(await Self.terminalEvents(log, on: queue) == ["didFailToConnect(BLESwiftProvider 11)", "didDisconnect"])
+        #expect(await Self.terminalEvents(log, on: queue) == ["didDisconnect", "didFailToConnect(BLESwiftProvider 11)"])
         #expect(VirtualCentralBackend.connectWhileDisconnectingError.code == 11)
+        #expect(await RecordingDevice.onQueue(queue) { remote.connectionState } == .disconnected)
+        #expect(await !radio.isConnected(session: backend.sessionID, device: device.descriptor.identifier))
+    }
+
+    @Test("The cancel's didDisconnect precedes the connect's failure whether or not the turn between them stalls", .timeLimit(.minutes(1)))
+    func connectWhileDisconnectingOrderIsFixed() async throws {
+        let radio = VirtualRadio()
+        let device = RecordingDevice.make(handler: RecordingHandler())
+        await radio.register(device)
+        let queue = DispatchQueue(label: "FaultInjectionRaceTests.connectWhileDisconnectingStalled")
+        let backend = VirtualCentralBackend(radio: radio, queue: queue)
+        let log = EventLog()
+        let remote = await Self.attach(backend, log: log, device: device.descriptor.identifier, on: queue)
+
+        // Both shapes of the turn, alternating. Unstalled, the turn posts the connect's
+        // failure microseconds after the cancel enqueued its chain step — the shape where a
+        // failure posted from the turn itself came first. Stalled — a `usleep` standing in
+        // for the queue's thread being preempted mid-turn on a loaded machine — the cancel's
+        // step finishes its radio round trip and posts its `didDisconnect` before the turn
+        // goes on. The failure follows the `didDisconnect` either way, because it is posted
+        // from the chain, behind the cancel's step, never from the turn.
+        var orders: Set<[String]> = []
+        for iteration in 0..<300 {
+            await RecordingDevice.onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
+            await Self.drain(backend, on: queue)
+            await RecordingDevice.onQueue(queue) {
+                log.events.removeAll()
+                backend.cancelPeripheralConnection(remote)
+                if iteration % 2 == 1 { usleep(200) }
+                backend.connect(remote, options: nil, requiresANCS: false)
+            }
+            await Self.drain(backend, on: queue)
+            orders.insert(await Self.terminalEvents(log, on: queue))
+        }
+        #expect(orders == [["didDisconnect", "didFailToConnect(BLESwiftProvider 11)"]])
         #expect(await RecordingDevice.onQueue(queue) { remote.connectionState } == .disconnected)
         #expect(await !radio.isConnected(session: backend.sessionID, device: device.descriptor.identifier))
     }
