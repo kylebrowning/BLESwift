@@ -68,9 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler that awaits in `subscriptionChanged`, a central now hears the disconnect only once
   the handler has returned. (#73)
 - `VirtualRadio.install(_:)` and `SimulatorLink.install` set the two registry factories and
-  their own `installed` / `endpoint` under separate locks, so a `Central()` or
-  `PeripheralHost()` built on another thread in between could get a mixed pair. Both now
-  change together. (#70)
+  their own `installed` / `endpoint` under separate locks, so a `Central()` and a
+  `PeripheralHost()` built on another thread in between could come from different installs,
+  and `installed` / `endpoint` could lag the registry. Both now change together. (#70)
 - `ManualClock.sleep(until:)` returned normally for a deadline already reached on a task
   that had been cancelled, where `ContinuousClock` throws `CancellationError`, so a test on
   `ManualClock` could not exercise a sleep's cancellation path for a zero delay.

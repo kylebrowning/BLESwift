@@ -231,6 +231,11 @@ public actor VirtualRadio {
     /// handler never heard the matching unsubscribes, and the centrals stayed connected to a
     /// device that had changed under them without a word.
     ///
+    /// While the old handler is reporting those unsubscribes, a connected central has lost its
+    /// connection but not yet heard so — the same window, with the same outcomes, that
+    /// ``VirtualDeviceHandle/disconnect(_:error:)`` documents. A scanning central may also see
+    /// the new registration's sighting before that `didDisconnect`.
+    ///
     /// The new device state is installed before the first `await`, and the identifier
     /// stays in `knownDeviceIDs` throughout, so a backend resolving the identifier while
     /// the old handler is still being told about its unsubscribes finds the device there —

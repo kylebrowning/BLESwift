@@ -176,7 +176,7 @@ struct ManualClockTests {
         #expect(clock.sleeperCount == 0)
     }
 
-    @Test("A cancelled waitForWaiters returns once, and a later waiter does not resume it")
+    @Test("A cancelled waitForWaiters returns once, and a later waiter does not resume it", .timeLimit(.minutes(1)))
     func cancelledWaitForWaitersReturns() async {
         // Nothing reports a watcher as registered, so whether the cancel lands before the
         // registration (its own `isCancelled` check) or after it (the remove-and-resume path)
