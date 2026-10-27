@@ -15,13 +15,20 @@ public struct PeripheralIdentifier: Sendable, CustomStringConvertible {
     /// The UUID CoreBluetooth uses to identify this peripheral on the current device.
     public let uuid: UUID
 
-    /// The peripheral's advertised or cached name, or `"No Name"` if none was provided.
-    public let name: String
+    /// The peripheral's advertised or cached name exactly as CoreBluetooth reported it, or
+    /// `nil` when the peripheral has none. Use this, not ``name``, to tell unnamed peripherals
+    /// apart from named ones.
+    public let cachedName: String?
 
-    /// Creates a `PeripheralIdentifier`. `name` defaults to `"No Name"` when `nil`.
+    /// A display name: ``cachedName``, or `"No Name"` when the peripheral has none.
+    public var name: String {
+        cachedName ?? "No Name"
+    }
+
+    /// Creates a `PeripheralIdentifier`. `name` is kept as-is in ``cachedName``.
     public init(uuid: UUID, name: String?) {
         self.uuid = uuid
-        self.name = name ?? "No Name"
+        self.cachedName = name
     }
 
     /// A human-readable description combining the name and UUID.

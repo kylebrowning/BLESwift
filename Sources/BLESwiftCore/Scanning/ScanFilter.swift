@@ -20,11 +20,13 @@ public struct ScanFilter: Sendable {
     public var services: [ServiceIdentifier]?
 
     /// Requires the advertised name (falling back to the cached
-    /// ``PeripheralIdentifier/name``) to start with this prefix.
+    /// ``PeripheralIdentifier/cachedName``) to start with this prefix. A peripheral with
+    /// neither name fails.
     public var namePrefix: String?
 
     /// Requires the advertised name (falling back to the cached
-    /// ``PeripheralIdentifier/name``) to equal this string exactly.
+    /// ``PeripheralIdentifier/cachedName``) to equal this string exactly. A peripheral with
+    /// neither name fails.
     public var nameExact: String?
 
     /// Requires ``AdvertisementData/manufacturerData`` whose first two bytes
@@ -76,9 +78,9 @@ public struct ScanFilter: Sendable {
     /// Whether `discovery` passes every set field. ``services`` is not re-checked here —
     /// it is a radio-level filter, already applied by CoreBluetooth.
     public func matches(_ discovery: Discovery) -> Bool {
-        let name = discovery.advertisement.localName ?? discovery.peripheral.name
+        let name = discovery.advertisement.localName ?? discovery.peripheral.cachedName
 
-        if let namePrefix, !name.hasPrefix(namePrefix) {
+        if let namePrefix, name?.hasPrefix(namePrefix) != true {
             return false
         }
         if let nameExact, name != nameExact {

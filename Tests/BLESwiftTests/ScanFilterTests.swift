@@ -57,8 +57,10 @@ struct ScanFilterTests {
         #expect(!filter.matches(makeDiscovery(localName: "Toaster-01")))
         // Falls back to the cached peripheral name when localName is absent.
         #expect(filter.matches(makeDiscovery(peripheralName: "Kettle-01")))
-        // No advertised name and no cached name ("No Name") fails.
+        // No advertised name and no cached name fails.
         #expect(!filter.matches(makeDiscovery()))
+        // The "No Name" display fallback is not a name to match against.
+        #expect(!ScanFilter(namePrefix: "No").matches(makeDiscovery()))
         // The advertised name wins over the cached one.
         #expect(!filter.matches(makeDiscovery(localName: "Toaster", peripheralName: "Kettle")))
     }
@@ -70,6 +72,8 @@ struct ScanFilterTests {
         #expect(!filter.matches(makeDiscovery(localName: "Kettle-012")))
         #expect(filter.matches(makeDiscovery(peripheralName: "Kettle-01")))
         #expect(!filter.matches(makeDiscovery()))
+        #expect(!ScanFilter(nameExact: "No Name").matches(makeDiscovery()))
+        #expect(ScanFilter(nameExact: "No Name").matches(makeDiscovery(peripheralName: "No Name")))
     }
 
     @Test("manufacturerID matches the little-endian company identifier")
@@ -89,6 +93,8 @@ struct ScanFilterTests {
         // The company identifier bytes themselves never count toward the prefix.
         #expect(!filter.matches(makeDiscovery(manufacturerData: Data([0x01, 0x02]))))
         #expect(!filter.matches(makeDiscovery()))
+        #expect(!ScanFilter(nameExact: "No Name").matches(makeDiscovery()))
+        #expect(ScanFilter(nameExact: "No Name").matches(makeDiscovery(peripheralName: "No Name")))
     }
 
     @Test("manufacturerID and manufacturerDataPrefix must both hold when both set")
