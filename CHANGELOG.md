@@ -57,6 +57,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A virtual device's `subscriptionChanged(isSubscribed: true)` report still in flight could
+  be overtaken by the unsubscribe report of a forced disconnect, removal, re-registration,
+  `setServices`, or detach that dropped the same subscription, so a handler that awaits
+  inside the report finished the two out of order. Reports for a device now reach its
+  handler one at a time, in the order the radio applied the changes, with each
+  `didDisconnect` behind the unsubscribes it follows. The entry points still return once
+  their reports are delivered — except when called from inside a report (a handler's
+  `subscriptionChanged`, or a task it spawned there), where they return first and the
+  reports follow once the handler returns, since waiting would deadlock. (#76)
 - Re-registering an identifier that still had connections left them, and their
   subscriptions, attached to the new registration: the new handler inherited subscribers it
   was never told about, the old one never heard the unsubscribes, and the centrals stayed

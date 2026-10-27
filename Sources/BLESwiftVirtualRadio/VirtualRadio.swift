@@ -204,6 +204,51 @@ public actor VirtualRadio {
     /// session identifiers currently subscribed.
     private var subscriptions: [UUID: [CharacteristicIdentifier: Set<UUID>]] = [:]
 
+    /// The tail of each device's report chain: the task delivering the last subscription
+    /// report — or trailing `didDisconnect` — enqueued for that device, which the next one
+    /// waits on. An entry is removed when its step finishes while still the tail, so the
+    /// table holds only devices with a report in flight.
+    ///
+    /// **Why a chain (#76):** the radio changes its subscription table synchronously and
+    /// then awaits `handler.subscriptionChanged`. The actor is reentrant across that await,
+    /// so a later table change for the same device — a disconnect, removal, re-registration,
+    /// `setServices`, or detach dropping that subscription — could report
+    /// `isSubscribed: false` while the earlier `isSubscribed: true` report was still in
+    /// flight, and a handler that awaits inside its report then finished the two out of
+    /// order. Every report is now a step on its device's chain, enqueued in the same
+    /// synchronous actor section as the table change it reports, so chain order is table
+    /// order and a handler hears each device's changes one at a time, in the order they
+    /// happened. See ``enqueueReport(device:_:)``.
+    private var reportChains: [UUID: ReportChain] = [:]
+
+    /// One device's report chain: its tail and the sequence number that identifies it, so a
+    /// step that finishes can tell whether it is still the tail.
+    private struct ReportChain {
+        let tail: Task<Void, Never>
+        let sequence: UInt64
+    }
+
+    /// Stamps every chain step, so the one that finishes can tell whether a later step has
+    /// been chained behind it. Monotonic across the radio and never reused.
+    private var lastReportSequence: UInt64 = 0
+
+    /// Whether the current task is delivering a report from a device's chain — `true` for
+    /// the whole of every chain step, and so inside every handler's `subscriptionChanged`
+    /// and every task it spawns from there (a `Task.detached` drops it).
+    ///
+    /// Every entry point that enqueues reports awaits its chain's tail before returning,
+    /// so a caller knows its reports have been delivered. Called from inside a report, that
+    /// wait would be on the very step the caller is running inside — a deadlock — so an
+    /// entry point that finds this set enqueues its steps and returns without awaiting them.
+    /// See ``settle(_:)``.
+    @TaskLocal static var isReporting = false
+
+    /// How many devices currently have a report chain. Not API: it exists so a test can
+    /// assert that a burst of reports left no chain behind once every one was delivered.
+    package var reportChainCount: Int {
+        reportChains.count
+    }
+
     /// Creates an empty radio.
     ///
     /// - Parameter clock: The clock every delay on this radio sleeps on. Defaults to
@@ -236,6 +281,13 @@ public actor VirtualRadio {
     /// the old handler is still being told about its unsubscribes finds the device there —
     /// the identifier is never absent, which is the whole point of re-registering instead
     /// of removing and registering.
+    ///
+    /// The retirement's reports go on the identifier's report chain, behind every report
+    /// already in flight for it, and the new registration shares that chain: the new
+    /// handler hears nothing until the old handler's retirement reports have run. Called
+    /// from inside a subscription report — a handler's `subscriptionChanged`, or a task it
+    /// spawned there — this returns before those reports are delivered, since awaiting
+    /// them would wait on the report it was called from.
     ///
     /// - Parameters:
     ///   - device: The device to host.
@@ -270,7 +322,7 @@ public actor VirtualRadio {
             reportSightings(of: identifier)
         }
         if let retired {
-            await report(retired)
+            await settle(report(retired))
         }
         return VirtualDeviceHandle(identifier: identifier, generation: generation, radio: self)
     }
@@ -396,6 +448,10 @@ public actor VirtualRadio {
     /// in the set, so no transition was reported and the host — which starts notifying on
     /// `didSubscribe` — was never told, while the central sat waiting on a stream that reported
     /// itself armed.
+    ///
+    /// The unsubscribes go on the device's report chain and this returns once they are
+    /// delivered — unless called from inside a subscription report, when it returns before
+    /// (see ``isReporting``).
     func setServices(_ services: [GATTService], device: UUID, generation: UInt64) async {
         guard isCurrent(device, generation: generation, operation: "setServices") else { return }
         let before = Set(devices[device]?.descriptor.services.map(\.identifier) ?? [])
@@ -412,9 +468,11 @@ public actor VirtualRadio {
         // handler that calls back into the radio cannot observe a half-applied database —
         // and the handler and subscribers are taken now, so a removal or re-registration
         // landing between the reports cannot redirect them.
+        var tail: Task<Void, Never>?
         for entry in dropped {
-            await reportUnsubscribed(entry.characteristics, handler: handler, central: entry.central)
+            tail = reportUnsubscribed(entry.characteristics, on: device, handler: handler, central: entry.central) ?? tail
         }
+        await settle(tail)
     }
 
     /// Removes a registered device, disconnecting every central attached to it. See
@@ -425,7 +483,8 @@ public actor VirtualRadio {
     /// notify again — CoreBluetooth reports `didUnsubscribe` when a subscribed central goes
     /// away, and so does this radio — and each connected central hears `didDisconnect`
     /// with ``deviceRemovedError`` only after that, the order every teardown on this radio
-    /// uses (see ``report(_:)``).
+    /// uses (see ``report(_:)``). Called from inside a subscription report, this returns
+    /// before its own reports are delivered — see ``isReporting``.
     func remove(device: UUID, generation: UInt64) async {
         guard isCurrent(device, generation: generation, operation: "remove") else { return }
         guard let retired = retire(device) else { return }
@@ -436,7 +495,7 @@ public actor VirtualRadio {
             known.remove(device)
         }
         recordConnectLatency(.zero, of: device)
-        await report(retired)
+        await settle(report(retired))
     }
 
     /// What retiring a registration leaves to deliver once every table is settled: each
@@ -490,9 +549,9 @@ public actor VirtualRadio {
         return Retirement(handler: state.handler, departing: departing, identifier: identifier, disconnected: disconnected)
     }
 
-    /// Tells a retired registration's handler about each subscription it lost, then delivers
-    /// the `didDisconnect`s — the one `await` of a removal or re-registration, made only
-    /// once every table is settled.
+    /// Enqueues, on the retired identifier's report chain, each subscription the retired
+    /// registration's handler lost and then the `didDisconnect`s — what a removal or
+    /// re-registration delivers, enqueued only once every table is settled.
     ///
     /// **The `didDisconnect`s go out last**, the order ``disconnect(centrals:error:device:generation:)``
     /// keeps and for the same reason: the actor is reentrant across the unsubscribe awaits,
@@ -501,14 +560,73 @@ public actor VirtualRadio {
     /// subscription. A removal left nothing to reconnect to, but a re-registration leaves
     /// the identifier known throughout, so the reconnect lands on the new registration at
     /// once — and with the same handler behind both, the handler finished the unsubscribe
-    /// *after* the re-subscribe and took a live subscriber for one that had left.
-    private func report(_ retired: Retirement) async {
-        for entry in retired.departing {
-            await retired.handler.subscriptionChanged(entry.characteristic, central: entry.central, isSubscribed: false)
+    /// *after* the re-subscribe and took a live subscriber for one that had left. As a chain
+    /// step behind the unsubscribes, the `didDisconnect` is now also ordered against every
+    /// other report for the identifier, including a subscribe still in flight when the
+    /// registration was retired.
+    ///
+    /// - Returns: The chain's tail once everything is enqueued, for ``settle(_:)``; `nil`
+    ///   when the registration had nothing to report.
+    private func report(_ retired: Retirement) -> Task<Void, Never>? {
+        var tail: Task<Void, Never>?
+        if !retired.departing.isEmpty {
+            tail = enqueueReport(device: retired.identifier.uuid) {
+                for entry in retired.departing {
+                    await retired.handler.subscriptionChanged(entry.characteristic, central: entry.central, isSubscribed: false)
+                }
+            }
         }
-        for sink in retired.disconnected {
-            sink(.didDisconnect(retired.identifier, error: Self.deviceRemovedError))
+        if !retired.disconnected.isEmpty {
+            tail = enqueueReport(device: retired.identifier.uuid) {
+                for sink in retired.disconnected {
+                    sink(.didDisconnect(retired.identifier, error: Self.deviceRemovedError))
+                }
+            }
         }
+        return tail
+    }
+
+    /// Chains `step` behind every report already enqueued for `device`, and returns the
+    /// task delivering it.
+    ///
+    /// Synchronous, and to be called in the same synchronous actor section as the table
+    /// change `step` reports: the chain's order is then the order the table changed in, so
+    /// a device's handler hears its changes in the order they happened, one at a time —
+    /// the next step starts only once the previous one's `subscriptionChanged` has returned.
+    /// The task inherits this actor's isolation, so it runs `step` from the actor and
+    /// removes its own entry here once `step` finishes while it is still the tail; a step
+    /// that is no longer the tail leaves the entry to its successor. Each step runs with
+    /// ``isReporting`` set, which is how an entry point called from inside a handler's
+    /// report knows not to wait on the chain.
+    func enqueueReport(device: UUID, _ step: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
+        let previous = reportChains[device]?.tail
+        lastReportSequence += 1
+        let sequence = lastReportSequence
+        let task = Task { [self] in
+            await previous?.value
+            await Self.$isReporting.withValue(true) { await step() }
+            if reportChains[device]?.sequence == sequence {
+                reportChains.removeValue(forKey: device)
+            }
+        }
+        reportChains[device] = ReportChain(tail: task, sequence: sequence)
+        return task
+    }
+
+    /// Waits for `tail` — the last report an entry point enqueued — to be delivered, so the
+    /// entry point returns only once its reports have reached the handler; nothing to wait
+    /// for when it enqueued none.
+    ///
+    /// **Not from inside a report.** A handler's `subscriptionChanged` that calls back into
+    /// the radio — `setServices`, `disconnect`, `remove`, a re-`register` — runs inside a
+    /// chain step, and the reports that call enqueues are chained behind that very step.
+    /// Waiting for them there would wait on the step to finish, which waits on the handler
+    /// to return, which waits on this: a deadlock. So inside a report — ``isReporting`` set —
+    /// this returns at once, and the entry point returns before its reports are delivered;
+    /// they are still delivered, in order, once the handler returns.
+    func settle(_ tail: Task<Void, Never>?) async {
+        guard let tail, !Self.isReporting else { return }
+        await tail.value
     }
 
     /// Pushes a notification to every subscribed, connected central. See
@@ -554,21 +672,30 @@ public actor VirtualRadio {
 
     /// Detaches a backend, cancelling its scan and dropping its connections, its per-device
     /// sinks — the whole session record goes — and its subscriptions. Each dropped
-    /// subscription is reported to its device's handler as an unsubscribe.
+    /// subscription is reported to its device's handler as an unsubscribe, from that
+    /// device's report chain; this returns once every one is delivered, unless called from
+    /// inside a subscription report (see ``isReporting``).
     func detach(session: UUID) async {
         guard let removed = sessions.removeValue(forKey: session) else { return }
         removed.scanner?.repeater?.cancel()
-        var dropped: [(handler: any VirtualDeviceHandler, central: Subscriber, characteristics: [CharacteristicIdentifier])] = []
+        var dropped: [(device: UUID, handler: any VirtualDeviceHandler, central: Subscriber, characteristics: [CharacteristicIdentifier])] = []
         for device in removed.connections {
             guard let handler = devices[device]?.handler else { continue }
-            dropped.append((handler, subscriber(session, device: device), dropSubscriptions(session: session, device: device)))
+            dropped.append((device, handler, subscriber(session, device: device), dropSubscriptions(session: session, device: device)))
         }
         // Every table is settled before the first `await`, so a handler that calls back into
         // the radio cannot observe a half-detached session; each handler and subscriber is
         // taken now too, so a removal or re-registration landing between the reports cannot
-        // redirect them.
+        // redirect them. Each device's reports go on that device's chain, and each chain's
+        // tail is waited for in turn, so none is still undelivered when this returns.
+        var tails: [Task<Void, Never>] = []
         for entry in dropped {
-            await reportUnsubscribed(entry.characteristics, handler: entry.handler, central: entry.central)
+            if let tail = reportUnsubscribed(entry.characteristics, on: entry.device, handler: entry.handler, central: entry.central) {
+                tails.append(tail)
+            }
+        }
+        for tail in tails {
+            await settle(tail)
         }
     }
 
@@ -740,6 +867,10 @@ public actor VirtualRadio {
     ///   `didDisconnect` on top of it reported the peripheral gone twice and overwrote the
     ///   state of a reconnect that had started in between. Sinks and subscriptions are
     ///   dropped either way; they are idempotent.
+    ///
+    /// Returns once the unsubscribes have been reported, so the backend's `didDisconnect`
+    /// follows them — unless called from inside a subscription report, when it returns
+    /// before they are delivered (see ``isReporting``).
     @discardableResult
     func disconnect(session: UUID, device: UUID) async -> Bool {
         let removed = sessions[session]?.connections.remove(device) != nil
@@ -750,7 +881,7 @@ public actor VirtualRadio {
         let dropped = dropSubscriptions(session: session, device: device)
         if let handler = devices[device]?.handler {
             let central = subscriber(session, device: device)
-            await reportUnsubscribed(dropped, handler: handler, central: central)
+            await settle(reportUnsubscribed(dropped, on: device, handler: handler, central: central))
         }
         return removed
     }
@@ -786,17 +917,26 @@ public actor VirtualRadio {
     /// or had its backend detached. CoreBluetooth reports `didUnsubscribe` in exactly those
     /// cases.
     ///
-    /// Takes the handler and the subscriber rather than looking them up: the caller is
-    /// reporting across `await`s, and a `remove()` or re-`register` landing between two of
-    /// them would otherwise drop the rest or hand them to a handler that never saw these
-    /// subscribers. Every caller captures both before its first `await`.
+    /// Takes the handler and the subscriber rather than looking them up: the reports are
+    /// delivered later, from the device's chain, and a `remove()` or re-`register` landing
+    /// before then would otherwise drop them or hand them to a handler that never saw these
+    /// subscribers. Every caller captures both in the synchronous section that dropped the
+    /// subscriptions, and enqueues from there, so the chain's order is the table's.
+    ///
+    /// - Returns: The chain step delivering the reports, for ``settle(_:)``; `nil` when
+    ///   there was nothing to report.
+    @discardableResult
     func reportUnsubscribed(
         _ characteristics: [CharacteristicIdentifier],
+        on device: UUID,
         handler: any VirtualDeviceHandler,
         central: Subscriber
-    ) async {
-        for characteristic in characteristics {
-            await handler.subscriptionChanged(characteristic, central: central, isSubscribed: false)
+    ) -> Task<Void, Never>? {
+        guard !characteristics.isEmpty else { return nil }
+        return enqueueReport(device: device) {
+            for characteristic in characteristics {
+                await handler.subscriptionChanged(characteristic, central: central, isSubscribed: false)
+            }
         }
     }
 
@@ -998,6 +1138,11 @@ public actor VirtualRadio {
     /// The device's ``VirtualLatency/subscribe`` delay comes before all of it, enabling and
     /// disabling alike, as ``services(of:matching:)`` explains.
     ///
+    /// The transition is reported from the device's report chain, behind every report
+    /// already in flight for the device, and this returns once it has been delivered —
+    /// unless called from inside a subscription report, when it returns before (see
+    /// ``isReporting``). The answer is decided here, from the table, either way.
+    ///
     /// - Returns: Whether `session` is subscribed to `characteristic` now the call has been
     ///   applied — `enabled` for a connected session, and the unchanged current state for one
     ///   that is not or for a request the checks above refused — together with the `ATTError`
@@ -1036,7 +1181,11 @@ public actor VirtualRadio {
             }
         }
         guard didChange else { return (enabled, nil) }
-        await state.handler.subscriptionChanged(characteristic, central: subscriber(session, device: device), isSubscribed: enabled)
+        let handler = state.handler
+        let central = subscriber(session, device: device)
+        await settle(enqueueReport(device: device) {
+            await handler.subscriptionChanged(characteristic, central: central, isSubscribed: enabled)
+        })
         return (enabled, nil)
     }
 

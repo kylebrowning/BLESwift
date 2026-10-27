@@ -102,6 +102,13 @@ public protocol VirtualDeviceHandler: Sendable {
 
     /// Reports that a central subscribed to, or unsubscribed from, a characteristic.
     ///
+    /// A device's reports arrive in the order the radio applied the changes, one at a
+    /// time: the next is not delivered until this call returns, however long it takes. A
+    /// handler that calls back into the radio from here — ``VirtualDeviceHandle/setServices(_:)``,
+    /// ``VirtualDeviceHandle/disconnect(_:error:)``, ``VirtualDeviceHandle/remove()``, or a
+    /// re-``VirtualRadio/register(_:advertising:)`` — gets its call back before the reports
+    /// it caused are delivered; they follow once this returns.
+    ///
     /// - Parameters:
     ///   - characteristic: The characteristic whose subscription changed.
     ///   - central: The remote central whose subscription changed.
@@ -216,6 +223,11 @@ public final class VirtualDeviceHandle: Sendable {
     /// reported to this device's handler as an unsubscribe. A purely additive change
     /// invalidates nothing and is reported to nobody.
     ///
+    /// Returns once those unsubscribes have been delivered, in order behind every report
+    /// already in flight for the device. Called from inside a subscription report — the
+    /// handler's own `subscriptionChanged`, or a task it spawned there — it returns before
+    /// they are delivered, since awaiting them would wait on the report it was called from.
+    ///
     /// - Parameter services: The device's new services.
     public func setServices(_ services: [GATTService]) async {
         await radio?.setServices(services, device: identifier, generation: generation)
@@ -233,6 +245,12 @@ public final class VirtualDeviceHandle: Sendable {
     /// Removes the device from the radio. Every central currently connected to it is
     /// disconnected with ``VirtualRadio/deviceRemovedError``, and later connection attempts
     /// fail with ``VirtualRadio/unknownDeviceError``.
+    ///
+    /// Returns once each dropped subscription has been reported to the handler and each
+    /// `didDisconnect` delivered, in that order and behind every report already in flight
+    /// for the device. Called from inside a subscription report — the handler's own
+    /// `subscriptionChanged`, or a task it spawned there — it returns before they are
+    /// delivered, since awaiting them would wait on the report it was called from.
     ///
     /// A no-op once the identifier has been re-registered: see the `generation` note above.
     public func remove() async {
