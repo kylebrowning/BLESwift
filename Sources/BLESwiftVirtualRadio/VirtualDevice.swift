@@ -1,9 +1,8 @@
 //
 //  VirtualDevice.swift
-//  BLESwiftProvider
+//  BLESwiftVirtualRadio
 //
 
-#if os(macOS)
 import BLESwiftCore
 import Foundation
 
@@ -203,4 +202,3 @@ public final class VirtualDeviceHandle: Sendable {
         await radio?.remove(device: identifier, generation: generation)
     }
 }
-#endif

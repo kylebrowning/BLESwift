@@ -1,9 +1,8 @@
 //
 //  FixtureDeviceHandler.swift
-//  BLESwiftProvider
+//  BLESwiftVirtualRadio
 //
 
-#if os(macOS)
 import BLESwiftCore
 import BLESwiftLink
 import Foundation
@@ -187,4 +186,3 @@ extension CharacteristicProperties {
         contains(.write) || contains(.writeWithoutResponse)
     }
 }
-#endif

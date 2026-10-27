@@ -1,9 +1,8 @@
 //
 //  VirtualRadio.swift
-//  BLESwiftProvider
+//  BLESwiftVirtualRadio
 //
 
-#if os(macOS)
 import BLESwiftCore
 import Foundation
 import Logging
@@ -17,6 +16,9 @@ import BLESwiftCompat17
 /// scanner, its connections, and its notification subscriptions. Backends are queue-confined
 /// classes that call in with `await` and deliver results back on their own queue, so no
 /// CoreBluetooth-shaped delivery contract is ever violated.
+///
+/// The `NSError` domain of this radio's errors is `"BLESwiftProvider"`, kept from before the
+/// radio moved out of that module, so callers that already switch on it keep working.
 ///
 /// ```swift
 /// let radio = VirtualRadio()
@@ -760,4 +762,3 @@ struct CharacteristicDiscovery: Sendable {
     /// The operations the characteristic advertises support for.
     let properties: CharacteristicProperties
 }
-#endif

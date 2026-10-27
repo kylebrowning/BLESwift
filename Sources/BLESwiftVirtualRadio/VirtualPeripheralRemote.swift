@@ -1,9 +1,8 @@
 //
 //  VirtualPeripheralRemote.swift
-//  BLESwiftProvider
+//  BLESwiftVirtualRadio
 //
 
-#if os(macOS)
 import BLESwiftCore
 import BLESwiftLink
 import Dispatch
@@ -502,4 +501,3 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         )
     }
 }
-#endif

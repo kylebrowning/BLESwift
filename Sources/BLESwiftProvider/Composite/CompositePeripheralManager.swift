@@ -552,7 +552,7 @@ public final class CompositePeripheralManager: PeripheralManaging, HostedDeviceR
 
     /// Takes every child's hosted device off its radio, for the children that host one.
     /// Must be called on ``queue``.
-    func removeHostedDevice() {
+    package func removeHostedDevice() {
         dispatchPrecondition(condition: .onQueue(queue))
         for backend in backends {
             (backend as? any HostedDeviceRemoving)?.removeHostedDevice()

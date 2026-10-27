@@ -1,9 +1,8 @@
 //
 //  VirtualPeripheralManagerBackend.swift
-//  BLESwiftProvider
+//  BLESwiftVirtualRadio
 //
 
-#if os(macOS)
 import BLESwiftCore
 import Dispatch
 import Foundation
@@ -15,7 +14,7 @@ import BLESwiftCompat17
 /// Detaching a backend's event handler is reversible — the composites document a `nil`
 /// handler as a detach every child is re-installed from — so the teardown that really is
 /// final asks for the removal outright, through whichever backend a session was given.
-protocol HostedDeviceRemoving {
+package protocol HostedDeviceRemoving {
 
     /// Takes the hosted device off the radio. Must be called on the backend's own queue.
     func removeHostedDevice()
@@ -231,7 +230,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
     /// Setting it back to `nil` *detaches* and nothing more: the hosted device stays on the
     /// radio, and a request arriving with nobody listening is refused rather than parked.
     /// Re-attaching re-installs a working backend — which is what
-    /// ``CompositePeripheralManager/eventHandler`` documents for every child it clears and
+    /// `BLESwiftProvider`'s `CompositePeripheralManager.eventHandler` documents for every child it clears and
     /// re-installs, and what a detach through it could not have honored while this one was
     /// terminal. Removing the device is `removeHostedDevice()`'s job, and `deinit`'s.
     public var eventHandler: ((PeripheralHostEvent) -> Void)? {
@@ -256,7 +255,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
     ///
     /// The explicit teardown a session ending calls; `deinit` does the same work on its own
     /// for a backend that is simply dropped. Must be called on ``queue``.
-    func removeHostedDevice() {
+    package func removeHostedDevice() {
         dispatchPrecondition(condition: .onQueue(queue))
         removeDevice()
     }
@@ -542,4 +541,3 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
             : .didUnsubscribe(central: central, characteristic: characteristic))
     }
 }
-#endif

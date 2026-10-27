@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `BLESwiftVirtualRadio`, a new product that builds for every platform: the in-process
+  virtual radio (`VirtualRadio`, `VirtualDevice`, `VirtualCentralBackend`,
+  `VirtualPeripheralManagerBackend`, …) for mocking Bluetooth in an app or test process,
+  with a "Mocking Bluetooth in-process" DocC article. (#65)
+- `VirtualRadio.install(_:)`, `uninstall()` and `installed`, which route every
+  `Central()` / `PeripheralHost()` to a radio through `BackendRegistry`, with no TCP and no
+  provider. (#65)
+
+### Changed
+
+- The virtual radio types moved out of `BLESwiftProvider` into `BLESwiftVirtualRadio`
+  and are no longer macOS-only. `BLESwiftProvider` re-exports the new module, so existing
+  `import BLESwiftProvider` code compiles unchanged. (#65)
+
 ## [3.0.0] - 2026-10-20
 
 ### Changed

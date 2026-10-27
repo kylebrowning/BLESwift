@@ -1,9 +1,8 @@
 //
 //  VirtualCentralBackend.swift
-//  BLESwiftProvider
+//  BLESwiftVirtualRadio
 //
 
-#if os(macOS)
 import BLESwiftCore
 import Dispatch
 import Foundation
@@ -376,9 +375,9 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// The error a connect fails with when the remote it was handed is no longer the one this
     /// backend has filed for that identifier.
     ///
-    /// Code 8, not 7: 7 is already
-    /// `CentralSession.l2capCreditRejected` in this same `BLESwiftProvider` domain, and two
-    /// distinct failures sharing a code cannot be told apart by a caller that switches on it.
+    /// Code 8, not 7: 7 is already `BLESwiftProvider`'s `CentralSession.l2capCreditRejected`
+    /// in this same `BLESwiftProvider` domain, and two distinct failures sharing a code
+    /// cannot be told apart by a caller that switches on it.
     public static var stalePeripheralHandleError: NSError {
         NSError(
             domain: "BLESwiftProvider",
@@ -415,8 +414,8 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// **Identifiers it does not know are omitted, not vended as placeholders**, exactly as
     /// CoreBluetooth omits a `UUID` its stack has never seen.
     ///
-    /// That omission is what makes this backend safe to compose: a
-    /// ``CompositeCentral`` resolves an identifier against every child and keeps the first
+    /// That omission is what makes this backend safe to compose: `BLESwiftProvider`'s
+    /// `CompositeCentral` resolves an identifier against every child and keeps the first
     /// answer, so a backend that vended a remote for *any* `UUID` would shadow every sibling
     /// and make a real (or injected) peripheral unreachable.
     ///
@@ -462,4 +461,3 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
     }
 }
-#endif
