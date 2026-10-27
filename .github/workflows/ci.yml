@@ -91,9 +91,11 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      # One simulator per cell, never shared (#48). One runner serialises the cells today, but
-      # a second `bleswift` runner on the same Mac would run two at once, and two cells on one
-      # device would boot, install into and shut down the same UDID under each other.
+      # One simulator per cell and per runner, never shared (#48). Several `bleswift` runners
+      # share one Mac, so two cells — or the same cell for two pull requests — run at once, and
+      # two jobs on one device would boot, install into and shut down the same UDID under each
+      # other. The cell names the device; the "Resolve the CI simulator" step appends the
+      # runner's name.
       matrix:
         include:
           - { label: "newest runtime",                  sim: "BLESwift CI Test",          major: "",   compat16: "0" }
@@ -109,7 +111,7 @@ jobs:
         env:
           HOSTED: ${{ runner.environment == 'github-hosted' }}
         run: |
-          if SIM_UDID=$(Scripts/ci/ensure-ci-simulator.sh "${{ matrix.sim }}" "${{ matrix.major }}"); then
+          if SIM_UDID=$(Scripts/ci/ensure-ci-simulator.sh "${{ matrix.sim }} ($RUNNER_NAME)" "${{ matrix.major }}"); then
             echo "SIM_UDID=$SIM_UDID" >> "$GITHUB_ENV"
             xcrun simctl list devices -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(*[f\"Using {x['name']} ({r}) {x['udid']}\" for r in d for x in d[r] if x['udid']==sys.argv[1]])" "$SIM_UDID"
           elif [ "$HOSTED" = "true" ] && [ -n "${{ matrix.major }}" ]; then
