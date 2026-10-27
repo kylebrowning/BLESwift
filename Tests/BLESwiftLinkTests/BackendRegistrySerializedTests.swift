@@ -8,6 +8,7 @@ import BLESwiftCore
 import BLESwiftLink
 import BLESwiftSimulatorLink
 import BLESwiftTestSupport
+import BLESwiftVirtualRadio
 import Dispatch
 import Foundation
 import BLESwiftCompat17
@@ -331,5 +332,118 @@ struct BackendRegistrySerializedTests {
             #expect(ContinuousClock.now - start < .seconds(1))
         }
 #endif
+    }
+
+    /// `VirtualRadio.install(_:)` mutates the process-wide `BackendRegistry` too, so every test
+    /// here restores an uninstalled state afterwards — and runs serialized with its siblings,
+    /// by way of the parent above. Nothing here dials a socket, so unlike the loopback tests
+    /// above it runs on every platform.
+    @Suite("VirtualRadio.install(_:)")
+    struct VirtualRadioInstallTests {
+
+        private static let service = ServiceIdentifier(uuid: "180D")
+        private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
+
+        /// A device that answers no dynamic GATT traffic — its one characteristic carries a
+        /// static value, which the radio serves itself.
+        private struct StaticHandler: VirtualDeviceHandler {
+            func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
+                .failure(.unlikelyError)
+            }
+
+            func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> {
+                .failure(.unlikelyError)
+            }
+
+            func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {}
+        }
+
+        private static func device(name: String) -> VirtualDevice {
+            VirtualDevice(
+                descriptor: VirtualDeviceDescriptor(
+                    name: name,
+                    advertisement: AdvertisementData(localName: name, serviceUUIDs: [service], isConnectable: true),
+                    services: [
+                        GATTService(identifier: service, characteristics: [
+                            GATTCharacteristic(
+                                identifier: measurement,
+                                properties: [.read],
+                                permissions: [.readable],
+                                value: Data([0, 72])
+                            )
+                        ])
+                    ]
+                ),
+                handler: StaticHandler()
+            )
+        }
+
+        @Test("After install, Central() scans, connects to, and reads a device registered on the radio")
+        func centralUsesInstalledRadio() async throws {
+            let radio = VirtualRadio()
+            _ = await radio.register(Self.device(name: "Installed HRM"))
+            VirtualRadio.install(radio)
+            defer { VirtualRadio.uninstall() }
+            #expect(VirtualRadio.installed === radio)
+
+            let central = Central()
+            await waitFor { central.state == .poweredOn }
+            #expect(central.state == .poweredOn)
+
+            var found: Discovery?
+            for try await event in await central.scan(services: [Self.service], timeout: .seconds(5)) {
+                if case .discovered(let discovery) = event { found = discovery; break }
+            }
+            let discovery = try #require(found)
+            #expect(discovery.advertisement.localName == "Installed HRM")
+
+            let peripheral = try await central.connect(discovery.peripheral)
+            let value: Data = try await peripheral.read(from: Self.measurement)
+            #expect(value == Data([0, 72]))
+            try await central.disconnect(peripheral.id)
+        }
+
+        @Test("After install, PeripheralHost() publishes and advertises, and a central on the radio discovers it")
+        func hostUsesInstalledRadio() async throws {
+            let radio = VirtualRadio()
+            VirtualRadio.install(radio)
+            defer { VirtualRadio.uninstall() }
+
+            let host = PeripheralHost()
+            await waitFor { host.state == .poweredOn }
+            #expect(host.state == .poweredOn)
+            try await host.add(GATTService(identifier: Self.service, characteristics: [
+                GATTCharacteristic(identifier: Self.measurement, properties: [.read], permissions: [.readable])
+            ]))
+            try await host.startAdvertising(
+                PeripheralAdvertisement(localName: "Installed Host", serviceUUIDs: [Self.service])
+            )
+            #expect(host.isAdvertising)
+
+            let queue = DispatchQueue(label: "VirtualRadioInstallTests.central")
+            let central = Central(backend: VirtualCentralBackend(radio: radio, queue: queue), queue: queue)
+            await waitFor { central.state == .poweredOn }
+
+            var found: Discovery?
+            for try await event in await central.scan(services: [Self.service], timeout: .seconds(5)) {
+                if case .discovered(let discovery) = event { found = discovery; break }
+            }
+            #expect(found?.advertisement.localName == "Installed Host")
+        }
+
+        @Test("uninstall() clears both factories and installed, and is safe to call twice")
+        func uninstallClears() {
+            let radio = VirtualRadio()
+            VirtualRadio.install(radio)
+            #expect(VirtualRadio.installed === radio)
+            #expect(BackendRegistry.centralFactory != nil)
+            #expect(BackendRegistry.peripheralManagerFactory != nil)
+
+            VirtualRadio.uninstall()
+            VirtualRadio.uninstall()
+            #expect(VirtualRadio.installed == nil)
+            #expect(BackendRegistry.centralFactory == nil)
+            #expect(BackendRegistry.peripheralManagerFactory == nil)
+        }
     }
 }

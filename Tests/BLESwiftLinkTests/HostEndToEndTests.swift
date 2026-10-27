@@ -8,6 +8,7 @@ import BLESwift
 import BLESwiftCore
 import BLESwiftLink
 @testable import BLESwiftProvider
+@testable import BLESwiftVirtualRadio
 import BLESwiftSimulatorLink
 import Dispatch
 import Foundation

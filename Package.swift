@@ -22,6 +22,7 @@ let package = Package(
         .library(name: "BLESwiftTestSupport", targets: ["BLESwiftTestSupport"]),
         .library(name: "BLESwiftLink", targets: ["BLESwiftLink"]),
         .library(name: "BLESwiftSimulatorLink", targets: ["BLESwiftSimulatorLink"]),
+        .library(name: "BLESwiftVirtualRadio", targets: ["BLESwiftVirtualRadio"]),
         .library(name: "BLESwiftProvider", targets: ["BLESwiftProvider"]),
         .executable(name: "bleswift-provider", targets: ["bleswift-provider"]),
     ],
@@ -113,11 +114,23 @@ let package = Package(
             swiftSettings: sharedSwiftSettings
         ),
         .target(
+            name: "BLESwiftVirtualRadio",
+            dependencies: [
+                "BLESwiftCompat17",
+                "BLESwiftCore",
+                "BLESwiftLink",
+                .product(name: "Logging", package: "swift-log")
+            ],
+            resources: [.copy("BLESwiftVirtualRadio.docc")],
+            swiftSettings: sharedSwiftSettings
+        ),
+        .target(
             name: "BLESwiftProvider",
             dependencies: [
                 "BLESwiftCompat17",
                 "BLESwift",
                 "BLESwiftLink",
+                "BLESwiftVirtualRadio",
                 .product(name: "Logging", package: "swift-log")
             ],
             resources: [.copy("BLESwiftProvider.docc")],
@@ -137,7 +150,17 @@ let package = Package(
                 "BLESwiftTestSupport",
                 "BLESwiftLink",
                 "BLESwiftSimulatorLink",
+                "BLESwiftVirtualRadio",
                 "BLESwiftProvider"
+            ]
+        ),
+        .testTarget(
+            name: "BLESwiftVirtualRadioTests",
+            dependencies: [
+                "BLESwift",
+                "BLESwiftCore",
+                "BLESwiftTestSupport",
+                "BLESwiftVirtualRadio"
             ]
         )
     ]
