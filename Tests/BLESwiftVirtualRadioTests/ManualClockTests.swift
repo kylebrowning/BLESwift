@@ -175,4 +175,35 @@ struct ManualClockTests {
         try await second.value
         #expect(clock.sleeperCount == 0)
     }
+
+    @Test("A cancelled waitForWaiters returns once, and a later waiter does not resume it")
+    func cancelledWaitForWaitersReturns() async {
+        // Nothing reports a watcher as registered, so whether the cancel lands before the
+        // registration (its own `isCancelled` check) or after it (the remove-and-resume path)
+        // is the scheduler's choice. Both must return exactly once; repeating covers both.
+        for _ in 0..<200 {
+            await cancelledWaitForWaitersOnce()
+        }
+    }
+
+    private func cancelledWaitForWaitersOnce() async {
+        let clock = ManualClock()
+        // Watches for two waiters; only one will ever register before the cancel.
+        let watcher = Task { await clock.waitForWaiters(2) }
+        let waiter = Task { await clock.waitForSleepers(1) }
+        await clock.waitForWaiters(1)
+        watcher.cancel()
+        await watcher.value
+        // A second waiter now satisfies the cancelled watcher's count; it must not be resumed
+        // a second time (a double resume would trap).
+        let secondWaiter = Task { await clock.waitForSleepers(1) }
+        await clock.waitForWaiters(2)
+        let sleeper = Task { try await clock.sleep(for: .seconds(1)) }
+        await waiter.value
+        await secondWaiter.value
+        clock.advance(by: .seconds(1))
+        try? await sleeper.value
+        #expect(clock.waiterCount == 0)
+        #expect(clock.sleeperCount == 0)
+    }
 }

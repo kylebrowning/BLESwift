@@ -61,9 +61,12 @@ extension VirtualDeviceHandle {
     /// `ATTError.invalidHandle`, and a `setNotifyValue(true)` answers not-notifying. A
     /// `cancelPeripheralConnection` in that window removes nothing, so a `Central.disconnect()`
     /// still returns normally, but the `.disconnected` connection event it produces carries
-    /// the forced error (code 7 by default) instead of `nil`; a connect in it fails with
-    /// ``VirtualCentralBackend/connectWhileDisconnectingError`` (code 11). A handler that
-    /// returns promptly leaves no such window.
+    /// the forced error (code 7 by default) instead of `nil`, and a connect queued behind that
+    /// cancel fails with ``VirtualCentralBackend/connectWhileDisconnectingError`` (code 11).
+    /// A connect on the remote with no cancel in between is answered as one on a connected
+    /// remote — a re-delivered `didConnect` (and through `Central`, which still tracks the
+    /// connection, `BLESwiftError.duplicateConnect`) — and the forced `didDisconnect` then
+    /// settles it. A handler that returns promptly leaves no such window.
     ///
     /// A subscribe whose own handler report is still in flight when the drop lands can be
     /// overtaken by the drop's unsubscribe report: the radio records the subscription before

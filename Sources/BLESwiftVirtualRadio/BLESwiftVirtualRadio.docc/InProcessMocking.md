@@ -122,6 +122,9 @@ let descriptor = VirtualDeviceDescriptor(
 The failures a real peripheral produces and a handler cannot are armed through the device's
 ``VirtualDeviceHandle``. Each one goes with the registration: `remove()` and registering the
 identifier again starts clean, and a handle from an earlier registration is ignored.
+Registering an identifier that is still registered retires the old registration first —
+connected centrals are disconnected with code 2 and the old handler hears its unsubscribes;
+see ``VirtualRadio/register(_:advertising:)``.
 
 - ``VirtualDeviceHandle/failConnections(with:times:)`` fails the next `times` connection
   attempts (`nil` for every attempt until ``VirtualDeviceHandle/clearConnectionFailures()``)

@@ -51,8 +51,8 @@ public enum BackendRegistry {
 
     /// Replaces both factories at once, under one lock acquisition.
     ///
-    /// Set one property at a time, a `Central()` or `PeripheralHost()` built on another
-    /// thread between the two writes could get a backend from the new central factory next
+    /// Were the two properties set one at a time, a `Central()` or `PeripheralHost()` built on
+    /// another thread between the writes could get a backend from the new central factory next
     /// to the previous peripheral-manager one. An installer — `VirtualRadio.install(_:)`,
     /// `SimulatorLink.install(endpoint:clientName:codec:)` — sets or clears both through
     /// here, from inside its own state lock, so the registry and the installer's own record
