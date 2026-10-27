@@ -69,9 +69,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-registering an identifier that still had connections left them, and their
   subscriptions, attached to the new registration: the new handler inherited subscribers it
   was never told about, the old one never heard the unsubscribes, and the centrals stayed
-  connected without hearing a disconnect. The old registration is now retired as a removal
-  retires one — each connected central hears `didDisconnect` with `deviceRemovedError`, the
-  old handler hears each unsubscribe — while the identifier never leaves the radio. (#73)
+  connected without hearing a disconnect. The old registration is now retired the way a
+  removal retires one — the old handler hears each unsubscribe, then each connected central
+  hears `didDisconnect` with `deviceRemovedError` — while the identifier never leaves the
+  radio. `VirtualDeviceHandle.remove()` now uses that same order too: it used to deliver the
+  `didDisconnect`s before telling the handler about the dropped subscriptions, so with a
+  handler that awaits in `subscriptionChanged`, a central now hears the disconnect only once
+  the handler has returned. (#73)
 - `VirtualRadio.install(_:)` and `SimulatorLink.install` set the two registry factories and
   their own `installed` / `endpoint` under separate locks, so a `Central()` or
   `PeripheralHost()` built on another thread in between could get a mixed pair. Both now

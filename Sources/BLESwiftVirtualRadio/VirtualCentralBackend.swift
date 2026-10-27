@@ -591,7 +591,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             let removed = await radio.disconnect(session: sessionID, device: device)
             queue.async { [self] in
                 guard removed else { return }
-                remote.setConnectionState(.disconnected)
+                // `deliver(_:)` settles the remote `.disconnected`, as on every `didDisconnect`.
                 deliver(.didDisconnect(remote.peripheralIdentifier, error: nil))
             }
         }

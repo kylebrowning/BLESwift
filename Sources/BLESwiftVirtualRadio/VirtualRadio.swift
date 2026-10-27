@@ -270,7 +270,7 @@ public actor VirtualRadio {
     /// teardown here orders them, since a `Central` that heard the disconnect first would
     /// reconnect to the new registration and re-subscribe while the old unsubscribe was
     /// still in flight. The new handler hears nothing, since it never saw those subscribers
-    /// arrive. Left in place, the connections and subscriptions
+    /// arrive. Left in place, as they were before, the connections and subscriptions
     /// carried over to a registration whose handler had been told of neither: it inherited
     /// subscribers it never received `subscriptionChanged(isSubscribed: true)` for, the old
     /// handler never heard the matching unsubscribes, and the centrals stayed connected to a

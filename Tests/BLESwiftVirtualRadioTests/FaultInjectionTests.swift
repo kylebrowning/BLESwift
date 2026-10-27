@@ -327,9 +327,10 @@ struct FaultInjectionTests {
         await stale.setATTError(.insufficientEncryption, for: RecordingDevice.measurement)
         #expect(try await peripheral.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
 
-        // The disconnect, had it landed, would have had the radio refuse this read with
-        // `invalidHandle` (which the `Central` reports as `notConnected`); the radio serves it
-        // from the same actor turn the stale call was refused on.
+        // The disconnect, had it landed, would have reached the `Central` before this read,
+        // which would then throw `notConnected` without asking the radio (a read that did reach
+        // the radio would be refused with `ATTError.invalidHandle`, surfaced as a
+        // `CBATTErrorDomain` code 1 error).
         await stale.disconnect()
         #expect(try await peripheral.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
         #expect(await RecordingDevice.isConnected(central, id))
