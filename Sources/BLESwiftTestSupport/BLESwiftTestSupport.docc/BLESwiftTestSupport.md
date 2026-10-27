@@ -34,3 +34,7 @@ carries no CoreBluetooth-backed code into your test target at all.
 - ``FakeL2CAPChannel``
 - ``FakeGATTBridge``
 - ``FakeStartupBackgroundTask``
+
+### Clocks
+
+- ``ManualClock``

@@ -163,12 +163,20 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// not run yet would re-register the session behind the first detach — and is free when
     /// the session is already gone, since `detach` is idempotent.
     ///
-    /// Reading `_work` off-queue is safe here: `deinit` runs only once every reference is
-    /// gone, and every queued delivery holds one.
+    /// Every remote's delayed connect attempt is cancelled too, on ``queue``: the attempt
+    /// has not reached the radio, so the detach drops nothing for it, and left running its
+    /// sleep would hold the remote for the rest of a delay that no backend will ever answer.
+    ///
+    /// Reading `_work` and `_remotes` off-queue is safe here: `deinit` runs only once every
+    /// reference is gone, and every queued delivery holds one.
     deinit {
         let radio = self.radio
         let session = sessionID
         let work = _work
+        let remotes = Array(_remotes.values)
+        queue.async {
+            for remote in remotes { remote.cancelPendingConnect() }
+        }
         Task {
             await radio.detach(session: session)
             await work?.value
@@ -363,6 +371,18 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// `Central` only ever connects a `.disconnected` remote — it reserves its slot only once
     /// the previous connection's termination event has arrived — so the three other cases
     /// matter only to a consumer driving the backend directly.
+    ///
+    /// **A device with a connect delay** (``VirtualLatency/connect``) sleeps it out *before*
+    /// the attempt is enqueued, on a task the remote holds as its `pendingConnect`, never in
+    /// the serial chain: a ``cancelPeripheralConnection(_:)`` queued behind a delayed attempt
+    /// would otherwise wait out the whole delay and then see a spurious `didConnect`. Once
+    /// the sleep ends the task hops onto ``queue`` and, only if the attempt is still the
+    /// current one, the remote is still `.connecting`, and nothing has cancelled it in
+    /// between, enqueues the very same connect body an undelayed attempt takes at once —
+    /// with every one of its guards. The radio sees nothing of the attempt until then: an
+    /// armed connection failure is consumed when the attempt lands, after the delay, and a
+    /// forced disconnect during the delay finds no connection and does nothing. A device
+    /// without a delay takes the undelayed path unchanged.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         // **A remote the cap evicted is re-filed rather than refused.** The table is bounded,
@@ -404,7 +424,43 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             break
         }
         remote.setConnectionState(.connecting)
+        // Nothing should be pending on a `.disconnected` remote — every path that settles one
+        // clears it. A stale task's hop would be refused by the token anyway; the cancel is
+        // for its sleeper, which would otherwise sit on the clock — counted by a
+        // `ManualClock` — until a deadline nobody is waiting on.
+        remote.cancelPendingConnect()
         let attempt = remote.beginConnectAttempt()
+        let device = remote.identifier
+        // Read synchronously, on this queue, from the mirror the radio keeps for exactly this
+        // decision: whether the attempt sleeps first cannot wait on an actor hop.
+        let delay = radio.connectLatencies.withLock { $0[device] ?? .zero }
+        guard delay > .zero else {
+            enqueueConnect(of: remote, attempt: attempt)
+            return
+        }
+        remote.pendingConnect = Task { [weak self, clock = radio.clock, queue] in
+            // A cancelled sleep — the attempt was withdrawn, or the backend went away — ends
+            // the attempt here; the cancel has already settled the remote and said so.
+            do { try await clock.sleep(for: delay) } catch { return }
+            guard let self else { return }
+            queue.async {
+                // This attempt's task is cleared on every exit, so a hop that applies nothing
+                // never leaves a stale task behind for a later cancel to find; a newer
+                // attempt's task is not this hop's to clear.
+                let wasPending = remote.pendingConnect != nil && remote.connectAttempt == attempt
+                if wasPending { remote.pendingConnect = nil }
+                guard wasPending, remote.connectionState == .connecting else { return }
+                self.enqueueConnect(of: remote, attempt: attempt)
+            }
+        }
+    }
+
+    /// Appends `remote`'s connect attempt `attempt` to the serial chain — the body of
+    /// ``connect(_:options:requiresANCS:)`` for a `.disconnected` remote, taken at once by an
+    /// undelayed attempt and once its delay has run out by a delayed one. Must be called on
+    /// ``queue``.
+    private func enqueueConnect(of remote: VirtualPeripheralRemote, attempt: UInt64) {
+        dispatchPrecondition(condition: .onQueue(queue))
         let device = remote.identifier
         enqueue { [radio, sessionID, queue] in
             // Connect-and-name in one actor hop: a second hop for the name could observe a
@@ -497,10 +553,37 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// the radio's `didConnect` left the remote connected. A cancel racing an armed
     /// connection failure is the same shape — the failed connect settled the remote and sent
     /// `didFailToConnect`, and nothing may follow it.
+    ///
+    /// **A cancel that catches an attempt still sleeping out its connect delay never reaches
+    /// the radio.** The attempt has not either, so the radio holds nothing for it: a
+    /// `radio.disconnect` would remove nothing and, per the rule above, deliver nothing, and
+    /// the caller would wait on a `didDisconnect` that never came. Instead the sleep is
+    /// cancelled, the attempt's token invalidated (the one bump a non-connect makes — see
+    /// `VirtualPeripheralRemote.invalidateConnectAttempt()`), and the remote takes the same
+    /// shape as behind an undelayed cancel: `.disconnecting` now, `.disconnected` and
+    /// `didDisconnect(nil)` on the hop. Settled `.disconnected` here instead, a `connect`
+    /// issued in the same turn started a new delayed attempt that the hop's `deliver` then
+    /// marked `.disconnected` from under — its own hop found it no longer `.connecting`, and
+    /// the caller waited on an answer that never came. Through `.disconnecting`, that
+    /// `connect` fails with ``connectWhileDisconnectingError``, exactly as it does behind an
+    /// undelayed cancel, and nothing can bump the token or change the state before the hop
+    /// lands, so the hop needs no guard of its own.
     public func cancelPeripheralConnection(_ peripheral: any PeripheralRemote) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let remote = peripheral as? VirtualPeripheralRemote, remote === _remotes[remote.identifier] else { return }
         guard remote.connectionState != .disconnected else { return }
+        if remote.pendingConnect != nil {
+            remote.cancelPendingConnect()
+            remote.invalidateConnectAttempt()
+            remote.setConnectionState(.disconnecting)
+            queue.async { [self] in
+                // Unguarded by design: while `.disconnecting`, no connect takes a token and no
+                // path changes the state, so this hop is the only one that can settle it.
+                remote.setConnectionState(.disconnected)
+                deliver(.didDisconnect(remote.peripheralIdentifier, error: nil))
+            }
+            return
+        }
         remote.setConnectionState(.disconnecting)
         let device = remote.identifier
         enqueue { [radio, sessionID, queue] in

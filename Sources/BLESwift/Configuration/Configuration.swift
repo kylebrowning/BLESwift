@@ -43,6 +43,16 @@ public struct Configuration: Sendable {
     var peripheralRestoration: PeripheralRestorationConfiguration?
     #endif
 
+    /// The clock every timer in `Central` sleeps on: `connect(timeout:)` and the other
+    /// operation timeouts, the scan timeout and loss timer, and the reconnect backoff.
+    /// Defaults to `ContinuousClock()`.
+    ///
+    /// It exists for tests. A timeout measured in tens of seconds cannot be exercised on
+    /// wall time, and shortening it changes the thing under test; a test hands in a clock it
+    /// drives by hand — `BLESwiftTestSupport`'s `ManualClock` — and advances it to the
+    /// deadline, or just short of it, deterministically. Production code leaves it alone.
+    public var clock: any Clock<Duration>
+
     #if os(iOS)
     /// Creates a `Configuration`.
     ///
@@ -53,26 +63,30 @@ public struct Configuration: Sendable {
         warningOptions: WarningOptions = .default,
         logger: Logger = Logger(label: "BLESwift"),
         restoration: RestorationConfiguration? = nil,
-        peripheralRestoration: PeripheralRestorationConfiguration? = nil
+        peripheralRestoration: PeripheralRestorationConfiguration? = nil,
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.showPowerAlert = showPowerAlert
         self.warningOptions = warningOptions
         self.logger = logger
         self.restoration = restoration
         self.peripheralRestoration = peripheralRestoration
+        self.clock = clock
     }
     #else
     /// Creates a `Configuration`.
     public init(
         showPowerAlert: Bool = false,
         warningOptions: WarningOptions = .default,
-        logger: Logger = Logger(label: "BLESwift")
+        logger: Logger = Logger(label: "BLESwift"),
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.showPowerAlert = showPowerAlert
         self.warningOptions = warningOptions
         self.logger = logger
         self.restoration = nil
         self.peripheralRestoration = nil
+        self.clock = clock
     }
     #endif
 }
