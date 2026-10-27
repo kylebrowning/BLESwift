@@ -3,9 +3,9 @@
 //  BLESwift
 //
 
-/// Races `operation` against a `duration`-long timer, task-group style (no stdlib timeout
-/// API exists in Swift 6.2). `nil` duration disables the timeout entirely. If the timer
-/// wins, `operation`'s task is cooperatively cancelled and `error()` is thrown.
+/// Races `operation` against a `duration`-long timer on `clock`, task-group style (no stdlib
+/// timeout API exists in Swift 6.2). `nil` duration disables the timeout entirely. If the
+/// timer wins, `operation`'s task is cooperatively cancelled and `error()` is thrown.
 ///
 /// Cancelling `operation`'s task does **not** by itself force it to return — Swift task
 /// cancellation is cooperative. An `operation` built around a `CheckedContinuation` must
@@ -18,6 +18,7 @@
 /// `withThrowingTaskGroup`'s scope.
 ///
 /// - Parameters:
+///   - clock: The clock the timer sleeps on — `Configuration.clock`, so a test can drive it.
 ///   - duration: How long to wait for `operation` before timing out. `nil` disables the
 ///     timeout entirely.
 ///   - error: Lazily evaluated; thrown if the timer wins the race.
@@ -25,6 +26,7 @@
 /// - Returns: `operation`'s result, if it wins the race.
 /// - Throws: `error()` if the timer wins the race; otherwise whatever `operation` throws.
 func withTimeout<T: Sendable>(
+    clock: any Clock<Duration>,
     _ duration: Duration?,
     throwing error: @autoclosure @escaping @Sendable () -> Error,
     operation: @Sendable @escaping () async throws -> T
@@ -38,7 +40,7 @@ func withTimeout<T: Sendable>(
             try await operation()
         }
         group.addTask {
-            try await Task.sleep(for: duration)
+            try await clock.sleep(for: duration)
             throw error()
         }
 

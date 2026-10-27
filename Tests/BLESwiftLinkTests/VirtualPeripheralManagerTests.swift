@@ -163,7 +163,8 @@ struct VirtualPeripheralManagerTests {
             radio: radio,
             queue: hostQueue,
             identifier: identifier,
-            attTimeout: .milliseconds(200)
+            attTimeout: .milliseconds(200),
+            clock: radio.clock
         )
         let host = PeripheralHost(backend: backend, queue: hostQueue)
         try await host.add(Self.service)
@@ -213,7 +214,8 @@ struct VirtualPeripheralManagerTests {
             radio: radio,
             queue: hostQueue,
             identifier: identifier,
-            attTimeout: .seconds(10)
+            attTimeout: .seconds(10),
+            clock: radio.clock
         )
         let host = PeripheralHost(backend: backend, queue: hostQueue)
         try await host.add(Self.service)

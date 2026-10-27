@@ -150,6 +150,64 @@ await handle.setATTError(.insufficientEncryption, for: measurement, operations: 
 await handle.disconnect()
 ```
 
+### Testing timeouts deterministically
+
+The radio answers at once unless a device says otherwise. Give one a ``VirtualLatency`` —
+through ``VirtualDeviceDescriptor/latency`` at registration, or
+``VirtualDeviceHandle/setLatency(_:)`` afterwards — and its connects, discoveries, reads,
+writes with response, and subscribes take that long to answer. A write without response
+has no answer to delay, and the handler still decides when a notification goes out.
+
+Delays sleep on the radio's ``VirtualRadio/clock``, and `Central`'s own timers sleep on
+`Configuration.clock`. Both default to wall time. Hand the same `ManualClock` from
+`BLESwiftTestSupport` to both, and a timeout measured in tens of seconds is crossed — or
+missed by a millisecond — by advancing the clock. With `heartRate`, `measurement`, and
+`HeartRateHandler` from the first snippet on this page:
+
+```swift
+import BLESwift
+import BLESwiftTestSupport
+import BLESwiftVirtualRadio
+import Foundation
+import Testing
+
+let clock = ManualClock()
+let radio = VirtualRadio(clock: clock)
+let slowDevice = VirtualDeviceDescriptor(
+    name: "Slow HRM",
+    advertisement: AdvertisementData(localName: "Slow HRM", serviceUUIDs: [heartRate], isConnectable: true),
+    services: [GATTService(identifier: heartRate, characteristics: [
+        GATTCharacteristic(identifier: measurement, properties: [.read, .notify], permissions: [.readable])
+    ])],
+    latency: VirtualLatency(connect: .seconds(60))
+)
+await radio.register(VirtualDevice(descriptor: slowDevice, handler: HeartRateHandler()))
+
+let queue = DispatchQueue(label: "MyTests.central")
+let central = Central(
+    backend: VirtualCentralBackend(radio: radio, queue: queue),
+    queue: queue,
+    configuration: Configuration(clock: clock)
+)
+
+let id = PeripheralIdentifier(uuid: slowDevice.identifier, name: nil)
+let attempt = Task { try await central.connect(id, timeout: .seconds(30)) }
+await clock.waitForSleepers(2)       // the device's delay and the Central's timeout are both parked
+clock.advance(by: .seconds(30))      // the timeout fires; the delayed attempt is withdrawn
+await #expect(throws: BLESwiftError.connectionTimedOut) { try await attempt.value }
+```
+
+`waitForSleepers(_:)` is what makes this deterministic: `advance(by:)` resumes only sleepers
+already suspended, so wait for the code under test to reach its sleep before moving the
+clock, then await the outcome. A cancel during a delayed connect — a `connect(timeout:)`
+firing, or a `disconnect` — withdraws the attempt before the radio ever sees it, so
+nothing connects later; a connection failure armed with
+``VirtualDeviceHandle/failConnections(with:times:)`` is consumed when the attempt lands,
+after the delay, and ``VirtualDeviceHandle/disconnect(_:error:)`` during the delay finds
+no connection and does nothing. A delayed read, write, or subscribe sees the device as it
+is once the delay has run out: disconnected from it in the meantime, the request fails as
+one arriving then would.
+
 ### Limits
 
 The radio is a harness, not a simulation of the air:

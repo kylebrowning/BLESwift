@@ -44,6 +44,13 @@ either by installing it once at launch with ``VirtualRadio/install(_:)`` or by h
 - ``VirtualGATTOperations``
 - ``VirtualRadio/peripheralDisconnectedError``
 
+### Delays on a clock
+
+- ``VirtualRadio/clock``
+- ``VirtualLatency``
+- ``VirtualDeviceDescriptor/latency``
+- ``VirtualDeviceHandle/setLatency(_:)``
+
 ### Backends
 
 - ``VirtualCentralBackend``

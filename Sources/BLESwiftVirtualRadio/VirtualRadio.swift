@@ -184,12 +184,34 @@ public actor VirtualRadio {
     /// registration is visible to every backend the instant it has happened.
     package nonisolated let knownDeviceIDs = Mutex<Set<UUID>>([])
 
+    /// Each registered device's connect delay, readable without awaiting the actor — only
+    /// devices with a non-zero ``VirtualLatency/connect`` have an entry.
+    ///
+    /// ``VirtualCentralBackend/connect(_:options:requiresANCS:)`` has to decide
+    /// **synchronously, on its own queue**, whether an attempt sleeps before it reaches the
+    /// radio: a delayed attempt must not sit in the backend's serial chain, where a cancel
+    /// queued behind it would wait out the delay and then see a spurious `didConnect`. Like
+    /// ``knownDeviceIDs``, this is written inside ``register(_:advertising:)``,
+    /// ``setLatency(_:device:generation:)``, and the removal path before any of them returns.
+    package nonisolated let connectLatencies = Mutex<[UUID: Duration]>([:])
+
+    /// The clock every delay on this radio sleeps on: a device's ``VirtualLatency``, the
+    /// duplicate-sighting repeater, and a hosted `PeripheralHost`'s ATT timeout. Wall time
+    /// unless ``init(clock:)`` was given another.
+    public nonisolated let clock: any Clock<Duration>
+
     /// Notification subscriptions, keyed by device, then characteristic, to the set of
     /// session identifiers currently subscribed.
     private var subscriptions: [UUID: [CharacteristicIdentifier: Set<UUID>]] = [:]
 
     /// Creates an empty radio.
-    public init() {}
+    ///
+    /// - Parameter clock: The clock every delay on this radio sleeps on. Defaults to
+    ///   `ContinuousClock()`; a test hands in `BLESwiftTestSupport`'s `ManualClock` and
+    ///   advances it to drive a device's ``VirtualLatency`` to its deadline.
+    public init(clock: any Clock<Duration> = ContinuousClock()) {
+        self.clock = clock
+    }
 
     // MARK: - Devices
 
@@ -219,6 +241,7 @@ public actor VirtualRadio {
         knownDeviceIDs.withLock { (known: inout Set<UUID>) -> Void in
             known.insert(identifier)
         }
+        recordConnectLatency(device.descriptor.latency.connect, of: identifier)
         if advertising {
             reportSightings(of: identifier)
         }
@@ -292,6 +315,41 @@ public actor VirtualRadio {
         }
     }
 
+    /// Replaces a registered device's latency. See ``VirtualDeviceHandle/setLatency(_:)``.
+    ///
+    /// The connect delay is mirrored into ``connectLatencies`` before this returns, so a
+    /// backend deciding on its own queue sees the new value the moment the handle's call has
+    /// landed.
+    func setLatency(_ latency: VirtualLatency, device: UUID, generation: UInt64) {
+        guard isCurrent(device, generation: generation, operation: "setLatency") else { return }
+        devices[device]?.descriptor.latency = latency
+        recordConnectLatency(latency.connect, of: device)
+    }
+
+    /// Mirrors `delay` into ``connectLatencies`` — an entry for a non-zero delay, none for
+    /// zero, so a device whose delay was cleared, or re-registered without one, leaves no
+    /// entry behind for a backend to sleep on.
+    private nonisolated func recordConnectLatency(_ delay: Duration, of device: UUID) {
+        connectLatencies.withLock { (latencies: inout [UUID: Duration]) -> Void in
+            if delay > .zero {
+                latencies[device] = delay
+            } else {
+                latencies.removeValue(forKey: device)
+            }
+        }
+    }
+
+    /// The delay a device's ``VirtualLatency`` sets for one kind of request, as of now, or
+    /// `nil` when there is none to wait out — the device is gone, or the delay is zero.
+    ///
+    /// The zero check is what keeps an undelayed operation on its old path exactly: a
+    /// `sleep(for: .zero)` would still suspend and, on a `ManualClock`, register a sleeper
+    /// for a test to wait on, so nothing is ever slept for `.zero`.
+    private func latency(for operation: KeyPath<VirtualLatency, Duration>, on device: UUID) -> Duration? {
+        guard let delay = devices[device]?.descriptor.latency[keyPath: operation], delay > .zero else { return nil }
+        return delay
+    }
+
     /// Replaces a registered device's GATT database. See
     /// ``VirtualDeviceHandle/setServices(_:)``.
     ///
@@ -346,6 +404,7 @@ public actor VirtualRadio {
         knownDeviceIDs.withLock { (known: inout Set<UUID>) -> Void in
             known.remove(device)
         }
+        recordConnectLatency(.zero, of: device)
         let identifier = PeripheralIdentifier(uuid: device, name: state.descriptor.name)
         for sessionID in Array(sessions.keys) {
             // Dropped for every session, connected or not: the sink routes events *from* this
@@ -440,9 +499,9 @@ public actor VirtualRadio {
         sessions[session]?.scanner = Scanner(services: services, repeater: nil)
         emitSightings(for: session)
         guard allowDuplicates else { return }
-        let repeater = Task { [weak self] in
+        let repeater = Task { [weak self, clock] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: Self.duplicateInterval)
+                try? await clock.sleep(for: Self.duplicateInterval)
                 guard !Task.isCancelled else { return }
                 await self?.emitSightings(for: session)
             }
@@ -658,8 +717,21 @@ public actor VirtualRadio {
 
     // MARK: - GATT
 
-    /// The services of `device` matching `filter` (every service when `filter` is `nil`).
-    func services(of device: UUID, matching filter: [ServiceIdentifier]?) -> [ServiceIdentifier] {
+    /// The services of `device` matching `filter` (every service when `filter` is `nil`),
+    /// after the device's ``VirtualLatency/discovery`` delay.
+    ///
+    /// **The delay comes before every guard**, here and in each GATT entry point below, so
+    /// every check sees the state the device is in once the delay has run out: a device
+    /// removed, re-registered, or disconnected from during the delay answers as it would
+    /// to a request that arrived then. The remote queues its GATT requests behind each other
+    /// on one chain, so a delayed one holds up those behind it, as ATT's one transaction at a
+    /// time does on hardware — with one difference: a delay already started outlives a
+    /// disconnect. Hardware aborts the transaction when the link drops; here the request
+    /// sleeps out its full delay, is refused at the gate, and holds the chain — and a
+    /// reconnect's first operation behind it — for the remainder. A `ManualClock` still
+    /// counts that sleeper. See ``VirtualLatency``.
+    func services(of device: UUID, matching filter: [ServiceIdentifier]?) async -> [ServiceIdentifier] {
+        if let delay = latency(for: \.discovery, on: device) { try? await clock.sleep(for: delay) }
         guard let state = devices[device] else { return [] }
         let identifiers = state.descriptor.services.map(\.identifier)
         guard let filter else { return identifiers }
@@ -668,12 +740,14 @@ public actor VirtualRadio {
     }
 
     /// The characteristics of `service` on `device` matching `filter`, paired with the
-    /// properties each advertises.
+    /// properties each advertises — after the device's ``VirtualLatency/discovery`` delay,
+    /// as ``services(of:matching:)``.
     func characteristics(
         of device: UUID,
         service: ServiceIdentifier,
         matching filter: [CharacteristicIdentifier]?
-    ) -> [CharacteristicDiscovery] {
+    ) async -> [CharacteristicDiscovery] {
+        if let delay = latency(for: \.discovery, on: device) { try? await clock.sleep(for: delay) }
         guard let state = devices[device],
               let match = state.descriptor.services.first(where: { $0.identifier == service })
         else { return [] }
@@ -713,12 +787,16 @@ public actor VirtualRadio {
     /// the static short-circuit, and the handler: it simulates the peripheral's ATT answer for
     /// a valid handle, so a static-value characteristic fails under it too. See
     /// ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
+    ///
+    /// The device's ``VirtualLatency/read`` delay comes before all of it, as
+    /// ``services(of:matching:)`` explains.
     func read(
         device: UUID,
         characteristic: CharacteristicIdentifier,
         offset: Int = 0,
         session: UUID
     ) async -> Result<Data, ATTError> {
+        if let delay = latency(for: \.read, on: device) { try? await clock.sleep(for: delay) }
         guard isConnected(session: session, to: device) else { return .failure(.invalidHandle) }
         guard let state = devices[device] else { return .failure(.invalidHandle) }
         guard let definition = definition(of: characteristic, in: state) else { return .failure(.attributeNotFound) }
@@ -758,6 +836,10 @@ public actor VirtualRadio {
     /// reached its `didReceiveWrite` and was served. Real hardware refuses that write at the
     /// ATT layer, before any of it reaches the peripheral's application code, and so does this
     /// radio, whatever the device behind the handle is.
+    ///
+    /// The device's ``VirtualLatency/write`` delay comes before all of it for a
+    /// `.withResponse` write, as ``services(of:matching:)`` explains; a `.withoutResponse`
+    /// write has no answer to delay and is never slept for.
     func write(
         device: UUID,
         characteristic: CharacteristicIdentifier,
@@ -765,6 +847,7 @@ public actor VirtualRadio {
         type: WriteType = .withResponse,
         session: UUID
     ) async -> Result<Void, ATTError> {
+        if type == .withResponse, let delay = latency(for: \.write, on: device) { try? await clock.sleep(for: delay) }
         guard isConnected(session: session, to: device) else { return .failure(.invalidHandle) }
         guard let state = devices[device] else { return .failure(.invalidHandle) }
         guard let definition = definition(of: characteristic, in: state) else { return .failure(.attributeNotFound) }
@@ -827,6 +910,9 @@ public actor VirtualRadio {
     /// was and the handler hears nothing, since no transition happened. See
     /// ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
     ///
+    /// The device's ``VirtualLatency/subscribe`` delay comes before all of it, enabling and
+    /// disabling alike, as ``services(of:matching:)`` explains.
+    ///
     /// - Returns: Whether `session` is subscribed to `characteristic` now the call has been
     ///   applied — `enabled` for a connected session, and the unchanged current state for one
     ///   that is not or for a request the checks above refused — together with the `ATTError`
@@ -838,6 +924,7 @@ public actor VirtualRadio {
         characteristic: CharacteristicIdentifier,
         session: UUID
     ) async -> (isNotifying: Bool, error: ATTError?) {
+        if let delay = latency(for: \.subscribe, on: device) { try? await clock.sleep(for: delay) }
         let unchanged = subscriptions[device]?[characteristic]?.contains(session) == true
         guard let state = devices[device], isConnected(session: session, to: device) else {
             return (unchanged, nil)

@@ -41,6 +41,12 @@ public struct VirtualDeviceDescriptor: Sendable {
     /// the MTU.
     public var maximumWriteWithoutResponseLength: Int
 
+    /// How long this device takes to answer each kind of request, on its radio's
+    /// ``VirtualRadio/clock``. Defaults to ``VirtualLatency/none``, which leaves every
+    /// answer as immediate as it always was. Change it after registration with
+    /// ``VirtualDeviceHandle/setLatency(_:)``.
+    public var latency: VirtualLatency
+
     /// Creates a descriptor.
     ///
     /// - Parameters:
@@ -50,18 +56,22 @@ public struct VirtualDeviceDescriptor: Sendable {
     ///   - services: The GATT services to host. Defaults to none.
     ///   - maximumWriteWithoutResponseLength: The one-packet length ceiling this device
     ///     reports and enforces. Defaults to ``VirtualRadio/maximumWriteWithoutResponseLength``.
+    ///   - latency: How long each kind of request takes to answer. Defaults to
+    ///     ``VirtualLatency/none``.
     public init(
         identifier: UUID = UUID(),
         name: String? = nil,
         advertisement: AdvertisementData,
         services: [GATTService] = [],
-        maximumWriteWithoutResponseLength: Int = VirtualRadio.maximumWriteWithoutResponseLength
+        maximumWriteWithoutResponseLength: Int = VirtualRadio.maximumWriteWithoutResponseLength,
+        latency: VirtualLatency = .none
     ) {
         self.identifier = identifier
         self.name = name
         self.advertisement = advertisement
         self.services = services
         self.maximumWriteWithoutResponseLength = maximumWriteWithoutResponseLength
+        self.latency = latency
     }
 }
 
@@ -209,6 +219,15 @@ public final class VirtualDeviceHandle: Sendable {
     /// - Parameter services: The device's new services.
     public func setServices(_ services: [GATTService]) async {
         await radio?.setServices(services, device: identifier, generation: generation)
+    }
+
+    /// Replaces how long the device takes to answer each kind of request. Takes effect for
+    /// every operation that starts from now on; one already delayed keeps the delay it
+    /// started with.
+    ///
+    /// - Parameter latency: The device's new latency.
+    public func setLatency(_ latency: VirtualLatency) async {
+        await radio?.setLatency(latency, device: identifier, generation: generation)
     }
 
     /// Removes the device from the radio. Every central currently connected to it is

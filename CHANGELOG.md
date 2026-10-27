@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `setATTError(_:for:operations:)` with `VirtualGATTOperations` to answer reads, writes
   with response, and subscribes with a chosen `ATTError`; plus
   `VirtualRadio.peripheralDisconnectedError` (`CBErrorDomain` code 7). (#67)
+- `Configuration.clock`, the `Clock<Duration>` every `Central` timer sleeps on — operation
+  and connect timeouts, the scan timeout and loss timer, the reconnect backoff — defaulting
+  to `ContinuousClock()`; and `ManualClock` in `BLESwiftTestSupport`, a clock a test advances
+  by hand. (#68)
+- Per-device delays on the virtual radio: `VirtualRadio(clock:)`, `VirtualLatency` (connect,
+  discovery, read, write, subscribe), `VirtualDeviceDescriptor.latency`, and
+  `VirtualDeviceHandle.setLatency(_:)`. Delays default to zero, so existing behavior is
+  unchanged; on a `ManualClock` a 60-second connect delay against a 30-second
+  `connect(timeout:)` is driven to its deadline without waiting. (#68)
 
 ### Changed
 
