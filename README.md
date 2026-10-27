@@ -197,6 +197,25 @@ your Mac's real radio, and needs a Bluetooth-entitled, signed provider build. Se
 [Running in the iOS Simulator](Sources/BLESwift/BLESwift.docc/SimulatorSupport.md) DocC article
 for fixtures, code-defined virtual devices, and the documented divergences from CoreBluetooth.
 
+### Mocking Bluetooth in-process
+
+`BLESwiftVirtualRadio` is the same virtual radio, without the provider: it runs inside your app
+or test process on every platform, so a `Central` can scan, connect to, and read devices you
+register in code, on device or in the simulator, with no TCP and no second process.
+
+```swift
+import BLESwiftVirtualRadio
+
+let radio = VirtualRadio()
+// ... register VirtualDevices on `radio` ...
+VirtualRadio.install(radio)   // before your first Central() / PeripheralHost()
+```
+
+In unit tests, skip the registry: `Central(backend: VirtualCentralBackend(radio: radio, queue: queue), queue: queue)`.
+See the "Mocking Bluetooth in-process" article in the
+[BLESwiftVirtualRadio](Sources/BLESwiftVirtualRadio/BLESwiftVirtualRadio.docc/BLESwiftVirtualRadio.md)
+documentation.
+
 ## Platform support
 
 | Platform  | Minimum version |
@@ -255,8 +274,11 @@ Each module ships a DocC catalog. Hosted on the Swift Package Index:
 - [BLESwiftSimulatorLink](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswiftsimulatorlink) —
   `SimulatorLink.install()` and the simulator-side link backends
   ([in repo](Sources/BLESwiftSimulatorLink/BLESwiftSimulatorLink.docc/BLESwiftSimulatorLink.md))
+- [BLESwiftVirtualRadio](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswiftvirtualradio) —
+  the in-process virtual radio, `VirtualRadio.install(_:)`, and code-defined virtual devices
+  ([in repo](Sources/BLESwiftVirtualRadio/BLESwiftVirtualRadio.docc/BLESwiftVirtualRadio.md))
 - [BLESwiftProvider](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswiftprovider) —
-  the host-side provider, the virtual radio, and code-defined virtual devices
+  the host-side provider, which serves the virtual radio and the Mac's real one over the link
   ([in repo](Sources/BLESwiftProvider/BLESwiftProvider.docc/BLESwiftProvider.md))
 - [BLESwiftLink](https://swiftpackageindex.com/kylebrowning/BLESwift/documentation/bleswiftlink) —
   the wire protocol and the fixture format the two halves share

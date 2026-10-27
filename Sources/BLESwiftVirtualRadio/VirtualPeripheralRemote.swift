@@ -1,9 +1,8 @@
 //
 //  VirtualPeripheralRemote.swift
-//  BLESwiftProvider
+//  BLESwiftVirtualRadio
 //
 
-#if os(macOS)
 import BLESwiftCore
 import BLESwiftLink
 import Dispatch
@@ -44,6 +43,102 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     /// answered — the transmit queue a real `CBPeripheral` reports back-pressure from.
     nonisolated(unsafe) private var _inFlightWrites = 0
 
+    /// The one-packet length the device negotiated at the last connect, which
+    /// ``maximumWriteValueLength(for:)`` reports for `.withoutResponse`. The default stands
+    /// in until a connection has answered with the device's own. The last answer is kept
+    /// across a disconnect by choice: the value describes the device, not the link, so code
+    /// that sizes its chunks before reconnecting sees the device it is about to talk to
+    /// rather than a default that is wrong for it.
+    nonisolated(unsafe) private var _maximumWriteWithoutResponseLength = VirtualRadio.maximumWriteWithoutResponseLength
+
+    /// Which connect attempt is current, so the hop that answers an attempt can tell it is
+    /// still answering for the right one.
+    ///
+    /// A connect's radio call and the hop that applies its answer are two steps with a gap
+    /// between them, and a forced disconnect can land in that gap: it settles this remote
+    /// `.disconnected`, the consumer — a `Central`'s auto-reconnect, or the provider's
+    /// `CentralSession` re-sending a link client's connect — connects again at once, and
+    /// the first attempt's hop then finds the remote `.connecting` for the *second* attempt
+    /// and would mark it `.connected`, with the first attempt's name and length, while the
+    /// radio holds nothing. Every attempt takes a fresh token (``beginConnectAttempt()``)
+    /// and its hop applies nothing unless the token is still current. A cancel does not
+    /// take one: a cancel queued behind a connect still gets that connect's `didConnect`,
+    /// then its own `didDisconnect`. The one exception is a cancel that catches an attempt
+    /// still sleeping out its device's connect delay — see ``invalidateConnectAttempt()``.
+    nonisolated(unsafe) private var _connectAttempt: UInt64 = 0
+
+    /// The task sleeping out the device's ``VirtualLatency/connect`` delay for the current
+    /// attempt, or `nil` when no attempt is delayed — the attempt has reached the radio, was
+    /// cancelled, or had no delay to begin with.
+    ///
+    /// Held here, not in the backend's serial chain: a cancel queued behind a delayed
+    /// attempt would otherwise wait out the whole delay and then watch a `didConnect` it
+    /// had asked to prevent. Only the attempt's own hop, and
+    /// ``VirtualCentralBackend/cancelPeripheralConnection(_:)``, clear it.
+    nonisolated(unsafe) private var _pendingConnect: Task<Void, Never>?
+
+    /// The current connect attempt's token. Must be called on ``queue``.
+    var connectAttempt: UInt64 {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _connectAttempt
+    }
+
+    /// Starts a new connect attempt and returns its token, invalidating every earlier
+    /// attempt's hop. Must be called on ``queue``.
+    func beginConnectAttempt() -> UInt64 {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _connectAttempt += 1
+        return _connectAttempt
+    }
+
+    /// Invalidates the current connect attempt without starting another: the hop of an
+    /// attempt in flight will find its token stale and apply nothing. Must be called on
+    /// ``queue``.
+    ///
+    /// **The only place a non-connect bumps the token.** A cancel ordinarily leaves it
+    /// alone, so a cancel queued behind a connect still gets that connect's `didConnect`
+    /// before its own `didDisconnect`. A cancel that catches an attempt still sleeping out
+    /// its connect delay is different: the attempt never reached the radio, the cancel
+    /// settles the remote `.disconnected` itself, and an attempt whose sleep had already
+    /// ended — its hop queued behind this cancel — must then not enqueue a connect the
+    /// caller just withdrew.
+    func invalidateConnectAttempt() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _connectAttempt += 1
+    }
+
+    /// The task sleeping out the current attempt's connect delay, if any. Setting it replaces
+    /// the previous one without cancelling it; ``cancelPendingConnect()`` cancels. Must be
+    /// called on ``queue``.
+    var pendingConnect: Task<Void, Never>? {
+        get {
+            dispatchPrecondition(condition: .onQueue(queue))
+            return _pendingConnect
+        }
+        set {
+            dispatchPrecondition(condition: .onQueue(queue))
+            _pendingConnect = newValue
+        }
+    }
+
+    /// Whether a connect attempt is still sleeping out its delay. Must be called on ``queue``.
+    ///
+    /// Not API: it exists so a test can assert that a cancel, or an attempt's own hop, left
+    /// no delayed attempt behind.
+    package var hasPendingConnect: Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _pendingConnect != nil
+    }
+
+    /// Cancels the task sleeping out the current attempt's connect delay and clears it, so
+    /// the attempt never reaches the radio. A no-op when nothing is pending. Must be called
+    /// on ``queue``.
+    func cancelPendingConnect() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _pendingConnect?.cancel()
+        _pendingConnect = nil
+    }
+
     /// The serial chain of radio work this remote has queued. Swift guarantees no ordering
     /// between independent `Task`s, so two back-to-back writes — or a `setNotifyValue(true)`
     /// and the write that triggers the notification it arms — could otherwise reach the actor
@@ -69,6 +164,14 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     func updateName(_ name: String?) {
         guard let name else { return }
         nameBox.withLock { $0 = name }
+    }
+
+    /// Records the one-packet length the device answered a connect with. Called by
+    /// ``VirtualCentralBackend`` before it marks the remote `.connected`, so the value is in
+    /// place by the time `didConnect` is delivered. Must be called on ``queue``.
+    func updateMaximumWriteWithoutResponseLength(_ length: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _maximumWriteWithoutResponseLength = length
     }
 
     /// Whether `candidate` is the session identifier of the backend that vended this remote.
@@ -104,6 +207,20 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
             await previous?.value
             await body()
         }
+    }
+
+    /// Suspends until every piece of radio work this remote has queued so far has run — the
+    /// chain's tail at the moment this reads it, on ``queue``. Deliveries the chain hopped
+    /// onto the queue are not awaited; a caller that needs them flushed runs an empty block
+    /// on the queue after this returns. Mirrors ``VirtualCentralBackend/waitForPendingWork()``.
+    ///
+    /// Not API: a test hook, for asserting on what a delayed GATT request left behind once
+    /// its delay has run out and the radio has answered it.
+    package func waitForPendingWork() async {
+        let work = await withCheckedContinuation { (continuation: CheckedContinuation<Task<Void, Never>?, Never>) in
+            queue.async { continuation.resume(returning: self._work) }
+        }
+        await work?.value
     }
 
     /// Records a connection-state transition. Must be called on ``queue``.
@@ -422,14 +539,15 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
     }
 
     /// The length ceiling for `type`: ``VirtualRadio/maximumValueLength`` for a
-    /// `.withResponse` write, which ATT long writes really do reach, and
-    /// ``VirtualRadio/maximumWriteWithoutResponseLength`` for a `.withoutResponse` write,
-    /// which is one ATT packet on hardware. The radio enforces both.
+    /// `.withResponse` write, which ATT long writes really do reach, and the device's
+    /// ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength`` — learned at connect,
+    /// ``VirtualRadio/maximumWriteWithoutResponseLength`` before the first — for a
+    /// `.withoutResponse` write, which is one ATT packet on hardware. The radio enforces both.
     public func maximumWriteValueLength(for type: WriteType) -> Int {
         dispatchPrecondition(condition: .onQueue(queue))
         switch type {
         case .withResponse: return VirtualRadio.maximumValueLength
-        case .withoutResponse: return VirtualRadio.maximumWriteWithoutResponseLength
+        case .withoutResponse: return _maximumWriteWithoutResponseLength
         }
     }
 
@@ -502,4 +620,3 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         )
     }
 }
-#endif

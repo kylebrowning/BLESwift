@@ -1,9 +1,8 @@
 //
 //  VirtualPeripheralManagerBackend.swift
-//  BLESwiftProvider
+//  BLESwiftVirtualRadio
 //
 
-#if os(macOS)
 import BLESwiftCore
 import Dispatch
 import Foundation
@@ -15,7 +14,7 @@ import BLESwiftCompat17
 /// Detaching a backend's event handler is reversible — the composites document a `nil`
 /// handler as a detach every child is re-installed from — so the teardown that really is
 /// final asks for the removal outright, through whichever backend a session was given.
-protocol HostedDeviceRemoving {
+package protocol HostedDeviceRemoving {
 
     /// Takes the hosted device off the radio. Must be called on the backend's own queue.
     func removeHostedDevice()
@@ -109,12 +108,12 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
     ///   - name: The device name centrals see on discovery and connection. Defaults to
     ///     `nil`; ``startAdvertising(_:)`` supplies the advertised local name separately.
     public convenience init(radio: VirtualRadio, queue: DispatchQueue, identifier: UUID = UUID(), name: String? = nil) {
-        self.init(radio: radio, queue: queue, identifier: identifier, name: name, attTimeout: VirtualRadio.attTimeout)
+        self.init(radio: radio, queue: queue, identifier: identifier, name: name, attTimeout: VirtualRadio.attTimeout, clock: radio.clock)
     }
 
-    /// Creates a backend whose parked requests time out after `attTimeout` — the designated
-    /// initializer, for tests that cannot wait ``VirtualRadio/attTimeout`` for a host that
-    /// never answers.
+    /// Creates a backend whose parked requests time out after `attTimeout` on `clock` — the
+    /// designated initializer, for tests that cannot wait ``VirtualRadio/attTimeout`` for a
+    /// host that never answers.
     ///
     /// - Parameters:
     ///   - radio: The radio to host this peripheral on.
@@ -123,17 +122,19 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
     ///   - name: The device name centrals see on discovery and connection.
     ///   - attTimeout: How long a request parked for the host waits for its answer before it
     ///     is refused with ``BLESwiftCore/ATTError/unlikelyError``.
+    ///   - clock: The clock that wait runs on. The public initializer passes the radio's.
     package init(
         radio: VirtualRadio,
         queue: DispatchQueue,
         identifier: UUID = UUID(),
         name: String? = nil,
-        attTimeout: Duration
+        attTimeout: Duration,
+        clock: any Clock<Duration>
     ) {
         self.radio = radio
         self.queue = queue
         self.identifier = identifier
-        self.handler = VirtualHostedDeviceHandler(attTimeout: attTimeout)
+        self.handler = VirtualHostedDeviceHandler(attTimeout: attTimeout, clock: clock)
 
         let device = VirtualDevice(
             descriptor: VirtualDeviceDescriptor(
@@ -231,7 +232,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
     /// Setting it back to `nil` *detaches* and nothing more: the hosted device stays on the
     /// radio, and a request arriving with nobody listening is refused rather than parked.
     /// Re-attaching re-installs a working backend — which is what
-    /// ``CompositePeripheralManager/eventHandler`` documents for every child it clears and
+    /// `BLESwiftProvider`'s `CompositePeripheralManager.eventHandler` documents for every child it clears and
     /// re-installs, and what a detach through it could not have honored while this one was
     /// terminal. Removing the device is `removeHostedDevice()`'s job, and `deinit`'s.
     public var eventHandler: ((PeripheralHostEvent) -> Void)? {
@@ -256,7 +257,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
     ///
     /// The explicit teardown a session ending calls; `deinit` does the same work on its own
     /// for a backend that is simply dropped. Must be called on ``queue``.
-    func removeHostedDevice() {
+    package func removeHostedDevice() {
         dispatchPrecondition(condition: .onQueue(queue))
         removeDevice()
     }
@@ -433,16 +434,23 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
     /// How long a parked request waits for the host's answer before it is refused.
     private let attTimeout: Duration
 
+    /// The clock that wait runs on — the radio's, so a test driving a `ManualClock` can run
+    /// the ATT timeout out like any other delay.
+    private let clock: any Clock<Duration>
+
     /// The countdown running against each parked request, cancelled the moment that request
     /// is settled by any other route.
     private var timeouts: [RequestToken: Task<Void, Never>] = [:]
 
     /// Creates a handler whose parked requests time out after `attTimeout`.
     ///
-    /// - Parameter attTimeout: The ATT transaction timeout. Defaults to
-    ///   ``VirtualRadio/attTimeout``; tests shorten it.
-    init(attTimeout: Duration = VirtualRadio.attTimeout) {
+    /// - Parameters:
+    ///   - attTimeout: The ATT transaction timeout. Defaults to ``VirtualRadio/attTimeout``;
+    ///     tests shorten it.
+    ///   - clock: The clock the timeout sleeps on — the radio's.
+    init(attTimeout: Duration = VirtualRadio.attTimeout, clock: any Clock<Duration>) {
         self.attTimeout = attTimeout
+        self.clock = clock
     }
 
     /// Attaches the event sink, before the device is registered.
@@ -511,8 +519,8 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
     /// answers refuses it after ``attTimeout`` rather than leaving its caller — and every
     /// operation queued behind it on that remote — suspended forever.
     private func startTimeout(for token: RequestToken) {
-        timeouts[token] = Task { [attTimeout] in
-            try? await Task.sleep(for: attTimeout)
+        timeouts[token] = Task { [attTimeout, clock] in
+            try? await clock.sleep(for: attTimeout)
             guard !Task.isCancelled else { return }
             fail(token)
         }
@@ -542,4 +550,3 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
             : .didUnsubscribe(central: central, characteristic: characteristic))
     }
 }
-#endif

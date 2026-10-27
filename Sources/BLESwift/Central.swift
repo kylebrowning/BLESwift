@@ -876,7 +876,7 @@ public actor Central {
     // MARK: - Connect internals
 
     /// Resolves once `id` is connected, or throws. Wraps ``awaitConnect(id:policy:timeout:warningOptions:)``
-    /// in ``withTimeout(_:throwing:operation:)``, which still awaits the real two-phase-cancel
+    /// in ``withTimeout(clock:_:throwing:operation:)``, which still awaits the real two-phase-cancel
     /// confirmation before returning rather than abandoning the underlying attempt.
     ///
     /// Takes only `identifier`, not the resolved peripheral — `any PeripheralRemote` isn't
@@ -889,7 +889,7 @@ public actor Central {
         timeout: Duration?,
         warningOptions: WarningOptions
     ) async throws -> Peripheral {
-        try await withTimeout(timeout, throwing: BLESwiftError.connectionTimedOut) {
+        try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.connectionTimedOut) {
             try await self.awaitConnect(id: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions)
         }
     }
@@ -1435,7 +1435,7 @@ public actor Central {
             }
 
             do {
-                try await Task.sleep(for: delay)
+                try await configuration.clock.sleep(for: delay)
             } catch {
                 // Cancelled mid-backoff: the canceller (disconnect/connect/disconnectAll/
                 // cancelAllOperations) usually finished the dormant record already with its
@@ -1980,7 +1980,7 @@ public actor Central {
     /// Wraps the discovery-then-read sequence in `timeout` (``BLESwiftError/timedOut``) and
     /// serializes it against other operations on the same characteristic.
     func performRead(peripheral identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, timeout: Duration?) async throws -> Data {
-        try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+        try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
             try await self.runOnFIFO(identifier: identifier, characteristic: characteristic) {
                 try await self.performReadNow(identifier: identifier, characteristic: characteristic)
             }
@@ -2063,7 +2063,7 @@ public actor Central {
         type: WriteType,
         timeout: Duration?
     ) async throws {
-        try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+        try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
             try await self.runOnFIFO(identifier: identifier, characteristic: characteristic) {
                 try await self.performWriteNow(identifier: identifier, characteristic: characteristic, data: data, type: type)
             }
@@ -2099,7 +2099,7 @@ public actor Central {
                 // A cancel between chunks stops the sequence; because we hold the FIFO lane,
                 // no further chunk is sent. A partially-sent payload is the caller's problem.
                 if Task.isCancelled { throw BLESwiftError.operationCancelled }
-                try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+                try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
                     try await self.performWriteNow(
                         identifier: identifier,
                         characteristic: characteristic,
@@ -2204,7 +2204,7 @@ public actor Central {
     /// `Peripheral.readDescriptor(_:timeout:)`. Serializes on the *parent characteristic's*
     /// FIFO lane so a descriptor op never races a characteristic op on the same characteristic.
     func performReadDescriptor(peripheral identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier, timeout: Duration?) async throws -> Data {
-        try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+        try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
             try await self.runOnFIFO(identifier: identifier, characteristic: descriptor.characteristic) {
                 try await self.performReadDescriptorNow(identifier: identifier, descriptor: descriptor)
             }
@@ -2245,7 +2245,7 @@ public actor Central {
     /// `Peripheral.writeDescriptor(_:value:timeout:)`. Always with-response — CoreBluetooth
     /// exposes no write-type parameter for a `CBDescriptor`.
     func performWriteDescriptor(peripheral identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier, data: Data, timeout: Duration?) async throws {
-        try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+        try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
             try await self.runOnFIFO(identifier: identifier, characteristic: descriptor.characteristic) {
                 try await self.performWriteDescriptorNow(identifier: identifier, descriptor: descriptor, data: data)
             }
@@ -2286,7 +2286,7 @@ public actor Central {
     /// RSSI has no owning characteristic, so it serializes via its own single tail rather
     /// than the per-characteristic FIFO map.
     func performReadRSSI(peripheral identifier: PeripheralIdentifier, timeout: Duration?) async throws -> Int {
-        try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+        try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
             try await self.runRSSISerialized(identifier: identifier) {
                 try await self.performReadRSSINow(identifier: identifier)
             }
@@ -3350,7 +3350,7 @@ public actor Central {
         data: Data,
         timeout: Duration?
     ) async throws -> Data {
-        try await withTimeout(timeout, throwing: BLESwiftError.listenTimedOut) {
+        try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.listenTimedOut) {
             try await self.writeAndAwaitNotificationNow(
                 identifier: identifier,
                 writeCharacteristic: writeCharacteristic,
@@ -3397,7 +3397,7 @@ public actor Central {
         expectedLength: Int,
         timeout: Duration?
     ) async throws -> Data {
-        try await withTimeout(timeout, throwing: BLESwiftError.listenTimedOut) {
+        try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.listenTimedOut) {
             try await self.writeAndAssembleNow(
                 identifier: identifier,
                 writeCharacteristic: writeCharacteristic,
@@ -3466,7 +3466,7 @@ public actor Central {
         while true {
             let packet: Data?
             do {
-                packet = try await withTimeout(quietPeriod, throwing: BLESwiftError.timedOut) {
+                packet = try await withTimeout(clock: configuration.clock, quietPeriod, throwing: BLESwiftError.timedOut) {
                     try await iterator.next()
                 }
             } catch BLESwiftError.timedOut {
@@ -3527,7 +3527,7 @@ public actor Central {
         psm: L2CAPPSM,
         timeout: Duration?
     ) async throws -> L2CAPChannel {
-        try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+        try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
             let transport = try await self.awaitL2CAPOpen(identifier: identifier, psm: psm)
             return try await self.registerL2CAPChannel(identifier: identifier, transport: transport)
         }
@@ -3837,8 +3837,8 @@ public actor Central {
         #endif
 
         if let timeout {
-            scan.timeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: timeout)
+            scan.timeoutTask = Task { [weak self, clock = configuration.clock] in
+                try? await clock.sleep(for: timeout)
                 guard !Task.isCancelled else { return }
                 await self?.timeoutActiveScan()
             }
@@ -3906,8 +3906,8 @@ public actor Central {
         scan.lossTimers[peripheral.uuid]?.cancel()
 
         let lossTimeout = scan.lossTimeout
-        scan.lossTimers[peripheral.uuid] = Task { [weak self] in
-            try? await Task.sleep(for: lossTimeout)
+        scan.lossTimers[peripheral.uuid] = Task { [weak self, clock = configuration.clock] in
+            try? await clock.sleep(for: lossTimeout)
             guard !Task.isCancelled else { return }
             await self?.handleLoss(of: peripheral)
         }
@@ -3996,7 +3996,7 @@ public actor Central {
         let ourScan = activeScan !== previous ? activeScan : nil
 
         do {
-            let discovery = try await withTimeout(timeout, throwing: BLESwiftError.timedOut) {
+            let discovery = try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
                 for try await event in stream {
                     if case .discovered(let discovery) = event {
                         return discovery

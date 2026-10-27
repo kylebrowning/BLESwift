@@ -9,6 +9,11 @@ radio (passthrough), from an in-process virtual radio hosting fixture or code-de
 devices, or both. The `bleswift-provider` executable is a thin command-line front end over
 ``Provider``; depend on this library directly to host virtual devices written in Swift.
 
+The virtual radio itself (`VirtualRadio`, `VirtualDevice`, `VirtualCentralBackend`, and the
+rest) lives in the `BLESwiftVirtualRadio` module, which this one re-exports so existing
+`import BLESwiftProvider` code keeps compiling. That module is built for every platform and
+documents mocking Bluetooth in-process.
+
 ## Topics
 
 ### Hosting
@@ -17,20 +22,8 @@ devices, or both. The `bleswift-provider` executable is a thin command-line fron
 - ``ProviderConfiguration``
 - ``ProviderCommandLine``
 
-### The virtual radio
-
-- ``VirtualRadio``
-- ``VirtualDevice``
-- ``VirtualDeviceDescriptor``
-- ``VirtualDeviceHandler``
-- ``VirtualDeviceHandle``
-- ``FixtureDeviceHandler``
-
 ### Backends
 
-- ``VirtualCentralBackend``
-- ``VirtualPeripheralRemote``
-- ``VirtualPeripheralManagerBackend``
 - ``CompositeCentral``
 - ``CompositePeripheralManager``
 - ``CoreBluetoothBackends``
