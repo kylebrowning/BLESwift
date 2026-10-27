@@ -25,6 +25,11 @@ extension VirtualDeviceHandle {
     /// A failed attempt never reaches the device's handler: a peripheral that refuses the
     /// link never learns who asked.
     ///
+    /// **Attempts are counted per device, across every central on the radio**, not per
+    /// central: with two backends connecting to the same device, whichever connects first
+    /// uses up the count, and the other succeeds. ``disconnect(_:error:)`` below is the one
+    /// that targets individual centrals.
+    ///
     /// - Parameters:
     ///   - error: The error each failed attempt is reported with.
     ///   - times: How many attempts to fail, or `nil` for every attempt. Defaults to `1`.
@@ -53,8 +58,19 @@ extension VirtualDeviceHandle {
     /// handler has been told about every dropped subscription. While a handler is slow to
     /// return from those unsubscribes, the central has no connection on the radio but has not
     /// heard so yet: a read or write it sends in that window fails with
-    /// `ATTError.invalidHandle`, and a `setNotifyValue(true)` answers not-notifying. A handler
-    /// that returns promptly leaves no such window.
+    /// `ATTError.invalidHandle`, and a `setNotifyValue(true)` answers not-notifying. A
+    /// `cancelPeripheralConnection` in that window removes nothing, so a `Central.disconnect()`
+    /// still returns normally, but the `.disconnected` connection event it produces carries
+    /// the forced error (code 7 by default) instead of `nil`; a connect in it fails with
+    /// ``VirtualCentralBackend/connectWhileDisconnectingError`` (code 11). A handler that
+    /// returns promptly leaves no such window.
+    ///
+    /// A subscribe whose own handler report is still in flight when the drop lands can be
+    /// overtaken by the drop's unsubscribe report: the radio records the subscription before
+    /// awaiting `subscriptionChanged(isSubscribed: true)`, and the unsubscribe is reported
+    /// concurrently, so a handler that awaits inside that report may finish the unsubscribe
+    /// before the subscribe. The shipped handlers do not await inside it, so they never see
+    /// the two out of order.
     ///
     /// - Parameters:
     ///   - centrals: The centrals to disconnect, as the handler sees them; `nil` for all.
@@ -160,8 +176,8 @@ extension VirtualRadio {
     /// `Central` with a reconnect policy and a surviving notification stream reconnect and
     /// re-subscribe while the handler was still being told about the old subscription: the
     /// handler finished the unsubscribe *after* the re-subscribe, and a hosted
-    /// `PeripheralHost` took a live subscriber for one that had left. `remove` keeps its
-    /// order, since the device is gone there and nothing can reconnect to it.
+    /// `PeripheralHost` took a live subscriber for one that had left. A removal and a
+    /// re-registration keep the same order, through ``VirtualRadio/report(_:)``.
     func disconnect(centrals: [UUID]?, error: NSError, device: UUID, generation: UInt64) async {
         guard isCurrent(device, generation: generation, operation: "disconnect") else { return }
         guard let state = devices[device] else { return }

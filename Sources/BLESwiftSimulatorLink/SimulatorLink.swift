@@ -52,29 +52,43 @@ public enum SimulatorLink {
     ///
     /// Idempotent: calling this again — with the same or different parameters — simply
     /// replaces the registered factories and the resolved ``endpoint``.
+    ///
+    /// The registry and ``endpoint`` change together: both factories go in through
+    /// `BackendRegistry.setFactories(central:peripheralManager:)`, one lock acquisition,
+    /// from inside this type's own state lock — so no `Central()`, `PeripheralHost()`, or
+    /// ``isInstalled`` read on another thread can see a link-backed central next to the
+    /// previous peripheral factory, or a registry already routing over the link while
+    /// ``endpoint`` still says `nil`. The lock order is this state, then the registry's; the
+    /// registry never takes this lock.
     public static func install(
         endpoint: LinkEndpoint? = nil,
         clientName: String = ProcessInfo.processInfo.processName,
         codec: LinkCodec = .binaryPropertyList
     ) {
         let resolvedEndpoint = endpoint ?? LinkEndpoint.fromEnvironment() ?? .default
-        BackendRegistry.centralFactory = { queue in
-            LinkCentral(endpoint: resolvedEndpoint, queue: queue, clientName: clientName, codec: codec)
+        state.withLock { state in
+            BackendRegistry.setFactories(
+                central: { queue in
+                    LinkCentral(endpoint: resolvedEndpoint, queue: queue, clientName: clientName, codec: codec)
+                },
+                peripheralManager: { queue in
+                    LinkPeripheralManager(endpoint: resolvedEndpoint, queue: queue, clientName: clientName, codec: codec)
+                }
+            )
+            state.endpoint = resolvedEndpoint
         }
-        BackendRegistry.peripheralManagerFactory = { queue in
-            LinkPeripheralManager(endpoint: resolvedEndpoint, queue: queue, clientName: clientName, codec: codec)
-        }
-        state.withLock { $0.endpoint = resolvedEndpoint }
     }
 
     /// Reverts `Central()` / `PeripheralHost()` to their default `CoreBluetooth` backend.
     ///
-    /// Clears both `BackendRegistry` factories and ``endpoint``. Idempotent; safe to call
-    /// even when nothing is installed.
+    /// Clears both `BackendRegistry` factories and ``endpoint``, under the same lock
+    /// ``install(endpoint:clientName:codec:)`` sets them. Idempotent; safe to call even when
+    /// nothing is installed.
     public static func uninstall() {
-        BackendRegistry.centralFactory = nil
-        BackendRegistry.peripheralManagerFactory = nil
-        state.withLock { $0.endpoint = nil }
+        state.withLock { state in
+            BackendRegistry.setFactories(central: nil, peripheralManager: nil)
+            state.endpoint = nil
+        }
     }
 
     /// Whether ``install(endpoint:clientName:codec:)`` has registered the link backends.

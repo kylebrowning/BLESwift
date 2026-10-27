@@ -74,6 +74,32 @@ struct BackendRegistrySerializedTests {
             #expect(host.state == .poweredOff)
         }
 
+        @Test("setFactories replaces both factories in one call, each independently (#70)")
+        func setFactoriesReplacesBoth() {
+            defer { BackendRegistry.setFactories(central: nil, peripheralManager: nil) }
+            let queue = DispatchQueue(label: "BackendRegistryTests.setFactories")
+
+            BackendRegistry.setFactories(
+                central: { queue in FakeCentral(queue: queue) },
+                peripheralManager: { queue in FakePeripheralManager(queue: queue) }
+            )
+            #expect(BackendRegistry.centralFactory?(queue) is FakeCentral)
+            #expect(BackendRegistry.peripheralManagerFactory?(queue) is FakePeripheralManager)
+
+            // Each slot takes exactly what the call names: `nil` clears, a factory replaces.
+            BackendRegistry.setFactories(central: nil, peripheralManager: { queue in FakePeripheralManager(queue: queue) })
+            #expect(BackendRegistry.centralFactory == nil)
+            #expect(BackendRegistry.peripheralManagerFactory != nil)
+
+            BackendRegistry.setFactories(central: { queue in FakeCentral(queue: queue) }, peripheralManager: nil)
+            #expect(BackendRegistry.centralFactory != nil)
+            #expect(BackendRegistry.peripheralManagerFactory == nil)
+
+            BackendRegistry.setFactories(central: nil, peripheralManager: nil)
+            #expect(BackendRegistry.centralFactory == nil)
+            #expect(BackendRegistry.peripheralManagerFactory == nil)
+        }
+
         @Test("Clearing the registry returns nil factories")
         func clearing() {
             BackendRegistry.centralFactory = { queue in FakeCentral(queue: queue) }
@@ -429,6 +455,33 @@ struct BackendRegistrySerializedTests {
                 if case .discovered(let discovery) = event { found = discovery; break }
             }
             #expect(found?.advertisement.localName == "Installed Host")
+        }
+
+        @Test("install/uninstall leave the registry and installed agreeing (#70)")
+        func installIsConsistent() {
+            let radio = VirtualRadio()
+            VirtualRadio.install(radio)
+            defer { VirtualRadio.uninstall() }
+
+            // Every read made after the install agrees: the radio is installed, and each
+            // factory builds a backend of the radio's own kind.
+            let queue = DispatchQueue(label: "VirtualRadioInstallTests.consistent")
+            #expect(VirtualRadio.installed === radio)
+            #expect(BackendRegistry.centralFactory?(queue) is VirtualCentralBackend)
+            #expect(BackendRegistry.peripheralManagerFactory?(queue) is VirtualPeripheralManagerBackend)
+
+            // A second install replaces both slots and `installed` with the new radio.
+            let replacement = VirtualRadio()
+            VirtualRadio.install(replacement)
+            #expect(VirtualRadio.installed === replacement)
+            #expect(BackendRegistry.centralFactory?(queue) is VirtualCentralBackend)
+            #expect(BackendRegistry.peripheralManagerFactory?(queue) is VirtualPeripheralManagerBackend)
+
+            // And an uninstall clears all three in the same step.
+            VirtualRadio.uninstall()
+            #expect(VirtualRadio.installed == nil)
+            #expect(BackendRegistry.centralFactory == nil)
+            #expect(BackendRegistry.peripheralManagerFactory == nil)
         }
 
         @Test("uninstall() clears both factories and installed, and is safe to call twice")

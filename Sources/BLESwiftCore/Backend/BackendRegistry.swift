@@ -48,4 +48,27 @@ public enum BackendRegistry {
         get { box.withLock { $0.peripheralManager } }
         set { box.withLock { $0.peripheralManager = newValue } }
     }
+
+    /// Replaces both factories at once, under one lock acquisition.
+    ///
+    /// Set one property at a time, a `Central()` or `PeripheralHost()` built on another
+    /// thread between the two writes could get a backend from the new central factory next
+    /// to the previous peripheral-manager one. An installer — `VirtualRadio.install(_:)`,
+    /// `SimulatorLink.install(endpoint:clientName:codec:)` — sets or clears both through
+    /// here, from inside its own state lock, so the registry and the installer's own record
+    /// of what it did change together. The lock order is always installer state, then this
+    /// registry's; the registry never takes an installer's lock, and calls nothing while it
+    /// holds its own.
+    ///
+    /// - Parameters:
+    ///   - central: The factory `Central(configuration:)` consults from now on, or `nil` for
+    ///     CoreBluetooth.
+    ///   - peripheralManager: The factory `PeripheralHost(configuration:)` consults from now
+    ///     on, or `nil` for CoreBluetooth.
+    public static func setFactories(central: CentralFactory?, peripheralManager: PeripheralManagerFactory?) {
+        box.withLock {
+            $0.central = central
+            $0.peripheralManager = peripheralManager
+        }
+    }
 }

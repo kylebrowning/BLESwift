@@ -1,4 +1,4 @@
 version: 1
 builder:
   configs:
-    - documentation_targets: [BLESwift, BLESwiftCore, BLESwiftProfiles, BLESwiftTestSupport]
+    - documentation_targets: [BLESwift, BLESwiftCore, BLESwiftProfiles, BLESwiftTestSupport, BLESwiftLink, BLESwiftSimulatorLink, BLESwiftProvider, BLESwiftVirtualRadio]

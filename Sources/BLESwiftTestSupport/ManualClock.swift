@@ -66,8 +66,9 @@ public final class ManualClock: Clock, Sendable {
         let continuation: CheckedContinuation<Void, any Error>
     }
 
-    /// One ``waitForSleepers(_:)`` call, parked until ``State/sleepers`` reaches `count`,
-    /// keyed so a cancellation can find exactly it.
+    /// One ``waitForSleepers(_:)`` call, parked until ``State/sleepers`` reaches `count` —
+    /// or one ``waitForWaiters(_:)`` call, parked until ``State/waiters`` does — keyed so a
+    /// cancellation can find exactly it.
     private struct Waiter {
         let id: UInt64
         let count: Int
@@ -80,6 +81,9 @@ public final class ManualClock: Clock, Sendable {
         var nextWaiterID: UInt64 = 0
         var sleepers: [Sleeper] = []
         var waiters: [Waiter] = []
+        /// ``waitForWaiters(_:)`` calls, parked until ``waiters`` reaches their count — the
+        /// same shape one level up, keyed from the same counter as ``waiters``.
+        var waiterWatchers: [Waiter] = []
     }
 
     private let state = Mutex<State>(State())
@@ -100,35 +104,47 @@ public final class ManualClock: Clock, Sendable {
         state.withLock { $0.sleepers.count }
     }
 
+    /// How many ``waitForSleepers(_:)`` calls are currently suspended on this clock.
+    ///
+    /// Not API: it exists so a test of the clock itself can tell a waiter that is registered
+    /// from one that returned, or was cancelled, before it could be.
+    package var waiterCount: Int {
+        state.withLock { $0.waiters.count }
+    }
+
     /// Suspends until `deadline` is reached by ``advance(by:)``, or the task is cancelled.
     ///
-    /// Returns at once for a deadline already reached, and throws `CancellationError` at once
-    /// for a task already cancelled, registering no sleeper either way. Otherwise the sleeper
-    /// is registered and resumed exactly once: by the ``advance(by:)`` that reaches its
-    /// deadline, or — throwing `CancellationError` — by the cancellation that removes it. The
-    /// lock is what decides which, so a cancel and an advance racing for the same sleeper
-    /// cannot both resume it.
+    /// **Cancellation wins.** A task already cancelled throws `CancellationError` at once,
+    /// before the deadline is looked at, as `ContinuousClock` does — so a sleep for a zero
+    /// delay on a cancelled task throws here exactly as it does on wall time, and a test on
+    /// this clock can exercise that cancellation path. A deadline already reached then
+    /// returns at once; neither case registers a sleeper. Otherwise the sleeper is registered
+    /// and resumed exactly once: by the ``advance(by:)`` that reaches its deadline, or —
+    /// throwing `CancellationError` — by the cancellation that removes it. The lock is what
+    /// decides which, so a cancel and an advance racing for the same sleeper cannot both
+    /// resume it.
     ///
     /// - Parameters:
     ///   - deadline: The instant to sleep until.
     ///   - tolerance: Ignored; a manual clock has no scheduling slack.
     public func sleep(until deadline: Instant, tolerance: Duration?) async throws {
-        guard deadline > now else { return }
         try Task.checkCancellation()
+        guard deadline > now else { return }
         let id = state.withLock { (state: inout State) -> UInt64 in
             state.nextSleeperID += 1
             return state.nextSleeperID
         }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-                // Decided under the lock: whether the deadline has been reached since the check
-                // above, whether the task was cancelled before the sleeper could be registered
-                // — the handler below has then already run and found nothing to remove — and,
+                // Decided under the lock: whether the task was cancelled before the sleeper
+                // could be registered — the handler below has then already run and found
+                // nothing to remove — checked first, so cancellation wins here as it does
+                // above; whether the deadline has been reached since the check above; and,
                 // once registered, which waiters the new count satisfies.
                 enum Outcome { case registered([Waiter]), elapsed, cancelled }
                 let outcome = state.withLock { (state: inout State) -> Outcome in
-                    if deadline <= state.now { return .elapsed }
                     if Task.isCancelled { return .cancelled }
+                    if deadline <= state.now { return .elapsed }
                     state.sleepers.append(Sleeper(id: id, deadline: deadline, continuation: continuation))
                     let count = state.sleepers.count
                     let satisfied = state.waiters.filter { $0.count <= count }
@@ -192,18 +208,62 @@ public final class ManualClock: Clock, Sendable {
         await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 // Decided under the lock, as a sleeper's registration is: already satisfied,
-                // cancelled before the waiter could be registered, or registered.
-                let ready = state.withLock { (state: inout State) -> Bool in
-                    if state.sleepers.count >= count || Task.isCancelled { return true }
+                // cancelled before the waiter could be registered, or registered — and, once
+                // registered, which ``waitForWaiters(_:)`` calls the new count satisfies.
+                enum Outcome { case ready, registered([Waiter]) }
+                let outcome = state.withLock { (state: inout State) -> Outcome in
+                    if state.sleepers.count >= count || Task.isCancelled { return .ready }
                     state.waiters.append(Waiter(id: id, count: count, continuation: continuation))
+                    let registered = state.waiters.count
+                    let satisfied = state.waiterWatchers.filter { $0.count <= registered }
+                    state.waiterWatchers.removeAll { $0.count <= registered }
+                    return .registered(satisfied)
+                }
+                switch outcome {
+                case .ready:
+                    continuation.resume()
+                case .registered(let satisfied):
+                    for watcher in satisfied { watcher.continuation.resume() }
+                }
+            }
+        } onCancel: {
+            let cancelled = state.withLock { (state: inout State) -> Waiter? in
+                guard let index = state.waiters.firstIndex(where: { $0.id == id }) else { return nil }
+                return state.waiters.remove(at: index)
+            }
+            cancelled?.continuation.resume()
+        }
+    }
+
+    /// Suspends until at least `count` ``waitForSleepers(_:)`` calls are suspended on this
+    /// clock — ``waitForSleepers(_:)`` one level up, woken by a waiter's registration rather
+    /// than a sleeper's, never by polling.
+    ///
+    /// Not API: it exists so a test of the clock itself can cancel a waiter only once it is
+    /// really registered, and so exercise the cancellation path that removes and resumes a
+    /// registered waiter rather than the check that answers a task cancelled before
+    /// registration. Cancelling the watching task returns early (it does not throw), exactly
+    /// once, under the same lock discipline as the waiters it watches.
+    ///
+    /// - Parameter count: How many waiters to wait for.
+    package func waitForWaiters(_ count: Int) async {
+        let id = state.withLock { (state: inout State) -> UInt64 in
+            state.nextWaiterID += 1
+            return state.nextWaiterID
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let ready = state.withLock { (state: inout State) -> Bool in
+                    if state.waiters.count >= count || Task.isCancelled { return true }
+                    state.waiterWatchers.append(Waiter(id: id, count: count, continuation: continuation))
                     return false
                 }
                 if ready { continuation.resume() }
             }
         } onCancel: {
             let cancelled = state.withLock { (state: inout State) -> Waiter? in
-                guard let index = state.waiters.firstIndex(where: { $0.id == id }) else { return nil }
-                return state.waiters.remove(at: index)
+                guard let index = state.waiterWatchers.firstIndex(where: { $0.id == id }) else { return nil }
+                return state.waiterWatchers.remove(at: index)
             }
             cancelled?.continuation.resume()
         }

@@ -53,6 +53,28 @@ struct FaultInjectionTests {
         #expect(try await peripheral.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
     }
 
+    @Test("failConnections(times: 2) fails the next two connects and the third succeeds", .timeLimit(.minutes(1)))
+    func failTwice() async throws {
+        let radio = VirtualRadio()
+        let device = RecordingDevice.make(handler: RecordingHandler())
+        let handle = await radio.register(device)
+        let id = PeripheralIdentifier(uuid: device.descriptor.identifier, name: nil)
+        let (central, _, _) = await RecordingDevice.central(on: radio, label: "FaultInjectionTests.failTwice")
+
+        // `connect` counts down `.some(2)` to `.some(1)` and disarms at `.some(1)`, so both
+        // steps of the countdown are crossed before the attempt that succeeds.
+        await handle.failConnections(with: Self.peerRemovedPairingInformation, times: 2)
+        for attempt in 1...2 {
+            let failure = await RecordingDevice.failure { try await central.connect(id) }
+            #expect(failure?.domain == "CBErrorDomain", "attempt \(attempt)")
+            #expect(failure?.code == 14, "attempt \(attempt)")
+            #expect(await RecordingDevice.isDisconnected(central, id), "attempt \(attempt)")
+        }
+
+        let peripheral = try await central.connect(id)
+        #expect(try await peripheral.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
+    }
+
     @Test("failConnections(times: nil) fails every attempt until cleared", .timeLimit(.minutes(1)))
     func failUntilCleared() async throws {
         let radio = VirtualRadio()
@@ -305,8 +327,9 @@ struct FaultInjectionTests {
         await stale.setATTError(.insufficientEncryption, for: RecordingDevice.measurement)
         #expect(try await peripheral.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
 
-        // The disconnect, had it landed, would have failed this read with `notConnected`;
-        // the radio serves it from the same actor turn the stale call was refused on.
+        // The disconnect, had it landed, would have had the radio refuse this read with
+        // `invalidHandle` (which the `Central` reports as `notConnected`); the radio serves it
+        // from the same actor turn the stale call was refused on.
         await stale.disconnect()
         #expect(try await peripheral.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
         #expect(await RecordingDevice.isConnected(central, id))
@@ -694,6 +717,49 @@ struct ForcedDisconnectOrderingTests {
         #expect(await handler.log == [true, false, true])
 
         // Teardown unsubscribes once more; finish the gate so that one is never held.
+        release.finish()
+        stream.cancel()
+        try await central.disconnect(id)
+    }
+
+    @Test("A reconnecting Central re-subscribes to a re-registered device only after the handler heard the unsubscribe (#73)", .timeLimit(.minutes(1)))
+    func unsubscribePrecedesResubscribeAcrossReregistration() async throws {
+        let radio = VirtualRadio()
+        let (gate, release) = AsyncStream<Void>.makeStream()
+        let handler = GatedHandler(gate: gate)
+        let device = RecordingDevice.make(handler: handler)
+        await radio.register(device)
+        let id = PeripheralIdentifier(uuid: device.descriptor.identifier, name: nil)
+        let (central, backend, queue) = await RecordingDevice.central(on: radio, label: "ForcedDisconnectOrderingTests.reregister")
+        let peripheral = try await central.connect(id, reconnect: .always(backoff: .zero))
+
+        let stream = Task {
+            for try await _ in peripheral.notifications(for: RecordingDevice.control, survivesReconnect: true) as AsyncThrowingStream<Data, Error> {}
+        }
+        #expect(await RecordingDevice.first(of: handler.subscriptions) == true)
+
+        // The same device — same identifier, same handler instance — registered again while
+        // the Central is connected and subscribed. The identifier never leaves the radio, so
+        // the Central's reconnect lands on the new registration at once.
+        let reregister = Task { await radio.register(device) }
+        _ = await RecordingDevice.first(of: handler.blocked)
+
+        await RecordingDevice.onQueue(queue) {}
+        if await RecordingDevice.isConnected(central, id) {
+            release.yield(())
+            #expect(await RecordingDevice.first(of: handler.subscriptions) == false)
+            #expect(await RecordingDevice.first(of: handler.subscriptions) == true)
+        } else {
+            #expect(await RecordingDevice.first(of: handler.subscriptions) == true)
+            release.yield(())
+            #expect(await RecordingDevice.first(of: handler.subscriptions) == false)
+        }
+        await reregister.value
+        #expect(await handler.log == [true, false, true])
+        // The radio agrees with what the handler last heard: one live subscriber.
+        #expect(await radio.subscriberCount(device: id.uuid, characteristic: RecordingDevice.control) == 1)
+        #expect(await radio.isSubscribed(session: backend.sessionID, characteristic: RecordingDevice.control))
+
         release.finish()
         stream.cancel()
         try await central.disconnect(id)
