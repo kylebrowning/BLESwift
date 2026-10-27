@@ -40,7 +40,10 @@ jobs:
   sim-to-sim-e2e:
     name: Sim-to-sim E2E (grantiva)
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [self-hosted, macOS, ARM64, bleswift]
+    # Pinned to the one runner labelled `bleswift-e2e`: the Advertiser and Scanner devices are
+    # machine-wide names the script tears down by process inspection, so two E2E runs on two
+    # runners of the same Mac would kill each other's apps. One runner runs one job at a time.
+    runs-on: [self-hosted, macOS, ARM64, bleswift, bleswift-e2e]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
