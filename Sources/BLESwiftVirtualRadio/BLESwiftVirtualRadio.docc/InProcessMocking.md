@@ -97,6 +97,117 @@ On iOS and macOS, where `PeripheralHost` exists, it works the same way with
 ``VirtualPeripheralManagerBackend``, and hosts a
 device of its own on the radio that any ``VirtualCentralBackend`` on that radio can discover.
 
+### Simulating MTU
+
+Real peripherals negotiate different ATT MTUs, and code that sizes its chunks from
+`maximumWriteValueLength(for:)` — a firmware update, a file transfer — behaves differently
+against each. Give a device its own one-packet length with
+``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength`` (20 through 512; the default
+is ``VirtualRadio/maximumWriteWithoutResponseLength``, 182). A connected `Central` reports
+it for `.withoutResponse`, the radio drops a write without response longer than it, and a
+notification is truncated to it — exactly what hardware does. A `.withResponse` write is
+unaffected: ATT long writes reach ``VirtualRadio/maximumValueLength`` whatever the MTU.
+
+```swift
+let descriptor = VirtualDeviceDescriptor(
+    name: "Small-MTU HRM",
+    advertisement: AdvertisementData(localName: "Small-MTU HRM", serviceUUIDs: [heartRate], isConnectable: true),
+    services: services,
+    maximumWriteWithoutResponseLength: 20
+)
+```
+
+### Injecting faults
+
+The failures a real peripheral produces and a handler cannot are armed through the device's
+``VirtualDeviceHandle``. Each one goes with the registration: `remove()` and registering the
+identifier again starts clean, and a handle from an earlier registration is ignored.
+
+- ``VirtualDeviceHandle/failConnections(with:times:)`` fails the next `times` connection
+  attempts (`nil` for every attempt until ``VirtualDeviceHandle/clearConnectionFailures()``)
+  with an `NSError` the `Central` receives unchanged, so pass the one CoreBluetooth would.
+- ``VirtualDeviceHandle/disconnect(_:error:)`` drops every connected central, or only the
+  ones named, as a peripheral-initiated disconnect: the `Central` sees the error (by default
+  ``VirtualRadio/peripheralDisconnectedError``, `CBError.peripheralDisconnected`), its
+  subscriptions are reported to the handler as unsubscribes, and it is free to reconnect.
+- ``VirtualDeviceHandle/setATTError(_:for:operations:)`` answers reads, writes with
+  response, and subscribes on one characteristic with an `ATTError`, ahead of the database
+  and the handler, so even a static value fails. A write without response has no ATT
+  response to carry an error, so it reaches the handler as usual. Note that on iOS,
+  CoreBluetooth answers `.insufficientEncryption` and `.insufficientAuthentication` by
+  starting pairing and retrying, so an app sees those errors only if pairing fails; the
+  radio returns them on the first attempt, so a test asserting on them is testing the
+  pairing-failed path.
+
+```swift
+// The next connect fails the way a peripheral that forgot its bond does.
+await handle.failConnections(with: NSError(domain: "CBErrorDomain", code: 14))
+
+// Reads of the measurement need encryption the central does not have.
+await handle.setATTError(.insufficientEncryption, for: measurement, operations: .read)
+
+// Then the link drops.
+await handle.disconnect()
+```
+
+### Testing timeouts deterministically
+
+The radio answers at once unless a device says otherwise. Give one a ``VirtualLatency`` —
+through ``VirtualDeviceDescriptor/latency`` at registration, or
+``VirtualDeviceHandle/setLatency(_:)`` afterwards — and its connects, discoveries, reads,
+writes with response, and subscribes take that long to answer. A write without response
+has no answer to delay, and the handler still decides when a notification goes out.
+
+Delays sleep on the radio's ``VirtualRadio/clock``, and `Central`'s own timers sleep on
+`Configuration.clock`. Both default to wall time. Hand the same `ManualClock` from
+`BLESwiftTestSupport` to both, and a timeout measured in tens of seconds is crossed — or
+missed by a millisecond — by advancing the clock. With `heartRate`, `measurement`, and
+`HeartRateHandler` from the first snippet on this page:
+
+```swift
+import BLESwift
+import BLESwiftTestSupport
+import BLESwiftVirtualRadio
+import Foundation
+import Testing
+
+let clock = ManualClock()
+let radio = VirtualRadio(clock: clock)
+let slowDevice = VirtualDeviceDescriptor(
+    name: "Slow HRM",
+    advertisement: AdvertisementData(localName: "Slow HRM", serviceUUIDs: [heartRate], isConnectable: true),
+    services: [GATTService(identifier: heartRate, characteristics: [
+        GATTCharacteristic(identifier: measurement, properties: [.read, .notify], permissions: [.readable])
+    ])],
+    latency: VirtualLatency(connect: .seconds(60))
+)
+await radio.register(VirtualDevice(descriptor: slowDevice, handler: HeartRateHandler()))
+
+let queue = DispatchQueue(label: "MyTests.central")
+let central = Central(
+    backend: VirtualCentralBackend(radio: radio, queue: queue),
+    queue: queue,
+    configuration: Configuration(clock: clock)
+)
+
+let id = PeripheralIdentifier(uuid: slowDevice.identifier, name: nil)
+let attempt = Task { try await central.connect(id, timeout: .seconds(30)) }
+await clock.waitForSleepers(2)       // the device's delay and the Central's timeout are both parked
+clock.advance(by: .seconds(30))      // the timeout fires; the delayed attempt is withdrawn
+await #expect(throws: BLESwiftError.connectionTimedOut) { try await attempt.value }
+```
+
+`waitForSleepers(_:)` is what makes this deterministic: `advance(by:)` resumes only sleepers
+already suspended, so wait for the code under test to reach its sleep before moving the
+clock, then await the outcome. A cancel during a delayed connect — a `connect(timeout:)`
+firing, or a `disconnect` — withdraws the attempt before the radio ever sees it, so
+nothing connects later; a connection failure armed with
+``VirtualDeviceHandle/failConnections(with:times:)`` is consumed when the attempt lands,
+after the delay, and ``VirtualDeviceHandle/disconnect(_:error:)`` during the delay finds
+no connection and does nothing. A delayed read, write, or subscribe sees the device as it
+is once the delay has run out: disconnected from it in the meantime, the request fails as
+one arriving then would.
+
 ### Limits
 
 The radio is a harness, not a simulation of the air:

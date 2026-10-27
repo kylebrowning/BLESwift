@@ -27,6 +27,26 @@ public struct VirtualDeviceDescriptor: Sendable {
     /// The GATT services this device hosts.
     public var services: [GATTService]
 
+    /// The length ceiling this device negotiates for one ATT packet: what a connected
+    /// central's `maximumWriteValueLength(for: .withoutResponse)` reports, past which a
+    /// `.withoutResponse` write is dropped and a notification is truncated. Must lie in
+    /// `20...512` — the minimum ATT_MTU of 23 less the three-byte header, up to the maximum
+    /// attribute length; ``VirtualRadio/register(_:advertising:)`` traps on a value outside it.
+    ///
+    /// Real peripherals negotiate different MTUs, and code that sizes its chunks from the
+    /// reported length — a DFU or a file transfer — behaves differently against each. The
+    /// default is ``VirtualRadio/maximumWriteWithoutResponseLength``, iOS's own ATT_MTU less
+    /// the header; set it per device to test against anything else. A `.withResponse` write
+    /// is unaffected, since ATT long writes reach ``VirtualRadio/maximumValueLength`` whatever
+    /// the MTU.
+    public var maximumWriteWithoutResponseLength: Int
+
+    /// How long this device takes to answer each kind of request, on its radio's
+    /// ``VirtualRadio/clock``. Defaults to ``VirtualLatency/none``, which leaves every
+    /// answer as immediate as it always was. Change it after registration with
+    /// ``VirtualDeviceHandle/setLatency(_:)``.
+    public var latency: VirtualLatency
+
     /// Creates a descriptor.
     ///
     /// - Parameters:
@@ -34,16 +54,24 @@ public struct VirtualDeviceDescriptor: Sendable {
     ///   - name: The device's name. Defaults to `nil`.
     ///   - advertisement: The advertisement to broadcast.
     ///   - services: The GATT services to host. Defaults to none.
+    ///   - maximumWriteWithoutResponseLength: The one-packet length ceiling this device
+    ///     reports and enforces. Defaults to ``VirtualRadio/maximumWriteWithoutResponseLength``.
+    ///   - latency: How long each kind of request takes to answer. Defaults to
+    ///     ``VirtualLatency/none``.
     public init(
         identifier: UUID = UUID(),
         name: String? = nil,
         advertisement: AdvertisementData,
-        services: [GATTService] = []
+        services: [GATTService] = [],
+        maximumWriteWithoutResponseLength: Int = VirtualRadio.maximumWriteWithoutResponseLength,
+        latency: VirtualLatency = .none
     ) {
         self.identifier = identifier
         self.name = name
         self.advertisement = advertisement
         self.services = services
+        self.maximumWriteWithoutResponseLength = maximumWriteWithoutResponseLength
+        self.latency = latency
     }
 }
 
@@ -138,7 +166,7 @@ public final class VirtualDeviceHandle: Sendable {
     /// `nonisolated(unsafe)` only because a `weak` reference cannot be declared `let`: it is
     /// written once, in `init`, and never again, and the runtime's own weak loads are
     /// thread-safe — so concurrent readers see either the radio or `nil`, never a race.
-    private nonisolated(unsafe) weak var radio: VirtualRadio?
+    nonisolated(unsafe) weak var radio: VirtualRadio?
 
     /// Creates a handle bound to `radio`, for the registration `generation` identifies.
     init(identifier: UUID, generation: UInt64, radio: VirtualRadio) {
@@ -191,6 +219,15 @@ public final class VirtualDeviceHandle: Sendable {
     /// - Parameter services: The device's new services.
     public func setServices(_ services: [GATTService]) async {
         await radio?.setServices(services, device: identifier, generation: generation)
+    }
+
+    /// Replaces how long the device takes to answer each kind of request. Takes effect for
+    /// every operation that starts from now on; one already delayed keeps the delay it
+    /// started with.
+    ///
+    /// - Parameter latency: The device's new latency.
+    public func setLatency(_ latency: VirtualLatency) async {
+        await radio?.setLatency(latency, device: identifier, generation: generation)
     }
 
     /// Removes the device from the radio. Every central currently connected to it is

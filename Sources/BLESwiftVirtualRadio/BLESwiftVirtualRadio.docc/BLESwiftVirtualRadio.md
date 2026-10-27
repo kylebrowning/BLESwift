@@ -35,6 +35,22 @@ either by installing it once at launch with ``VirtualRadio/install(_:)`` or by h
 - ``VirtualDeviceHandle``
 - ``FixtureDeviceHandler``
 
+### Injecting faults
+
+- ``VirtualDeviceHandle/failConnections(with:times:)``
+- ``VirtualDeviceHandle/clearConnectionFailures()``
+- ``VirtualDeviceHandle/disconnect(_:error:)``
+- ``VirtualDeviceHandle/setATTError(_:for:operations:)``
+- ``VirtualGATTOperations``
+- ``VirtualRadio/peripheralDisconnectedError``
+
+### Delays on a clock
+
+- ``VirtualRadio/clock``
+- ``VirtualLatency``
+- ``VirtualDeviceDescriptor/latency``
+- ``VirtualDeviceHandle/setLatency(_:)``
+
 ### Backends
 
 - ``VirtualCentralBackend``
