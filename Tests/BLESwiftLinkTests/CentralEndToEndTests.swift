@@ -513,19 +513,26 @@ struct CentralEndToEndTests {
         // waits holds the handshake open — and that is the only window in which a connection's
         // messages are held rather than served. Nothing else can keep it open on demand.
         //
-        // The wait is short and independently released: it occupies a cooperative thread while
-        // it lasts, and a test that held one until *another* async assertion completed could
-        // starve the very pool that assertion needs.
+        // The wait is released by the drop itself, and bounded: it occupies a cooperative
+        // thread while it lasts, and a test that held one until *another* async assertion
+        // completed could starve the very pool that assertion needs. The drop does not need
+        // that thread — it is decided on the listener queue, in `onMessage`, before any
+        // handshake work reaches the actor the factory is holding — so the log line it
+        // writes is what opens the gate; the timeout is a fallback for a run where it never
+        // comes, wide enough that a loaded runner cannot open the gate early on its own.
         let gate = DispatchSemaphore(value: 0)
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
         configuration.passthrough = true
         configuration.centralBackendFactory = { queue in
-            _ = gate.wait(timeout: .now() + 2)
+            _ = gate.wait(timeout: .now() + 10)
             return FakeCentral(queue: queue, state: .poweredOn)
         }
         let log = Mutex<[String]>([])
-        configuration.log = { line in log.withLock { $0.append(line) } }
+        configuration.log = { line in
+            log.withLock { $0.append(line) }
+            if line.contains("bytes behind its handshake") { gate.signal() }
+        }
         let provider = Provider(configuration: configuration)
         try await provider.start()
 
@@ -547,10 +554,6 @@ struct CentralEndToEndTests {
         await waitFor(timeout: .seconds(5)) { ready.withLock { $0 } }
         #expect(ready.withLock { $0 })
 
-        // Released on a timer of its own, well after the burst below has crossed a loopback
-        // socket, so the handshake is never held on an assertion that has to run to free it.
-        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(750)) { gate.signal() }
-
         connection.send(.clientHello(ClientHello(
             protocolVersion: LinkProtocol.version,
             role: .central,
@@ -571,7 +574,7 @@ struct CentralEndToEndTests {
 
         await waitFor(timeout: .seconds(15)) { ended.withLock { $0 } }
         #expect(ended.withLock { $0 })
-        #expect(log.withLock { $0 }.contains { $0.contains("behind its handshake") })
+        #expect(log.withLock { $0 }.contains { $0.contains("bytes behind its handshake") })
 
         gate.signal()
         connection.onStateChange = nil

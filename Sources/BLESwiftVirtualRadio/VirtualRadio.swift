@@ -93,7 +93,7 @@ public actor VirtualRadio {
     /// Where the radio reports a mutation refused because its handle is stale. Nothing else
     /// in the radio logs: this is the one event that is silently *not* what its caller asked
     /// for, and a session teardown that quietly did nothing is worth a line.
-    private static let logger = Logger(label: "BLESwiftProvider.VirtualRadio")
+    private static let logger = Logger(label: "BLESwiftVirtualRadio.VirtualRadio")
 
     /// One registered device: its description, whether it is currently advertising, which
     /// registration of its identifier it belongs to, and the faults armed on it.
@@ -217,19 +217,48 @@ public actor VirtualRadio {
 
     /// Registers `device`, making it visible to every backend this radio serves.
     ///
+    /// **An identifier already registered is replaced, and the old registration retired as
+    /// ``VirtualDeviceHandle/remove()`` retires one** — what a link client redialing under a
+    /// stable `hostIdentifier` produces. Each subscription the old registration held is
+    /// reported to the *old* handler as an unsubscribe, and every central connected to it
+    /// then hears `didDisconnect` with ``deviceRemovedError`` — unsubscribes first, as every
+    /// teardown here orders them, since a `Central` that heard the disconnect first would
+    /// reconnect to the new registration and re-subscribe while the old unsubscribe was
+    /// still in flight. The new handler hears nothing, since it never saw those subscribers
+    /// arrive. Left in place, as they were before, the connections and subscriptions
+    /// carried over to a registration whose handler had been told of neither: it inherited
+    /// subscribers it never received `subscriptionChanged(isSubscribed: true)` for, the old
+    /// handler never heard the matching unsubscribes, and the centrals stayed connected to a
+    /// device that had changed under them without a word.
+    ///
+    /// While the old handler is reporting those unsubscribes, a connected central has lost its
+    /// connection but not yet heard so — the same window, with the same outcomes, that
+    /// ``VirtualDeviceHandle/disconnect(_:error:)`` documents. A scanning central may also see
+    /// the new registration's sighting before that `didDisconnect`.
+    ///
+    /// The new device state is installed before the first `await`, and the identifier
+    /// stays in `knownDeviceIDs` throughout, so a backend resolving the identifier while
+    /// the old handler is still being told about its unsubscribes finds the device there —
+    /// the identifier is never absent, which is the whole point of re-registering instead
+    /// of removing and registering.
+    ///
     /// - Parameters:
     ///   - device: The device to host.
     ///   - advertising: Whether it starts out advertising. Defaults to `true`.
     /// - Returns: A ``VirtualDeviceHandle`` for pushing notifications and mutating the
     ///   device after registration.
     @discardableResult
-    public func register(_ device: VirtualDevice, advertising: Bool = true) -> VirtualDeviceHandle {
+    public func register(_ device: VirtualDevice, advertising: Bool = true) async -> VirtualDeviceHandle {
         let identifier = device.descriptor.identifier
         let packetLength = device.descriptor.maximumWriteWithoutResponseLength
         precondition(
             (20...512).contains(packetLength),
             "maximumWriteWithoutResponseLength must be in 20...512 (ATT_MTU 23 − 3 up to the attribute maximum); got \(packetLength)"
         )
+        // Retired before the new state goes in, so every table — connections, sinks,
+        // subscriptions — belongs to one registration at a time; its reports wait until the
+        // new state is in place, so nothing a handler does on hearing them finds a gap.
+        let retired = retire(identifier)
         lastGeneration += 1
         let generation = lastGeneration
         devices[identifier] = DeviceState(
@@ -244,6 +273,9 @@ public actor VirtualRadio {
         recordConnectLatency(device.descriptor.latency.connect, of: identifier)
         if advertising {
             reportSightings(of: identifier)
+        }
+        if let retired {
+            await report(retired)
         }
         return VirtualDeviceHandle(identifier: identifier, generation: generation, radio: self)
     }
@@ -394,37 +426,93 @@ public actor VirtualRadio {
     /// ``VirtualDeviceHandle/remove()``.
     ///
     /// Every subscription the device still had is reported to its handler as an
-    /// unsubscribe before the device goes, so a hosted `PeripheralHost` is left holding no
-    /// subscriber it can never notify again — CoreBluetooth reports `didUnsubscribe` when a
-    /// subscribed central goes away, and so does this radio.
+    /// unsubscribe, so a hosted `PeripheralHost` is left holding no subscriber it can never
+    /// notify again — CoreBluetooth reports `didUnsubscribe` when a subscribed central goes
+    /// away, and so does this radio — and each connected central hears `didDisconnect`
+    /// with ``deviceRemovedError`` only after that, the order every teardown on this radio
+    /// uses (see ``report(_:)``).
     func remove(device: UUID, generation: UInt64) async {
         guard isCurrent(device, generation: generation, operation: "remove") else { return }
-        guard let state = devices.removeValue(forKey: device) else { return }
-        let departing = subscriptions.removeValue(forKey: device) ?? [:]
+        guard let retired = retire(device) else { return }
+        // Taken off the synchronous mirrors here, not in `retire`: a re-registration retires
+        // the old state and installs the new in the same actor turn, and the identifier must
+        // stay resolvable throughout. Only a removal makes it unknown.
         knownDeviceIDs.withLock { (known: inout Set<UUID>) -> Void in
             known.remove(device)
         }
         recordConnectLatency(.zero, of: device)
+        await report(retired)
+    }
+
+    /// What retiring a registration leaves to deliver once every table is settled: each
+    /// subscription it still held, as the `Subscriber` the handler saw arrive, and the
+    /// `didDisconnect` owed to each session that was connected.
+    ///
+    /// Built from the retired descriptor rather than looked up: by the time these are
+    /// reported, the device is gone from the table — or, after a re-registration, is a
+    /// different device — and the handler should see the same `Subscriber` leave as it saw
+    /// arrive.
+    private struct Retirement {
+        let handler: any VirtualDeviceHandler
+        let departing: [(characteristic: CharacteristicIdentifier, central: Subscriber)]
+        let identifier: PeripheralIdentifier
+        let disconnected: [@Sendable (CentralEvent) -> Void]
+    }
+
+    /// Takes `device`'s registration off every actor table — the device, its subscriptions,
+    /// and each session's connection to it and sink for it. The shared body of
+    /// ``remove(device:generation:)`` and a re-``register(_:advertising:)``.
+    ///
+    /// Synchronous, so a caller can settle the tables — and, for a re-registration, install
+    /// the successor — before anything is reported. Nothing is delivered here: the
+    /// unsubscribes and the `didDisconnect`s come back as a ``Retirement`` for
+    /// ``report(_:)``, which sends them in the one order every teardown uses; `nil` when
+    /// nothing was registered under `device`.
+    private func retire(_ device: UUID) -> Retirement? {
+        guard let state = devices.removeValue(forKey: device) else { return nil }
+        let subscriptions = self.subscriptions.removeValue(forKey: device) ?? [:]
         let identifier = PeripheralIdentifier(uuid: device, name: state.descriptor.name)
+        var disconnected: [@Sendable (CentralEvent) -> Void] = []
         for sessionID in Array(sessions.keys) {
             // Dropped for every session, connected or not: the sink routes events *from* this
             // device, and there is no longer a device to route them from. A live entry would
             // outlive the device and keep its backend's remote alive with it.
             sessions[sessionID]?.peripheralSinks.removeValue(forKey: device)
-            guard sessions[sessionID]?.connections.contains(device) == true else { continue }
+            guard let session = sessions[sessionID], session.connections.contains(device) else { continue }
             sessions[sessionID]?.connections.remove(device)
-            sessions[sessionID]?.centralSink(.didDisconnect(identifier, error: Self.deviceRemovedError))
+            disconnected.append(session.centralSink)
         }
-        // Built from the removed descriptor, not looked up: the device is gone from the
-        // table, and the handler should see the same `Subscriber` leave as it saw arrive.
-        for (characteristic, subscribers) in departing {
+        var departing: [(characteristic: CharacteristicIdentifier, central: Subscriber)] = []
+        for (characteristic, subscribers) in subscriptions {
             for sessionID in subscribers {
                 let central = Subscriber(
                     id: sessionID,
                     maximumUpdateValueLength: state.descriptor.maximumWriteWithoutResponseLength
                 )
-                await state.handler.subscriptionChanged(characteristic, central: central, isSubscribed: false)
+                departing.append((characteristic, central))
             }
+        }
+        return Retirement(handler: state.handler, departing: departing, identifier: identifier, disconnected: disconnected)
+    }
+
+    /// Tells a retired registration's handler about each subscription it lost, then delivers
+    /// the `didDisconnect`s — the one `await` of a removal or re-registration, made only
+    /// once every table is settled.
+    ///
+    /// **The `didDisconnect`s go out last**, the order ``disconnect(centrals:error:device:generation:)``
+    /// keeps and for the same reason: the actor is reentrant across the unsubscribe awaits,
+    /// and a `Central` with a reconnect policy that heard the disconnect first could
+    /// reconnect and re-subscribe while the handler was still being told about the old
+    /// subscription. A removal left nothing to reconnect to, but a re-registration leaves
+    /// the identifier known throughout, so the reconnect lands on the new registration at
+    /// once — and with the same handler behind both, the handler finished the unsubscribe
+    /// *after* the re-subscribe and took a live subscriber for one that had left.
+    private func report(_ retired: Retirement) async {
+        for entry in retired.departing {
+            await retired.handler.subscriptionChanged(entry.characteristic, central: entry.central, isSubscribed: false)
+        }
+        for sink in retired.disconnected {
+            sink(.didDisconnect(retired.identifier, error: Self.deviceRemovedError))
         }
     }
 
@@ -610,9 +698,11 @@ public actor VirtualRadio {
     /// never with a fault armed on a registration that is gone. A failed attempt records
     /// neither the connection nor the sink, so the device never learns of it, exactly as a
     /// peripheral that refused the link never sees the central. See
-    /// ``VirtualDeviceHandle/failConnections(with:times:)``. A session already connected to
-    /// the device succeeds without consuming the armed failure: failing it would leave a
-    /// remote the radio still holds connected reporting itself disconnected.
+    /// ``VirtualDeviceHandle/failConnections(with:times:)``. A direct caller of the radio
+    /// connecting a session already connected to the device succeeds without consuming the
+    /// armed failure — ``VirtualCentralBackend`` never sends such a call, since it answers a
+    /// connect on a `.connected` remote itself — because failing it would leave a remote the
+    /// radio still holds connected reporting itself disconnected.
     ///
     /// - Returns: The outcome: the error to fail the attempt with, or the connected device's
     ///   name and ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``.
@@ -970,8 +1060,8 @@ public actor VirtualRadio {
     /// ``maximumValueLength``: a notification is a single ATT packet, exactly as a
     /// `.withoutResponse` write is. See ``maximumWriteWithoutResponseLength``, which stands
     /// in for a device that is not registered. Every caller looks up a device that is;
-    /// ``remove(device:generation:)`` builds its departing subscribers from the removed
-    /// descriptor itself rather than through here.
+    /// ``retire(_:)`` builds a retired registration's departing subscribers from its own
+    /// descriptor rather than through here.
     func subscriber(_ session: UUID, device: UUID) -> Subscriber {
         Subscriber(
             id: session,

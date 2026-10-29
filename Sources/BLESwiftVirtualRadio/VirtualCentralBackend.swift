@@ -578,8 +578,9 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             remote.setConnectionState(.disconnecting)
             queue.async { [self] in
                 // Unguarded by design: while `.disconnecting`, no connect takes a token and no
-                // path changes the state, so this hop is the only one that can settle it.
-                remote.setConnectionState(.disconnected)
+                // path changes the state, so this hop is the only one that can settle it —
+                // and `deliver(_:)` is what settles it, as it does on every `didDisconnect`,
+                // so this hop sets nothing itself.
                 deliver(.didDisconnect(remote.peripheralIdentifier, error: nil))
             }
             return
@@ -590,7 +591,7 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             let removed = await radio.disconnect(session: sessionID, device: device)
             queue.async { [self] in
                 guard removed else { return }
-                remote.setConnectionState(.disconnected)
+                // `deliver(_:)` settles the remote `.disconnected`, as on every `didDisconnect`.
                 deliver(.didDisconnect(remote.peripheralIdentifier, error: nil))
             }
         }

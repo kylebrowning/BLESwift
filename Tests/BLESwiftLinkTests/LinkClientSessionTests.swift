@@ -161,7 +161,7 @@ struct LinkClientSessionTests {
         weak var connection: LinkConnection?
     }
 
-    @Test("A session retrying against a closed port releases every connection it creates")
+    @Test("A session retrying against a closed port releases every connection it creates", .timeLimit(.minutes(1)))
     func retryingReleasesItsConnections() async throws {
         // Below the ephemeral range: the dials must keep being refused, which they would not
         // be if a parallel test were handed this port and bound a listener on it.
@@ -177,18 +177,28 @@ struct LinkClientSessionTests {
         // `dial()` stores handlers that capture their own connection strongly, so a connection
         // whose handlers survive its terminal state can never be released.
         let dialled = Mutex<[WeakConnection]>([])
-        session.onDial = { connection in dialled.withLock { $0.append(WeakConnection(connection: connection)) } }
+        let (dials, dialSignal) = AsyncStream<Void>.makeStream()
+        session.onDial = { connection in
+            dialled.withLock { $0.append(WeakConnection(connection: connection)) }
+            dialSignal.yield()
+        }
         session.start()
-        try await Task.sleep(for: .milliseconds(700))
+        // Waits for the retry itself rather than a fixed window (#88): a refused dial's
+        // turnaround is not free, and under a loaded bundle a 700 ms window could close before
+        // the second dial. What matters is that it retried, and that every connection it made
+        // was released.
+        var nextDial = dials.makeAsyncIterator()
+        await nextDial.next()
+        await nextDial.next()
         session.stop()
+        dialSignal.finish()
         #expect(!session.isConnected)
 
         let observed = dialled.withLock { $0 }
-        // The retry interval is 50 ms over a 700 ms window, but a refused dial's turnaround is
-        // not free and this suite runs in parallel with the rest of the bundle: the count that
-        // matters is that it retried at all, and that every connection it made was released.
         #expect(observed.count >= 2, "only \(observed.count) dials observed")
-        try await Task.sleep(for: .milliseconds(300))
+        // Released once each connection's terminal state has been processed on the session's
+        // queue; waited for, with an upper bound, rather than slept on.
+        await waitFor(timeout: .seconds(10)) { observed.allSatisfy { $0.connection == nil } }
         let alive = observed.filter { $0.connection != nil }.count
         #expect(alive == 0, "\(alive) of \(observed.count) connections still alive")
     }

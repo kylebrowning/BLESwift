@@ -44,14 +44,22 @@ extension VirtualRadio {
     /// entirely and is preferred in unit tests, where a process-global is a liability.
     ///
     /// Idempotent: calling this again simply replaces the registered factories and ``installed``.
+    ///
+    /// The registry and ``installed`` change together: both factories go in through
+    /// `BackendRegistry.setFactories(central:peripheralManager:)`, one lock acquisition,
+    /// from inside this type's own state lock — so no `Central()`, `PeripheralHost()`, or
+    /// ``installed`` read on another thread can see a radio-backed central next to the
+    /// previous peripheral factory, or a registry already routing to the radio while
+    /// ``installed`` still says `nil`. The lock order is this state, then the registry's; the
+    /// registry never takes this lock.
     public static func install(_ radio: VirtualRadio) {
-        BackendRegistry.centralFactory = { queue in
-            VirtualCentralBackend(radio: radio, queue: queue)
+        installState.withLock { state in
+            BackendRegistry.setFactories(
+                central: { queue in VirtualCentralBackend(radio: radio, queue: queue) },
+                peripheralManager: { queue in VirtualPeripheralManagerBackend(radio: radio, queue: queue) }
+            )
+            state.radio = radio
         }
-        BackendRegistry.peripheralManagerFactory = { queue in
-            VirtualPeripheralManagerBackend(radio: radio, queue: queue)
-        }
-        installState.withLock { $0.radio = radio }
     }
 
     /// Reverts `Central()` / `PeripheralHost()` to their default `CoreBluetooth` backend.
@@ -62,10 +70,14 @@ extension VirtualRadio {
     /// The registry slot is cleared whoever filled it: after a later `SimulatorLink.install`,
     /// this removes the link's routing too (and `SimulatorLink.isInstalled` does not notice).
     /// Use one installer per process.
+    ///
+    /// Cleared the way ``install(_:)`` sets them: both factories and ``installed`` under the
+    /// same lock, so nothing can observe one gone and the other still routing.
     public static func uninstall() {
-        BackendRegistry.centralFactory = nil
-        BackendRegistry.peripheralManagerFactory = nil
-        installState.withLock { $0.radio = nil }
+        installState.withLock { state in
+            BackendRegistry.setFactories(central: nil, peripheralManager: nil)
+            state.radio = nil
+        }
     }
 
     /// The radio ``install(_:)`` registered, or `nil` when none is installed.

@@ -39,14 +39,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, `nil` when it has none. `name` is unchanged — it still returns `"No Name"` for an
   unnamed peripheral — but it now comes from `cachedName`, so an unnamed peripheral can be
   told apart from one actually named "No Name". (#63)
+- `BackendRegistry.setFactories(central:peripheralManager:)`, which replaces both factories
+  under one lock; `VirtualRadio.install(_:)` / `uninstall()` and `SimulatorLink.install` /
+  `uninstall()` go through it. (#70)
 
 ### Changed
 
 - The virtual radio types moved out of `BLESwiftProvider` into `BLESwiftVirtualRadio`
   and are no longer macOS-only. `BLESwiftProvider` re-exports the new module, so existing
   `import BLESwiftProvider` code compiles unchanged. (#65)
+- The virtual radio's logger label is `BLESwiftVirtualRadio.VirtualRadio`; it was
+  `BLESwiftProvider.VirtualRadio` in 3.0.0, on macOS. The `NSError` domain is unchanged. (#71)
+- **Source-breaking for synchronous in-actor callers only:**
+  `VirtualRadio.register(_:advertising:)` is `async`. Callers outside the actor already
+  `await` it and are unaffected; a synchronous method in an `extension VirtualRadio` that
+  calls `register` must become `async`. (#73)
 
 ### Fixed
+
+- Re-registering an identifier that still had connections left them, and their
+  subscriptions, attached to the new registration: the new handler inherited subscribers it
+  was never told about, the old one never heard the unsubscribes, and the centrals stayed
+  connected without hearing a disconnect. The old registration is now retired the way a
+  removal retires one — the old handler hears each unsubscribe, then each connected central
+  hears `didDisconnect` with `deviceRemovedError` — while the identifier never leaves the
+  radio. `VirtualDeviceHandle.remove()` now uses that same order too: it used to deliver the
+  `didDisconnect`s before telling the handler about the dropped subscriptions, so with a
+  handler that awaits in `subscriptionChanged`, a central now hears the disconnect only once
+  the handler has returned. (#73)
+- `VirtualRadio.install(_:)` and `SimulatorLink.install` set the two registry factories and
+  their own `installed` / `endpoint` under separate locks, so a `Central()` and a
+  `PeripheralHost()` built on another thread in between could come from different installs,
+  and `installed` / `endpoint` could lag the registry. Both now change together. (#70)
+- `ManualClock.sleep(until:)` returned normally for a deadline already reached on a task
+  that had been cancelled, where `ContinuousClock` throws `CancellationError`, so a test on
+  `ManualClock` could not exercise a sleep's cancellation path for a zero delay.
+  Cancellation is now checked first, matching `ContinuousClock`. (#81)
 
 - `ScanFilter`'s `namePrefix` and `nameExact` matched an unnamed peripheral against the
   `"No Name"` display fallback, so `ScanFilter(namePrefix: "No")` let unnamed peripherals
