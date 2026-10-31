@@ -54,10 +54,12 @@ extension VirtualDeviceHandle {
     /// left `.disconnected` and free to reconnect: the same cleanup a device removal runs,
     /// minus the removal. A central named here that is not connected is left alone.
     ///
-    /// The radio drops the connection first and delivers `didDisconnect` only once the
-    /// handler has been told about every dropped subscription. While a handler is slow to
-    /// return from those unsubscribes, the central has no connection on the radio but has not
-    /// heard so yet: a read or write it sends in that window fails with
+    /// The radio drops the connection first and delivers `didDisconnect` only once every
+    /// report in flight for this device has been delivered: the unsubscribes this call makes,
+    /// and any report already queued for the device before it — another central's subscribe,
+    /// a `setServices` unsubscribe. While the handler is still inside one of those, the
+    /// central has no connection on the radio but has not heard so yet: a read or write it
+    /// sends in that window fails with
     /// `ATTError.invalidHandle`, and a `setNotifyValue(true)` answers not-notifying. A
     /// `cancelPeripheralConnection` in that window removes nothing, so a `Central.disconnect()`
     /// still returns normally, but the `.disconnected` connection event it produces carries
@@ -66,14 +68,17 @@ extension VirtualDeviceHandle {
     /// A connect on the remote with no cancel in between is answered as one on a connected
     /// remote — a re-delivered `didConnect` (and through `Central`, which still tracks the
     /// connection, `BLESwiftError.duplicateConnect`) — and the forced `didDisconnect` then
-    /// settles it. A handler that returns promptly leaves no such window.
+    /// settles it. A device with no report in flight — nothing queued, and no subscription
+    /// for this call to drop — has no window: its `didDisconnect` goes out in the same actor
+    /// turn the connection is dropped in.
     ///
-    /// A subscribe whose own handler report is still in flight when the drop lands can be
-    /// overtaken by the drop's unsubscribe report: the radio records the subscription before
-    /// awaiting `subscriptionChanged(isSubscribed: true)`, and the unsubscribe is reported
-    /// concurrently, so a handler that awaits inside that report may finish the unsubscribe
-    /// before the subscribe. The shipped handlers do not await inside it, so they never see
-    /// the two out of order.
+    /// A subscribe whose own handler report is still in flight when the drop lands is
+    /// reported before the drop's unsubscribe: every report for a device reaches its handler
+    /// in the order the radio applied the changes, one at a time, and the `didDisconnect`
+    /// follows the last of them. Called from inside a subscription report — the handler's
+    /// own `subscriptionChanged`, or a task it spawned there — this returns before its
+    /// reports are delivered, since awaiting them would wait on the report it was called
+    /// from; they are still delivered, in order, once that report returns.
     ///
     /// - Parameters:
     ///   - centrals: The centrals to disconnect, as the handler sees them; `nil` for all.
@@ -180,7 +185,14 @@ extension VirtualRadio {
     /// re-subscribe while the handler was still being told about the old subscription: the
     /// handler finished the unsubscribe *after* the re-subscribe, and a hosted
     /// `PeripheralHost` took a live subscriber for one that had left. A removal and a
-    /// re-registration keep the same order, through ``VirtualRadio/report(_:)``.
+    /// re-registration keep the same order, through ``VirtualRadio/report(_:)``. Both
+    /// go on the device's report chain — the `didDisconnect` as the step behind the
+    /// unsubscribes — so they are also ordered against every report in flight for the
+    /// device, a subscribe still being reported or another central's unsubscribe included
+    /// (#76), and this returns once they are delivered, unless called from inside a
+    /// subscription report (see ``VirtualRadio/isReporting``). A drop with nothing in
+    /// flight to wait behind delivers its `didDisconnect`s in this turn instead; see
+    /// ``VirtualRadio/deliverDisconnects(_:device:after:_:)``.
     func disconnect(centrals: [UUID]?, error: NSError, device: UUID, generation: UInt64) async {
         guard isCurrent(device, generation: generation, operation: "disconnect") else { return }
         guard let state = devices[device] else { return }
@@ -195,15 +207,17 @@ extension VirtualRadio {
             dropped.append((subscriber(sessionID, device: device), dropSubscriptions(session: sessionID, device: device)))
             sinks.append(session.centralSink)
         }
-        // `state.handler` and each subscriber were taken before the first `await`: a removal
-        // or re-registration landing between the reports must not redirect the rest to a
-        // handler that never saw these subscribers.
+        // `state.handler` and each subscriber were taken before anything is enqueued: a
+        // removal or re-registration landing between the reports must not redirect the rest
+        // to a handler that never saw these subscribers.
+        var tail: Task<Void, Never>?
         for entry in dropped {
-            await reportUnsubscribed(entry.characteristics, handler: state.handler, central: entry.central)
+            tail = reportUnsubscribed(entry.characteristics, on: device, handler: state.handler, central: entry.central) ?? tail
         }
-        for sink in sinks {
-            sink(.didDisconnect(identifier, error: error))
+        tail = deliverDisconnects(sinks, device: device, after: tail) {
+            .didDisconnect(identifier, error: error)
         }
+        await settle(tail)
     }
 
     /// Sets or clears the injected ATT answer for `operations` on `characteristic`. See
