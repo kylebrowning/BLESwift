@@ -249,7 +249,7 @@ Add BLESwift to your `Package.swift` dependencies:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/kylebrowning/BLESwift.git", from: "3.0.0")
+    .package(url: "https://github.com/kylebrowning/BLESwift.git", from: "3.1.0")
 ]
 ```
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-11-01
+
 ### Added
 
 - `BLESwiftVirtualRadio`, a new product that builds for every platform: the in-process
@@ -34,7 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `VirtualDeviceHandle.setLatency(_:)`. Delays default to zero, so existing behavior is
   unchanged; on a `ManualClock` a 60-second connect delay against a 30-second
   `connect(timeout:)` is driven to its deadline without waiting. (#68)
-
 - `PeripheralIdentifier.cachedName`: the peripheral's name exactly as CoreBluetooth reported
   it, `nil` when it has none. `name` is unchanged — it still returns `"No Name"` for an
   unnamed peripheral — but it now comes from `cachedName`, so an unnamed peripheral can be
@@ -93,7 +94,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that had been cancelled, where `ContinuousClock` throws `CancellationError`, so a test on
   `ManualClock` could not exercise a sleep's cancellation path for a zero delay.
   Cancellation is now checked first, matching `ContinuousClock`. (#81)
-
 - `ScanFilter`'s `namePrefix` and `nameExact` matched an unnamed peripheral against the
   `"No Name"` display fallback, so `ScanFilter(namePrefix: "No")` let unnamed peripherals
   through. An unnamed peripheral now fails any name filter. (#63)
@@ -426,7 +426,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed a deadlock when connecting to the same peripheral concurrently.
 - Restoring multiple peripherals now happens concurrently.
 
-[Unreleased]: https://github.com/kylebrowning/BLESwift/compare/3.0.0...HEAD
+[Unreleased]: https://github.com/kylebrowning/BLESwift/compare/3.1.0...HEAD
+[3.1.0]: https://github.com/kylebrowning/BLESwift/compare/3.0.0...3.1.0
 [3.0.0]: https://github.com/kylebrowning/BLESwift/compare/2.1.0...3.0.0
 [2.1.0]: https://github.com/kylebrowning/BLESwift/compare/2.0.0...2.1.0
 [2.0.0]: https://github.com/kylebrowning/BLESwift/compare/1.0.2...2.0.0
