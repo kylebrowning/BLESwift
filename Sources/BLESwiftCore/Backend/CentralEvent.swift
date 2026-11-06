@@ -5,15 +5,14 @@
 
 import Foundation
 
-/// A `Sendable` representation of a `CBCentralManagerDelegate` callback, speaking
-/// exclusively in BLESwift-owned types. See ``CentralManaging`` for the delivery contract.
+/// A `Sendable` representation of a `CBCentralManagerDelegate` callback. It uses only types that
+/// BLESwift owns. See ``CentralManaging`` for the delivery contract.
 ///
-/// Error payloads are typed `NSError?` rather than `any Error`, since `NSError` is
-/// unconditionally `Sendable` and an `any Error` existential is not guaranteed to be.
+/// Error payloads are `NSError?` and not `any Error`, because `NSError` is always `Sendable` and an
+/// `any Error` existential is not guaranteed to be.
 public enum CentralEvent: Sendable {
 
-    /// The Bluetooth radio's state changed. Mirrors
-    /// `centralManagerDidUpdateState(_:)`.
+    /// The state of the Bluetooth radio changed. Mirrors `centralManagerDidUpdateState(_:)`.
     case didUpdateState(CentralState)
 
     /// A peripheral was discovered during a scan. Mirrors
@@ -23,25 +22,24 @@ public enum CentralEvent: Sendable {
     /// A connection attempt succeeded. Mirrors `centralManager(_:didConnect:)`.
     case didConnect(PeripheralIdentifier)
 
-    /// A connection attempt failed. Mirrors
-    /// `centralManager(_:didFailToConnect:error:)`.
+    /// A connection attempt failed. Mirrors `centralManager(_:didFailToConnect:error:)`.
     case didFailToConnect(PeripheralIdentifier, error: NSError?)
 
     /// A connected peripheral disconnected. Mirrors
     /// `centralManager(_:didDisconnectPeripheral:error:)`.
     case didDisconnect(PeripheralIdentifier, error: NSError?)
 
-    /// A system-level connection event occurred for a peripheral matched by a prior
-    /// `registerForConnectionEvents(services:peripherals:)` call. Mirrors
-    /// `centralManager(_:connectionEventDidOccur:for:)`. Never produced on macOS.
+    /// A system-level connection event occurred for a peripheral that an earlier
+    /// `registerForConnectionEvents(services:peripherals:)` call matched. Mirrors
+    /// `centralManager(_:connectionEventDidOccur:for:)`. This event never occurs on macOS.
     case connectionEventDidOccur(peripheral: UUID, event: SystemConnectionEvent.Kind)
 
-    /// A connected peripheral's ANCS authorization status changed. Mirrors
-    /// `centralManager(_:didUpdateANCSAuthorizationFor:)`. Only produced on iOS.
+    /// The ANCS authorization status of a connected peripheral changed. Mirrors
+    /// `centralManager(_:didUpdateANCSAuthorizationFor:)`. This event occurs only on iOS.
     case didUpdateANCSAuthorization(peripheral: UUID, authorized: Bool)
 
     /// CoreBluetooth restored preserved state after a background relaunch (iOS). Mirrors
-    /// `centralManager(_:willRestoreState:)`, with the raw dictionary already converted to
-    /// the `Sendable` ``RestoredState`` by the proxy.
+    /// `centralManager(_:willRestoreState:)`. The proxy has already converted the raw dictionary to
+    /// the `Sendable` ``RestoredState``.
     case willRestoreState(RestoredState)
 }

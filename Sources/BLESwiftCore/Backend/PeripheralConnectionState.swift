@@ -3,8 +3,8 @@
 //  BLESwiftCore
 //
 
-/// One peripheral's connection state, as reported by the backend seam and by state
-/// restoration. `Central` tracks this independently per peripheral.
+/// The connection state of one peripheral, as the backend seam and state restoration report it.
+/// `Central` tracks this state for each peripheral independently.
 public enum PeripheralConnectionState: Sendable, Hashable {
 
     /// Not connected, and no connection attempt is in progress.
@@ -16,6 +16,6 @@ public enum PeripheralConnectionState: Sendable, Hashable {
     /// Connected.
     case connected
 
-    /// Disconnecting.
+    /// A disconnection is in progress.
     case disconnecting
 }

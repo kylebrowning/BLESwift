@@ -40,7 +40,7 @@ struct VirtualRadioTests {
         return (central, radio, handle)
     }
 
-    /// A device registered under `identifier`, advertising `name` and hosting `services`.
+    /// A device registered under `identifier`. It advertises `name` and hosts `services`.
     private static func device(identifier: UUID, name: String, services: [GATTService]) -> VirtualDevice {
         VirtualDevice(
             descriptor: VirtualDeviceDescriptor(
@@ -61,26 +61,24 @@ struct VirtualRadioTests {
             GATTCharacteristic(identifier: Self.measurement, properties: [.read], permissions: [.readable])
         ])
 
-        // Generation 1: the session that is about to be replaced.
         let first = await radio.register(Self.device(identifier: identifier, name: "first", services: []))
-        // Generation 2: the reconnect, registered under the same stable `hostIdentifier`.
         let second = await radio.register(Self.device(identifier: identifier, name: "second", services: [published]))
         #expect(first.generation != second.generation)
 
-        // The old session's teardown, landing *after* its successor registered: exactly the
-        // `stopAdvertising` / `removeAllHostedServices` / `eventHandler = nil` sequence
-        // `HostSession.close()` runs, all of it keyed by the identifier they now share.
+        // The old session's teardown lands *after* its successor registered. It is the sequence
+        // that `HostSession.close()` runs (`stopAdvertising`, `removeAllHostedServices`,
+        // `eventHandler = nil`), keyed by the identifier that both sessions share.
         await first.setAdvertising(false)
         await first.setServices([])
         await first.setAdvertisement(AdvertisementData(localName: "first", isConnectable: true))
         await first.remove()
 
-        // The new registration is untouched: still there, still generation 2's state.
+        // The new registration is untouched. It is still there, and it still has generation 2's
+        // state.
         #expect(radio.knownDeviceIDs.withLock { $0.contains(identifier) })
         #expect(await radio.name(of: identifier) == "second")
         #expect(await radio.services(of: identifier, matching: nil) == [Self.service])
 
-        // And still advertising, so a scan started after the teardown finds it.
         let queue = DispatchQueue(label: "VirtualRadioTests.generation")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: queue), queue: queue)
         await waitFor { central.state == .poweredOn }
@@ -91,7 +89,6 @@ struct VirtualRadioTests {
         #expect(found?.peripheral.uuid == identifier)
         #expect(found?.advertisement.localName == "second")
 
-        // The current handle still works, so the guard refuses only the stale one.
         await second.remove()
         #expect(radio.knownDeviceIDs.withLock { !$0.contains(identifier) })
     }
@@ -122,8 +119,8 @@ struct VirtualRadioTests {
             }
             return nil
         }
-        // `Peripheral` publishes no "notifications are armed" signal of its own, so the wait is
-        // on the radio's own subscription table — the state the push consults.
+        // `Peripheral` publishes no "notifications are armed" signal, so the test waits on the
+        // radio's subscription table, which the push consults.
         await waitFor(timeout: .seconds(10)) { await radio.isSubscribed(characteristic: Self.control) }
         #expect(await radio.isSubscribed(characteristic: Self.control))
         try await peripheral.write(Data([0x2A]), to: Self.control)
@@ -136,7 +133,7 @@ struct VirtualRadioTests {
     @Test("Connecting to an unknown identifier throws rather than connecting")
     func unknown() async throws {
         let (central, radio, handle) = try await makeRig()
-        // An identifier the backend has never seen is never vended as a remote at all, so the
+        // The backend never vends an identifier that it has never seen as a remote at all, so the
         // attempt fails before it can reach the radio.
         do {
             _ = try await central.connect(PeripheralIdentifier(uuid: UUID(), name: nil), timeout: .seconds(2))
@@ -148,8 +145,8 @@ struct VirtualRadioTests {
             }
         }
 
-        // A device this backend *has* sighted stays retrievable after the radio drops it, and
-        // the connect attempt is what then fails — with the radio's own error.
+        // A device that this backend *has* sighted stays retrievable after the radio drops it. The
+        // connect attempt then fails with the radio's error.
         let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
         for try await event in await central.scan(services: [Self.service], timeout: .seconds(2)) {
             if case .discovered = event { break }
@@ -191,10 +188,9 @@ struct VirtualRadioTests {
 
     @Test("A device registered a moment ago is retrievable with no waiting at all")
     func registrationIsVisibleWithoutWaiting() async throws {
-        // The shape the provider's own sessions have: register a device, then build a backend
-        // and look the identifier up in one synchronous flow, with no `waitFor` and no chance
-        // for any hop to have run. A pushed known-devices snapshot could not be there yet, so
-        // this used to depend on the scheduler — and lost the race under CI load.
+        // This is the shape of the provider's sessions: register a device, then build a backend and
+        // look the identifier up in one synchronous flow, with no `waitFor` and no hop. A pushed
+        // snapshot would not be there yet and would lose the race under CI load.
         let radio = VirtualRadio()
         let identifier = UUID()
         let (device, handler) = VirtualDevice.fixture(
@@ -210,7 +206,6 @@ struct VirtualRadioTests {
         }
         #expect(retrieved == [identifier])
 
-        // And a removal is just as immediate in the other direction.
         await handle.remove()
         let afterRemoval = queue.sync { () -> [UUID] in
             let backend = VirtualCentralBackend(radio: radio, queue: queue)
@@ -224,11 +219,10 @@ struct VirtualRadioTests {
         let (central, _, handle) = try await makeRig()
         let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
         _ = try await central.connect(PeripheralIdentifier(uuid: id, name: nil))
-        // Subscribed here, not inside the task: `connectionEvents()` is a broadcast with no
-        // replay, and the stream's subscriber is registered the moment it is created. Creating
-        // it inside the task let `remove()` win the race perhaps one run in ten — the
-        // `.disconnected` was yielded to nobody, the stream then never yielded again, and the
-        // test parked on `events.value` forever, hanging the whole bundle with it.
+        // Subscribe here and not inside the task. `connectionEvents()` is a broadcast with no
+        // replay. If the stream were created inside the task, `remove()` would win the race about
+        // one run in ten, the `.disconnected` would go to nobody, and the test would hang on
+        // `events.value`.
         let events = await central.connectionEvents()
         let disconnects = Task { () -> (any Error)?? in
             for await event in events {
@@ -245,8 +239,8 @@ struct VirtualRadioTests {
 
     @Test("A device's event sink is released on disconnect and on removal")
     func peripheralSinksAreReleased() async throws {
-        /// Stands in for everything a real sink closes over — a backend's remote, and through
-        /// it the session it belongs to. Its lifetime *is* the sink's.
+        /// Stands in for everything that a real sink closes over: a backend's remote and, through
+        /// it, the session that the remote belongs to. Its lifetime *is* the sink's lifetime.
         final class Probe: Sendable {}
 
         let radio = VirtualRadio()
@@ -258,7 +252,6 @@ struct VirtualRadioTests {
         let session = UUID()
         await radio.attach(session: session, centralSink: { _ in })
 
-        // Ended by the central: the sink goes with the connection that registered it.
         weak var afterDisconnect: Probe?
         do {
             let probe = Probe()
@@ -269,7 +262,6 @@ struct VirtualRadioTests {
         await radio.disconnect(session: session, device: identifier)
         #expect(afterDisconnect == nil)
 
-        // Ended by the device going away: same, for every session, connected or not.
         weak var afterRemoval: Probe?
         do {
             let probe = Probe()
@@ -304,20 +296,17 @@ struct VirtualRadioTests {
         }
         await waitFor { await Self.onQueue(queue) { remote.connectionState == .connected } }
 
-        // Discovered first: a `PeripheralRemote` no-ops GATT traffic for a characteristic it
-        // has not discovered, so a test driving one directly has to enumerate it the way
-        // `Central` would.
-        // A service at a time: a characteristic discovery for a service the remote has not
-        // discovered yet is a no-op, so the sweep has to land before the one under it is asked
-        // for — exactly the order `Central` issues them in.
+        // Discover first: a `PeripheralRemote` ignores GATT traffic on an undiscovered
+        // characteristic, so a test that drives one directly must enumerate it as `Central` would,
+        // one service at a time.
         await Self.onQueue(queue) { remote.discoverServices([Self.service]) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
         await Self.onQueue(queue) { remote.discoverCharacteristics([Self.control], for: Self.service) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
 
-        // Two writes without response issued in one queue block — the `drainWrites` shape.
-        // Nothing acknowledges either, so they land on the radio purely as queued work;
-        // repeated, because an inversion is scheduler-dependent.
+        // Two writes without response in one queue block, which is the `drainWrites` shape. Nothing
+        // acknowledges them, so they land on the radio as queued work. An inversion depends on the
+        // scheduler, so the test repeats them.
         for iteration in 0..<25 {
             let first = Data([UInt8(iteration), 1])
             let second = Data([UInt8(iteration), 2])
@@ -340,8 +329,8 @@ struct VirtualRadioTests {
         let queue = DispatchQueue(label: "VirtualRadioTests.stopscan")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
 
-        // A duplicate-allowing scan installs a repeater; a `stopScan` that reached the radio
-        // first would leave it running forever against a scan nobody asked for any more.
+        // A scan that allows duplicates installs a repeater. If a `stopScan` reached the radio
+        // first, the repeater would run forever against a scan that nobody asked for any more.
         for iteration in 0..<10 {
             await Self.onQueue(queue) {
                 backend.scanForPeripherals(withServices: nil, options: ScanOptions(allowDuplicates: true))
@@ -352,7 +341,7 @@ struct VirtualRadioTests {
         }
     }
 
-    /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.
+    /// Runs `body` on `queue` and returns its result. It does not block a cooperative thread.
     private static func onQueue<T: Sendable>(
         _ queue: DispatchQueue,
         _ body: @escaping @Sendable () -> T
@@ -373,7 +362,7 @@ struct VirtualRadioTests {
             }
             return nil
         }
-        // See `gatt()` — no public arming signal, so the wait is on the radio's own
+        // See `gatt()`. There is no public arming signal, so the test waits on the radio's
         // subscription table.
         await waitFor(timeout: .seconds(10)) { await radio.isSubscribed(characteristic: Self.measurement) }
         #expect(await radio.isSubscribed(characteristic: Self.measurement))
@@ -381,8 +370,8 @@ struct VirtualRadioTests {
         #expect(try await bounded { try await task.value } == Data([0, 99]))
     }
 
-    /// A device that answers no GATT traffic — the sighting-history tests only need it to
-    /// exist and advertise.
+    /// A device that answers no GATT traffic. The sighting-history tests only need it to exist and
+    /// advertise.
     private struct InertHandler: VirtualDeviceHandler {
         func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
             .failure(.unlikelyError)
@@ -399,7 +388,7 @@ struct VirtualRadioTests {
     func sightingHistoryIsCapped() async throws {
         let radio = VirtualRadio()
         let queue = DispatchQueue(label: "VirtualRadioTests.sightings")
-        // A history of one, so a second sighting is all it takes to forget the first.
+        // A history of one, so a second sighting is all that it takes to forget the first.
         let backend = VirtualCentralBackend(radio: radio, queue: queue, maximumDiscovered: 1)
 
         let sighted = Mutex<[UUID]>([])
@@ -409,7 +398,7 @@ struct VirtualRadioTests {
             }
         }
 
-        /// Registers an advertising device and returns its handle once the backend has seen it.
+        /// Registers an advertising device and returns its handle after the backend has seen it.
         func advertise() async -> (id: UUID, handle: VirtualDeviceHandle) {
             let identifier = UUID()
             let device = VirtualDevice(
@@ -427,13 +416,12 @@ struct VirtualRadioTests {
         await Self.onQueue(queue) {
             backend.scanForPeripherals(withServices: nil, options: ScanOptions(allowDuplicates: false))
         }
-        // Sequential, so the history's order is the order they were registered in.
         let oldest = await advertise()
         let newest = await advertise()
         #expect(sighted.withLock { $0 } == [oldest.id, newest.id])
 
-        // Both devices leave the radio, so only the sighting history can still vend a remote
-        // for them — which is exactly what the cap bounds.
+        // Both devices leave the radio, so only the sighting history can still vend a remote for
+        // them. The cap bounds exactly this.
         await oldest.handle.remove()
         await newest.handle.remove()
 
@@ -459,7 +447,7 @@ struct VirtualRadioTests {
     func remoteTableIsCapped() async throws {
         let radio = VirtualRadio()
         let queue = DispatchQueue(label: "VirtualRadioTests.remotecap")
-        // A table of one, so the second remote is all it takes to forget the first.
+        // A table of one, so the second remote is all that it takes to forget the first.
         let backend = VirtualCentralBackend(radio: radio, queue: queue, maximumDiscovered: 8, maximumRemotes: 1)
         let oldest = await Self.register(on: radio)
         let newest = await Self.register(on: radio)
@@ -467,8 +455,8 @@ struct VirtualRadioTests {
         let first = try #require(await Self.remote(backend, queue, oldest))
         _ = await Self.remote(backend, queue, newest)
 
-        // Disconnected, so the cap was free to drop it: the identifier is still known, and
-        // retrieving it again mints a remote rather than returning the forgotten one.
+        // The remote is disconnected, so the cap was free to drop it. The identifier is still
+        // known. A new retrieval creates a remote and does not return the forgotten one.
         let refetched = try #require(await Self.remote(backend, queue, oldest))
         #expect(refetched !== first)
     }
@@ -493,14 +481,13 @@ struct VirtualRadioTests {
         await Self.onQueue(queue) { backend.connect(live, options: nil, requiresANCS: false) }
         await waitFor { events.withLock { $0.contains(connected) } }
 
-        // Overflows the table of one while `live` is connected: a connected remote is never
-        // the cap's candidate, so the newcomer is filed alongside it rather than in its place.
+        // The test overflows the table of one while `live` is connected. A connected remote is
+        // never a cap candidate, so the newcomer is filed next to it.
         let evicted = try #require(await Self.remote(backend, queue, other))
         #expect(await Self.remote(backend, queue, connected) === live)
 
-        // `evicted` is disconnected, so the next retrieval is what displaces it — and
-        // connecting it anyway re-files it, rather than leaving the caller waiting for a
-        // `didConnect` nothing would ever send.
+        // `evicted` is disconnected, so the next retrieval displaces it. The connect files it again
+        // anyway. Otherwise the caller would wait for a `didConnect` that nothing would ever send.
         _ = await Self.remote(backend, queue, filler)
         await Self.onQueue(queue) { backend.connect(evicted, options: nil, requiresANCS: false) }
         await waitFor(timeout: .seconds(5)) { events.withLock { $0.contains(other) } }
@@ -524,8 +511,8 @@ struct VirtualRadioTests {
         }
 
         let stale = try #require(await Self.remote(backend, queue, target))
-        // Evicted by the overflow, then re-minted: the backend files a *different* remote for
-        // `target`, and the radio's events for it would be routed there.
+        // The overflow evicted the remote and the backend created it again, so the backend files a
+        // *different* remote for `target`, and the radio would route events there.
         _ = await Self.remote(backend, queue, filler)
         let current = try #require(await Self.remote(backend, queue, target))
         #expect(current !== stale)
@@ -538,7 +525,8 @@ struct VirtualRadioTests {
         #expect(reported.first?.peripheral == target)
         #expect(reported.first?.error?.domain == "BLESwiftProvider")
         #expect(reported.first?.error?.code == 8)
-        // Refused before the radio was ever asked, so the stale remote never left `.disconnected`.
+        // The backend refused before it ever asked the radio, so the stale remote never left
+        // `.disconnected`.
         #expect(await Self.onQueue(queue) { stale.connectionState } == .disconnected)
     }
 
@@ -564,21 +552,18 @@ struct VirtualRadioTests {
         await waitFor { await Self.onQueue(queue) { remote.connectionState == .connected } }
         #expect(await Self.onQueue(queue) { !remote.isDiscovered(Self.control) })
 
-        // Undiscovered: the radio is never asked, so no completion is delivered.
+        // The remote is undiscovered. The radio is never asked, so no completion is delivered.
         await Self.onQueue(queue) { remote.readValue(for: Self.control) }
 
-        // Discovery behind it is the barrier: its own completion cannot land before the read's
-        // would have, since both run on the same serial chain and the same queue.
-        // A service at a time: a characteristic discovery for a service the remote has not
-        // discovered yet is a no-op, so the sweep has to land before the one under it is asked
-        // for — exactly the order `Central` issues them in.
+        // The discovery behind it is the barrier: both run on the same serial chain and queue, so
+        // its completion cannot land before the read's would have. Discover one service at a time,
+        // as `Central` does.
         await Self.onQueue(queue) { remote.discoverServices([Self.service]) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
         await Self.onQueue(queue) { remote.discoverCharacteristics([Self.control], for: Self.service) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.control) } }
         #expect(values.withLock { $0 }.isEmpty)
 
-        // The very same read now answers: the guard is the discovery cache, nothing else.
         await Self.onQueue(queue) { remote.readValue(for: Self.control) }
         await waitFor { values.withLock { !$0.isEmpty } }
         #expect(values.withLock { $0.count } == 1)
@@ -608,19 +593,18 @@ struct VirtualRadioTests {
         await waitFor { await Self.onQueue(queue) { remote.connectionState == .connected } }
         #expect(await Self.onQueue(queue) { !remote.isDiscovered(Self.service) })
 
-        // The service was never discovered, so — as with `LinkPeripheral` and `CBPeripheral`,
-        // which has no `CBService` object to hand its own `discoverCharacteristics(_:for:)` —
-        // the radio is never asked and no completion arrives.
+        // The service was never discovered, so the radio is never asked and no completion arrives.
+        // The same holds for `LinkPeripheral` and `CBPeripheral`, which has no `CBService` to pass
+        // to `discoverCharacteristics(_:for:)`.
         await Self.onQueue(queue) { remote.discoverCharacteristics([Self.control], for: Self.service) }
 
-        // The service discovery behind it is the barrier: both run on the same serial chain,
-        // so its own completion cannot land before the refused one would have.
+        // The service discovery behind it is the barrier. Both run on the same serial chain, so its
+        // completion cannot land before the refused call's completion would have landed.
         await Self.onQueue(queue) { remote.discoverServices([Self.service]) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
         #expect(discovered.withLock { $0 }.isEmpty)
         #expect(await Self.onQueue(queue) { remote.discoveredCharacteristics(for: Self.service).isEmpty })
 
-        // The very same call now answers: the guard is the discovery cache, nothing else.
         await Self.onQueue(queue) { remote.discoverCharacteristics([Self.control], for: Self.service) }
         await waitFor { discovered.withLock { !$0.isEmpty } }
         #expect(discovered.withLock { $0 } == [Self.service])
@@ -655,9 +639,8 @@ struct VirtualRadioTests {
             backend.connect(remote, options: nil, requiresANCS: false)
         }
         await waitFor { await Self.onQueue(queue) { remote.connectionState == .connected } }
-        // A service at a time: a characteristic discovery for a service the remote has not
-        // discovered yet is a no-op, so the sweep has to land before the one under it is asked
-        // for — exactly the order `Central` issues them in.
+        // Do this one service at a time, because a characteristic discovery for a service that the
+        // remote has not discovered yet does nothing. `Central` issues them in the same order.
         await Self.onQueue(queue) { remote.discoverServices([Self.service]) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
         await Self.onQueue(queue) { remote.discoverCharacteristics([Self.control], for: Self.service) }
@@ -665,14 +648,14 @@ struct VirtualRadioTests {
 
         await Self.onQueue(queue) { backend.cancelPeripheralConnection(remote) }
         await waitFor { await Self.onQueue(queue) { remote.connectionState == .disconnected } }
-        // The disconnect emptied the discovery caches, exactly as a `LinkPeripheral`'s
-        // `markDisconnected()` does, so the read never leaves the remote at all.
+        // The disconnect emptied the discovery caches, as a `LinkPeripheral`'s `markDisconnected()`
+        // does, so the read never leaves the remote at all.
         #expect(await Self.onQueue(queue) { !remote.isDiscovered(Self.control) })
         #expect(await Self.onQueue(queue) { remote.discoveredServices.isEmpty })
         #expect(await Self.onQueue(queue) { remote.properties(of: Self.control) == [] })
 
-        // `readRSSI()` is the barrier: it always completes, and on the same queue, so its
-        // event landing proves the read's would have landed by now had one been produced.
+        // `readRSSI()` is the barrier. It always completes on the same queue, so when its event
+        // lands, a read's event would have landed by now.
         await Self.onQueue(queue) {
             remote.readValue(for: Self.control)
             remote.readRSSI()
@@ -680,8 +663,8 @@ struct VirtualRadioTests {
         await waitFor { rssis.withLock { !$0.isEmpty } }
         #expect(values.withLock { $0 }.isEmpty)
 
-        // And the radio refuses it on its own account, for any caller that reaches past the
-        // remote's cache: `2A39` has a static value, so only the connection gate can refuse it.
+        // The radio also refuses the write on its own account, for any caller that reaches past the
+        // remote's cache. `2A39` has a static value, so only the connection gate can refuse it.
         let refused = await radio.read(device: id, characteristic: Self.control, session: backend.sessionID)
         #expect(refused == .failure(.invalidHandle))
         let written = await radio.write(device: id, characteristic: Self.control, value: Data([1]), session: backend.sessionID)
@@ -710,33 +693,33 @@ struct VirtualRadioTests {
         let session = UUID()
         await radio.attach(session: session, centralSink: { _ in })
 
-        // Never connected: nothing is armed, nothing is filed, and the host is told nothing.
+        // The remote was never connected. Nothing is armed, nothing is filed, and nobody tells the
+        // host anything.
         #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session).isNotifying == false)
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
 
-        // Connected: the very same call takes, so the refusal above was the gate and not the
+        // Connected: the very same call takes effect. So the gate caused the refusal above, not the
         // characteristic.
         #expect(await radio.connect(session: session, device: identifier, sink: { _ in }).error == nil)
         #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session).isNotifying == true)
         await waitFor { await !host.subscribers(for: Self.measurement).isEmpty }
         #expect(await host.subscribers(for: Self.measurement).count == 1)
 
-        // Disconnected again: the subscription is dropped, and a `setNotify` from the stale
-        // session cannot plant a new one behind it.
+        // Disconnected again: the radio drops the subscription. A `setNotify` from the stale
+        // session cannot plant a new subscription behind it.
         await radio.disconnect(session: session, device: identifier)
         await waitFor { await host.subscribers(for: Self.measurement).isEmpty }
         #expect(await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session).isNotifying == false)
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
 
-        // A detach has nothing left to clean, and leaves nothing behind either.
         await radio.detach(session: session)
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
     }
 
-    /// Records every write the radio passes down, and accepts all of them.
+    /// Records every write that the radio passes down, and accepts all of them.
     private final class WriteRecordingHandler: VirtualDeviceHandler, Sendable {
         private let writes = Mutex<[Data]>([])
 
@@ -781,8 +764,8 @@ struct VirtualRadioTests {
         await radio.attach(session: session, centralSink: { _ in })
         #expect(await radio.connect(session: session, device: identifier, sink: { _ in }).error == nil)
 
-        /// Writes `count` bytes of `type` and returns the `ATTError` it was refused with, or
-        /// `nil` when the radio served it. (`Result<Void, _>` is not `Equatable`.)
+        /// Writes `count` bytes of `type`. It returns the `ATTError` that refused the write, or
+        /// `nil` when the radio served the write. `Result<Void, _>` is not `Equatable`.
         func write(_ count: Int, _ type: WriteType) async -> ATTError? {
             let result = await radio.write(
                 device: identifier,
@@ -795,25 +778,21 @@ struct VirtualRadioTests {
             return error
         }
 
-        // 400 bytes without response: one ATT packet on hardware cannot carry them, so
-        // CoreBluetooth drops it and nothing reaches the device.
+        // 400 bytes without response. One ATT packet on hardware cannot carry them, so
+        // CoreBluetooth drops the write and nothing reaches the device.
         #expect(await write(400, .withoutResponse) == nil)
         #expect(handler.received.isEmpty)
 
-        // The same 400 bytes with response: ATT long writes carry them, and they arrive whole.
         #expect(await write(400, .withResponse) == nil)
         #expect(handler.received.map(\.count) == [400])
 
-        // Past the maximum ATT attribute length, even a long write is refused.
         #expect(await write(513, .withResponse) == .invalidAttributeValueLength)
         #expect(handler.received.map(\.count) == [400])
 
-        // Right at each ceiling, both are served.
         #expect(await write(VirtualRadio.maximumWriteWithoutResponseLength, .withoutResponse) == nil)
         #expect(await write(VirtualRadio.maximumValueLength, .withResponse) == nil)
         #expect(handler.received.map(\.count) == [400, VirtualRadio.maximumWriteWithoutResponseLength, 512])
 
-        // And the remote reports the two ceilings it is held to.
         let queue = DispatchQueue(label: "VirtualRadioTests.ceilings")
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
         await waitFor { await Self.onQueue(queue) { !backend.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
@@ -822,12 +801,12 @@ struct VirtualRadioTests {
         #expect(await Self.onQueue(queue) { remote.maximumWriteValueLength(for: .withoutResponse) } == 182)
     }
 
-    /// Records the `maximumUpdateValueLength` of every subscriber the radio reports a
-    /// subscription change for.
+    /// Records the `maximumUpdateValueLength` of every subscriber for which the radio reports a
+    /// subscription change.
     private final class SubscriberRecordingHandler: VirtualDeviceHandler, Sendable {
         private let maxima = Mutex<[Int]>([])
 
-        /// Every reported subscriber's maximum, in order.
+        /// The maximum of every reported subscriber, in order.
         var reported: [Int] { maxima.withLock { $0 } }
 
         func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
@@ -871,31 +850,29 @@ struct VirtualRadioTests {
                 .isNotifying
         )
 
-        // A notification is one ATT packet — there is no long-write equivalent for it — so the
-        // subscriber a device handler is handed reports ATT_MTU − 3, the same ceiling a
-        // `.withoutResponse` write is held to, and not the 512-byte attribute maximum.
+        // A notification is one ATT packet with no long-write equivalent, so a device handler's
+        // subscriber reports ATT_MTU - 3, the same ceiling as a `.withoutResponse` write, and not
+        // the 512-byte attribute maximum.
         #expect(handler.reported == [VirtualRadio.maximumWriteWithoutResponseLength])
         #expect(VirtualRadio.maximumWriteWithoutResponseLength == 182)
 
-        // Longer than the subscriber's `maximumUpdateValueLength`: clipped to it, as
-        // CoreBluetooth clips a notification that will not fit the subscriber's MTU.
+        // The value exceeds the subscriber's `maximumUpdateValueLength`. The radio clips it, as
+        // CoreBluetooth clips a notification that does not fit the MTU.
         await handle.notify(Data(repeating: 0x7F, count: 500), for: Self.measurement, to: nil)
         await waitFor { values.withLock { !$0.isEmpty } }
         #expect(values.withLock { $0 }.map(\.count) == [VirtualRadio.maximumWriteWithoutResponseLength])
 
-        // Exactly at the maximum: delivered whole.
         let full = Data(repeating: 0x2A, count: VirtualRadio.maximumWriteWithoutResponseLength)
         await handle.notify(full, for: Self.measurement, to: nil)
         await waitFor { values.withLock { $0.count } == 2 }
         #expect(values.withLock { $0 }.last == full)
 
-        // A value that fits is delivered whole too.
         await handle.notify(Data(repeating: 0x01, count: 8), for: Self.measurement, to: nil)
         await waitFor { values.withLock { $0.count } == 3 }
         #expect(values.withLock { $0 }.last == Data(repeating: 0x01, count: 8))
     }
 
-    /// Records every `subscriptionChanged` the radio reports, so a test can assert on exactly
+    /// Records every `subscriptionChanged` that the radio reports, so a test can assert on exactly
     /// which calls produced one.
     private final class RecordingHandler: VirtualDeviceHandler, Sendable {
         private let changes = Mutex<[Bool]>([])
@@ -952,18 +929,18 @@ struct VirtualRadioTests {
             return outcome.isNotifying
         }
 
-        // Disabling a characteristic that was never enabled is not an unsubscribe: the host
-        // never had this subscriber, so it must not be told it lost one.
+        // Disabling a characteristic that was never enabled is not an unsubscribe. The host never
+        // had this subscriber, so the radio must not tell it that it lost one.
         #expect(await setNotify(false) == false)
         #expect(handler.reported.isEmpty)
 
-        // The first enable is the transition; the second changes nothing and reports nothing.
+        // The first enable is the transition. The second enable changes nothing and reports
+        // nothing.
         #expect(await setNotify(true) == true)
         #expect(await setNotify(true) == true)
         #expect(handler.reported == [true])
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 1)
 
-        // Symmetrically on the way out.
         #expect(await setNotify(false) == false)
         #expect(await setNotify(false) == false)
         #expect(handler.reported == [true, false])
@@ -979,7 +956,6 @@ struct VirtualRadioTests {
             backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, identifier: identifier),
             queue: hostQueue
         )
-        // Read/write only: no CCCD, so no hardware would ever accept a subscription on it.
         try await host.add(
             GATTService(identifier: Self.service, characteristics: [
                 GATTCharacteristic(
@@ -1001,8 +977,8 @@ struct VirtualRadioTests {
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.control) == 0)
         #expect(await host.subscribers(for: Self.control).isEmpty)
 
-        // A characteristic that is not in the database at all is refused the way a read or a
-        // write of it is.
+        // A characteristic that is not in the database at all is refused in the same way as a read
+        // or a write of it.
         let missing = await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session)
         #expect(missing.isNotifying == false)
         #expect(missing.error == .attributeNotFound)
@@ -1014,8 +990,8 @@ struct VirtualRadioTests {
     private static let batteryService = ServiceIdentifier(uuid: "180F")
     private static let batteryLevel = CharacteristicIdentifier(uuid: "2A19", service: batteryService)
 
-    /// A device hosting the heart-rate and battery services, connected to `backend`, with
-    /// both services and the heart rate's characteristics already discovered.
+    /// A device that hosts the heart-rate and battery services. It is connected to `backend`. Both
+    /// services and the heart rate's characteristics are already discovered.
     private static func discoveredRemote(
         radio: VirtualRadio,
         backend: VirtualCentralBackend,
@@ -1049,17 +1025,16 @@ struct VirtualRadioTests {
             }
         }
 
-        // The radio disconnects it first — the device is removed from under the central.
         await handle.remove()
         await waitFor { disconnects.withLock { $0 } == 1 }
         await waitFor { await Self.onQueue(queue) { remote.connectionState == .disconnected } }
 
-        // The cancel that follows has nothing to cancel, and CoreBluetooth would report
-        // nothing for it either.
+        // The cancel that follows has nothing to cancel. CoreBluetooth would report nothing for it
+        // either.
         await Self.onQueue(queue) { backend.cancelPeripheralConnection(remote) }
-        // Long enough for the radio round-trip a cancel would have taken, plus the queue hop
-        // its `didDisconnect` would have come back on: this is a negative assertion, so it is
-        // given every chance to fail.
+        // The wait covers the radio round-trip that a cancel would take and the queue hop that its
+        // `didDisconnect` would return on. This is a negative assertion, so it gets every chance to
+        // fail.
         try? await Task.sleep(for: .milliseconds(50))
         _ = await radio.generation(of: identifier)
         await Self.onQueue(queue) {}
@@ -1087,8 +1062,8 @@ struct VirtualRadioTests {
                 default: break
                 }
             }
-            // One queue turn: the first needs a radio round-trip, the three behind it do not.
-            // Answered off the chain, each of those overtook it.
+            // One queue turn. The first call needs a radio round-trip. The three calls behind it do
+            // not. If the radio answered them off the chain, each of them overtook the first call.
             remote.discoverCharacteristics(nil, for: Self.service)
             remote.discoverDescriptors(for: Self.measurement)
             remote.readRSSI()
@@ -1099,7 +1074,7 @@ struct VirtualRadioTests {
         #expect(events.withLock { $0 } == ["characteristics", "descriptors", "rssi", "l2cap"])
     }
 
-    /// Both services, the heart rate carrying its measurement and control point.
+    /// Both services. The heart rate carries its measurement and control point.
     private static var twoServices: [GATTService] {
         [
             GATTService(identifier: service, characteristics: [
@@ -1124,8 +1099,8 @@ struct VirtualRadioTests {
         #expect(await Self.onQueue(queue) { Set(remote.discoveredServices) } == [Self.service, Self.batteryService])
         #expect(await Self.onQueue(queue) { Set(remote.discoveredCharacteristics(for: Self.service)) } == [Self.measurement, Self.control])
 
-        // Every service discovery this test issues is awaited on the completion it delivers,
-        // since one that changes nothing about the cache changes nothing to poll for either.
+        // The test awaits each service discovery's completion, because a discovery that changes
+        // nothing in the cache gives nothing to poll for.
         let discoveries = Mutex<Int>(0)
         await Self.onQueue(queue) {
             remote.eventHandler = { event in
@@ -1138,26 +1113,26 @@ struct VirtualRadioTests {
             await waitFor { discoveries.withLock { $0 } > before }
         }
 
-        // A discovery narrowed to one service says nothing about any other, so it joins the
-        // cache rather than replacing it: `GATTCompatibility.discovery` defaults to
-        // `.filtered`, and pruning here left the heart rate's characteristics discovered on
-        // the client and gone on the provider — a read under them never answered.
+        // A discovery narrowed to one service says nothing about other services, so it joins the
+        // cache instead of replacing it. `GATTCompatibility.discovery` defaults to `.filtered`.
+        // Pruning would leave the heart rate's characteristics discovered on the client and gone on
+        // the provider, and a read under them would never answer.
         await discover([Self.batteryService])
         #expect(await Self.onQueue(queue) { Set(remote.discoveredServices) } == [Self.service, Self.batteryService])
         #expect(await Self.onQueue(queue) { Set(remote.discoveredCharacteristics(for: Self.service)) } == [Self.measurement, Self.control])
         #expect(await Self.onQueue(queue) { remote.properties(of: Self.measurement) } == [.read, .notify])
 
-        // Narrowing a *characteristic* discovery still replaces that service's entries: that
-        // answer does describe the whole of the one service it was asked about.
+        // A narrowed *characteristic* discovery still replaces the entries of that service. That
+        // answer does describe the whole of the one service that the discovery asked about.
         await Self.onQueue(queue) { remote.discoverCharacteristics([Self.measurement], for: Self.service) }
         await waitFor { await Self.onQueue(queue) { !remote.isDiscovered(Self.control) } }
         #expect(await Self.onQueue(queue) { remote.discoveredCharacteristics(for: Self.service) } == [Self.measurement])
-        // The battery service, discovered in the same sweep, is untouched: the replacement is
+        // The battery service, which the same sweep discovered, is untouched. The replacement is
         // per service.
         #expect(await Self.onQueue(queue) { remote.isDiscovered(Self.batteryService) })
 
-        // An unfiltered discovery does describe the whole database, so a service that has
-        // since disappeared from it is no longer reported as discovered.
+        // An unfiltered discovery does describe the whole database, so the client no longer reports
+        // as discovered a service that has since disappeared from it.
         await handle.setServices([Self.twoServices[0]])
         await discover(nil)
         #expect(await Self.onQueue(queue) { remote.discoveredServices } == [Self.service])
@@ -1182,21 +1157,19 @@ struct VirtualRadioTests {
         await Self.onQueue(queue) { remote.setNotifyValue(true, for: Self.measurement) }
         await waitFor { await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 1 }
 
-        // The device drops the heart-rate service — the hosted-host equivalent of a
-        // `CBPeripheralManager` removing a published service.
+        // The device drops the heart-rate service. This is the hosted-host equivalent of a
+        // `CBPeripheralManager` that removes a published service.
         await handle.setServices([Self.twoServices[1]])
 
         await waitFor { modified.withLock { !$0.isEmpty } }
         #expect(modified.withLock { $0 } == [[Self.service]])
-        // The remote pruned what went with it: the service, its characteristics, their
-        // properties, and the notification it had armed under them.
+        // The remote pruned what went with the service: the service, its characteristics, their
+        // properties, and the notification that it had armed under them.
         #expect(await Self.onQueue(queue) { !remote.isDiscovered(Self.service) })
         #expect(await Self.onQueue(queue) { remote.discoveredCharacteristics(for: Self.service).isEmpty })
         #expect(await Self.onQueue(queue) { !remote.isNotifying(Self.measurement) })
-        // The service that stayed is still discovered.
         #expect(await Self.onQueue(queue) { remote.isDiscovered(Self.batteryService) })
 
-        // A purely additive change invalidates nothing, so nothing more is reported.
         await handle.setServices(Self.twoServices)
         await Self.onQueue(queue) { remote.discoverServices(nil) }
         await waitFor { await Self.onQueue(queue) { remote.isDiscovered(Self.service) } }
@@ -1229,14 +1202,14 @@ struct VirtualRadioTests {
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 1)
         #expect(handler.reported == [true])
 
-        // The heart-rate service goes: the subscription under it goes with it, and the host is
-        // told it lost that subscriber rather than being left holding a ghost.
+        // The heart-rate service goes. The subscription under it goes with it. The host is told
+        // that it lost that subscriber, so it is not left to hold a ghost.
         await handle.setServices([Self.twoServices[1]])
         #expect(await radio.subscriberCount(device: identifier, characteristic: Self.measurement) == 0)
         #expect(handler.reported == [true, false])
 
-        // Re-added and re-subscribed, the transition is reported again — which the stale set
-        // entry would have swallowed, leaving the central armed and the host unaware.
+        // Add the service and subscribe again. The radio reports the transition again. A stale set
+        // entry would swallow it and leave the central armed without the host knowing.
         await handle.setServices(Self.twoServices)
         #expect(
             await radio.setNotify(true, device: identifier, characteristic: Self.measurement, session: session)
@@ -1250,9 +1223,8 @@ struct VirtualRadioTests {
     func staticValueHonorsTheReadPermission() async throws {
         let radio = VirtualRadio()
         let identifier = UUID()
-        // Both carry a static value, so both are answered from the database rather than
-        // through the handler — whose `read` fails everything, so an answer proves the
-        // database served it.
+        // Both characteristics carry a static value, so the database answers them. The handler's
+        // `read` fails everything, so an answer proves the database served it.
         let published = GATTService(identifier: Self.service, characteristics: [
             GATTCharacteristic(
                 identifier: Self.control,
@@ -1272,12 +1244,13 @@ struct VirtualRadioTests {
         await radio.attach(session: session, centralSink: { _ in })
         #expect(await radio.connect(session: session, device: identifier, sink: { _ in }).error == nil)
 
-        // The write-only characteristic has a value the radio could answer with, and must not.
+        // The write-only characteristic has a value that the radio could answer with, and it must
+        // not.
         let refused = await radio.read(device: identifier, characteristic: Self.control, session: session)
         #expect(refused == .failure(.readNotPermitted))
 
-        // The readable one on the same device still answers from the database, so the refusal
-        // above was the permission check and not the static path itself.
+        // The readable characteristic on the same device still answers from the database, so the
+        // permission check caused the refusal above and not the static path.
         let allowed = await radio.read(device: identifier, characteristic: Self.measurement, session: session)
         #expect(allowed == .success(Data([0, 0x48])))
     }
@@ -1286,8 +1259,8 @@ struct VirtualRadioTests {
     func fixtureAttachmentDoesNotRetainTheRadio() async throws {
         let fixture = try FixtureDocument.parse(Data(Self.fixtureJSON.utf8)).devices[0]
         weak var weakRadio: VirtualRadio?
-        // The handler outlives the scope, so the only path that could keep the radio alive is
-        // the handle it was attached with — exactly the cycle this guards against.
+        // The handler outlives the scope, so the only path that could keep the radio alive is the
+        // handle it was attached with. This test guards against that cycle.
         var retainedHandler: FixtureDeviceHandler?
         do {
             let radio = VirtualRadio()
@@ -1302,7 +1275,7 @@ struct VirtualRadioTests {
         retainedHandler = nil
     }
 
-    /// The remote `backend` vends for `identifier`, fetched on its own queue.
+    /// The remote that `backend` vends for `identifier`, fetched on its own queue.
     private static func remote(
         _ backend: VirtualCentralBackend,
         _ queue: DispatchQueue,
@@ -1313,7 +1286,7 @@ struct VirtualRadioTests {
         }
     }
 }
-/// ``FixtureDeviceHandler``'s read path: what a fixture device answers, and what it refuses.
+/// The read path of ``FixtureDeviceHandler``: what a fixture device answers, and what it refuses.
 @Suite("Fixture device reads")
 struct FixtureDeviceReadTests {
 
@@ -1361,7 +1334,6 @@ struct FixtureDeviceReadTests {
         let handler = try makeHandler()
         #expect(await handler.read(Self.readable, offset: 0, from: Self.central) == .success(Data([1, 2, 3, 4, 5])))
         #expect(await handler.read(Self.readable, offset: 2, from: Self.central) == .success(Data([3, 4, 5])))
-        // At the end: legal, and empty — how a long read learns it is done.
         #expect(await handler.read(Self.readable, offset: 5, from: Self.central) == .success(Data()))
     }
 
@@ -1375,14 +1347,13 @@ struct FixtureDeviceReadTests {
 
 /// Per-service (filtered) discovery over the link, against a two-service fixture device.
 ///
-/// `GATTCompatibility.discovery` defaults to `.filtered`, so `Central` asks for one service
-/// at a time — the shape a virtual device is overwhelmingly likely to be driven in, and the
-/// one that a discovery answer replacing the cache rather than joining it silently breaks.
+/// `GATTCompatibility.discovery` defaults to `.filtered`, so `Central` asks for one service at a
+/// time. A discovery answer that replaces the cache instead of joining it breaks this.
 @Suite("Filtered service discovery over the link")
 struct FilteredDiscoveryTests {
 
-    /// A heart-rate service and a battery service on one device, so a per-service discovery
-    /// of either leaves the other one already discovered.
+    /// A heart-rate service and a battery service on one device, so a per-service discovery of
+    /// either one leaves the other already discovered.
     private static let fixtureJSON = """
     { "devices": [ { "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8", "name": "Fixture Multi",
       "advertisedServices": ["180D"], "services": [
@@ -1397,7 +1368,7 @@ struct FilteredDiscoveryTests {
     private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: heartRate)
     private static let batteryLevel = CharacteristicIdentifier(uuid: "2A19", service: battery)
 
-    /// A provider serving the two-service fixture on a system-assigned loopback port.
+    /// A provider that serves the two-service fixture on a system-assigned loopback port.
     private func makeProvider() async throws -> Provider {
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
@@ -1407,7 +1378,7 @@ struct FilteredDiscoveryTests {
         return provider
     }
 
-    /// A real `Central` on a `LinkCentral` dialing `provider`, already powered on and
+    /// A real `Central` on a `LinkCentral` that dials `provider`. It is already powered on and
     /// connected to the fixture device.
     private func connect(to provider: Provider, label: String) async throws -> (Central, LinkCentral, Peripheral) {
         let queue = DispatchQueue(label: label)
@@ -1439,14 +1410,14 @@ struct FilteredDiscoveryTests {
         let first: Data = try await bounded("read A") { try await peripheral.read(from: Self.measurement) }
         #expect(first == Data([0, 0x48]))
 
-        // Discovering the battery service must not evict the heart rate service — or anything
-        // discovered beneath it — from either half of the seam.
+        // Discovery of the battery service must not evict the heart rate service from either half
+        // of the seam, or anything discovered beneath it.
         let level: Data = try await bounded("read B") { try await peripheral.read(from: Self.batteryLevel) }
         #expect(level == Data([0x64]))
 
-        // The read that used to time out: `Central` re-discovers the service (cheap) but
-        // skips characteristic discovery, because its client-side cache never lost the
-        // characteristic — so the read reaches a provider that had pruned it and is dropped.
+        // This read timed out in the original bug. `Central` rediscovers the service, which is
+        // cheap, and skips characteristic discovery because its cache kept the characteristic. The
+        // read then reaches a provider that had pruned it, and the provider drops the read.
         let again: Data = try await bounded("read A again") { try await peripheral.read(from: Self.measurement) }
         #expect(again == Data([0, 0x48]))
 
@@ -1467,8 +1438,8 @@ struct FilteredDiscoveryTests {
             for try await value in notifications { return value }
             return nil
         }
-        // The radio's own subscription table is the state the push consults, so it stands in
-        // for the "armed" signal `Peripheral` does not publish.
+        // The radio's own subscription table is the state that the push consults, so it replaces
+        // the "armed" signal that `Peripheral` does not publish.
         await waitFor(timeout: .seconds(10)) { await provider.radio.isSubscribed(characteristic: Self.measurement) }
         #expect(await provider.radio.isSubscribed(characteristic: Self.measurement))
 

@@ -7,41 +7,28 @@ import BLESwiftCompat17
 
 /// A `Clock` that moves only when a test tells it to.
 ///
-/// Hand one to `Configuration(clock:)` or `VirtualRadio(clock:)` and every timer behind
-/// them — a connect timeout, a scan timeout, a reconnect backoff, a virtual device's
-/// latency — sleeps on it instead of wall time. ``now`` stays put until ``advance(by:)``
-/// moves it, which resumes every sleeper whose deadline it reached, so a 60-second timeout
-/// is crossed, or missed by a millisecond, in no time at all and with no race.
+/// Give a clock to `Configuration(clock:)` or `VirtualRadio(clock:)`. Every timer behind them
+/// then sleeps on this clock and not on wall time. ``now`` stays the same until
+/// ``advance(by:)`` moves it. ``advance(by:)`` then resumes every sleeper whose deadline it
+/// reached. A test can cross a 60-second timeout, or miss it by a millisecond, instantly and
+/// with no race.
 ///
-/// The deterministic pattern is three steps: wait until the code under test has gone to
-/// sleep, move the clock, then await the outcome.
+/// - Important: ``advance(by:)`` resumes only the sleepers that are already suspended. Call
+///   ``waitForSleepers(_:)`` first. If you advance before the code under test reaches its
+///   `sleep`, the clock moves past a deadline that nobody waits on yet.
 ///
-/// ```swift
-/// let clock = ManualClock()
-/// let central = Central(backend: backend, queue: queue, configuration: Configuration(clock: clock))
-/// let attempt = Task { try await central.connect(id, timeout: .seconds(30)) }
-/// await clock.waitForSleepers(1)      // the timeout timer is parked
-/// clock.advance(by: .seconds(30))     // and now it has fired
-/// await #expect(throws: BLESwiftError.connectionTimedOut) { try await attempt.value }
-/// ```
-///
-/// ``waitForSleepers(_:)`` is the step that makes it deterministic: ``advance(by:)`` resumes
-/// only sleepers that are already suspended, so advancing before the code under test has
-/// reached its `sleep` would move the clock past a deadline that nobody is waiting on yet.
-/// It is woken by registration, never by polling.
-///
-/// `Mutex`-guarded, not queue-confined, like ``FakeStartupBackgroundTask``: a clock is slept
-/// on from whatever task the code under test runs its timer in, and advanced from the test.
+/// A `Mutex` guards the clock. No queue confines it.
+/// See <doc:TestingYourBLECode#Testing-timeouts>.
 public final class ManualClock: Clock, Sendable {
 
-    /// A point on a ``ManualClock``'s timeline: how far it has been advanced since it was
-    /// created.
+    /// A point on a ``ManualClock``'s timeline: the total time that the clock has advanced since
+    /// its creation.
     public struct Instant: InstantProtocol, Sendable, Hashable {
 
         /// The distance from the clock's starting point.
         public var offset: Duration
 
-        /// Creates an instant `offset` past the clock's starting point.
+        /// Creates an instant `offset` after the clock's starting point.
         public init(offset: Duration = .zero) {
             self.offset = offset
         }
@@ -59,16 +46,16 @@ public final class ManualClock: Clock, Sendable {
         }
     }
 
-    /// One suspended `sleep`, keyed so a cancellation can find exactly it.
+    /// One suspended `sleep`. Its `id` lets a cancellation find exactly this sleeper.
     private struct Sleeper {
         let id: UInt64
         let deadline: Instant
         let continuation: CheckedContinuation<Void, any Error>
     }
 
-    /// One ``waitForSleepers(_:)`` call, parked until ``State/sleepers`` reaches `count` —
-    /// or one ``waitForWaiters(_:)`` call, parked until ``State/waiters`` does — keyed so a
-    /// cancellation can find exactly it.
+    /// One ``waitForSleepers(_:)`` call that waits until ``State/sleepers`` reaches `count`, or
+    /// one ``waitForWaiters(_:)`` call that waits until ``State/waiters`` reaches `count`. Its `id`
+    /// lets a cancellation find exactly this call.
     private struct Waiter {
         let id: UInt64
         let count: Int
@@ -81,14 +68,14 @@ public final class ManualClock: Clock, Sendable {
         var nextWaiterID: UInt64 = 0
         var sleepers: [Sleeper] = []
         var waiters: [Waiter] = []
-        /// ``waitForWaiters(_:)`` calls, parked until ``waiters`` reaches their count — the
-        /// same shape one level up, keyed from the same counter as ``waiters``.
+        /// ``waitForWaiters(_:)`` calls that wait until ``waiters`` reaches their count. The `id`
+        /// values come from the same counter as ``waiters``.
         var waiterWatchers: [Waiter] = []
     }
 
     private let state = Mutex<State>(State())
 
-    /// Creates a clock at its starting point, with nothing sleeping on it.
+    /// Creates a clock at its starting point, with nothing that sleeps on it.
     public init() {}
 
     /// The current time: the sum of every ``advance(by:)`` so far.
@@ -96,37 +83,40 @@ public final class ManualClock: Clock, Sendable {
         state.withLock { $0.now }
     }
 
-    /// Zero — a manual clock resolves exactly the instants it is advanced to.
+    /// Zero. A manual clock resolves exactly the instants that it is advanced to.
     public var minimumResolution: Duration { .zero }
 
-    /// How many `sleep` calls are currently suspended on this clock.
+    /// The number of `sleep` calls that are now suspended on this clock.
     public var sleeperCount: Int {
         state.withLock { $0.sleepers.count }
     }
 
-    /// How many ``waitForSleepers(_:)`` calls are currently suspended on this clock.
+    /// The number of ``waitForSleepers(_:)`` calls that are now suspended on this clock.
     ///
-    /// Not API: it exists so a test of the clock itself can tell a waiter that is registered
-    /// from one that returned, or was cancelled, before it could be.
+    /// This is not public API. It lets a test of the clock itself tell a registered waiter from
+    /// one that returned, or was cancelled, before it could register.
     package var waiterCount: Int {
         state.withLock { $0.waiters.count }
     }
 
-    /// Suspends until `deadline` is reached by ``advance(by:)``, or the task is cancelled.
+    /// Suspends until ``advance(by:)`` reaches `deadline`, or until the task is cancelled.
     ///
-    /// **Cancellation wins.** A task already cancelled throws `CancellationError` at once,
-    /// before the deadline is looked at, as `ContinuousClock` does — so a sleep for a zero
-    /// delay on a cancelled task throws here exactly as it does on wall time, and a test on
-    /// this clock can exercise that cancellation path. A deadline already reached then
-    /// returns at once; neither case registers a sleeper. Otherwise the sleeper is registered
-    /// and resumed exactly once: by the ``advance(by:)`` that reaches its deadline, or —
-    /// throwing `CancellationError` — by the cancellation that removes it. The lock is what
-    /// decides which, so a cancel and an advance racing for the same sleeper cannot both
-    /// resume it.
+    /// **Cancellation wins.** If the task is already cancelled, the function throws
+    /// `CancellationError` at once, before it looks at the deadline, as `ContinuousClock` does. A
+    /// zero-delay sleep on a cancelled task therefore throws here as it does on wall time. If the
+    /// deadline is already reached, the function returns at once. In neither case does it register
+    /// a sleeper.
+    ///
+    /// Otherwise the function registers the sleeper and resumes it exactly once:
+    /// - The ``advance(by:)`` that reaches its deadline resumes it.
+    /// - A cancellation removes and resumes it, and it throws `CancellationError`.
+    ///
+    /// The lock decides which of the two happens, so a cancel and an advance that race for the same
+    /// sleeper cannot both resume it.
     ///
     /// - Parameters:
     ///   - deadline: The instant to sleep until.
-    ///   - tolerance: Ignored; a manual clock has no scheduling slack.
+    ///   - tolerance: Ignored. A manual clock has no scheduling slack.
     public func sleep(until deadline: Instant, tolerance: Duration?) async throws {
         try Task.checkCancellation()
         guard deadline > now else { return }
@@ -136,11 +126,11 @@ public final class ManualClock: Clock, Sendable {
         }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-                // Decided under the lock: whether the task was cancelled before the sleeper
-                // could be registered — the handler below has then already run and found
-                // nothing to remove — checked first, so cancellation wins here as it does
-                // above; whether the deadline has been reached since the check above; and,
-                // once registered, which waiters the new count satisfies.
+                // Decide under the lock, in this order:
+                // 1. Was the task cancelled before registration? The handler below already ran and
+                //    found nothing to remove. Check this first so that cancellation wins, as above.
+                // 2. Was the deadline reached since the check above?
+                // 3. After registration, which waiters does the new count satisfy?
                 enum Outcome { case registered([Waiter]), elapsed, cancelled }
                 let outcome = state.withLock { (state: inout State) -> Outcome in
                     if Task.isCancelled { return .cancelled }
@@ -169,14 +159,15 @@ public final class ManualClock: Clock, Sendable {
         }
     }
 
-    /// Moves ``now`` forward by `duration` and resumes every sleeper whose deadline is now
-    /// reached, earliest deadline first (ties in the order they went to sleep).
+    /// Moves ``now`` forward by `duration` and resumes every sleeper whose deadline is now reached.
+    /// The earliest deadline resumes first. Sleepers with the same deadline resume in the order
+    /// that they went to sleep.
     ///
-    /// Synchronous: it only resumes the continuations, in that order. The resumed tasks then
-    /// run concurrently, in no guaranteed order, so a test awaits the outcome it expects
-    /// rather than assuming it has happened when this returns.
+    /// This function is synchronous. It only resumes the continuations, in that order. The resumed
+    /// tasks then run concurrently, in no guaranteed order. Await the outcome that you expect. Do
+    /// not assume that it exists when this function returns.
     ///
-    /// - Parameter duration: How far to move the clock. Must not be negative.
+    /// - Parameter duration: How far to move the clock. It must not be negative.
     public func advance(by duration: Duration) {
         precondition(duration >= .zero, "ManualClock cannot run backwards; got \(duration)")
         let due = state.withLock { (state: inout State) -> [Sleeper] in
@@ -186,20 +177,20 @@ public final class ManualClock: Clock, Sendable {
             state.sleepers.removeAll { $0.deadline <= now }
             return due.sorted { ($0.deadline, $0.id) < ($1.deadline, $1.id) }
         }
-        // Resumed outside the lock: a resumed sleeper may go straight back to sleep on this
-        // clock, and would take the lock to do it.
+        // Resume outside the lock. A resumed sleeper can sleep on this clock again at once, and
+        // that takes the lock.
         for sleeper in due { sleeper.continuation.resume() }
     }
 
     /// Suspends until at least `count` sleepers are suspended on this clock.
     ///
-    /// Returns at once when they already are. Otherwise it is woken by the registration
-    /// that brings the count up to `count`, never by polling — which is what lets a test
-    /// advance the clock only once the code under test has really gone to sleep. Cancelling
-    /// the waiting task returns early (it does not throw), exactly once, under the same lock
-    /// discipline as ``sleep(until:tolerance:)``; the sleepers are untouched.
+    /// It returns at once if they already are. Otherwise the registration that brings the count up
+    /// to `count` wakes it. It never polls, so a test can advance the clock only after the code
+    /// under test has really gone to sleep. If the waiting task is cancelled, the function returns
+    /// early and does not throw. It returns exactly once, under the same lock discipline as
+    /// ``sleep(until:tolerance:)``, and leaves the sleepers unchanged.
     ///
-    /// - Parameter count: How many sleepers to wait for.
+    /// - Parameter count: The number of sleepers to wait for.
     public func waitForSleepers(_ count: Int) async {
         let id = state.withLock { (state: inout State) -> UInt64 in
             state.nextWaiterID += 1
@@ -207,9 +198,9 @@ public final class ManualClock: Clock, Sendable {
         }
         await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                // Decided under the lock, as a sleeper's registration is: already satisfied,
-                // cancelled before the waiter could be registered, or registered — and, once
-                // registered, which ``waitForWaiters(_:)`` calls the new count satisfies.
+                // Decide under the lock, as for a sleeper: the condition already holds, the task
+                // was cancelled before registration, or the waiter registers. After registration,
+                // decide which ``waitForWaiters(_:)`` calls the new count satisfies.
                 enum Outcome { case ready, registered([Waiter]) }
                 let outcome = state.withLock { (state: inout State) -> Outcome in
                     if state.sleepers.count >= count || Task.isCancelled { return .ready }
@@ -235,17 +226,19 @@ public final class ManualClock: Clock, Sendable {
         }
     }
 
-    /// Suspends until at least `count` ``waitForSleepers(_:)`` calls are suspended on this
-    /// clock — ``waitForSleepers(_:)`` one level up, woken by a waiter's registration rather
-    /// than a sleeper's, never by polling.
+    /// Suspends until at least `count` ``waitForSleepers(_:)`` calls are suspended on this clock.
+    /// It is ``waitForSleepers(_:)`` one level up. A waiter's registration wakes it, not a
+    /// sleeper's. It never polls.
     ///
-    /// Not API: it exists so a test of the clock itself can cancel a waiter only once it is
-    /// really registered, and so exercise the cancellation path that removes and resumes a
-    /// registered waiter rather than the check that answers a task cancelled before
-    /// registration. Cancelling the watching task returns early (it does not throw), exactly
-    /// once, under the same lock discipline as the waiters it watches.
+    /// This is not public API. A test of the clock itself uses it to cancel a waiter only after the
+    /// waiter is registered. The test can then exercise the cancellation path that removes and
+    /// resumes a registered waiter. That path differs from the check for a task that was cancelled
+    /// before registration.
     ///
-    /// - Parameter count: How many waiters to wait for.
+    /// If the watching task is cancelled, the function returns early and does not throw. It returns
+    /// exactly once, under the same lock discipline as the waiters that it watches.
+    ///
+    /// - Parameter count: The number of waiters to wait for.
     package func waitForWaiters(_ count: Int) async {
         let id = state.withLock { (state: inout State) -> UInt64 in
             state.nextWaiterID += 1

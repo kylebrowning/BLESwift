@@ -6,33 +6,35 @@
 import BLESwiftCore
 import Foundation
 
-/// System-known peripheral retrieval — synchronous lookups against the local CoreBluetooth
-/// cache/stack, with no radio scan.
+/// System-known peripheral retrieval. These lookups are synchronous and do not scan.
 extension Central {
 
-    /// Looks up peripherals this device's CoreBluetooth stack already knows by identifier —
-    /// no scan required. Documented restoration fallback: persist `uuid`s and re-resolve
-    /// them here on a later launch, even after a force-quit (see <doc:BackgroundRestoration>).
+    /// Looks up peripherals that this device's CoreBluetooth stack already knows by
+    /// identifier. No scan is necessary. Save the `uuid` values and resolve them here on a
+    /// later launch. This also works after the user force-quits the app (see
+    /// <doc:BackgroundRestoration>).
     ///
-    /// - Parameter identifiers: The bare `UUID`s to resolve (not ``PeripheralIdentifier``s).
-    /// - Returns: A ``PeripheralIdentifier`` per recognized `UUID`; unrecognized ones are
-    ///   omitted, not errors. Feed a result to ``connect(_:timeout:reconnect:warningOptions:compatibility:)``.
-    /// - Throws: ``BLESwiftError/stopped`` if this `Central` has been stopped.
+    /// - Parameter identifiers: The bare `UUID` values to resolve. Do not use
+    ///   ``PeripheralIdentifier`` values.
+    /// - Returns: A ``PeripheralIdentifier`` for each recognized `UUID`. The result omits
+    ///   unrecognized values. Pass a result to
+    ///   ``connect(_:timeout:reconnect:warningOptions:compatibility:)``.
+    /// - Throws: ``BLESwiftError/stopped`` if this `Central` is stopped.
     public func knownPeripherals(withIdentifiers identifiers: [UUID]) throws -> [PeripheralIdentifier] {
         guard let shim else { throw BLESwiftError.stopped }
         return shim.retrievePeripherals(withIdentifiers: identifiers)
             .map { PeripheralIdentifier(uuid: $0.identifier, name: $0.name) }
     }
 
-    /// Peripherals currently connected to this *device* (by any app, not just this one)
-    /// that contain at least one of the given services. Unlike
-    /// ``Central/connectedPeripherals``, this reflects OS-wide links, not just this
-    /// library's tracked sessions — the two can disagree.
+    /// Peripherals that are connected to this *device* and that contain at least one of the
+    /// given services. Any app can hold the connection. ``Central/connectedPeripherals`` shows
+    /// only the sessions that this library tracks, so the two results can differ.
     ///
-    /// - Parameter services: The services to filter by (any-of match).
-    /// - Returns: A ``PeripheralIdentifier`` per matching peripheral. Feed a result to
+    /// - Parameter services: The services to filter by. A peripheral matches if it has any
+    ///   one of them.
+    /// - Returns: A ``PeripheralIdentifier`` for each matching peripheral. Pass a result to
     ///   ``connect(_:timeout:reconnect:warningOptions:compatibility:)``.
-    /// - Throws: ``BLESwiftError/stopped`` if this `Central` has been stopped.
+    /// - Throws: ``BLESwiftError/stopped`` if this `Central` is stopped.
     public func systemConnectedPeripherals(withServices services: [ServiceIdentifier]) throws -> [PeripheralIdentifier] {
         guard let shim else { throw BLESwiftError.stopped }
         return shim.retrieveConnectedPeripherals(withServices: services)

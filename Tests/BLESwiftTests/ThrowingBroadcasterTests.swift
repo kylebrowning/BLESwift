@@ -9,11 +9,11 @@ import Testing
 import BLESwiftCore
 @testable import BLESwift
 
-/// Exercises ``ThrowingBroadcaster`` in isolation, mirroring `BroadcasterTests` where
-/// applicable (multicast fan-out, cancellation unregistration, buffering policy — there
-/// are no replay modes to mirror) plus the finish-with-error cases that are this type's
-/// entire reason to exist. The Phase 7 notification engine multicasts raw `Data` through
-/// this primitive, so correctness here is load-bearing for every notification stream.
+/// Tests ``ThrowingBroadcaster`` alone. The tests mirror `BroadcasterTests` where that applies:
+/// multicast fan-out, unregistration at cancellation, and the buffering policy. There are no replay
+/// modes to mirror. The tests also cover the cases that finish with an error, which is why this
+/// type exists. The notification engine multicasts raw `Data` through it, so every notification
+/// stream depends on it.
 @Suite("ThrowingBroadcaster")
 struct ThrowingBroadcasterTests {
 
@@ -27,8 +27,8 @@ struct ThrowingBroadcasterTests {
         async let collected1 = collect(stream1, count: 3)
         async let collected2 = collect(stream2, count: 3)
 
-        // Give both `for await` loops a chance to start iterating before yielding —
-        // otherwise a yield could race ahead of a subscriber's first `next()` call.
+        // Give both `for await` loops time to start iterating before the yield. Otherwise the yield
+        // could run before a subscriber's first `next()` call.
         await Task.yield()
         await Task.yield()
 
@@ -75,8 +75,8 @@ struct ThrowingBroadcasterTests {
         }
 
         broadcaster.yield(1)
-        // Wait for the value to be observed before cancelling, so this isn't a race
-        // between "task starts consuming" and "cancel".
+        // Wait until the test observes the value, then cancel. This avoids a race between "the task
+        // starts to consume" and "cancel".
         try? await Task.sleep(for: .milliseconds(20))
 
         task.cancel()
@@ -169,8 +169,8 @@ struct ThrowingBroadcasterTests {
         let broadcaster = ThrowingBroadcaster<Int>()
         let stream = broadcaster.stream(policy: .bufferingNewest(1))
 
-        // Yield synchronously before any consumer iterates, so all three elements land in
-        // the stream's internal buffer, where the buffering policy applies.
+        // Yield synchronously before any consumer iterates. All three elements go into the stream's
+        // internal buffer, where the buffering policy applies.
         broadcaster.yield(1)
         broadcaster.yield(2)
         broadcaster.yield(3)
@@ -184,8 +184,8 @@ struct ThrowingBroadcasterTests {
         #expect(received == [3])
     }
 
-    /// Collects exactly `count` elements from `stream`, then returns without waiting for
-    /// it to finish (the stream may still have a live producer).
+    /// Collects exactly `count` elements from `stream`, then returns without waiting for the stream
+    /// to finish. The stream can still have a live producer.
     private func collect(_ stream: AsyncThrowingStream<Int, Error>, count: Int) async throws -> [Int] {
         var results: [Int] = []
         var iterator = stream.makeAsyncIterator()
@@ -207,28 +207,27 @@ struct ThrowingBroadcasterTests {
 
     @Test("Stress: yielding while subscribers cancel never deadlocks")
     func concurrentYieldAndCancellationDoNotDeadlock() async {
-        // Mirrors the `Broadcaster` regression test for the same lock-order inversion:
-        // `yield(_:)` must not hold this broadcaster's `Mutex` across
-        // `AsyncThrowingStream.Continuation.yield`, which — when it resumes a suspended
-        // consumer — takes that consumer task's status lock, while a concurrent cancellation
-        // holds that status lock and re-enters the `Mutex` from `onTermination`.
+        // Mirrors the `Broadcaster` regression test for the same lock-order inversion. `yield(_:)`
+        // must not hold this broadcaster's `Mutex` across `AsyncThrowingStream.Continuation.yield`.
+        // That call can resume a suspended consumer, which takes the consumer task's status lock. A
+        // concurrent cancellation holds that status lock and enters the `Mutex` again from
+        // `onTermination`.
         //
-        // Every call into the broadcaster — yielding, subscribing, cancelling — is made from
-        // `DispatchQueue.global()` threads, and the deadline is enforced by a blocking
-        // `DispatchSemaphore.wait` on one more of them, handed back to this test through a
-        // continuation. So no cooperative thread is ever blocked and the workload never
-        // competes with the watchdog for the pool (which matters under
-        // `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`, where the pool is a single thread): the
-        // pool is left to the subscriber tasks, which only iterate.
+        // Every call into the broadcaster (yield, subscribe, cancel) comes from a
+        // `DispatchQueue.global()` thread. A blocking `DispatchSemaphore.wait` on one more such
+        // thread enforces the deadline and returns the result through a continuation. No
+        // cooperative thread is blocked, so the workload does not compete with the watchdog for the
+        // pool. This matters with `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`, where the pool has one
+        // thread, used only by the subscriber tasks, which only iterate.
         let finishedSignal = DispatchSemaphore(value: 0)
         let stopProducing = Mutex<Bool>(false)
 
         DispatchQueue.global().async {
             let broadcaster = ThrowingBroadcaster<Int>()
 
-            // Steady subscribers spend most of their time suspended, so each fan-out
-            // resumes them one after another — the half of the inversion that touches
-            // consumer status locks.
+            // Steady subscribers stay suspended most of the time, so each fan-out resumes them one
+            // after another. This is the half of the inversion that touches the consumers' status
+            // locks.
             let steady = (0..<8).map { _ -> Task<Void, Error> in
                 let stream = broadcaster.stream()
                 return Task.detached {
@@ -256,9 +255,9 @@ struct ThrowingBroadcasterTests {
                             for try await _ in stream {}
                         }
                         usleep(100)
-                        // Cancelling a consumer that is very likely suspended awaiting the
-                        // producer: cancellation runs `onTermination` synchronously, under
-                        // that consumer's status lock, on this thread.
+                        // Cancel a consumer that is very likely suspended waiting for the producer.
+                        // The cancellation runs `onTermination` synchronously on this thread, under
+                        // that consumer's status lock.
                         consumer.cancel()
                     }
                 }

@@ -3,57 +3,59 @@
 //  BLESwift
 //
 
-// NOTE — dual-access declaration: see the note in `RestorationConfiguration.swift`.
-// Public on iOS, internal mirror elsewhere. **Keep the two in sync.**
+// NOTE: This is a dual-access declaration. See the note in `RestorationConfiguration.swift`.
+// It is public on iOS and an internal mirror on other platforms. **Keep the two in sync.**
 
 import BLESwiftCore
 import Foundation
 
 #if os(iOS)
 
-/// A background-restoration event, published by ``Central/restorationEvents()``.
+/// A background-restoration event. ``Central/restorationEvents()`` publishes it.
 ///
-/// Surfaced as a **buffered, replayed** event stream: every event is buffered from
-/// `Central`'s creation and replayed in order to the first consumer, so nothing restored
-/// during launch is lost even if the consumer task starts late.
+/// The stream is **buffered and replayed**. It buffers every event from the creation of
+/// `Central` and replays them in order to the first consumer, even if the consumer starts
+/// late.
 public enum RestorationEvent: Sendable {
 
-    /// CoreBluetooth is restoring preserved state — the eager, `Sendable` capture of its
-    /// `willRestoreState` delegate callback. Always the first restoration event of a
-    /// restored launch; ``restoredConnection(_:)``/``failedToRestoreConnection(_:error:)``
-    /// follow once the radio reports powered-on and `Central` finishes routing.
+    /// CoreBluetooth restored preserved state. It is a `Sendable` capture of the
+    /// `willRestoreState` delegate callback, and it is always the first event of a restored
+    /// launch. ``restoredConnection(_:)`` or ``failedToRestoreConnection(_:error:)`` follow
+    /// when the radio reports powered-on and `Central` finishes the routing.
     case willRestore(RestoredState)
 
-    /// A restored connection is live again: either the peripheral was restored already
-    /// connected (adopted directly as a live session — its `Peripheral` handle is available
-    /// via ``Central/connectionState(of:)``), or a restored-*connecting* peripheral's manual
-    /// re-connect succeeded. Every restored peripheral is routed and produces its own event —
-    /// none are dropped or treated as extras.
+    /// A restored connection is live again. There are two cases:
+    ///
+    /// - The peripheral was restored already connected. Its `Peripheral` handle is available
+    ///   through ``Central/connectionState(of:)``.
+    /// - The manual reconnect of a restored-*connecting* peripheral succeeded.
+    ///
+    /// Each restored peripheral produces its own event.
     case restoredConnection(PeripheralIdentifier)
 
-    /// Restoring a connection failed. Emitted with ``BLESwiftError/notConnected`` for a
-    /// peripheral restored in the `disconnecting`/`disconnected` state, with the manual
-    /// re-connect's error for a restored-*connecting* peripheral (timeout:
-    /// ``BLESwiftError/connectionTimedOut``), with
-    /// ``BLESwiftError/startupBackgroundTaskExpired`` if iOS's startup background time ran
-    /// out mid-restoration, or with ``BLESwiftError/bluetoothUnavailable`` if the radio
-    /// never reached powered-on.
+    /// The connection restoration failed. The error depends on the cause:
+    ///
+    /// - ``BLESwiftError/notConnected`` for a peripheral restored in the `disconnecting` or
+    ///   `disconnected` state.
+    /// - The error of the manual reconnect of a restored-*connecting* peripheral. For a
+    ///   timeout, it is ``BLESwiftError/connectionTimedOut``.
+    /// - ``BLESwiftError/startupBackgroundTaskExpired`` if iOS's startup background time ran
+    ///   out during the restoration.
+    /// - ``BLESwiftError/bluetoothUnavailable`` if the radio never reached powered-on.
     case failedToRestoreConnection(PeripheralIdentifier, error: Error)
 
-    /// A characteristic value arrived with no active notification subscriber and no
-    /// pending read — the restored peripheral is still notifying from a subscription that
-    /// belonged to the previous app life.
+    /// A characteristic value arrived with no notification subscriber and no pending read. The
+    /// restored peripheral still notifies from a subscription of the previous app launch.
     ///
-    /// To keep receiving, subscribe normally via `Peripheral.notifications(for:policy:)`;
-    /// to stop the peripheral notifying, subscribe and cancel (the last unsubscribe turns
-    /// notifications off).
+    /// To receive values, subscribe with `Peripheral.notifications(for:policy:)`. To stop the
+    /// notifications, subscribe and then cancel. The last unsubscribe turns notifications off.
     case unhandledNotification(PeripheralIdentifier, CharacteristicIdentifier, Data?)
 }
 
 #else
 
-/// Internal mirror of the iOS-only public `RestorationEvent` — see the dual-access note
-/// in `RestorationConfiguration.swift`.
+/// Internal mirror of the public `RestorationEvent`, which is iOS-only. See the dual-access
+/// note in `RestorationConfiguration.swift`.
 enum RestorationEvent: Sendable {
     case willRestore(RestoredState)
     case restoredConnection(PeripheralIdentifier)

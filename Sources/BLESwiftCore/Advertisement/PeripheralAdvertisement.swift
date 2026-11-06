@@ -3,20 +3,20 @@
 //  BLESwiftCore
 //
 
-/// The advertisement packet a `PeripheralHost` broadcasts via
+/// The advertisement packet that a `PeripheralHost` broadcasts with
 /// `PeripheralHost/startAdvertising(_:)`.
 ///
-/// Carries only the two fields `CBPeripheralManager` actually honors when advertising —
-/// local name and service UUIDs; every other field a scanning central can observe is
-/// ignored on the advertising side, so this type omits them.
+/// It carries only the two fields that `CBPeripheralManager` honors when it advertises: the local
+/// name and the service UUIDs. A scanning central can observe other fields, but the advertising
+/// side ignores them, so this type omits them.
 public struct PeripheralAdvertisement: Sendable, Hashable {
 
-    /// The local name to advertise (`CBAdvertisementDataLocalNameKey`), or `nil` to
-    /// advertise no name.
+    /// The local name to advertise (`CBAdvertisementDataLocalNameKey`). Use `nil` to advertise no
+    /// name.
     public let localName: String?
 
-    /// The service UUIDs to advertise (`CBAdvertisementDataServiceUUIDsKey`). Empty
-    /// advertises no service UUIDs.
+    /// The service UUIDs to advertise (`CBAdvertisementDataServiceUUIDsKey`). If the array is
+    /// empty, no service UUIDs are advertised.
     public let serviceUUIDs: [ServiceIdentifier]
 
     /// Creates a `PeripheralAdvertisement`.

@@ -3,23 +3,22 @@
 //  BLESwiftCore
 //
 
-/// Everything CoreBluetooth handed back in the peripheral-role `willRestoreState` delegate
-/// callback, converted eagerly into `Sendable` BLESwift value types. The
-/// `CBPeripheralManager` counterpart to ``RestoredState``. Delivered via `PeripheralHost`'s
-/// restoration event stream, which buffers events until the first consumer arrives.
+/// Everything that CoreBluetooth handed back in the peripheral-role `willRestoreState` delegate
+/// callback, converted immediately to `Sendable` BLESwift value types. It is the
+/// `CBPeripheralManager` counterpart of ``RestoredState``. `PeripheralHost`'s restoration event
+/// stream delivers it and buffers events until the first consumer arrives.
 public struct RestoredPeripheralState: Sendable, Hashable {
 
-    /// The services CoreBluetooth preserved and re-published on the app's behalf
-    /// (`CBPeripheralManagerRestoredStateServicesKey`). Reported by identifier; the full
-    /// definitions live in CoreBluetooth's re-established GATT database.
+    /// The services that CoreBluetooth preserved and republished for the app
+    /// (`CBPeripheralManagerRestoredStateServicesKey`), by identifier. The full definitions are in
+    /// the GATT database that CoreBluetooth restored.
     public let services: [ServiceIdentifier]
 
-    /// The advertisement CoreBluetooth was broadcasting when the app was terminated
-    /// (`CBPeripheralManagerRestoredStateAdvertisementDataKey`), or `nil` if it was not
-    /// advertising. When non-`nil`, CoreBluetooth *resumes* this advertisement across the
-    /// relaunch on the app's behalf, so `PeripheralHost` reflects it in its `isAdvertising`
-    /// snapshot — but `PeripheralHost` does **not** itself re-issue `startAdvertising`
-    /// (CoreBluetooth already did).
+    /// The advertisement that CoreBluetooth broadcast when the app was terminated
+    /// (`CBPeripheralManagerRestoredStateAdvertisementDataKey`). It is `nil` if the peripheral did
+    /// not advertise. Otherwise CoreBluetooth *resumes* this advertisement across the relaunch, so
+    /// `PeripheralHost` reports it in its `isAdvertising` snapshot. `PeripheralHost` does **not**
+    /// call `startAdvertising` again.
     public let advertisement: PeripheralAdvertisement?
 
     /// Creates a `RestoredPeripheralState`.

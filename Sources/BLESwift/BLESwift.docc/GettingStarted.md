@@ -1,18 +1,14 @@
 # Getting Started
 
-Configure, create, and connect a ``Central`` — from radio power-on to your first GATT read.
+Configure and create a ``Central``, wait for the radio, connect to a peripheral, and read a characteristic.
 
 ## Overview
 
-Every BLESwift app follows the same shape: configure once, create a single ``Central``, wait for
-the Bluetooth radio to power on, then connect and talk to a peripheral. This article walks
-through that shape end to end.
+Every BLESwift app follows these steps. Configure once. Create one ``Central``. Wait for the Bluetooth radio to power on. Then connect to a peripheral and use it.
 
 ### Configuring `Central`
 
-``Configuration`` captures every start-time option BLESwift needs, since the underlying
-`CBCentralManager` is created synchronously inside ``Central/init(configuration:)`` (not behind
-a separate async `start()` step):
+``Configuration`` has every start-time option. `Central` creates its `CBCentralManager` synchronously in ``Central/init(configuration:)``. There is no separate async `start()` step.
 
 ```swift
 import BLESwift
@@ -23,11 +19,9 @@ let configuration = Configuration(
 )
 ```
 
-`showPowerAlert` mirrors `CBCentralManagerOptionShowPowerAlertKey` — whether iOS shows a system
-alert if Bluetooth is off while your app is backgrounded. `warningOptions` (see
-``WarningOptions``) is the default applied to every connection that doesn't override it.
-`Configuration` also carries a `swift-log` `Logger` (defaulting to `Logger(label: "BLESwift")`) —
-install a custom `LogHandler` on it to observe BLESwift's internal logging.
+- `showPowerAlert` sets `CBCentralManagerOptionShowPowerAlertKey`. It controls whether iOS shows a system alert when Bluetooth is off and your app is in the background.
+- `warningOptions` (see ``WarningOptions``) is the default for each connection that does not set its own.
+- `logger` is a `swift-log` `Logger`. Its default label is `"BLESwift"`. Set a custom `LogHandler` on it to read the internal log.
 
 ### Creating `Central`
 
@@ -35,16 +29,11 @@ install a custom `LogHandler` on it to observe BLESwift's internal logging.
 let central = Central(configuration: configuration)
 ```
 
-``Central`` is an actor: every stored piece of connection/scan state lives inside its isolation
-domain, and every method that touches CoreBluetooth is `async`. Two properties are exceptions,
-readable synchronously from any isolation domain because they're backed by a `Mutex` snapshot:
-``Central/state`` (the current ``CentralState``) and ``Central/isScanning``.
+``Central`` is an actor. Its methods that use CoreBluetooth are `async`. Two properties are readable from any isolation domain without `await`: ``Central/state`` (a ``CentralState``) and ``Central/isScanning``.
 
 ### Waiting for the radio
 
-Bluetooth starts in ``CentralState/unknown`` until CoreBluetooth reports its first real state.
-Subscribe to ``Central/stateEvents()`` and wait for ``CentralState/poweredOn`` before scanning
-or connecting:
+The state is ``CentralState/unknown`` until CoreBluetooth reports a real state. Before you scan or connect, wait for ``CentralState/poweredOn`` on ``Central/stateEvents()``:
 
 ```swift
 for await state in await central.stateEvents() {
@@ -52,31 +41,27 @@ for await state in await central.stateEvents() {
 }
 ```
 
-``Central/stateEvents()`` replays the most recently observed state to a subscriber that starts
-listening after that state was reached, so a late subscriber never misses the current state —
-you don't need to separately check ``Central/state`` first.
+``Central/stateEvents()`` replays the latest state to a new subscriber. You do not need to read ``Central/state`` first.
 
 ### Connecting
 
-Once you have a ``PeripheralIdentifier`` — typically from a scan (see <doc:Scanning>), or one
-you already know about — connect with ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)``:
+Get a ``PeripheralIdentifier`` from a scan (see <doc:Scanning>) or from a saved value. Then call ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)``:
 
 ```swift
 let peripheral = try await central.connect(identifier, timeout: .seconds(10))
 ```
 
-This throws ``BLESwiftError/connectionTimedOut`` if `timeout` elapses,
-``BLESwiftError/duplicateConnect(_:)`` if `identifier` itself already has a connection or
-connection attempt in progress, or whatever error CoreBluetooth reports for the attempt.
-`Central` supports any number of concurrent peripheral connections — connecting to a
-*different* peripheral never conflicts with this one. See <doc:ConnectionsAndReconnection> for
-reconnect policies, multi-peripheral connections, and connection-lifecycle events.
+The call can throw these errors:
+
+- ``BLESwiftError/connectionTimedOut`` if `timeout` elapses.
+- ``BLESwiftError/duplicateConnect(_:)`` if `identifier` already has a connection or an attempt.
+- The error that CoreBluetooth reports for the attempt.
+
+`Central` supports any number of concurrent connections. For reconnect policies and connection events, see <doc:ConnectionsAndReconnection>.
 
 ### Reading a characteristic
 
-``Peripheral`` is a lightweight, `Sendable` handle: every GATT operation on it is an `async
-throws` method that routes through the owning ``Central``, lazily discovering the service and
-characteristic it needs first.
+``Peripheral`` is a `Sendable` handle. Each GATT operation is an `async throws` method. The method goes through the owning ``Central`` and discovers the service and characteristic if necessary.
 
 ```swift
 let batteryService = ServiceIdentifier(uuid: "180F")
@@ -86,18 +71,11 @@ let level: UInt8 = try await peripheral.read(from: batteryLevelCharacteristic)
 print("Battery: \(level)%")
 ```
 
-`UInt8` conforms to ``Receivable`` out of the box (as do every fixed-width integer type,
-`String`, and `Data` itself) — decode your own binary formats by conforming your own type to
-``Receivable``/``Transmittable``. See <doc:ReadingWritingNotifications> for writes and
-notification streams.
+``Receivable`` is implemented for `UInt8`, the other fixed-width integer types, `String`, and `Data`. For your own binary formats, conform your type to ``Receivable`` or ``Transmittable``. For writes and notification streams, see <doc:ReadingWritingNotifications>.
 
 ### Testing
 
-You don't need real hardware to unit-test code built on `Central`. The **BLESwiftTestSupport**
-module ships `FakeCentral`/`FakePeripheral` — scriptable stand-ins for
-`CBCentralManager`/`CBPeripheral` — plus `Central`'s public
-`init(backend:queue:configuration:startupBackgroundTask:connectedPeripherals:)`, which wires a
-real `Central` to them instead of CoreBluetooth:
+You can unit-test code that uses `Central` without hardware. The **BLESwiftTestSupport** module has `FakeCentral` and `FakePeripheral`. These are scriptable replacements for `CBCentralManager` and `CBPeripheral`. `Central`'s public `init(backend:queue:configuration:startupBackgroundTask:connectedPeripherals:)` connects a real `Central` to them:
 
 ```swift
 import BLESwift
@@ -110,12 +88,7 @@ let fakeCentral = FakeCentral(queue: queue)
 let central = Central(backend: fakeCentral, queue: queue)
 ```
 
-From there, `central` behaves exactly like a production `Central` — `stateEvents()`,
-`connect(_:)`, and every `Peripheral` GATT method work unchanged, because `Central` itself has
-no idea it isn't talking to real hardware. See the **BLESwiftTestSupport** module's "Testing
-Your BLE Code" article for the full rig pattern, the queue-confined contract these fakes
-enforce, and the scripting reference (`connectBehavior`, `scriptedReadValues`,
-`availableServices`, and more).
+This `central` behaves like a production `Central`. For the full rig pattern, the queue rules, and the scripting reference, see the "Testing Your BLE Code" article of the **BLESwiftTestSupport** module.
 
 ## See Also
 

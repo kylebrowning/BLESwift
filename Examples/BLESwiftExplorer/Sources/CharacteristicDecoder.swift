@@ -2,9 +2,9 @@
 //  CharacteristicDecoder.swift
 //  BLESwiftExplorer
 //
-//  Decodes a characteristic's raw `Data` into a human-readable string using the
-//  `BLESwiftProfiles` types (Task 6) when the UUID is recognized, falling back to a hex
-//  dump for anything unknown. Every profile characteristic identifier is referenced here.
+//  Decodes the raw `Data` of a characteristic into a readable string. It uses the `BLESwiftProfiles`
+//  types if it recognizes the UUID, and falls back to a hex dump for an unknown UUID. Every profile
+//  characteristic identifier is referenced here.
 //
 
 import BLESwift
@@ -13,7 +13,8 @@ import Foundation
 
 enum CharacteristicDecoder {
 
-    /// Every characteristic UUID this app can decode typed, for labelling the browser.
+    /// Every characteristic UUID that this app can decode as a typed value. The browser uses it for
+    /// labels.
     static let knownCharacteristics: [CharacteristicIdentifier] = [
         HeartRateMeasurement.characteristic,
         BatteryLevel.characteristic,
@@ -28,12 +29,12 @@ enum CharacteristicDecoder {
         knownCharacteristics.contains { $0.uuidString.caseInsensitiveCompare(characteristic.uuidString) == .orderedSame }
     }
 
-    /// Hex fallback for unknown characteristics (and the default rendering of raw reads).
+    /// Hex fallback for unknown characteristics (and the default display of raw reads).
     static func hex(_ data: Data) -> String {
         data.isEmpty ? "(empty)" : data.map { String(format: "%02X", $0) }.joined(separator: " ")
     }
 
-    /// Returns a typed, human-readable decode when the UUID is recognized, else a hex dump.
+    /// Returns a readable typed decode if the UUID is recognized. Otherwise returns a hex dump.
     static func decode(_ data: Data, for characteristic: CharacteristicIdentifier) -> String {
         let uuid = characteristic.uuidString.uppercased()
         do {

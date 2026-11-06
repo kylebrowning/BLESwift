@@ -9,10 +9,9 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Exercises `Peripheral`'s Phase 6 GATT surface: `read`, `write`, `readRSSI`,
-/// `maximumWriteValueLength`, and `serviceChanges()` — all driven through
-/// `makeTestCentral()`'s `FakeCentral`/`FakePeripheral` pair, connected first via the
-/// Phase 5 connection lifecycle.
+/// Tests the GATT API of `Peripheral`: `read`, `write`, `readRSSI`, `maximumWriteValueLength`, and
+/// `serviceChanges()`. All tests connect the `FakeCentral` and `FakePeripheral` pair of
+/// `makeTestCentral()` first.
 @Suite("GATT operations")
 struct GATTTests {
 
@@ -95,8 +94,8 @@ struct GATTTests {
     @Test("A characteristic genuinely absent from an otherwise-discovered service's GATT table throws .missingCharacteristic")
     func missingCharacteristicThrows() async throws {
         let (_, _, fakePeripheral, peripheral) = try await connected()
-        // The service is real, but its GATT table doesn't actually contain
-        // `heartRateMeasurement` — only a different characteristic under it.
+        // The service is real, but its GATT table contains only a different characteristic, not
+        // `heartRateMeasurement`.
         await fakePeripheral.onQueue {
             fakePeripheral.availableServices = [Self.heartRateService: [Self.bodySensorLocation]]
         }
@@ -114,8 +113,8 @@ struct GATTTests {
     @Test("A service genuinely absent from the peripheral's GATT table throws .missingService")
     func missingServiceThrows() async throws {
         let (_, _, fakePeripheral, peripheral) = try await connected()
-        // The peripheral's GATT table exists (scripted) but simply doesn't include
-        // `heartRateService` at all — e.g. only the battery service is present.
+        // The peripheral's GATT table exists (scripted) but does not include `heartRateService`.
+        // Only the battery service is present.
         await fakePeripheral.onQueue {
             fakePeripheral.availableServices = [Self.batteryService: [Self.batteryLevel]]
         }
@@ -148,7 +147,7 @@ struct GATTTests {
         let second = Task<UInt8, Error> {
             try await peripheral.read(from: Self.heartRateMeasurement)
         }
-        // Give the second read every opportunity to (incorrectly) start early.
+        // Give the second read every opportunity to start early (which would be wrong).
         try await Task.sleep(for: .milliseconds(50))
         #expect(await fakePeripheral.onQueue { fakePeripheral.readCallCount } == 1, "second read must not start until the first completes")
 
@@ -156,11 +155,10 @@ struct GATTTests {
         let firstValue = try await first.value
         #expect(firstValue == 1)
 
-        // Only now — after the first read has fully resolved — should the second read's
-        // `readValue(for:)` call happen, proving the FIFO unblocked it in order (rather
-        // than distinguishing the two reads by scripting different return values, which
-        // would race: `readValue(for:)` captures the scripted value at *call* time, and
-        // that call is exactly the event being awaited here).
+        // Only after the first read has fully resolved should the second read's `readValue(for:)`
+        // call happen. This proves that the FIFO unblocked it in order. Different scripted return
+        // values would race, because `readValue(for:)` captures the scripted value at *call* time,
+        // and that call is what the test waits for.
         await waitUntil { await fakePeripheral.onQueue { fakePeripheral.readCallCount } == 2 }
         fakePeripheral.simulateNextHeldReadCompletion()
         let secondValue = try await second.value
@@ -184,7 +182,7 @@ struct GATTTests {
         let readB = Task<UInt8, Error> {
             try await peripheral.read(from: Self.batteryLevel)
         }
-        // Different characteristic — must be able to start without waiting on `readA`.
+        // A different characteristic must start without waiting for `readA`.
         await waitUntil { await fakePeripheral.onQueue { fakePeripheral.readCallCount } == 2 }
 
         fakePeripheral.simulateNextHeldReadCompletion()
@@ -207,7 +205,7 @@ struct GATTTests {
             try await peripheral.write(UInt8(1), to: Self.heartRateMeasurement, type: .withoutResponse)
         }
 
-        // Give the write every opportunity to (incorrectly) proceed while blocked.
+        // Give the blocked write every opportunity to proceed (which would be wrong).
         try await Task.sleep(for: .milliseconds(50))
         #expect(await fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.heartRateMeasurement] } == nil)
 
@@ -232,7 +230,7 @@ struct GATTTests {
     func readRSSIReturnsValue() async throws {
         let (_, _, _, peripheral) = try await connected()
         let rssi = try await peripheral.readRSSI()
-        #expect(rssi == -50) // FakePeripheral's fixed placeholder value.
+        #expect(rssi == -50) // This is the fixed placeholder value of FakePeripheral.
     }
 
     @Test("maximumWriteValueLength(for:) returns the scripted value")
@@ -268,7 +266,7 @@ struct GATTTests {
         #expect(await fakePeripheral.onQueue { fakePeripheral.isDiscovered(Self.heartRateService) } == false)
         #expect(await fakePeripheral.onQueue { fakePeripheral.isDiscovered(Self.heartRateMeasurement) } == false)
 
-        // The next read must re-discover from scratch.
+        // The next read must discover again from the start.
         let value: UInt8 = try await peripheral.read(from: Self.heartRateMeasurement)
         #expect(value == 1)
         #expect(await fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 1)
@@ -279,7 +277,7 @@ struct GATTTests {
     func serviceChangesStreamSurvivesDisconnectAndReconnect() async throws {
         let (central, fakeCentral, fakePeripheral, peripheral) = try await connected()
 
-        // Subscribed while still on the FIRST connection.
+        // Subscribed while the connection is still the FIRST connection.
         let stream = peripheral.serviceChanges()
         let collector = Task<[ServiceIdentifier]?, Never> {
             var iterator = stream.makeAsyncIterator()
@@ -293,9 +291,9 @@ struct GATTTests {
             return
         }
 
-        // Reconnect to the SAME identifier — `ServiceChangesRegistry` is keyed by
-        // `PeripheralIdentifier`, not by any particular connection attempt, so the old
-        // subscriber's stream must still be live against the new session.
+        // Reconnect to the SAME identifier. `ServiceChangesRegistry` keys by
+        // `PeripheralIdentifier`, not by connection attempt, so the old subscriber's stream must
+        // stay live against the new session.
         _ = try await central.connect(fakePeripheral.peripheralIdentifier)
         guard case .connected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .connected after reconnect")
@@ -316,7 +314,7 @@ struct GATTTests {
         fakePeripheral.simulateDiscoveredServices([Self.heartRateService])
         fakePeripheral.simulateDiscoveredCharacteristics([Self.heartRateMeasurement], for: Self.heartRateService)
         await fakePeripheral.onQueue { fakePeripheral.setNotifyValue(true, for: Self.heartRateMeasurement) }
-        await fakePeripheral.onQueue {} // flush didUpdateNotificationState delivery
+        await fakePeripheral.onQueue {} // Flush the didUpdateNotificationState delivery.
 
         do {
             let _: UInt8 = try await peripheral.read(from: Self.heartRateMeasurement)
@@ -379,8 +377,8 @@ struct GATTTests {
 
 // MARK: - Test helpers
 
-/// Registers `peripheral` as retrievable and connects to it, returning the connected
-/// `Peripheral` handle alongside the `Central`/`FakeCentral`/`FakePeripheral` backing it.
+/// Registers `peripheral` as retrievable and connects to it. Returns the connected `Peripheral`
+/// handle and the supporting `Central`, `FakeCentral`, and `FakePeripheral`.
 private func connected() async throws -> (Central, FakeCentral, FakePeripheral, Peripheral) {
     let (central, fakeCentral, fakePeripheral) = makeTestCentral()
     await fakeCentral.onQueue {
@@ -391,7 +389,7 @@ private func connected() async throws -> (Central, FakeCentral, FakePeripheral, 
     return (central, fakeCentral, fakePeripheral, peripheral)
 }
 
-/// Polls `condition` until it's `true`, or a generous timeout elapses.
+/// Polls `condition` until it is `true` or a long timeout ends.
 private func waitUntil(timeout: Duration = .seconds(2), _ condition: () async -> Bool) async {
     let deadline = ContinuousClock.now + timeout
     while await !condition() {

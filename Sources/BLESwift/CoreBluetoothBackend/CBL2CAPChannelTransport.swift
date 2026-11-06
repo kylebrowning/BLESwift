@@ -7,67 +7,68 @@ import BLESwiftCore
 import CoreBluetooth
 import Foundation
 
-/// The CoreBluetooth ``L2CAPChannelRemote``: wraps a `CBL2CAPChannel`'s Foundation
-/// `InputStream`/`OutputStream` and pumps them as async byte I/O.
+/// The CoreBluetooth ``L2CAPChannelRemote``. It wraps the Foundation `InputStream` and
+/// `OutputStream` of a `CBL2CAPChannel` and pumps them as async byte I/O.
 ///
 /// ## No RunLoop, and never the actor
-/// `InputStream`/`OutputStream` are classically RunLoop-driven, but nothing may schedule a
-/// RunLoop on the `Central` actor's executor. This transport instead schedules both streams
-/// on its own dedicated serial ``pumpQueue`` via `CFReadStreamSetDispatchQueue`/
-/// `CFWriteStreamSetDispatchQueue` — GCD-scheduled, never a RunLoop, and off the actor.
+/// Foundation streams normally need a RunLoop, and nothing can schedule a RunLoop on the
+/// `Central` actor's executor. This transport schedules both streams on its own serial
+/// ``pumpQueue`` with `CFReadStreamSetDispatchQueue` and `CFWriteStreamSetDispatchQueue`, so
+/// GCD drives them off the actor.
 ///
-/// ## Sendable via queue confinement (not locks, not `@unchecked`)
-/// Every mutable stored property is `nonisolated(unsafe)` and touched **only** on
-/// ``pumpQueue`` — a `dispatchPrecondition` guards each entry point, and
-/// ``write(_:)``/``close(error:)`` hop on via `pumpQueue.async`. A documented, narrow
-/// confinement, not a type-wide `@unchecked Sendable` (which stays grep-forbidden).
+/// ## Sendable by queue confinement (no locks, no `@unchecked`)
+/// Every mutable stored property is `nonisolated(unsafe)` and code touches it **only** on
+/// ``pumpQueue``. A `dispatchPrecondition` guards each entry point, and ``write(_:)`` and
+/// ``close(error:)`` hop on with `pumpQueue.async`. This is a narrow confinement and not a
+/// type-wide `@unchecked Sendable`, which a grep check forbids.
 ///
 /// ## Deterministic teardown
 /// ``close(error:)`` hops onto ``pumpQueue``, closes and unschedules both streams, finishes
-/// the inbound stream, and fails any queued write. Idempotent.
+/// the inbound stream, and fails any queued write. It is idempotent.
 final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegate {
 
     let psm: L2CAPPSM
 
-    /// The dedicated serial queue every stream event, read, and write is confined to —
-    /// created per transport, never the actor's executor and never a RunLoop.
+    /// The dedicated serial queue that confines each stream event, read, and write. It is
+    /// never the actor's executor and never a RunLoop.
     private let pumpQueue: DispatchQueue
 
-    /// `InputStream`/`OutputStream` are not `Sendable`, but touched only on ``pumpQueue`` —
-    /// same queue-confinement as every other stored property here.
+    /// `InputStream` and `OutputStream` are not `Sendable`, but code touches them only on
+    /// ``pumpQueue``, like every other stored property here.
     nonisolated(unsafe) private let inputStream: InputStream
     nonisolated(unsafe) private let outputStream: OutputStream
 
-    /// The single inbound stream vended to the `L2CAPChannel` handle. The continuation is
-    /// only ever `yield`ed/`finish`ed from ``pumpQueue``.
+    /// The single inbound stream for the `L2CAPChannel` handle. Code calls `yield` and `finish`
+    /// on the continuation only from ``pumpQueue``.
     private let inboundStream: AsyncThrowingStream<Data, Error>
     private let inboundContinuation: AsyncThrowingStream<Data, Error>.Continuation
 
-    /// One queued outbound write awaiting (possibly partial) delivery. Pump-confined.
+    /// One queued outbound write that waits for delivery, which can be partial. Confined to
+    /// the pump.
     private struct WriteJob {
         let bytes: [UInt8]
         var offset: Int
         let continuation: CheckedContinuation<Void, Error>
     }
 
-    /// FIFO of outbound writes not yet fully flushed. Pump-confined.
+    /// FIFO of outbound writes that are not fully flushed. Confined to the pump.
     nonisolated(unsafe) private var writeQueue: [WriteJob] = []
-    /// Whether the output stream currently reports space available. Pump-confined.
+    /// Whether the output stream reports available space. Confined to the pump.
     nonisolated(unsafe) private var hasSpace = false
-    /// Whether ``teardown(error:)`` has already run. Pump-confined.
+    /// Whether ``teardown(error:)`` already ran. Confined to the pump.
     nonisolated(unsafe) private var closed = false
-    /// Whether the streams were opened (so ``teardown(error:)`` only closes opened streams).
-    /// Pump-confined.
+    /// Whether the streams were opened, so ``teardown(error:)`` closes only opened streams.
+    /// Confined to the pump.
     nonisolated(unsafe) private var opened = false
 
-    /// The `CBL2CAPChannel` these streams belong to. CoreBluetooth tears down the underlying
-    /// L2CAP connection when the channel object deallocates, so the transport must keep it
-    /// alive; ``teardown(error:)`` releases it. `AnyObject` so the stream-only initializer
-    /// (and tests) can pass `nil`. Pump-confined.
+    /// The `CBL2CAPChannel` that owns these streams. CoreBluetooth tears down the L2CAP
+    /// connection when the channel deallocates, so the transport keeps it alive until
+    /// ``teardown(error:)``. The type is `AnyObject`, so the stream-only initializer and tests
+    /// can pass `nil`. Confined to the pump.
     nonisolated(unsafe) private var underlyingChannel: AnyObject?
 
-    /// Creates a transport over an already-open channel's streams. `retaining` keeps the
-    /// object that owns the streams (the `CBL2CAPChannel`) alive until teardown.
+    /// Creates a transport over the streams of an open channel. `retaining` keeps the streams'
+    /// owner (the `CBL2CAPChannel`) alive until teardown.
     init(psm: L2CAPPSM, inputStream: InputStream, outputStream: OutputStream, retaining underlyingChannel: AnyObject? = nil) {
         self.psm = psm
         self.pumpQueue = DispatchQueue(label: "com.bleswift.l2cap.pump.\(psm.rawValue).\(UUID().uuidString)")
@@ -81,8 +82,7 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
         start()
     }
 
-    /// Convenience for the delegate proxy: build a transport straight from a freshly-opened
-    /// `CBL2CAPChannel`.
+    /// Creates a transport from a `CBL2CAPChannel` that just opened. The delegate proxy uses it.
     convenience init(channel: CBL2CAPChannel) {
         self.init(
             psm: L2CAPPSM(channel.psm),
@@ -92,8 +92,8 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
         )
     }
 
-    /// Schedules both streams on ``pumpQueue`` and opens them — all on ``pumpQueue``, so the
-    /// very first `.hasSpaceAvailable`/`.hasBytesAvailable` callbacks already arrive there.
+    /// Schedules both streams on ``pumpQueue`` and opens them, all on ``pumpQueue``, so the
+    /// first `.hasSpaceAvailable` and `.hasBytesAvailable` callbacks already arrive there.
     private func start() {
         pumpQueue.async { [self] in
             dispatchPrecondition(condition: .onQueue(pumpQueue))
@@ -139,10 +139,9 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
 
     // MARK: - Pump (``pumpQueue`` only)
 
-    /// Writes as much of the head-of-queue job(s) as the output stream currently accepts,
-    /// resuming each job's continuation once its bytes are fully written. Stops when the
-    /// queue drains or the stream reports no more space (awaiting the next
-    /// `.hasSpaceAvailable`).
+    /// Writes the head-of-queue jobs as far as the output stream accepts them. It resumes a
+    /// job's continuation when all its bytes are written. It stops when the queue is empty, or
+    /// when the stream has no more space, and then waits for the next `.hasSpaceAvailable`.
     private func flushWrites() {
         dispatchPrecondition(condition: .onQueue(pumpQueue))
         while hasSpace, !writeQueue.isEmpty {
@@ -156,8 +155,8 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
                 return
             }
             if written == 0 {
-                // No capacity right now despite the flag — wait for the next
-                // `.hasSpaceAvailable` before trying again.
+                // No capacity, although the flag says there is. Wait for the next
+                // `.hasSpaceAvailable`.
                 hasSpace = false
                 break
             }
@@ -166,7 +165,7 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
                 writeQueue.removeFirst()
                 job.continuation.resume()
             } else {
-                // Partial write: keep the remainder queued; the stream is now full.
+                // Partial write. Keep the remainder queued. The stream is full.
                 writeQueue[0] = job
                 hasSpace = false
                 break
@@ -174,8 +173,7 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
         }
     }
 
-    /// Drains every currently-available inbound byte, yielding each chunk to the inbound
-    /// stream.
+    /// Drains the available inbound bytes and yields each chunk to the inbound stream.
     private func readInbound() {
         dispatchPrecondition(condition: .onQueue(pumpQueue))
         let capacity = 4096
@@ -219,7 +217,7 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
             job.continuation.resume(throwing: error ?? BLESwiftError.l2capChannelClosed)
         }
 
-        // Releasing the `CBL2CAPChannel` is what closes the OS-level channel.
+        // Releasing the `CBL2CAPChannel` closes the OS-level channel.
         underlyingChannel = nil
     }
 
@@ -237,7 +235,7 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
         case .errorOccurred:
             teardown(error: aStream.streamError ?? BLESwiftError.l2capChannelClosed)
         case .endEncountered:
-            // Drain any final inbound bytes, then finish the inbound stream cleanly.
+            // Drain the final inbound bytes, then finish the inbound stream cleanly.
             if aStream === inputStream {
                 readInbound()
             }

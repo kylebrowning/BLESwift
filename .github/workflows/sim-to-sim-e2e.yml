@@ -1,18 +1,24 @@
 name: Sim-to-sim E2E
 
-# Two simulator apps talk BLE to each other through bleswift-provider's virtual radio,
-# driven by grantiva. No hardware, no entitlements. Runs on every push to main and every
-# same-repository pull request, on the project's self-hosted Mac: it boots two simulators in
-# seconds where GitHub's hosted image took 112-577 s and flaked on runner weather. The job's
-# `if:` skips a fork PR, but that condition lives in this file and a `pull_request` run uses
-# the PR head's copy of it — see the note at the top of `ci.yml`: the boundary that keeps a
-# fork off the machine is the fork-PR approval policy plus a review of the PR's workflow diff
-# before approving. There is no `continue-on-error`: when it is red, it is red.
+# Two simulator apps use BLE to talk to each other through the virtual radio of bleswift-provider.
+# grantiva drives the apps. The test needs no hardware and no entitlements. The workflow runs on
+# every push to main and on every pull request from the same repository, on the project's
+# self-hosted Mac. This Mac boots two simulators in seconds. The GitHub-hosted image needed 112-577
+# s and was not reliable because of the runner's state.
 #
-# grantiva is whatever the runner has installed (`brew upgrade grantiva` on the Mac to move
-# it); the `grantiva --version` step records which. The script depends on 1.7.0 features
-# (`simulator ensure --name`, `run --ready-file`, `run --env`, `simulator teardown --udid
-# --force`), so a version older than that is the first thing to check when a run goes red.
+# The job's `if:` skips a fork PR. That condition is in this file, and a `pull_request` run uses the
+# PR head's copy of the file. See the note at the top of `ci.yml`. Two controls keep a fork off the
+# machine: the fork-PR approval policy, and a review of the PR's workflow diff before approval.
+# There is no `continue-on-error`. If the job is red, it is red.
+#
+# grantiva is the version installed on the runner. To move it, run `brew upgrade grantiva` on the
+# Mac. The step `grantiva --version` records the version. The script needs these features of version
+# 1.7.0:
+#   - `simulator ensure --name`
+#   - `run --ready-file`
+#   - `run --env`
+#   - `simulator teardown --udid --force`
+# If a run goes red, first check that the version is not older than 1.7.0.
 
 on:
   push:
@@ -29,9 +35,9 @@ on:
         required: false
         default: ''
 
-# Only a pull request's superseded run is cancelled; a push to main queues instead. A
-# cancelled run is SIGKILLed after a short grace period — too short for the script's own
-# cleanup — which is what the always-run "Reclaim the simulators" step below is for.
+# Only a superseded run of a pull request is cancelled. A push to main waits in a queue. A cancelled
+# run receives SIGKILL after a short grace period, which is too short for the script's own cleanup.
+# The step "Reclaim the simulators" below always runs for this reason.
 concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -40,36 +46,36 @@ jobs:
   sim-to-sim-e2e:
     name: Sim-to-sim E2E (grantiva)
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    # Pinned to the one runner labelled `bleswift-e2e`: the Advertiser and Scanner devices are
-    # machine-wide names the script tears down by process inspection, so two E2E runs on two
-    # runners of the same Mac would kill each other's apps. One runner runs one job at a time.
+    # Pinned to the one runner with the label `bleswift-e2e`. The Advertiser and Scanner devices
+    # have machine-wide names, and the script tears them down by process inspection. If two E2E runs
+    # used two runners on the same Mac, they would kill each other's apps. One runner runs one job
+    # at a time.
     runs-on: [self-hosted, macOS, ARM64, bleswift, bleswift-e2e]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Homebrew on PATH
-        # The runner's LaunchAgent does not source a login shell, so grantiva's Homebrew
-        # prefix is added explicitly.
+        # The runner's LaunchAgent does not load a login shell, so this step adds grantiva's
+        # Homebrew prefix to the path.
         run: echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
       - name: grantiva version
         run: grantiva --version
       - name: Resolve two simulators
-        # Both dispatch inputs given, both are used as-is (they are empty on push and PR).
-        # Otherwise two CI-only devices, created on first use by
-        # `Scripts/ci/ensure-ci-simulator.sh` from the newest iPhone device type on the
-        # highest-version iOS runtime installed, and recreated there when a newer runtime
-        # is installed. The runner is also someone's workstation: CI must not
-        # borrow "the two newest iPhones" — those are the devices they use — and the reclaim
-        # step below tears down every device of these names, which is only safe when the
-        # names are CI's own.
+        # If both dispatch inputs are set, the job uses them as they are. On push and PR they are
+        # empty. Otherwise the job uses two devices only for CI, which
+        # `Scripts/ci/ensure-ci-simulator.sh` creates on first use. It uses the newest iPhone device
+        # type on the iOS runtime with the highest installed version, and recreates the devices on a
+        # newer runtime when one is installed. The runner is also a person's workstation, so CI must
+        # not use "the two newest iPhones", which the person uses. The reclaim step below tears down
+        # every device with these names, which is only safe if the names belong to CI.
         env:
           ADVERTISER_INPUT: ${{ inputs.advertiser_sim }}
           SCANNER_INPUT: ${{ inputs.scanner_sim }}
         run: |
-          # Inputs are written into GITHUB_ENV line by line; the dispatch API accepts newlines
-          # in an input, so anything but a plain simulator name is refused first. The check is
-          # on the whole string (a `case` glob), not per line — `grep -q` would pass a value
-          # whose first line is a name and whose second is `PATH=…`.
+          # The step writes the inputs into GITHUB_ENV line by line, and the dispatch API accepts
+          # newlines in an input. So the step first refuses anything but a plain simulator name. The
+          # check is on the whole string (a `case` glob), not on each line, because `grep -q` would
+          # accept a value with a name on the first line and `PATH=…` on the second.
           for value in "$ADVERTISER_INPUT" "$SCANNER_INPUT"; do
             case "$value" in
               *[!A-Za-z0-9\ ._\(\)-]*)
@@ -100,18 +106,19 @@ jobs:
       - name: Run
         run: Scripts/sim-to-sim-e2e.sh
       - name: Reclaim the simulators
-        # Runs on cancellation too. The script's EXIT trap does this on a normal end, but a
-        # cancelled step is killed before the trap finishes, and on a persistent runner a
-        # simulator still leased by a dead grantiva run fails the next run's `ensure`.
+        # This step also runs after a cancellation. On a normal end, the script's EXIT trap does
+        # this work, but a cancelled step is killed before the trap finishes. On a persistent
+        # runner, a simulator that a dead grantiva run still leases makes the next run's `ensure`
+        # fail.
         if: always()
-        # `teardown --udid --force` reclaims by live-process inspection — it kills the
-        # grantiva runner, the WebDriverAgent xcodebuild and any simctl diagnose holding that
-        # device and breaks the lease; it does not shut the simulator down, so `simctl
-        # shutdown` follows it. Both run for every device of each name regardless of state (a
-        # cancelled run leaves them Booting or Shutting Down as often as Booted; either call on
-        # an idle device is harmless). That is only safe because the names are CI's own; a
-        # dispatch that named the operator's devices gets them torn down too, which is what
-        # the inputs opt into.
+        # `teardown --udid --force` reclaims a device by inspection of live processes. It kills the
+        # grantiva runner, the WebDriverAgent xcodebuild, and any simctl diagnose that holds the
+        # device, and it breaks the lease. It does not shut the simulator down, so `simctl shutdown`
+        # follows it. Both commands run for every device of each name, in any state, because a
+        # cancelled run leaves devices Booting or Shutting Down as often as Booted. Either command
+        # is harmless on an idle device. This is only safe because the names belong to CI. If a
+        # dispatch names the operator's devices, the job tears them down too. The inputs request
+        # this behavior.
         run: |
           for name in "$ADVERTISER_SIM" "$SCANNER_SIM"; do
             [ -n "$name" ] || continue

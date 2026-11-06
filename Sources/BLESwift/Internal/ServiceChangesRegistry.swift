@@ -6,24 +6,21 @@
 import BLESwiftCore
 import BLESwiftCompat17
 
-/// Per-peripheral `didModifyServices` broadcasters, keyed by ``PeripheralIdentifier``, so
-/// peripheral A's invalidations never reach peripheral B's ``Peripheral/serviceChanges()``
-/// subscribers.
+/// Per-peripheral `didModifyServices` broadcasters, keyed by ``PeripheralIdentifier``. The
+/// invalidations of one peripheral never reach the subscribers of another.
 ///
-/// `nonisolated` and `Mutex`-guarded: ``Peripheral/serviceChanges()`` must fetch its stream
-/// **synchronously** — no actor hop, matching that method's non-`async` signature.
+/// The registry is `nonisolated` and a `Mutex` guards it, because
+/// ``Peripheral/serviceChanges()`` is not `async` and must fetch its stream synchronously.
 ///
-/// Entries are created on demand and never removed — bounded by the number of distinct
-/// peripherals this `Central` ever touches. Streams deliberately survive disconnect: a
-/// subscriber that started listening before a disconnect keeps receiving invalidations
-/// after that same peripheral reconnects, since reconnecting reuses the same broadcaster.
+/// The registry creates entries on demand and never removes them. Streams survive a
+/// disconnect, because a reconnect reuses the same broadcaster.
 final class ServiceChangesRegistry: Sendable {
 
     private let broadcasters = Mutex<[PeripheralIdentifier: Broadcaster<[ServiceIdentifier]>]>([:])
 
-    /// Returns `id`'s broadcaster, creating one (`.none` replay) on first access.
-    /// Get-or-create happens entirely inside one `withLock`, so two concurrent calls for
-    /// the same `id` are serialized and always return the same instance.
+    /// Returns the broadcaster for `id`. On first access, it creates one with `.none` replay.
+    /// Get-or-create runs inside one `withLock`, so concurrent calls for the same `id` return
+    /// the same instance.
     func broadcaster(for id: PeripheralIdentifier) -> Broadcaster<[ServiceIdentifier]> {
         broadcasters.withLock { state in
             if let existing = state[id] {

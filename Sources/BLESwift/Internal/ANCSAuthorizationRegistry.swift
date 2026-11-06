@@ -7,17 +7,16 @@
 import BLESwiftCore
 import BLESwiftCompat17
 
-/// Per-peripheral ANCS-authorization broadcasters, keyed by ``PeripheralIdentifier`` —
-/// the ANCS mirror of ``ServiceChangesRegistry``, with the same synchronous-fetch
-/// (`nonisolated`, `Mutex`-guarded) and survives-reconnect semantics.
+/// Per-peripheral ANCS-authorization broadcasters, keyed by ``PeripheralIdentifier``. It works
+/// like ``ServiceChangesRegistry``: a `Mutex` guards it, you fetch synchronously, and entries
+/// survive a reconnect.
 ///
-/// Entries are created on demand and never removed — bounded by the number of distinct
-/// peripherals this `Central` ever touches.
+/// The registry creates entries on demand and never removes them.
 final class ANCSAuthorizationRegistry: Sendable {
 
     private let broadcasters = Mutex<[PeripheralIdentifier: Broadcaster<Bool>]>([:])
 
-    /// Returns `id`'s broadcaster, creating one (`.none` replay) on first access.
+    /// Returns the broadcaster for `id`. On first access, it creates one with `.none` replay.
     func broadcaster(for id: PeripheralIdentifier) -> Broadcaster<Bool> {
         broadcasters.withLock { state in
             if let existing = state[id] {

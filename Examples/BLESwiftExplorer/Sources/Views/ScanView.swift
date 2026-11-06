@@ -2,9 +2,13 @@
 //  ScanView.swift
 //  BLESwiftExplorer
 //
-//  Screen 2: scan list with `ScanFilter` controls (Task 4), a `GATTCompatibility` picker
-//  (Task 5), an ANCS toggle (Task 7, iOS), a `findFirst` action, and tap-to-connect that
-//  pushes the peripheral detail browser.
+//  Screen 2: scan list with these controls:
+//  - `ScanFilter` controls
+//  - a `GATTCompatibility` picker
+//  - an ANCS toggle (iOS)
+//  - a `findFirst` action
+//
+//  A tap on a peripheral connects to it and pushes the peripheral detail browser.
 //
 
 import BLESwift
@@ -135,7 +139,7 @@ struct ScanView: View {
         }
     }
 
-    /// Assembles a `ScanFilter` from the UI, exercising every field.
+    /// Assembles a `ScanFilter` from the UI, using every field.
     private func buildFilter() -> ScanFilter {
         let services = servicesText
             .split(separator: ",")
@@ -149,7 +153,7 @@ struct ScanView: View {
             manufacturerID: UInt16(manufacturerID),
             minimumRSSI: minimumRSSI <= -100 ? nil : Int(minimumRSSI),
             connectableOnly: connectableOnly,
-            custom: { _ in true } // escape-hatch predicate (accepts everything here)
+            custom: { _ in true } // predicate for any case (it accepts everything here)
         )
     }
 }

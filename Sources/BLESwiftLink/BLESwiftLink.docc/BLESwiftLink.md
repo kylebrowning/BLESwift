@@ -4,10 +4,11 @@ The wire protocol shared by the simulator-side backends and the host-side provid
 
 ## Overview
 
-`BLESwiftLink` defines the framed, `Codable` messages that carry BLESwift's backend seam
-(`CentralManaging`, `PeripheralRemote`, `PeripheralManaging`) across a localhost TCP
-connection, plus the transport primitives and the declarative fixture format both ends use.
-Most apps never import it directly — see `BLESwiftSimulatorLink` and `BLESwiftProvider`.
+`BLESwiftLink` defines the wire protocol between a simulator app and a host provider. The messages are framed and `Codable`. They carry BLESwift's backend seam (`CentralManaging`, `PeripheralRemote`, `PeripheralManaging`) across a localhost TCP connection.
+
+The module also has the transport primitives and the declarative fixture format. Both ends of the link use them.
+
+Most apps do not import this module. Use `BLESwiftSimulatorLink` in the app and `BLESwiftProvider` on the host.
 
 ## Topics
 

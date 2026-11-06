@@ -6,49 +6,45 @@
 import Foundation
 
 /// Errors from ``LinkFraming/decodeFrames(from:)`` and ``LinkFraming/encodeFrame(codec:payload:)``.
-/// Either one means the connection cannot carry what it was asked to and must be closed.
+/// After either error, close the connection.
 public enum LinkFramingError: Error, Equatable {
-    /// The codec byte at the front of a frame did not match any ``LinkCodec`` case.
+    /// The codec byte at the start of a frame did not match any ``LinkCodec`` case.
     case unknownCodec(UInt8)
-    /// A payload length exceeded ``LinkFraming/maximumPayloadLength`` — declared by an
-    /// inbound frame's header, or reached by an outbound payload this end encoded.
-    /// Carried as a `UInt32`: an inbound length is compared — and reported — before any
-    /// conversion to `Int`, which would trap on a 32-bit `Int` platform such as watchOS's
-    /// arm64_32, and an outbound length is clamped into one for the same reason.
+    /// A payload length was larger than ``LinkFraming/maximumPayloadLength``. An inbound frame's
+    /// header declared the length, or this end tried to encode an outbound payload of that length.
+    /// The error carries the length as a `UInt32`, because converting a large length to `Int`
+    /// traps where `Int` has 32 bits (arm64_32 on watchOS). The encoder clamps an outbound length
+    /// into a `UInt32` for the same reason.
     case payloadTooLarge(UInt32)
 }
 
 /// Length-prefixed framing: `[codec: UInt8][length: UInt32 big-endian][payload]`.
 public enum LinkFraming {
 
-    /// Codec byte plus 4-byte length.
+    /// The codec byte plus the 4-byte length.
     public static let headerLength = 5
 
-    /// The largest payload accepted; anything larger is a protocol error.
+    /// The largest payload that the decoder accepts. A larger payload is a protocol error.
     ///
-    /// One mebibyte, which no legitimate frame comes near: the biggest one this protocol
-    /// carries is an L2CAP chunk, capped at 64 KiB by both ends, and every GATT value,
-    /// advertisement, and fixture database on the wire is smaller again. The cap is a
-    /// hostile-stream bound, not a budget, so it is set just far enough above the real
-    /// traffic to leave encoding overhead room.
+    /// The limit is one mebibyte. No valid frame is near this size. The largest frame in this
+    /// protocol is an L2CAP chunk, and both ends cap it at 64 KiB. Every GATT value,
+    /// advertisement, and fixture database on the wire is smaller than that chunk. The limit
+    /// protects against a hostile stream and leaves room for encoding overhead.
     ///
-    /// **It also bounds what a peer can make a reader hold.** A frame is buffered until it is
-    /// complete, so this is the memory one half-delivered frame costs; the provider holds one
-    /// such buffer per connection it has accepted but not yet handshaken, so its own
-    /// pre-handshake ceiling is this times
-    /// `ProviderConfiguration.maximumPendingConnections`
-    /// (64 by default — 64 MiB), which is separate from, and additional to, the 1 MiB of
-    /// *decoded* messages each entry may queue behind its hello
-    /// (`PendingConnections.maximumQueuedBytes`).
+    /// **The limit also bounds the memory that a peer can make a reader use.** The reader buffers
+    /// a frame until the frame is complete, so one half-delivered frame costs up to this much
+    /// memory. The provider keeps one such buffer for each connection that has not yet completed
+    /// the handshake. Its ceiling before the handshake is this limit multiplied by
+    /// `ProviderConfiguration.maximumPendingConnections`. The default is 64, so the ceiling is
+    /// 64 MiB. This ceiling is in addition to the 1 MiB of *decoded* messages that each entry can
+    /// queue behind its hello (`PendingConnections.maximumQueuedBytes`).
     public static let maximumPayloadLength = 1024 * 1024
 
     /// Builds one frame.
     ///
-    /// - Throws: ``LinkFramingError/payloadTooLarge(_:)`` for a payload past
-    ///   ``maximumPayloadLength``. The cap is checked here rather than left to the peer's
-    ///   decoder: a frame this end cannot legally send is one the far end would answer by
-    ///   closing the stream as corrupt, and `UInt32(payload.count)` would trap on a payload
-    ///   past 4 GiB before it ever reached the wire.
+    /// - Throws: ``LinkFramingError/payloadTooLarge(_:)`` if the payload is larger than
+    ///   ``maximumPayloadLength``. The peer would close the stream as corrupt on such a frame.
+    ///   The check also stops `UInt32(payload.count)` from trapping on a payload over 4 GiB.
     public static func encodeFrame(codec: LinkCodec, payload: Data) throws -> Data {
         guard payload.count <= maximumPayloadLength else {
             throw LinkFramingError.payloadTooLarge(UInt32(clamping: payload.count))
@@ -61,13 +57,11 @@ public enum LinkFraming {
         return frame
     }
 
-    /// Removes and returns every complete frame at the front of `buffer`; a trailing
-    /// partial frame stays in `buffer` for the next call.
+    /// Removes every complete frame at the start of `buffer` and returns the frames. A partial
+    /// frame at the end stays in `buffer` for the next call.
     ///
-    /// **One compaction, not one per frame.** The frames are read through a cursor and the
-    /// bytes they consumed are dropped once, at the end. Removing each frame as it was
-    /// decoded made a full read quadratic in the number of frames it carried: every removal
-    /// shifts the whole remainder of the buffer down, and one 64 KiB read off a busy link can
+    /// The function compacts the buffer once at the end, not once for each frame. A removal for
+    /// each frame would make a full read quadratic in the number of frames, and one 64 KiB read can
     /// hold thousands of small frames.
     public static func decodeFrames(from buffer: inout Data) throws -> [(codec: LinkCodec, payload: Data)] {
         var frames: [(codec: LinkCodec, payload: Data)] = []
@@ -77,9 +71,9 @@ public enum LinkFraming {
             let codecByte = buffer[start]
             guard let codec = LinkCodec(rawValue: codecByte) else { throw LinkFramingError.unknownCodec(codecByte) }
             let lengthBytes = buffer[start + 1 ..< start + 5]
-            // Compared as the `UInt32` it was read as: `Int(_:)` traps on a length above
-            // `Int.max`, which on watchOS's 32-bit `Int` is any length from 2 GiB up — and a
-            // corrupt or hostile stream can declare one.
+            // Compare the length as a `UInt32`. `Int(_:)` traps on a length above `Int.max`, which
+            // is any length from 2 GiB up where `Int` has 32 bits (watchOS).
+            // A corrupt or hostile stream can declare such a length.
             let declared = lengthBytes.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
             guard declared <= UInt32(maximumPayloadLength) else {
                 throw LinkFramingError.payloadTooLarge(declared)
@@ -90,9 +84,8 @@ public enum LinkFraming {
             frames.append((codec, payload))
             cursor = start + headerLength + length
         }
-        // A throw above leaves `buffer` untouched, which the length checks rely on: the stream
-        // is corrupt and the connection is about to close, and the caller's own tests read the
-        // bytes back to prove nothing was consumed.
+        // A throw above leaves `buffer` unchanged. The tests read the bytes back to prove that the
+        // function consumed nothing.
         if cursor > buffer.startIndex {
             buffer.removeSubrange(buffer.startIndex ..< cursor)
         }

@@ -7,31 +7,29 @@
 import BLESwiftLink
 import Foundation
 
-/// The hand-parsed command-line surface for the `bleswift-provider` executable.
+/// The command-line interface for the `bleswift-provider` executable.
 ///
-/// No third-party argument-parsing dependency is used: the grammar is small enough (five
-/// flags, one of them repeatable) that ``parse(_:environment:)`` just walks the argument
-/// array itself.
+/// The grammar is small: five flags, and one of them can repeat. Thus ``parse(_:environment:)``
+/// reads the argument array directly and the module has no argument-parsing dependency.
 public enum ProviderCommandLine {
 
     /// The parsed result of ``parse(_:environment:)``.
     public struct Options: Sendable, Equatable {
-        /// Where the provider listens. Defaults to `--listen`, then `BLESWIFT_LINK`, then
+        /// Where the provider listens: the `--listen` value, else `BLESWIFT_LINK`, else
         /// `LinkEndpoint.default`.
         public var endpoint: LinkEndpoint
-        /// The codec the provider encodes with. `--json` selects `LinkCodec.json`;
-        /// otherwise `LinkCodec.binaryPropertyList`.
+        /// The codec with which the provider encodes. `--json` selects `LinkCodec.json`. The
+        /// default is `LinkCodec.binaryPropertyList`.
         public var codec: LinkCodec
-        /// Whether `--passthrough` was given.
+        /// Whether the arguments contain `--passthrough`.
         public var passthrough: Bool
-        /// The paths passed via `--fixture`, in the order they appeared.
+        /// The paths that follow `--fixture`, in argument order.
         public var fixturePaths: [String]
-        /// Whether `-h`/`--help` was given. When `true`, every other field is unpopulated —
-        /// parsing stops as soon as help is seen.
+        /// Whether the arguments contain `-h`/`--help`. When `true`, parsing stopped at the flag
+        /// and the other fields are incomplete.
         public var showHelp: Bool
 
-        /// Creates an `Options` value directly. Exposed for callers that want the same
-        /// defaults ``parse(_:environment:)`` uses without going through argument parsing.
+        /// Creates an `Options` value directly, with the defaults of ``parse(_:environment:)``.
         public init(
             endpoint: LinkEndpoint = .default,
             codec: LinkCodec = .binaryPropertyList,
@@ -47,13 +45,13 @@ public enum ProviderCommandLine {
         }
     }
 
-    /// What can go wrong while parsing ``parse(_:environment:)``'s `arguments`.
+    /// The errors that ``parse(_:environment:)`` throws.
     public enum ParseError: Error, Equatable, CustomStringConvertible {
-        /// An argument that isn't one of the recognized flags.
+        /// An argument that is not one of the known flags.
         case unknownFlag(String)
-        /// A flag that takes a value appeared with nothing after it.
+        /// A flag that takes a value has no argument after it.
         case missingValue(String)
-        /// `--listen`'s value did not parse as `host:port`.
+        /// The value of `--listen` is not valid `host:port`.
         case invalidEndpoint(String)
 
         public var description: String {
@@ -70,12 +68,12 @@ public enum ProviderCommandLine {
 
     /// Parses `arguments` (excluding `argv[0]`) into ``Options``.
     ///
-    /// `-h`/`--help` short-circuits: as soon as it is seen, parsing stops and `showHelp` is
-    /// `true` on the returned `Options` — nothing after it, valid or not, is inspected.
+    /// `-h`/`--help` ends parsing early. The returned `Options` has `showHelp` set to `true`. The
+    /// parser does not inspect any later argument, valid or not.
     ///
     /// - Parameters:
     ///   - arguments: The command-line arguments, not including the executable path.
-    ///   - environment: Consulted for `BLESWIFT_LINK` when `--listen` is absent. Defaults to
+    ///   - environment: The source of `BLESWIFT_LINK` when `--listen` is absent. The default is
     ///     the process environment.
     /// - Throws: ``ParseError`` for an unrecognized flag, a value-taking flag with nothing
     ///   after it, or an unparseable `--listen` value.
@@ -115,22 +113,21 @@ public enum ProviderCommandLine {
         return options
     }
 
-    /// The warning to print at startup when `endpoint` is not on the loopback interface, or
-    /// `nil` when it is.
+    /// The warning to print at startup when `endpoint` is not on the loopback interface, or `nil`
+    /// when it is.
     ///
-    /// The link carries no authentication of any kind: a provider bound to a routable address
-    /// serves any client that reaches it, with the Mac's real Bluetooth radio behind it when
-    /// `--passthrough` is on. That is a deliberate simplification for a loopback development
-    /// tool — and worth saying out loud the moment the tool stops being on loopback.
+    /// The link has no authentication. A provider bound to a routable address serves any client
+    /// that reaches it. If `--passthrough` is on, the Mac's real Bluetooth radio is behind that
+    /// client.
     ///
-    /// - Parameter endpoint: The endpoint the provider is about to listen on.
+    /// - Parameter endpoint: The endpoint on which the provider will listen.
     /// - Returns: One line to print, or `nil`.
     public static func nonLoopbackWarning(for endpoint: LinkEndpoint) -> String? {
         guard !endpoint.isLoopback else { return nil }
         return "bleswift-provider: warning: listening on a non-loopback interface; the link is unauthenticated"
     }
 
-    /// Usage text for `-h`/`--help` and for reporting a ``ParseError``.
+    /// The usage text for `-h`/`--help` and for a ``ParseError`` report.
     public static let usage = """
     Usage: bleswift-provider [options]
 

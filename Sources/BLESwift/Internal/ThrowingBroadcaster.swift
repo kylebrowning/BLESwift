@@ -5,47 +5,44 @@
 
 import BLESwiftCompat17
 
-/// The throwing counterpart to ``Broadcaster``: a multicast primitive that fans out each
-/// ``yield(_:)``ed `Element` to every currently subscribed `AsyncThrowingStream`, and can
-/// ``finish(throwing:)`` every subscriber with an error. Exists because notification
-/// streams must be able to finish with an error, while ``Broadcaster`` is `AsyncStream`-based
-/// and structurally cannot. Modeled directly on `Broadcaster` — same `Mutex`-guarded state,
-/// same rationale.
+/// The throwing counterpart to ``Broadcaster``. It fans out each `Element` that code yields
+/// (see ``yield(_:)``) to every subscribed `AsyncThrowingStream`, and ``finish(throwing:)``
+/// can end every subscriber with an error. Notification streams need this, and the
+/// `AsyncStream`-based ``Broadcaster`` cannot do it. It uses the same `Mutex`-guarded state.
 ///
-/// Unlike `Broadcaster` there are no replay modes (notifications are live-only), and a
-/// stream created *after* ``finish(throwing:)`` finishes immediately **with the same
-/// terminal error** rather than cleanly — silently ending a late subscriber would hide the
-/// very failure this type exists to deliver.
+/// It differs from `Broadcaster` in two ways:
+///
+/// - It has no replay modes, because notifications are live-only.
+/// - A stream that is created *after* ``finish(throwing:)`` finishes immediately **with the
+///   same terminal error**. A clean end would hide the failure.
 final class ThrowingBroadcaster<Element: Sendable>: Sendable {
 
-    /// All of a `ThrowingBroadcaster`'s mutable state, guarded as one unit by
+    /// All the mutable state of a `ThrowingBroadcaster`, guarded as one unit by
     /// ``ThrowingBroadcaster/box``.
     private struct State {
-        /// Live subscribers, keyed by a monotonically increasing token so
-        /// `onTermination` can remove exactly the continuation it was handed.
+        /// Live subscribers. The key is an increasing token, so `onTermination` removes exactly
+        /// its own continuation.
         var continuations: [UInt64: AsyncThrowingStream<Element, Error>.Continuation] = [:]
-        /// The next token to hand out.
+        /// The next token to give out.
         var nextToken: UInt64 = 0
-        /// Set by ``finish(throwing:)``; once `true`, new subscribers are immediately
-        /// finished (with ``terminalError``) and ``yield(_:)`` is a no-op.
+        /// Set by ``finish(throwing:)``. New subscribers then finish immediately, with
+        /// ``terminalError``, and ``yield(_:)`` does nothing.
         var finished = false
-        /// The error ``finish(throwing:)`` was called with, if any — replayed as the
-        /// immediate terminal error of any stream created after finishing.
+        /// The error that ``finish(throwing:)`` received, if any. A stream that is created
+        /// after the finish ends with it.
         var terminalError: Error?
     }
 
     private let box = Mutex<State>(State())
 
-    /// Creates an empty, unfinished `ThrowingBroadcaster`.
+    /// Creates an empty `ThrowingBroadcaster` that is not finished.
     init() {}
 
-    /// Returns a fresh `AsyncThrowingStream` subscribed to every future ``yield(_:)``.
+    /// Returns a new `AsyncThrowingStream` that is subscribed to every future ``yield(_:)``.
     ///
-    /// Cancelling the stream's consuming task — or otherwise letting the stream's iterator
-    /// deinit — unregisters it via `onTermination`; no explicit unsubscribe call is needed.
-    /// If this broadcaster has already ``finish(throwing:)``ed, the returned stream
-    /// finishes immediately with the same terminal error (or cleanly, if it finished
-    /// without one).
+    /// `onTermination` unregisters the stream when its consuming task is cancelled or its
+    /// iterator deinitializes. If this broadcaster already ran ``finish(throwing:)``, the
+    /// stream finishes immediately with the same terminal error, or cleanly if there was none.
     func stream(
         policy: AsyncThrowingStream<Element, Error>.Continuation.BufferingPolicy = .unbounded
     ) -> AsyncThrowingStream<Element, Error> {
@@ -66,7 +63,7 @@ final class ThrowingBroadcaster<Element: Sendable>: Sendable {
             }
 
             guard let token = registration.token else {
-                // Outside the lock — same never-finish-under-lock discipline as `Broadcaster`.
+                // Finish outside the lock, as in `Broadcaster`.
                 continuation.finish(throwing: registration.terminalError)
                 return
             }
@@ -77,16 +74,14 @@ final class ThrowingBroadcaster<Element: Sendable>: Sendable {
         }
     }
 
-    /// Fans `element` out to every currently subscribed stream. A no-op after
+    /// Fans `element` out to every stream that is subscribed now. It does nothing after
     /// ``finish(throwing:)``.
     ///
-    /// As in `Broadcaster.yield(_:)`, the fan-out happens *outside* the lock — a
-    /// continuation removed between the snapshot and the call is harmlessly yielded to,
-    /// since `AsyncThrowingStream` drops values after termination.
+    /// As in `Broadcaster.yield(_:)`, the fan-out runs *outside* the lock. A yield to a
+    /// continuation that was removed meanwhile is harmless, because `AsyncThrowingStream`
+    /// drops values after termination.
     func yield(_ element: Element) {
-        // Same lock-order inversion as `Broadcaster.yield(_:)`: `continuation.yield` takes
-        // the consuming task's status lock, while a concurrent cancellation of that task
-        // holds its status lock and re-enters `box.withLock` from `onTermination`.
+        // Same lock-order inversion as `Broadcaster.yield(_:)`: do not yield under the lock.
         let targets: [AsyncThrowingStream<Element, Error>.Continuation] = box.withLock { state in
             guard !state.finished else { return [] }
             return Array(state.continuations.values)
@@ -97,12 +92,12 @@ final class ThrowingBroadcaster<Element: Sendable>: Sendable {
         }
     }
 
-    /// Finishes every currently subscribed stream — throwing `error`, or cleanly if `nil`.
-    /// Every stream created after this call finishes immediately the same way. Idempotent:
-    /// the first call's `error` wins; later calls are no-ops.
+    /// Finishes every subscribed stream with `error`, or cleanly if `error` is `nil`. A stream
+    /// that is created later finishes immediately in the same way. It is idempotent. The first
+    /// call's `error` wins.
     func finish(throwing error: Error? = nil) {
-        // Same reentrancy hazard and pull-then-finish-after-release discipline as
-        // `Broadcaster.finish()`.
+        // Same reentrancy hazard as `Broadcaster.finish()`: finish the continuations after the
+        // lock is released.
         let continuationsToFinish: [AsyncThrowingStream<Element, Error>.Continuation] = box.withLock { state in
             guard !state.finished else { return [] }
             state.finished = true

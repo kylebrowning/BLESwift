@@ -3,26 +3,26 @@
 //  BLESwift
 //
 
-/// How a notification stream buffers values its consumer hasn't consumed yet. BLESwift's
-/// own mirror of `AsyncStream.Continuation.BufferingPolicy`, which can't appear directly in
-/// ``Peripheral/notifications(for:policy:)``'s signature without naming the element type.
+/// How a notification stream buffers the values that its consumer has not consumed yet. It
+/// mirrors `AsyncStream.Continuation.BufferingPolicy`, which needs an element type and so
+/// cannot appear in the signature of ``Peripheral/notifications(for:policy:)``.
 public enum BufferingPolicy: Sendable, Equatable {
 
-    /// Buffer every unconsumed value, without limit. The default.
+    /// Buffer every unconsumed value, without a limit. This is the default.
     case unbounded
 
-    /// Buffer at most `count` unconsumed values, discarding the **newest** value when a
-    /// fresh one arrives with the buffer full (the buffer keeps the oldest values).
+    /// Buffer at most `count` unconsumed values. If a new value arrives and the buffer is
+    /// full, the buffer discards the **newest** value. The buffer keeps the oldest values.
     case bufferingOldest(Int)
 
-    /// Buffer at most `count` unconsumed values, discarding the **oldest** buffered value
-    /// when a fresh one arrives with the buffer full (the buffer keeps the newest values).
-    /// `bufferingNewest(1)` yields classic "latest value wins" behavior.
+    /// Buffer at most `count` unconsumed values. If a new value arrives and the buffer is
+    /// full, the buffer discards the **oldest** value. The buffer keeps the newest
+    /// values. `bufferingNewest(1)` keeps only the latest value.
     case bufferingNewest(Int)
 }
 
 extension BufferingPolicy {
-    /// The corresponding `AsyncThrowingStream` buffering policy for streams of `Element`.
+    /// The matching `AsyncThrowingStream` buffering policy for streams of `Element`.
     func asStreamPolicy<Element>(
         of _: Element.Type = Element.self
     ) -> AsyncThrowingStream<Element, Error>.Continuation.BufferingPolicy {

@@ -3,8 +3,8 @@
 //  BLESwiftTests
 //
 
-// `Central.connectionEventRegistration(services:peripherals:)` exists everywhere but
-// macOS, matching CoreBluetooth's `registerForConnectionEvents(options:)` availability.
+// `Central.connectionEventRegistration(services:peripherals:)` exists on all platforms except
+// macOS, as does `registerForConnectionEvents(options:)` in CoreBluetooth.
 #if !os(macOS)
 
 import Foundation
@@ -13,8 +13,8 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Exercises `Central.connectionEventRegistration(services:peripherals:)`: subscribe,
-/// receive, refcounted backend register/unregister, and multi-subscriber multicast.
+/// Tests `Central.connectionEventRegistration(services:peripherals:)`: subscribe, receive, backend
+/// register and unregister with reference counts, and the multicast to multiple subscribers.
 @Suite("System connection events")
 struct ConnectionEventsTests {
 
@@ -72,12 +72,12 @@ struct ConnectionEventsTests {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         let id = fakePeripheral.peripheralIdentifier
 
-        // Consume each stream inside its own task WITHOUT retaining the stream value in
-        // this scope: dropping an AsyncStream's iterator (as `first(where:)` does) never
-        // terminates a stream that is still retained — termination fires only when the
-        // stream value itself is released, here at each task's completion. Continuations
-        // are registered synchronously when each stream is created, so an event simulated
-        // before the tasks start iterating is buffered, not lost.
+        // Consume each stream inside its own task. Do NOT keep the stream value in this scope. When
+        // code drops the iterator of an AsyncStream (as `first(where:)` does), a stream that
+        // something still holds does not terminate. Termination fires only when the stream value
+        // itself is released, here at the completion of each task. The continuations register
+        // synchronously when each stream is created, so the stream buffers an event simulated
+        // before the tasks start to iterate.
         func consumeFirst(_ stream: AsyncStream<SystemConnectionEvent>) -> Task<SystemConnectionEvent?, Never> {
             Task {
                 for await event in stream { return event }
@@ -96,8 +96,8 @@ struct ConnectionEventsTests {
         #expect(await first.value == expected)
         #expect(await second.value == expected)
 
-        // Both tasks completed, releasing both streams — exactly one backend
-        // unregistration follows the second termination, and no re-registration.
+        // Both tasks completed and released both streams. Exactly one backend unregistration
+        // follows the second termination, with no re-registration.
         await waitFor { await fakeCentral.onQueue { fakeCentral.connectionEventUnregistrationCount == 1 } }
         let (finalRegistrations, unregistrations) = await fakeCentral.onQueue {
             (fakeCentral.connectionEventRegistrationCount, fakeCentral.connectionEventUnregistrationCount)

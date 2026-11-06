@@ -11,11 +11,11 @@ import Testing
 import BLESwiftCore
 @testable import BLESwift
 
-/// Regression tests for #53. Each delegate proxy kept its handler as a function-typed `Mutex`
-/// value, and every read wrapped the stored closure in two more reabstraction thunks
-/// (swiftlang/swift#91348). A long-running scan with `allowDuplicates` reads it on every
-/// event, so after some thousands of events delivering one overflowed the stack (SIGBUS).
-/// Before the fix each test here crashed well inside its read or event count.
+/// Regression tests for a stack overflow in the delegate proxies. Each proxy kept its handler as a
+/// function-typed `Mutex` value, and every read wrapped the stored closure in two more
+/// reabstraction thunks (swiftlang/swift#91348). A long scan with `allowDuplicates` reads the
+/// handler on every event, and after some thousands of events one delivery overflowed the stack
+/// (SIGBUS). Each test here crashed well inside its read count or event count before the fix.
 @Suite("Delegate proxy handlers")
 struct DelegateProxyHandlerTests {
 
@@ -51,8 +51,8 @@ struct DelegateProxyHandlerTests {
     }
     #endif
 
-    /// The reporter's reproduction: a real `CBCentralManager` adopted by `Central`, with
-    /// twenty thousand events pushed through its `eventHandler` on the callback queue.
+    /// The reproduction from the bug report. `Central` adopts a real `CBCentralManager`, and the
+    /// test pushes twenty thousand events through its `eventHandler` on the callback queue.
     @Test("an adopted CBCentralManager delivers 20,000 events without overflowing")
     func adoptedManagerSurvivesManyEvents() async {
         let queue = DispatchQueue(label: "DelegateProxyHandlerTests.adopted")

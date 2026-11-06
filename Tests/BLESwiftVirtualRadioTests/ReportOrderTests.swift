@@ -9,25 +9,26 @@ import BLESwiftVirtualRadio
 import Foundation
 import Testing
 
-/// A device's subscription reports reach its handler in the order the radio applied the
-/// changes (#76): a subscribe whose report is still in flight is finished before the
-/// unsubscribe of whatever drops it, whichever path drops it, and a handler that calls back
-/// into the radio from inside a report neither deadlocks nor sees its own reports out of
-/// order. `burstLeavesNoChain` is a chain-hygiene test only: the remote's serial chain
-/// already orders the calls it makes, so it proves nothing about ordering.
+/// The subscription reports of a device reach its handler in the order in which the radio applied
+/// the changes. A subscribe whose report is in flight finishes before the unsubscribe of the event
+/// that drops it, on any path that drops it. A handler that calls back into the radio from inside a
+/// report does not deadlock and does not see its own reports out of order.
+///
+/// `burstLeavesNoChain` only tests chain hygiene. The remote's serial chain already orders its own
+/// calls, so that test proves nothing about order.
 @Suite("Subscription report order")
 struct ReportOrderTests {
 
-    /// A handler whose subscribe report does not return until the test releases it, so the
-    /// test controls exactly when the radio's subscribe finishes reporting — and can land a
-    /// drop while it is suspended.
+    /// A handler whose subscribe report does not return until the test releases it. The test
+    /// controls when the radio's subscribe finishes its report, and can land a drop while the
+    /// report is suspended.
     private actor GatedSubscribeHandler: VirtualDeviceHandler {
-        /// Each change in the order the handler *finished* it, which is the order a hosted
-        /// `PeripheralHost` would act on them.
+        /// Each change in the order in which the handler *finished* it. A hosted `PeripheralHost`
+        /// acts on changes in this order.
         private(set) var log: [Bool] = []
         let subscriptions: AsyncStream<Bool>
         private let subscriptionsContinuation: AsyncStream<Bool>.Continuation
-        /// Yields once the subscribe is suspended on the gate.
+        /// Yields when the subscribe is suspended on the gate.
         let blocked: AsyncStream<Void>
         private let blockedContinuation: AsyncStream<Void>.Continuation
         private let gate: AsyncStream<Void>
@@ -56,14 +57,14 @@ struct ReportOrderTests {
         }
     }
 
-    /// What ``ReentrantHandler`` does on hearing a subscribe.
+    /// What ``ReentrantHandler`` does when it hears a subscribe.
     private enum Reentry {
         case setServicesEmpty
         case disconnect
     }
 
-    /// A handler that calls back into the radio from inside its own subscribe report — the
-    /// shape that would deadlock if the radio waited for the reports that call enqueues.
+    /// A handler that calls back into the radio from inside its own subscribe report. It would
+    /// deadlock if the radio waited for the reports that this call queues.
     private actor ReentrantHandler: VirtualDeviceHandler {
         private(set) var log: [Bool] = []
         let subscriptions: AsyncStream<Bool>
@@ -100,8 +101,8 @@ struct ReportOrderTests {
         }
     }
 
-    /// A connected `Central` subscribed to the fixture's dynamic characteristic, with the
-    /// handler's subscribe report suspended on the gate.
+    /// A connected `Central` subscribed to the fixture's dynamic characteristic, with the handler's
+    /// subscribe report suspended on the gate.
     private static func subscribeAndBlock(
         on radio: VirtualRadio,
         device: VirtualDevice,
@@ -121,7 +122,7 @@ struct ReportOrderTests {
         return (central, backend, id, stream)
     }
 
-    /// The error the first `.disconnected` event for `id` on `events` carries.
+    /// The error that the first `.disconnected` event for `id` on `events` carries.
     private static func disconnectError(for id: PeripheralIdentifier, on events: AsyncStream<ConnectionEvent>) async -> NSError? {
         for await event in events {
             if case .disconnected(let peripheral, let error, _) = event, peripheral == id {
@@ -131,11 +132,11 @@ struct ReportOrderTests {
         return nil
     }
 
-    /// Runs `trigger` off the test task, since it cannot return until the gate opens. The
-    /// test then waits for the synchronous table change the drop makes before it opens the
-    /// gate: the ordering under test is of a drop that has *landed* while the subscribe
-    /// report is suspended, not one that arrives after it returned — and the gate opening
-    /// first would let the unfixed radio pass by luck.
+    /// Runs `trigger` off the test task, because `trigger` cannot return until the gate opens. The
+    /// test then waits for the synchronous table change that the drop makes, and only then opens
+    /// the gate. This checks the order for a drop that has *landed* while the subscribe report is
+    /// suspended, not one that arrives after the report returned. If the gate opened first, the
+    /// radio without the fix could pass by luck.
     private static func launch(_ trigger: @escaping @Sendable () async -> Void) async -> Task<Void, Never> {
         let (started, startedContinuation) = AsyncStream<Void>.makeStream()
         let task = Task {
@@ -225,7 +226,7 @@ struct ReportOrderTests {
         await republish.value
         #expect(await handler.log == [true, false])
         #expect(await radio.subscriberCount(device: id.uuid, characteristic: RecordingDevice.control) == 0)
-        // The service went, not the connection.
+        // The service went, and the connection did not.
         #expect(await radio.isConnected(session: backend.sessionID, device: id.uuid))
         #expect(await RecordingDevice.isConnected(central, id))
         #expect(await radio.reportChainCount == 0)
@@ -324,7 +325,7 @@ struct ReportOrderTests {
         stream.cancel()
     }
 
-    /// Every `CentralEvent` a backend delivered, read and written on the backend's queue only.
+    /// Every `CentralEvent` that a backend delivered. Only the backend's queue reads and writes it.
     private final class EventLog: @unchecked Sendable {
         var events: [CentralEvent] = []
     }
@@ -349,9 +350,9 @@ struct ReportOrderTests {
         #expect(await RecordingDevice.onQueue(queue) { remote.connectionState } == .connected)
         #expect(await radio.reportChainCount == 0)
 
-        // No subscription to drop and no report queued: the didDisconnect went out in the
-        // same actor turn as the drop, so once the queue has run what the radio sent it,
-        // before `disconnect()` returned, the event is there — nothing else to wait for.
+        // There is no subscription to drop and no report in the queue. The `didDisconnect` went out
+        // in the same actor turn as the drop, and the queue has run what the radio sent before
+        // `disconnect()` returned. The event is there, so the test has nothing else to wait for.
         await RecordingDevice.onQueue(queue) { log.events.removeAll() }
         await handle.disconnect()
         await RecordingDevice.onQueue(queue) {}
@@ -383,9 +384,8 @@ struct ReportOrderTests {
             return backend.retrievePeripherals(withIdentifiers: [identifier]).first as! VirtualPeripheralRemote
         }
 
-        // Connected and discovered the way a `Central` does it, each answer landed before
-        // the next request, since the remote ignores a subscribe for a characteristic it has
-        // not discovered.
+        // Connect and discover as a `Central` does, with each answer before the next request. The
+        // remote ignores a subscribe for an undiscovered characteristic.
         await RecordingDevice.onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
         await backend.waitForPendingWork()
         await RecordingDevice.onQueue(queue) { remote.discoverServices(nil) }

@@ -6,16 +6,17 @@
 import BLESwiftCore
 import Foundation
 
-/// Codec for the IEEE 11073-20601 32-bit FLOAT-Type used by medical/health GATT
-/// characteristics (e.g. Temperature Measurement).
+/// Codec for the IEEE 11073-20601 32-bit FLOAT-Type, which medical and health GATT characteristics
+/// use (for example, Temperature Measurement).
 ///
-/// Wire layout (4 bytes, little-endian): a signed 24-bit mantissa in bytes 0-2, and a
-/// signed 8-bit base-10 exponent in byte 3. The represented value is
-/// `mantissa × 10^exponent`.
+/// Wire layout (4 bytes, little-endian): a signed 24-bit mantissa in bytes 0-2, and a signed 8-bit
+/// base-10 exponent in byte 3. The represented value is `mantissa × 10^exponent`.
 ///
-/// Special mantissa values (per IEEE 11073-20601 §A.2) map to floating-point specials:
-/// `0x007FFFFF` → NaN, `0x00800000` (NRes, "not at this resolution") → NaN,
-/// `0x007FFFFE` → +∞, `0x00800002` → -∞.
+/// Special mantissa values (per IEEE 11073-20601 §A.2) map to floating-point special values:
+/// - `0x007FFFFF` gives NaN.
+/// - `0x00800000` (NRes, "not at this resolution") gives NaN.
+/// - `0x007FFFFE` gives +∞.
+/// - `0x00800002` gives -∞.
 enum IEEE11073Float {
 
     static let nanMantissa: UInt32 = 0x007F_FFFF
@@ -25,8 +26,8 @@ enum IEEE11073Float {
 
     /// Decodes the 4-byte FLOAT-Type at the start of `data`.
     ///
-    /// - Throws: ``BLESwiftError/dataOutOfBounds(start:length:count:)`` if fewer than 4
-    ///   bytes are available.
+    /// - Throws: ``BLESwiftError/dataOutOfBounds(start:length:count:)`` if fewer than 4 bytes are
+    ///   available.
     static func decode(_ data: Data) throws -> Double {
         let b0: UInt8 = try data.extract(start: 0, length: 1)
         let b1: UInt8 = try data.extract(start: 1, length: 1)
@@ -58,9 +59,8 @@ enum IEEE11073Float {
         return Double(mantissa) * pow(10.0, Double(exponent))
     }
 
-    /// Encodes `value` as a FLOAT-Type at the given base-10 `exponent`, choosing the
-    /// mantissa so that `mantissa × 10^exponent ≈ value`. The mantissa is clamped to the
-    /// signed 24-bit range.
+    /// Encodes `value` as a FLOAT-Type with the given base-10 `exponent`. The mantissa is
+    /// `value / 10^exponent`, rounded and clamped to the signed 24-bit range.
     static func encode(_ value: Double, exponent: Int8) -> Data {
         let scaled = (value / pow(10.0, Double(exponent))).rounded()
         let clamped = min(max(scaled, -8_388_608.0), 8_388_607.0) // signed 24-bit range

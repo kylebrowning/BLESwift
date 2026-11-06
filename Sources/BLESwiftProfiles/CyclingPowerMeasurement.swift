@@ -7,27 +7,12 @@ import BLESwift
 import BLESwiftCore
 import Foundation
 
-/// The Bluetooth SIG "Cycling Power Measurement" characteristic (GSS §3.59 Cycling Power
-/// Measurement, `0x2A63`) from the Cycling Power service.
+/// The Bluetooth SIG "Cycling Power Measurement" characteristic (GSS §3.59, `0x2A63`) from
+/// the Cycling Power service.
 ///
-/// Byte layout (little-endian): a 2-byte `Flags` field, a 2-byte signed
-/// `instantaneousPower` (watts), then flag-driven optional fields in this exact order:
-/// - bit 0 — Pedal Power Balance present (`UInt8`, units of 1/2 %).
-/// - bit 1 — Pedal Power Balance Reference: 0 = unknown, 1 = left.
-/// - bit 2 — Accumulated Torque present (`UInt16`, units of 1/32 N·m).
-/// - bit 3 — Accumulated Torque Source: 0 = wheel-based, 1 = crank-based.
-/// - bit 4 — Wheel Revolution Data: cumulative (`UInt32`) + last event time (`UInt16`,
-///   units of 1/2048 s).
-/// - bit 5 — Crank Revolution Data: cumulative (`UInt16`) + last event time (`UInt16`,
-///   units of 1/1024 s).
-/// - bit 6 — Extreme Force Magnitudes: max (`Int16`) + min (`Int16`), newtons.
-/// - bit 7 — Extreme Torque Magnitudes: max (`Int16`) + min (`Int16`), units of 1/32 N·m.
-/// - bit 8 — Extreme Angles: 3 bytes packed as two 12-bit values —
-///   `maxAngle = raw24 & 0xFFF`, `minAngle = raw24 >> 12` (degrees).
-/// - bit 9 — Top Dead Spot Angle (`UInt16`, degrees).
-/// - bit 10 — Bottom Dead Spot Angle (`UInt16`, degrees).
-/// - bit 11 — Accumulated Energy (`UInt16`, kilojoules).
-/// - bit 12 — Offset Compensation Indicator (a flag; no payload).
+/// The value is little-endian. It has a 2-byte `Flags` field and a 2-byte signed
+/// `instantaneousPower` (watts). The optional fields that the flags select follow in bit
+/// order. See <doc:UsingProfiles#Cycling-power-layout> for the layout.
 public struct CyclingPowerMeasurement: Receivable, Sendable, Equatable {
 
     /// The reference leg for Pedal Power Balance (Flags bit 1).
@@ -44,8 +29,11 @@ public struct CyclingPowerMeasurement: Receivable, Sendable, Equatable {
 
     /// Wheel-revolution data (Flags bit 4).
     public struct WheelRevolutionData: Sendable, Equatable {
+        /// Cumulative wheel revolutions.
         public let cumulativeRevolutions: UInt32
+        /// Last wheel event time, in units of 1/2048 s.
         public let lastEventTime: UInt16
+        /// Creates wheel revolution data from a revolution count and an event time.
         public init(cumulativeRevolutions: UInt32, lastEventTime: UInt16) {
             self.cumulativeRevolutions = cumulativeRevolutions
             self.lastEventTime = lastEventTime
@@ -54,18 +42,24 @@ public struct CyclingPowerMeasurement: Receivable, Sendable, Equatable {
 
     /// Crank-revolution data (Flags bit 5).
     public struct CrankRevolutionData: Sendable, Equatable {
+        /// Cumulative crank revolutions.
         public let cumulativeRevolutions: UInt16
+        /// Last crank event time, in units of 1/1024 s.
         public let lastEventTime: UInt16
+        /// Creates crank revolution data from a revolution count and an event time.
         public init(cumulativeRevolutions: UInt16, lastEventTime: UInt16) {
             self.cumulativeRevolutions = cumulativeRevolutions
             self.lastEventTime = lastEventTime
         }
     }
 
-    /// A max/min pair of signed magnitudes (used for extreme force and torque).
+    /// A max and min pair of signed magnitudes (for extreme force and torque).
     public struct MinMax: Sendable, Equatable {
+        /// The maximum magnitude. The unit depends on the field that holds this value.
         public let maximum: Int16
+        /// The minimum magnitude. The unit depends on the field that holds this value.
         public let minimum: Int16
+        /// Creates a pair from a maximum and a minimum.
         public init(maximum: Int16, minimum: Int16) {
             self.maximum = maximum
             self.minimum = minimum
@@ -74,8 +68,11 @@ public struct CyclingPowerMeasurement: Receivable, Sendable, Equatable {
 
     /// The extreme crank angles, as two 12-bit degree values (Flags bit 8).
     public struct ExtremeAngles: Sendable, Equatable {
+        /// The maximum angle, in degrees (0–4095).
         public let maximum: UInt16
+        /// The minimum angle, in degrees (0–4095).
         public let minimum: UInt16
+        /// Creates a pair from a maximum and a minimum angle.
         public init(maximum: UInt16, minimum: UInt16) {
             self.maximum = maximum
             self.minimum = minimum

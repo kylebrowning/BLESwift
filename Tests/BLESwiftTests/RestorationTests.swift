@@ -10,13 +10,16 @@ import BLESwiftCompat17
 import Testing
 @testable import BLESwift
 
-/// Exercises Phase 8's background-restoration surface: `willRestoreState` buffering and
-/// replay, `.poweredOn` routing (adopt restored-connected, manual re-connect for
-/// restored-connecting, fail restored-disconnecting/disconnected), the
-/// unhandled-notification surface, and the startup background-task window — all driven
-/// through the fakes (`FakeCentral.simulateRestoration` delivers `willRestoreState`
-/// before the state flip, mirroring CoreBluetooth's guaranteed ordering) and the
-/// `StartupBackgroundTaskRunning` seam (SPM tests have no `UIApplication`).
+/// Tests background restoration:
+/// - the buffer and replay of `willRestoreState`
+/// - the routing at `.poweredOn`: adopt a peripheral restored as connected, manually reconnect one
+///   restored as connecting, and fail one restored as disconnecting or disconnected
+/// - the surface for unhandled notifications
+/// - the window of the startup background task
+///
+/// The tests use the fakes. `FakeCentral.simulateRestoration` delivers `willRestoreState` before
+/// the state flip, as CoreBluetooth guarantees. The `StartupBackgroundTaskRunning` seam replaces
+/// `UIApplication`, which SPM tests do not have.
 @Suite("Background restoration")
 struct RestorationTests {
 
@@ -34,8 +37,8 @@ struct RestorationTests {
         fakeCentral.simulateRestoration(restored)
         fakeCentral.simulateStateChange(.poweredOn)
 
-        // Deliberately let the entire restoration complete BEFORE the first subscriber
-        // arrives — the buffered-replay guarantee is the point of this test.
+        // Complete the whole restoration BEFORE the first subscriber arrives, to test the buffered
+        // replay.
         await waitFor {
             if case .connected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) { return true }
             return false
@@ -56,8 +59,8 @@ struct RestorationTests {
         }
         #expect(identifier == fakePeripheral.peripheralIdentifier)
 
-        // Adoption requires no CoreBluetooth connect call — the peripheral was restored
-        // already connected.
+        // The peripheral was restored as connected, so the adoption needs no CoreBluetooth connect
+        // call.
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCount } == 0)
     }
 
@@ -112,7 +115,7 @@ struct RestorationTests {
         }
         #expect(identifier == fakePeripheral.peripheralIdentifier)
 
-        // Exactly one manual re-connect was issued against CoreBluetooth.
+        // Exactly one manual re-connect against CoreBluetooth.
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCount } == 1)
 
         guard case .connected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
@@ -123,10 +126,10 @@ struct RestorationTests {
 
     @Test("restored-connecting manual connect times out per RestorationConfiguration.connectingTimeout")
     func restoredConnectingTimesOut() async throws {
-        // A second, not a tenth of one: the test only needs the timeout to fire *eventually*,
-        // and a margin that short races the connect attempt's own scheduling on a starved
-        // machine — the attempt is then cancelled before it is even attached, and the
-        // restoration fails with `.operationCancelled` instead of the timeout under test.
+        // The timeout is one second so that it fires only eventually. A shorter margin races the
+        // scheduling of the connect attempt on a starved machine. The code then cancels the attempt
+        // before it attaches, and the restoration fails with `.operationCancelled` instead of the
+        // timeout.
         let (central, fakeCentral, fakePeripheral) = makeRestorationCentral(connectingTimeout: .seconds(1))
         await registerRetrievable(fakePeripheral, on: fakeCentral)
         await fakeCentral.onQueue { fakeCentral.connectBehavior = .hang }
@@ -134,8 +137,8 @@ struct RestorationTests {
         fakeCentral.simulateRestoration(restoredState(for: fakePeripheral, state: .connecting))
         fakeCentral.simulateStateChange(.poweredOn)
 
-        // The timeout triggers the standard two-phase cancel: CoreBluetooth is asked to
-        // cancel the pending connection, and the failure resolves once it confirms.
+        // The timeout starts the standard two-phase cancel. The failure resolves when CoreBluetooth
+        // confirms.
         await waitFor(timeout: .seconds(30)) { await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
         #expect(await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1)
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
@@ -189,8 +192,8 @@ struct RestorationTests {
             return false
         }
 
-        // A notification from a listen that belonged to the previous app life: no BLESwift
-        // subscriber, no pending read.
+        // A notification from a listen that belonged to the previous life of the app. No subscriber
+        // and no pending read exist for it.
         let payload = Data([0xAB, 0xCD])
         fakePeripheral.simulateNotification(for: Self.heartRateMeasurement, value: payload)
 
@@ -210,18 +213,17 @@ struct RestorationTests {
         let (central, fakeCentral, fakePeripheral) = makeRestorationCentral()
         await registerRetrievable(fakePeripheral, on: fakeCentral)
 
-        // Stage restoration, then deliver a notification BEFORE the .poweredOn flip —
-        // the phase is still .idle (untracked), but the peripheral is pending
-        // restoration, so the value must surface rather than drop.
+        // Stage the restoration and deliver a notification BEFORE the .poweredOn flip. The phase is
+        // still .idle but the peripheral is pending restoration, so the value must surface.
         fakeCentral.simulateRestoration(restoredState(for: fakePeripheral, state: .connected))
-        await fakeCentral.onQueue {} // staged restoration landed in the actor
+        await fakeCentral.onQueue {} // The staged restoration reached the actor.
         let payload = Data([0x5A])
         fakePeripheral.simulateNotification(for: Self.heartRateMeasurement, value: payload)
         await fakePeripheral.onQueue {}
 
         fakeCentral.simulateStateChange(.poweredOn)
 
-        // Replay order: willRestore, unhandledNotification (pre-routing), restoredConnection.
+        // Replay order: willRestore, unhandledNotification (before routing), restoredConnection.
         let events = await collectRestorationEvents(central, count: 3)
         try #require(events.count == 3)
         guard case .unhandledNotification(let identifier, let characteristic, let value) = events[1] else {
@@ -250,7 +252,7 @@ struct RestorationTests {
         }
 
         fakePeripheral.simulateNotification(for: Self.heartRateMeasurement, value: Data([0x01]))
-        await fakePeripheral.onQueue {} // flush the delivery through the actor
+        await fakePeripheral.onQueue {} // Flush the delivery through the actor.
         try? await Task.sleep(for: .milliseconds(50))
 
         #expect(received.withLock { $0 } == 0)
@@ -279,7 +281,7 @@ struct RestorationTests {
         await registerRetrievable(fakePeripheral, on: fakeCentral)
 
         fakeCentral.simulateRestoration(restoredState(for: fakePeripheral, state: .connected))
-        await fakeCentral.onQueue {} // ensure the staged restoration has landed in the actor
+        await fakeCentral.onQueue {} // Make sure that the staged restoration reached the actor.
 
         runner.fireExpiration()
 
@@ -294,7 +296,7 @@ struct RestorationTests {
         await waitFor { runner.endCount >= 1 }
         #expect(runner.endCount >= 1)
 
-        // A later .poweredOn must not adopt anything — the staged restoration is gone.
+        // A later .poweredOn must not adopt anything because the staged restoration is gone.
         fakeCentral.simulateStateChange(.poweredOn)
         await fakeCentral.onQueue {}
         guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
@@ -316,7 +318,7 @@ struct RestorationTests {
 
         runner.fireExpiration()
 
-        // Expiration routes through the standard two-phase cancel; complete it.
+        // The expiration uses the standard two-phase cancel. Complete it.
         await waitFor { await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
 
@@ -340,7 +342,7 @@ struct RestorationTests {
         await registerRetrievable(fakePeripheral, on: fakeCentral)
 
         fakeCentral.simulateRestoration(restoredState(for: fakePeripheral, state: .connected))
-        await fakeCentral.onQueue {} // ensure the staged restoration has landed in the actor
+        await fakeCentral.onQueue {} // Make sure that the staged restoration reached the actor.
 
         do {
             _ = try await central.connect(fakePeripheral.peripheralIdentifier)
@@ -373,7 +375,7 @@ struct RestorationTests {
         #expect(runner.endCount >= 1)
     }
 
-    // MARK: - Multi-peripheral restoration (Phase 3: every restored peripheral is routed)
+    // MARK: - Multi-peripheral restoration (every restored peripheral is routed)
 
     @Test("two restored-connected peripherals are both adopted independently, and GATT works on both")
     func multipleRestoredConnectedAreBothAdopted() async throws {
@@ -410,7 +412,7 @@ struct RestorationTests {
         #expect(connected.count == 2)
         #expect(Set(connected.map(\.id)) == Set([fakePeripheralA.peripheralIdentifier, fakePeripheralB.peripheralIdentifier]))
 
-        // Adoption requires no CoreBluetooth connect call for either peripheral.
+        // Neither peripheral needs a CoreBluetooth connect call.
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCount } == 0)
 
         guard case .connected(let peripheralA) = await central.connectionState(of: fakePeripheralA.peripheralIdentifier) else {
@@ -445,9 +447,9 @@ struct RestorationTests {
         fakeCentral.simulateRestoration(restored)
         fakeCentral.simulateStateChange(.poweredOn)
 
-        // The connected peripheral is adopted and the disconnected one fails synchronously
-        // during routing; the connecting one's manual reconnect is still hung — the window
-        // must not close yet even though 2 of the 3 outcomes are already resolved.
+        // The connected peripheral is adopted and the disconnected one fails during the routing.
+        // The connecting peripheral's manual reconnect is still hung, so the window must not close
+        // although 2 of 3 outcomes are resolved.
         await waitFor {
             if case .connected = await central.connectionState(of: connectedFake.peripheralIdentifier) { return true }
             return false
@@ -460,7 +462,7 @@ struct RestorationTests {
         }
         #expect(runner.endCount == 0)
 
-        // Complete the hung manual connect via the standard timeout two-phase cancel.
+        // Complete the hung manual connect with the standard timeout and two-phase cancel.
         await waitFor { await fakeCentral.onQueue { fakeCentral.cancelCallCounts[connectingFake.identifier] } == 1 }
         fakeCentral.simulateDisconnect(connectingFake.peripheralIdentifier, error: nil)
 
@@ -496,9 +498,8 @@ struct RestorationTests {
     @Test("two restored-connecting peripherals reconnect independently and concurrently — the startup window closes only after both resolve")
     func multipleRestoredConnectingReconnectIndependently() async throws {
         let runner = FakeStartupBackgroundTask()
-        // A second, for the reason `restoredConnectingTimesOut` gives: only the hanging
-        // peripheral needs this to fire, and a margin of a fraction of one can expire against
-        // the *succeeding* peripheral's connect before its `didConnect` is delivered.
+        // The timeout is one second, as in `restoredConnectingTimesOut`. A shorter margin can
+        // expire against the succeeding peripheral's connect before its `didConnect` arrives.
         let (central, fakeCentral, succeedFake) = makeRestorationCentral(
             connectingTimeout: .seconds(1),
             startupBackgroundTask: runner
@@ -517,15 +518,15 @@ struct RestorationTests {
         fakeCentral.simulateRestoration(restored)
         fakeCentral.simulateStateChange(.poweredOn)
 
-        // The succeeding one resolves quickly; the window must not close yet — the other
-        // one's manual reconnect is still hung.
+        // The succeeding peripheral resolves quickly. The window must not close because the other
+        // peripheral's manual reconnect is still hung.
         await waitFor(timeout: .seconds(30)) {
             if case .connected = await central.connectionState(of: succeedFake.peripheralIdentifier) { return true }
             return false
         }
         #expect(runner.endCount == 0)
 
-        // The hanging one times out via the standard two-phase cancel.
+        // The hanging peripheral times out through the standard two-phase cancel.
         await waitFor(timeout: .seconds(30)) { await fakeCentral.onQueue { fakeCentral.cancelCallCounts[hangFake.identifier] } == 1 }
         #expect(await fakeCentral.onQueue { fakeCentral.cancelCallCounts[hangFake.identifier] } == 1)
         fakeCentral.simulateDisconnect(hangFake.peripheralIdentifier, error: nil)
@@ -550,8 +551,7 @@ struct RestorationTests {
         }
         #expect(error as? BLESwiftError == .connectionTimedOut)
 
-        // Exactly one manual re-connect was issued per identifier — independent attempts,
-        // not a shared single-slot state.
+        // Exactly one manual re-connect for each identifier. The attempts do not share a slot.
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCounts[succeedFake.identifier] } == 1)
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCounts[hangFake.identifier] } == 1)
 
@@ -584,7 +584,7 @@ struct RestorationTests {
 
         runner.fireExpiration()
 
-        // Expiration routes both through the standard two-phase cancel.
+        // The expiration sends both peripherals through the standard two-phase cancel.
         await waitFor {
             let a = await fakeCentral.onQueue { fakeCentral.cancelCallCounts[fakeA.identifier] }
             let b = await fakeCentral.onQueue { fakeCentral.cancelCallCounts[fakeB.identifier] }
@@ -610,9 +610,8 @@ struct RestorationTests {
 
 // MARK: - Helpers
 
-/// A `Configuration` with restoration enabled (via the internal seam on non-iOS
-/// platforms — see the dual-access note in `RestorationConfiguration.swift`), wired
-/// through `makeTestCentral`.
+/// A `Configuration` with restoration enabled, wired through `makeTestCentral`. Outside iOS it uses
+/// the internal seam (see the dual-access note in `RestorationConfiguration.swift`).
 private func makeRestorationCentral(
     connectingTimeout: Duration = .seconds(15),
     startupBackgroundTask: (any StartupBackgroundTaskRunning)? = nil
@@ -625,23 +624,23 @@ private func makeRestorationCentral(
     return makeTestCentral(configuration: configuration, startupBackgroundTask: startupBackgroundTask)
 }
 
-/// A single-peripheral `RestoredState`, as CoreBluetooth would hand back for `peripheral`.
+/// A `RestoredState` with a single peripheral, as CoreBluetooth returns it for `peripheral`.
 private func restoredState(for peripheral: FakePeripheral, state: PeripheralConnectionState) -> RestoredState {
     RestoredState(
         peripherals: [RestoredPeripheral(identifier: peripheral.peripheralIdentifier, state: state)]
     )
 }
 
-/// Registers `peripheral` as retrievable from `central` — restoration routing re-resolves
-/// restored peripherals via `retrievePeripherals(withIdentifiers:)`.
+/// Registers `peripheral` as retrievable from `central`. The restoration routing resolves restored
+/// peripherals with `retrievePeripherals(withIdentifiers:)`.
 private func registerRetrievable(_ peripheral: FakePeripheral, on central: FakeCentral) async {
     await central.onQueue {
         central.retrievablePeripherals[peripheral.identifier] = peripheral
     }
 }
 
-/// Collects up to `count` restoration events, giving up (and returning what arrived) after
-/// `timeout` so a missing event fails the test's assertions instead of hanging it.
+/// Collects up to `count` restoration events. After `timeout` it returns what arrived, so a missing
+/// event fails the assertions instead of hanging.
 private func collectRestorationEvents(
     _ central: Central,
     count: Int,

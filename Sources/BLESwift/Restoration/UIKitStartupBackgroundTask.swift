@@ -12,32 +12,30 @@ import UIKit
 
 #if os(iOS)
 
-/// The real conformance, backed by `UIApplication.beginBackgroundTask(withName:expirationHandler:)`
-/// / `endBackgroundTask(_:)` (`NS_SWIFT_NONISOLATED`, but `UIApplication.shared` itself is
-/// MainActor-isolated).
+/// The real conformance. It uses `UIApplication.beginBackgroundTask(withName:expirationHandler:)`
+/// and `endBackgroundTask(_:)`. These are `NS_SWIFT_NONISOLATED`, but `UIApplication.shared`
+/// itself is MainActor-isolated.
 ///
-/// **MainActor access pattern:** `@MainActor` is grep-banned in `Sources/`, and `Central`
-/// must never block on the main thread — so every `UIApplication.shared` access here hops
-/// onto the main **queue** via `DispatchQueue.main.async` and re-enters MainActor isolation
-/// with `MainActor.assumeIsolated`, sound because the main queue *is* the MainActor's
+/// **MainActor access pattern:** A grep check bans `@MainActor` in `Sources/`, and `Central`
+/// must never block on the main thread. So each `UIApplication.shared` access hops to the main
+/// **queue** with `DispatchQueue.main.async` and enters MainActor isolation with
+/// `MainActor.assumeIsolated`. This is safe, because the main queue *is* the MainActor's
 /// executor.
 ///
-/// The `begin`/`end` race (an `end()` arriving before `begin`'s asynchronous main-queue hop
-/// has run) is resolved by the `Mutex`-guarded state machine below: `end()` marks the task
-/// `.ended`, and `begin`'s deferred main-queue block observes that and immediately ends the
-/// just-created platform task instead of storing it.
+/// `end()` can arrive before the asynchronous main-queue hop of `begin` runs. A `Mutex`-guarded
+/// state machine resolves this race. `end()` marks the task `.ended`. The deferred block of
+/// `begin` sees that state and ends the platform task that it just created, without storing it.
 final class UIKitStartupBackgroundTask: StartupBackgroundTaskRunning {
 
-    /// The task's lifecycle, guarded as one unit by ``state``.
+    /// The lifecycle of the task, guarded as one unit by ``state``.
     private enum TaskState {
-        /// `begin(onExpiration:)` not yet called.
+        /// `begin(onExpiration:)` did not run yet.
         case idle
-        /// `begin(onExpiration:)` called; the main-queue hop hasn't created the platform
-        /// task yet.
+        /// `begin(onExpiration:)` ran. The main-queue hop did not create the platform task yet.
         case beginning
         /// The platform task is live.
         case active(UIBackgroundTaskIdentifier)
-        /// `end()` was called (or expiration self-ended). Terminal.
+        /// `end()` ran, or the expiration ended the task. This state is terminal.
         case ended
     }
 
@@ -52,23 +50,23 @@ final class UIKitStartupBackgroundTask: StartupBackgroundTaskRunning {
         guard shouldBegin else { return }
 
         DispatchQueue.main.async {
-            // Sound: the main queue is the MainActor's executor — see the type doc comment.
+            // Safe. The main queue is the MainActor's executor. See the type doc comment.
             MainActor.assumeIsolated {
                 let identifier = UIApplication.shared.beginBackgroundTask(
                     withName: "BLESwift.BackgroundRestoration"
                 ) {
-                    // UIKit requires the task to be ended from its expiration handler;
-                    // `end()` does that idempotently. `self` is captured strongly,
-                    // deliberately: no cycle (UIKit holds the closure), and the runner
-                    // must stay alive until expiration or `end()`.
+                    // UIKit requires that the expiration handler ends the task. `end()` does that
+                    // idempotently. `self` is captured strongly on purpose: UIKit holds the
+                    // closure, so there is no cycle, and the runner must stay alive until the
+                    // expiration or `end()`.
                     onExpiration()
                     self.end()
                 }
 
                 let orphaned: UIBackgroundTaskIdentifier? = self.state.withLock { current in
                     if case .ended = current {
-                        // `end()` raced ahead of this deferred block — the platform task
-                        // just created is already unwanted.
+                        // `end()` ran before this deferred block, so nobody wants the platform
+                        // task that we just created.
                         return identifier
                     }
                     current = .active(identifier)
@@ -92,7 +90,7 @@ final class UIKitStartupBackgroundTask: StartupBackgroundTaskRunning {
         guard let identifier, identifier != .invalid else { return }
 
         DispatchQueue.main.async {
-            // Sound: the main queue is the MainActor's executor — see the type doc comment.
+            // Safe. The main queue is the MainActor's executor. See the type doc comment.
             MainActor.assumeIsolated {
                 UIApplication.shared.endBackgroundTask(identifier)
             }

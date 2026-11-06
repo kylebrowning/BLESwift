@@ -5,23 +5,24 @@ on:
     branches: [main]
   pull_request:
 
-# Every job runs on the project's self-hosted macOS runner (labels below). GitHub's hosted
-# macOS runners boot simulators in 100-600 s and starve the test process about one push in
-# four; a Mac on a desk does neither. A single runner executes one job at a time, so the
-# jobs in a run are effectively serial; a newer pull-request run on the same ref cancels
-# the older one, and pushes to main queue (see `concurrency` below).
+# Every job runs on the project's self-hosted macOS runner (see the labels below). GitHub-hosted
+# macOS runners need 100-600 s to boot a simulator and starve the test process in about one push out
+# of four. A Mac on a desk does neither. A single runner executes one job at a time, so the jobs in
+# a run are almost serial. A newer pull-request run on the same ref cancels the older run. Pushes to
+# main wait in a queue (see `concurrency` below).
 #
-# The repository is public. A pull request from a fork falls back to GitHub's hosted image
-# in `runs-on` below — but that expression lives in this file, and a `pull_request` run uses
-# the workflow file FROM THE PR HEAD, so a fork can rewrite it. The expression is therefore a
-# convenience, not the boundary. The boundary is the repository's fork-PR approval policy
-# ("all external contributors"): nothing from a fork runs until a maintainer approves it, and
-# that approval MUST include reading the PR's `.github/workflows` diff — a fork PR that touches
-# a workflow file is not approved, it is rewritten by the maintainer on a same-repo branch.
-# Runner groups with pinned workflows would enforce this mechanically; they are an
-# organization feature and this is a personal repository.
-# A superseded pull-request run is cancelled; pushes to main queue, so every commit on main
-# keeps a CI verdict even when two merges land within one serialized run.
+# The repository is public. A pull request from a fork uses the GitHub-hosted image, which the
+# `runs-on` expression below selects. That expression is a convenience, not a security boundary: a
+# `pull_request` run uses the workflow file FROM THE PR HEAD, so a fork can change it.
+#
+# The boundary is the repository's fork-PR approval policy ("all external contributors"). Nothing
+# from a fork runs until a maintainer approves it. The approval MUST include a read of the PR's
+# `.github/workflows` diff. If a fork PR changes a workflow file, do not approve it. The maintainer
+# rewrites it on a branch in the same repository. Runner groups with pinned workflows would enforce
+# this automatically, but they are an organization feature and this is a personal repository.
+#
+# A pull-request run that a newer run replaces is cancelled. Pushes to main wait in a queue, so
+# every commit on main keeps a CI result even when two merges arrive during one serialized run.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -38,22 +39,24 @@ jobs:
       - name: Test
         run: BLESWIFT_STRICT=1 swift test
       - name: Test under Thread Sanitizer with the iOS 16 executor
-        # BLESwiftCompat16's SerialQueueExecutor and assumeIsolated(onQueue:) are hand-written
-        # isolation; a bug there is a data race, which TSan reports deterministically where
-        # the plain run would only flake. Non-strict: sanitizer builds emit their own warnings.
+        # The BLESwiftCompat16 executor (`SerialQueueExecutor` and `assumeIsolated(onQueue:)`) is
+        # hand-written isolation, and a bug there is a data race. TSan reports a data race every
+        # time. The plain run shows it only sometimes. This step is not strict, because sanitizer
+        # builds emit their own warnings.
         run: BLESWIFT_FORCE_COMPAT16_EXECUTOR=1 swift test --sanitize=thread
       - name: Test on the Swift 6.3 release toolchain
-        # The self-hosted Mac runs a beta Xcode, which has hidden Swift 6.3 release-toolchain
-        # failures before (an `Xcode 27 beta` build passed where consumers on 6.3.3 failed).
-        # The release toolchain installed on the runner is the canary for that, and its
-        # absence on the self-hosted runner is a failure, not a skip: a canary that goes
-        # green when it is uninstalled is not one. Only GitHub's hosted image — the fork-PR
-        # fallback, which has no such toolchain — may skip it.
+        # The self-hosted Mac runs a beta Xcode, which has hidden failures of the Swift 6.3 release
+        # toolchain: an `Xcode 27 beta` build passed where consumers on 6.3.3 failed. The release
+        # toolchain on the runner is the canary for these failures. If it is not installed on the
+        # self-hosted runner, the step fails and does not skip, because a canary that passes when it
+        # is not installed is not a canary. Only the GitHub-hosted image, the fork-PR fallback, has
+        # no such toolchain and may skip the step.
         #
-        # It builds against the macOS 26 SDK, not the beta Xcode's: a 6.3 consumer has a 26-era
-        # SDK, and the macOS 27 SDK's interfaces carry flags only Swift 6.4 parses (6.3.3
-        # rejects `-target-arch-variant` and crashes rebuilding Foundation). The Command Line
-        # Tools keep that SDK; `MacOSX26.sdk` follows its newest 26.x. Missing is a failure too.
+        # The step builds against the macOS 26 SDK, not the beta Xcode's SDK, because a 6.3 consumer
+        # has an SDK from the 26 releases. The macOS 27 SDK interfaces have flags that only Swift
+        # 6.4 can parse: Swift 6.3.3 rejects `-target-arch-variant` and crashes when it rebuilds
+        # Foundation. The Command Line Tools keep the macOS 26 SDK, and `MacOSX26.sdk` points to the
+        # newest 26.x SDK. If this SDK is missing, the step also fails.
         env:
           HOSTED: ${{ runner.environment == 'github-hosted' }}
           SDK_26: /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk
@@ -71,31 +74,31 @@ jobs:
             exit 1
           fi
       - name: Consumer simulation (issue #20 regression guard)
-        # Xcode compiles package dependencies with -suppress-warnings, which
-        # hard-conflicts with -warnings-as-errors. This step fails if strict
-        # warnings ever leak back into the default (consumer-facing) settings.
+        # Xcode compiles package dependencies with -suppress-warnings, which conflicts with
+        # -warnings-as-errors. This step fails if strict warnings enter the default settings that
+        # consumers use.
         run: swift build -Xswiftc -suppress-warnings
 
   ios-simulator-test:
-    # The connection-event and ANCS suites are fenced (#if !os(macOS) / #if os(iOS)),
-    # so `swift test` on the macOS host skips them. Run the full suite on iOS simulators so
-    # those tests — and the connection-event subscriber-refcount concurrency code they
-    # cover — actually execute. Three cells:
-    #   newest runtime, default executor  — the modern (18-tier) path;
-    #   newest runtime, forced 16-tier executor — BLESwiftCompat16's SerialQueueExecutor
-    #     and assumeIsolated(onQueue:) under the whole suite;
-    #   iOS 17 runtime — the only real Swift 5.9-runtime execution (iOS 16 simulators
-    #     cannot run on macOS 27, so the 16 tier is compile-verified by platform-build).
+    # The suites for connection events and ANCS are fenced (#if !os(macOS) / #if os(iOS)), so `swift
+    # test` on the macOS host skips them. This job runs the full suite on iOS simulators, so these
+    # tests also run. They cover the concurrency code for the connection events' subscriber
+    # reference count. The job has three cells:
+    #   - Newest runtime, default executor: the modern (18-tier) path.
+    #   - Newest runtime, forced 16-tier executor: BLESwiftCompat16's `SerialQueueExecutor` and
+    #     `assumeIsolated(onQueue:)` run under the whole suite.
+    #   - iOS 17 runtime: the only real run on the Swift 5.9 runtime. iOS 16 simulators cannot run
+    #     on macOS 27, so platform-build only compiles the 16 tier.
     name: Test (iOS Simulator, ${{ matrix.label }})
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      # One simulator per cell and per runner, never shared (#48). Several `bleswift` runners
-      # share one Mac, so two cells — or the same cell for two pull requests — run at once, and
-      # two jobs on one device would boot, install into and shut down the same UDID under each
-      # other. The cell names the device; the "Resolve the CI simulator" step appends the
-      # runner's name.
+      # Each cell and each runner has its own simulator (#48). Cells never share one. Several
+      # `bleswift` runners share one Mac, so two cells, or the same cell for two pull requests, can
+      # run at the same time. Two jobs on one device would boot, install into, and shut down the
+      # same UDID while the other job uses it. The cell names the device, and the step "Resolve the
+      # CI simulator" appends the runner's name.
       matrix:
         include:
           - { label: "newest runtime",                  sim: "BLESwift CI Test",          major: "",   compat16: "0" }
@@ -103,10 +106,11 @@ jobs:
           - { label: "iOS 17 runtime",                  sim: "BLESwift CI Test iOS17",    major: "17", compat16: "0" }
     steps:
       - uses: actions/checkout@v4
-      # A CI-only device, by UDID. The runner is also someone's workstation, so the job must
-      # not borrow "the newest iPhone" — that is the device they are debugging on. The script
-      # reuses a device of this name when it is on the highest-version runtime of the requested
-      # major (or overall), and otherwise recreates it on that runtime; nothing is pinned.
+      # A device only for CI, selected by UDID. The runner is also a person's workstation, so the
+      # job must not use "the newest iPhone", which can be the device that the person debugs on. The
+      # script reuses a device of this name if it is on the runtime with the highest version of the
+      # requested major version (or of all versions). Otherwise it recreates the device on that
+      # runtime. Nothing is pinned.
       - name: Resolve the CI simulator
         env:
           HOSTED: ${{ runner.environment == 'github-hosted' }}
@@ -122,18 +126,18 @@ jobs:
           fi
       - name: Test on iOS Simulator
         if: env.SKIP != '1'
-        # Retried once. On GitHub's hosted runners the simulator starved the test process
-        # outright (the macOS-green `BLESwiftTests` suite froze for ~100 s inside the
-        # simulator until the job timed out). The self-hosted Mac has not shown it; the retry
-        # stays for the hosted fallback that fork PRs still use.
+        # The step retries once. On GitHub-hosted runners the simulator starved the test process
+        # completely: the `BLESwiftTests` suite passed on macOS but froze for about 100 s in the
+        # simulator until the job timed out. The self-hosted Mac has not shown this problem. The
+        # retry stays for the hosted fallback that fork PRs still use.
         #
-        # A green run must also show the executor this cell asked for (#47). If the
-        # `TEST_RUNNER_` variable stopped reaching the test process, the forced cell would test
-        # the default executor and still pass, and nothing inside the process can tell, since
-        # it reads the same missing variable. `ExecutorSelectionTests` prints the executor a
-        # `Central` really bound; that line is checked here, from outside. The value sits in
-        # brackets and the match is unanchored: the test's logger writes to the same pipe, and a
-        # log line can land around the marker (`…poweredOBLESwift executor: defaultn`).
+        # A passing run must also show the executor that this cell requested (#47). If the
+        # `TEST_RUNNER_` variable does not reach the test process, the forced cell tests the default
+        # executor and still passes, and nothing in the process can detect this because it reads the
+        # same missing variable. `ExecutorSelectionTests` prints the executor that a `Central`
+        # really bound, and this step checks that line from outside the process. The value is in
+        # brackets and the match is not anchored, because the test logger writes to the same pipe. A
+        # log line can appear around the marker (`…poweredOBLESwift executor: defaultn`).
         env:
           TEST_RUNNER_BLESWIFT_FORCE_COMPAT16_EXECUTOR: ${{ matrix.compat16 }}
           EXPECTED_EXECUTOR: ${{ matrix.compat16 == '1' && 'compat16' || 'default' }}
@@ -152,15 +156,15 @@ jobs:
           done
           exit 1
       - name: Shut the CI simulator down
-        # Runs on cancellation too: a cancelled `xcodebuild test` leaves the device booted
-        # with a half-torn-down session on a persistent runner.
+        # This step also runs after a cancellation. A cancelled `xcodebuild test` leaves the device
+        # booted with a half-closed session on a persistent runner.
         if: always()
         run: |
           [ -n "$SIM_UDID" ] && xcrun simctl shutdown "$SIM_UDID" 2>/dev/null || true
 
   platform-build:
-    # The manifest declares watchOS/tvOS/visionOS; the peripheral role's CoreBluetooth
-    # APIs are unavailable there and must stay fenced out (issue #22 regression guard).
+    # The manifest declares watchOS, tvOS, and visionOS, where the CoreBluetooth peripheral-role
+    # APIs are not available. The build must keep them fenced out (issue #22 regression guard).
     name: Build (${{ matrix.platform }})
     timeout-minutes: 20
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}
@@ -176,8 +180,8 @@ jobs:
         run: xcodebuild build -scheme BLESwiftProfiles -destination 'generic/platform=${{ matrix.platform }}'
       - name: Build BLESwiftTestSupport
         run: xcodebuild build -scheme BLESwiftTestSupport -destination 'generic/platform=${{ matrix.platform }}'
-      # The link, its simulator-side backends, and the in-process virtual radio are declared
-      # for every platform too, and nothing else in CI compiles them off macOS.
+      # The link, its simulator backends, and the in-process virtual radio are declared for every
+      # platform too. No other CI step compiles them outside macOS.
       - name: Build BLESwiftLink
         run: xcodebuild build -scheme BLESwiftLink -destination 'generic/platform=${{ matrix.platform }}'
       - name: Build BLESwiftSimulatorLink
@@ -186,9 +190,9 @@ jobs:
         run: xcodebuild build -scheme BLESwiftVirtualRadio -destination 'generic/platform=${{ matrix.platform }}'
 
   sample-app:
-    # Build (only) the BLESwiftExplorer SwiftUI sample for iOS and macOS on every commit,
-    # so it stays compiling against the package. It depends on the package by path and
-    # ships a committed .xcodeproj (via a .gitignore negation), so CI needs no xcodegen.
+    # Build (only) the BLESwiftExplorer SwiftUI sample for iOS and macOS on every commit, so the
+    # sample always compiles against the package, on which it depends by path. It has a committed
+    # .xcodeproj (through a .gitignore negation), so CI does not need xcodegen.
     name: Build sample app (${{ matrix.platform }})
     timeout-minutes: 20
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'macos-latest' || fromJSON('["self-hosted","macOS","ARM64","bleswift"]') }}

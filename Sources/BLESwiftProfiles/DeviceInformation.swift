@@ -7,12 +7,12 @@ import BLESwift
 import BLESwiftCore
 import Foundation
 
-/// The strings exposed by the Bluetooth SIG "Device Information" service (`0x180A`).
+/// The strings that the Bluetooth SIG "Device Information" service (`0x180A`) exposes.
 ///
-/// This is an *aggregate* of up to six independent UTF-8 String characteristics, each of
-/// which is optional on a given peripheral — so `DeviceInformation` is not itself
-/// ``Receivable``. Read it with ``BLESwift/Peripheral/readDeviceInformation(timeout:)``,
-/// which reads whichever characteristics the peripheral exposes and leaves the rest `nil`.
+/// This is an *aggregate* of up to six independent UTF-8 String characteristics. A peripheral can
+/// omit any of them, so `DeviceInformation` is not itself ``Receivable``. To read it, use
+/// ``BLESwift/Peripheral/readDeviceInformation(timeout:)``. That function reads the characteristics
+/// that the peripheral exposes and leaves the rest as `nil`.
 ///
 /// Characteristics (all UTF-8 strings, GSS §3):
 /// - Manufacturer Name String (`0x2A29`)
@@ -49,13 +49,20 @@ public struct DeviceInformation: Sendable, Equatable {
         softwareRevisionCharacteristic,
     ]
 
+    /// The manufacturer name, or `nil` if the peripheral does not expose it.
     public let manufacturerName: String?
+    /// The model number that the manufacturer assigns, or `nil` if not exposed.
     public let modelNumber: String?
+    /// The serial number, or `nil` if not exposed.
     public let serialNumber: String?
+    /// The firmware revision, or `nil` if not exposed.
     public let firmwareRevision: String?
+    /// The hardware revision, or `nil` if not exposed.
     public let hardwareRevision: String?
+    /// The software revision, or `nil` if not exposed.
     public let softwareRevision: String?
 
+    /// Creates a value from the strings that you have. Each omitted string is `nil`.
     public init(
         manufacturerName: String? = nil,
         modelNumber: String? = nil,

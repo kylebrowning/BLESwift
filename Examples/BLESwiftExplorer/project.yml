@@ -40,8 +40,8 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
 
 schemes:
-  # A shared scheme so CI (a fresh checkout with only project.pbxproj) can build by name
-  # without relying on xcodebuild's implicit scheme autogeneration.
+  # A shared scheme. CI is a fresh checkout with only project.pbxproj, and the shared scheme lets CI
+  # build by name instead of relying on xcodebuild's automatic scheme generation.
   BLESwiftExplorer:
     build:
       targets:

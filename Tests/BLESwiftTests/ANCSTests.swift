@@ -3,8 +3,9 @@
 //  BLESwiftTests
 //
 
-// ANCS (`requiresANCS:`, `Peripheral.ancsAuthorized`, `ancsAuthorizationEvents()`) is
-// iOS-only, matching CoreBluetooth's `CBConnectPeripheralOptionRequiresANCS` availability.
+// ANCS is available on iOS only. The ANCS API (`requiresANCS:`, `Peripheral.ancsAuthorized`, and
+// `ancsAuthorizationEvents()`) has the availability of `CBConnectPeripheralOptionRequiresANCS` in
+// CoreBluetooth.
 #if os(iOS)
 
 import Foundation
@@ -13,8 +14,10 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Exercises the ANCS surface: the `requiresANCS:` connect option's plumbing to the
-/// backend seam, `Peripheral.ancsAuthorized`, and `ancsAuthorizationEvents()` multicast.
+/// Tests the ANCS API:
+/// - how the `requiresANCS:` connect option reaches the backend seam
+/// - `Peripheral.ancsAuthorized`
+/// - the multicast of `ancsAuthorizationEvents()`
 @Suite("ANCS")
 struct ANCSTests {
 
@@ -60,8 +63,8 @@ struct ANCSTests {
         await fakeCentral.onQueue { fakePeripheral.ancsAuthorized = true }
         #expect(await peripheral.ancsAuthorized == true)
 
-        // Explicit disconnect is two-phase — it awaits CoreBluetooth's confirmation, which
-        // the fake must script (same shape as PeripheralDisconnectTests.disconnectResolves).
+        // An explicit disconnect has two phases and waits for the CoreBluetooth confirmation. The
+        // fake must script it, as in PeripheralDisconnectTests.disconnectResolves.
         let disconnectTask = Task { try await peripheral.disconnect() }
         await waitFor { await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)

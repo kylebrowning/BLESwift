@@ -13,9 +13,9 @@ import Foundation
 import BLESwiftCompat17
 import Testing
 
-/// What a peripheral-role session refuses to hold on a misbehaving client's behalf — the
-/// counterpart to `CentralSessionLimitsTests` for the notification queue — and what it
-/// refuses to pass on from a malformed request.
+/// The limits that a peripheral-role session enforces against a misbehaving client. This is the
+/// counterpart to `CentralSessionLimitsTests` for the notification queue, and it also covers
+/// malformed requests.
 @Suite("Host session limits")
 struct HostSessionLimitsTests {
 
@@ -23,33 +23,31 @@ struct HostSessionLimitsTests {
     private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
 
 #if !targetEnvironment(simulator)
-    // Sockets in a CI simulator are unreliable; the simulator-side path is covered by the
-    // two-simulator E2E on real simulators.
+    // Sockets in a CI simulator are not reliable. The two-simulator E2E on real simulators covers
+    // the simulator-side path.
 
     @Test("A client that queues past the update window loses its session")
     func updateWindowOverrunClosesTheSession() async throws {
-        // One more than the cap, plus the window the composite backend in front of the fake
-        // accepts and drains before it starts refusing — those never sit in the queue this
-        // cap counts.
+        // One more than the cap, plus the window that the composite in front of the fake accepts
+        // and drains before it refuses. Those pushes never sit in the queue that the cap counts.
         let overrun = HostSession.maximumPendingUpdates + LinkFlowControl.updateValueWindow + 1
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
-        // `peripheralManagerBackendFactory` stands in for the host's real CoreBluetooth,
-        // which only a passthrough provider builds.
+        // `peripheralManagerBackendFactory` replaces the host's real CoreBluetooth. Only a
+        // passthrough provider builds the real CoreBluetooth.
         configuration.passthrough = true
         configuration.peripheralManagerBackendFactory = { queue in
-            // Back-pressured from the start: every offer is refused and no
-            // `readyToUpdateSubscribers` ever follows, so the session's queue grows exactly
-            // as fast as the client fills it.
+            // The back-pressure is on from the start. The fake refuses every offer and never sends
+            // `readyToUpdateSubscribers`, so the session's queue grows as fast as the client fills
+            // it.
             let fake = FakePeripheralManager(queue: queue, state: .poweredOn)
-            // Far more refusals than this test can consume: the composite in front of the
-            // fake re-offers a parked push every time the virtual backend reports itself
-            // ready, so the script has to outlast those retries as well.
+            // The refusals outnumber what the test can consume. The composite offers a parked push
+            // again each time the virtual backend is ready, so the script must outlast these
+            // retries.
             fake.scriptedUpdateValueReturns = Array(repeating: false, count: 100_000)
-            // A live child with a real transmit queue, not one with a dead handle: the
-            // readiness it raises before any push is what tells the composite in front of it
-            // that its refusals are back-pressure, so its full FIFO closes the composite's
-            // window and the session's own queue is what grows from there.
+            // A live child with a real transmit queue, not a dead handle. It raises a readiness
+            // before any push, so the composite treats its refusals as back-pressure. Its full FIFO
+            // closes the composite's window, and the session's queue grows from there.
             fake.simulateReadyToUpdate()
             return fake
         }
@@ -57,9 +55,8 @@ struct HostSessionLimitsTests {
         try await provider.start()
         let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
 
-        // Straight down the link, behind `LinkPeripheralManager`'s back: its own
-        // `updateValue` honors the window, which is the point — only a client that has
-        // stopped honoring it can reach this.
+        // The test writes straight down the link, behind `LinkPeripheralManager`'s back. Its own
+        // `updateValue` honors the window, so only a misbehaving client reaches this state.
         let connection = LinkConnection.connect(
             to: endpoint,
             codec: .binaryPropertyList,
@@ -92,7 +89,6 @@ struct HostSessionLimitsTests {
             )))
         }
 
-        // The session goes, rather than the provider's memory.
         await waitFor(timeout: .seconds(10)) { await provider.sessionCount == 0 }
         #expect(await provider.sessionCount == 0)
 
@@ -110,8 +106,8 @@ struct HostSessionLimitsTests {
         try await provider.start()
         let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
 
-        // Straight down the link, behind `LinkPeripheralManager`'s back: an honest client
-        // publishes a handful of services, not a fresh one per frame forever.
+        // The test writes straight down the link, behind `LinkPeripheralManager`'s back. An honest
+        // client publishes a handful of services, not a fresh service for each frame forever.
         let connection = LinkConnection.connect(
             to: endpoint,
             codec: .binaryPropertyList,
@@ -135,7 +131,6 @@ struct HostSessionLimitsTests {
         await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
         #expect(await provider.sessionCount == 1)
 
-        // One more distinct service than the session will hold.
         for _ in 0...HostSession.maximumHostedServices {
             let service = GATTService(
                 identifier: ServiceIdentifier(uuid: UUID().uuidString),
@@ -146,7 +141,6 @@ struct HostSessionLimitsTests {
             connection.send(.hostRequest(.addService(WireGATTService(service))))
         }
 
-        // The session goes, rather than the provider's memory.
         await waitFor(timeout: .seconds(10)) { await provider.sessionCount == 0 }
         #expect(await provider.sessionCount == 0)
 
@@ -170,7 +164,6 @@ struct HostSessionLimitsTests {
             queue: DispatchQueue(label: "hostsession.duplicates")
         )
         let accepted = Mutex(false)
-        // Every `didAddService` the provider has answered with, `true` for a refusal.
         let answers = Mutex<[Bool]>([])
         connection.onStateChange = { [weak connection] state in
             guard case .ready = state else { return }
@@ -195,10 +188,9 @@ struct HostSessionLimitsTests {
         await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
         #expect(await provider.sessionCount == 1)
 
-        // One service, published once and then re-added far past the cap — each add answered
-        // before the next is sent, exactly as an honest client that reads its completions
-        // would. The database never holds more than the one service, so the cap has nothing
-        // to defend against and the link stays up.
+        // The test answers each add before it sends the next, as an honest client does. The
+        // database never holds more than the one service, so the cap has nothing to defend against
+        // and the link stays up.
         let service = GATTService(
             identifier: ServiceIdentifier(uuid: UUID().uuidString),
             characteristics: [
@@ -230,8 +222,8 @@ struct HostSessionLimitsTests {
         try await provider.start()
         let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
 
-        // Straight down the link, behind `LinkPeripheralManager`'s back: its own `respond`
-        // can only ever send a code an `ATTError` already held.
+        // The test writes straight down the link, behind `LinkPeripheralManager`'s back. Its own
+        // `respond` can only send a code that an `ATTError` already held.
         let connection = LinkConnection.connect(
             to: endpoint,
             codec: .binaryPropertyList,
@@ -257,7 +249,8 @@ struct HostSessionLimitsTests {
 
         connection.send(.hostRequest(.respond(token: UUID(), value: nil, attError: 999)))
 
-        // Refused outright, rather than passed on as a success the client never asked for.
+        // The session refuses the request outright. It does not pass the request on as a success
+        // that the client never asked for.
         await waitFor(timeout: .seconds(10)) { await provider.sessionCount == 0 }
         #expect(await provider.sessionCount == 0)
 

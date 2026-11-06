@@ -6,58 +6,59 @@
 import BLESwiftCore
 import Logging
 
-/// Configures a ``Central`` at creation time. Every start-time option is captured here up
-/// front because `CBCentralManager` is created synchronously inside `Central.init`.
+/// Configures a ``Central`` when you create it. `Central.init` creates the `CBCentralManager`
+/// synchronously, so this type holds every start-time option.
 public struct Configuration: Sendable {
 
-    /// Whether iOS should show a system alert when Bluetooth is turned off while the app
-    /// is still running in the background.
+    /// Whether iOS shows a system alert when Bluetooth is off and the app is still in the
+    /// background.
     public let showPowerAlert: Bool
 
-    /// The default ``WarningOptions`` applied to connections that don't specify their own.
+    /// The default ``WarningOptions`` for connections that do not specify their own.
     public let warningOptions: WarningOptions
 
-    /// The `swift-log` logger `Central` writes every internal log line to, tagged with a
-    /// `"category"` metadata key per subsystem area.
+    /// The `swift-log` logger for `Central`'s internal log lines. Each line has a `"category"`
+    /// metadata key for its subsystem.
     public var logger: Logger
 
     #if os(iOS)
-    /// Enables CoreBluetooth **background state restoration** (iOS only). `nil` (the
-    /// default) disables restoration. Has no effect with `Central(adopting:)` — a restore
-    /// identifier cannot be applied retroactively to an already-created manager.
+    /// Enables CoreBluetooth **background state restoration** (iOS only). The default `nil`
+    /// disables restoration. It has no effect with `Central(adopting:)`, because a manager
+    /// that exists cannot get a restore identifier.
     public var restoration: RestorationConfiguration?
     #else
-    /// Internal on non-iOS platforms — see the dual-access note in
+    /// Internal on non-iOS platforms. See the dual-access note in
     /// `RestorationConfiguration.swift`.
     var restoration: RestorationConfiguration?
     #endif
 
     #if os(iOS)
-    /// Enables CoreBluetooth **peripheral-role background state restoration** (iOS only).
-    /// `nil` (the default) disables it. A separate setting from ``restoration``: CoreBluetooth
-    /// requires a distinct restore identifier per manager.
+    /// Enables CoreBluetooth **peripheral-role background state restoration** (iOS only). The
+    /// default `nil` disables it. This setting is separate from ``restoration``, and each
+    /// manager needs a different restore identifier.
     public var peripheralRestoration: PeripheralRestorationConfiguration?
     #else
-    /// Internal on non-iOS platforms — see the dual-access note in
+    /// Internal on non-iOS platforms. See the dual-access note in
     /// `RestorationConfiguration.swift`.
     var peripheralRestoration: PeripheralRestorationConfiguration?
     #endif
 
-    /// The clock every timer in `Central` sleeps on: `connect(timeout:)` and the other
-    /// operation timeouts, the scan timeout and loss timer, and the reconnect backoff.
-    /// Defaults to `ContinuousClock()`.
+    /// The clock for every timer in `Central`:
     ///
-    /// It exists for tests. A timeout measured in tens of seconds cannot be exercised on
-    /// wall time, and shortening it changes the thing under test; a test hands in a clock it
-    /// drives by hand — `BLESwiftTestSupport`'s `ManualClock` — and advances it to the
-    /// deadline, or just short of it, deterministically. Production code leaves it alone.
+    /// - `connect(timeout:)` and the other operation timeouts
+    /// - the scan timeout and the loss timer
+    /// - the reconnect backoff
+    ///
+    /// The default is `ContinuousClock()`. This property exists for tests. A test passes the
+    /// `ManualClock` of `BLESwiftTestSupport` and advances it to, or just before, a deadline
+    /// in a deterministic way. Production code does not change it.
     public var clock: any Clock<Duration>
 
     #if os(iOS)
     /// Creates a `Configuration`.
     ///
-    /// - Parameter peripheralRestoration: Must use a restore identifier distinct from
-    ///   `restoration`'s.
+    /// - Parameter peripheralRestoration: Must use a restore identifier that differs from
+    ///   the identifier of `restoration`.
     public init(
         showPowerAlert: Bool = false,
         warningOptions: WarningOptions = .default,

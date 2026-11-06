@@ -8,11 +8,11 @@ import BLESwiftCore
 import BLESwiftLink
 import Dispatch
 
-/// Everything a ``Provider`` needs to know before it binds a port: where to listen, how to
-/// encode, which fixture devices to host, and whether to put the host's own CoreBluetooth
+/// The settings that a ``Provider`` needs before it binds a port. They set where to listen,
+/// how to encode, which fixture devices to host, and whether to put the host's CoreBluetooth
 /// behind the same link.
 ///
-/// Every field has a default, so the common case is one mutation:
+/// Every field has a default, so the common case needs one change:
 ///
 /// ```swift
 /// var configuration = ProviderConfiguration()
@@ -22,65 +22,64 @@ import Dispatch
 /// ```
 public struct ProviderConfiguration: Sendable {
 
-    /// Where the provider listens. Defaults to `LinkEndpoint.default`; use
-    /// port `0` to have the system assign a free port and read ``Provider/port`` afterwards.
+    /// Where the provider listens. The default is `LinkEndpoint.default`. For a system-assigned
+    /// free port, use port `0` and read ``Provider/port``.
     public var endpoint: LinkEndpoint = .default
 
-    /// The codec the provider encodes its outgoing messages with. Each frame names its own
-    /// codec, so a client may answer in another one.
+    /// The codec with which the provider encodes its outgoing messages. Each frame names its own
+    /// codec, so a client can answer with a different codec.
     public var codec: LinkCodec = .binaryPropertyList
 
     /// Whether a central-role session also sees the host machine's real CoreBluetooth
-    /// peripherals, alongside the virtual ones.
+    /// peripherals, in addition to the virtual peripherals.
     public var passthrough: Bool = false
 
     /// The fixture devices ``Provider/start()`` registers on ``Provider/radio``.
     public var fixtures: [FixtureDevice] = []
 
-    /// The name the provider reports in its `ServerHello`, for client-side logging.
+    /// The name that the provider reports in its `ServerHello`. The client uses it for logs.
     public var providerName: String = "bleswift-provider"
 
-    /// How long an accepted connection has to send a valid `ClientHello` before it is
-    /// cancelled and released.
+    /// The time in which an accepted connection must send a valid `ClientHello`. After this
+    /// time, the provider cancels and releases the connection.
     ///
-    /// A client that opens a socket and then says nothing would otherwise hold an entry — and
-    /// the connection it keeps alive — for as long as the provider runs, and enough of them
-    /// would fill ``maximumPendingConnections`` against every real client. Ten seconds is far
-    /// longer than a loopback handshake takes and short enough that a wedged or hostile peer
-    /// is not the provider's problem for long.
+    /// Without a timeout, a client that opens a socket and sends nothing would hold an entry for
+    /// as long as the provider runs. Enough such clients would fill ``maximumPendingConnections``
+    /// and block every real client. Ten seconds is much longer than a loopback handshake and
+    /// short enough to limit a stuck or hostile peer.
     public var handshakeTimeout: Duration = .seconds(10)
 
-    /// How many accepted connections may be waiting on a handshake at once. A connection
-    /// accepted beyond this is cancelled immediately.
+    /// The number of accepted connections that can wait for a handshake at the same time. The
+    /// provider cancels any connection above this number immediately.
     ///
-    /// Only unclaimed connections count: a completed handshake hands its connection to a
-    /// session, which frees the slot for the next client. Sixty-four is far more than the
-    /// handful of simulators a provider realistically serves, so the cap is a ceiling on a
-    /// misbehaving peer rather than a limit a real deployment meets.
+    /// Only unclaimed connections count. A completed handshake gives its connection to a session
+    /// and frees the slot. Sixty-four is much more than the few simulators that a provider serves
+    /// in practice, so only a misbehaving peer reaches it.
     public var maximumPendingConnections: Int = 64
 
-    /// Receives one line per notable provider event — sessions opening and closing, refused
-    /// handshakes, requests naming an unknown peripheral. `nil` discards them.
+    /// Receives one line for each notable provider event, such as a session that opens or
+    /// closes, a refused handshake, or a request that names an unknown peripheral. If the value
+    /// is `nil`, the provider discards the lines.
     public var log: (@Sendable (String) -> Void)?
 
-    /// Test/consumer hook: replaces the real CoreBluetooth central backend used when
-    /// ``passthrough`` is true. The factory is called once per central-role session, on that
-    /// session's own serial queue, and must return a backend confined to that queue. The
-    /// queue handed to the factory is always serial (`DispatchQueue(label:)` is).
+    /// A hook for tests and consumers. It replaces the real CoreBluetooth central backend that
+    /// the provider uses when ``passthrough`` is true. The provider calls the factory once for
+    /// each central-role session, with that session's serial queue. The factory must return a
+    /// backend confined to that queue.
     public var centralBackendFactory: (@Sendable (DispatchQueue) -> any CentralManaging)?
 
-    /// Test/consumer hook: the peripheral-manager counterpart of
-    /// ``centralBackendFactory``. The factory is called once per peripheral-role session, on
-    /// that session's own serial queue, and must return a backend confined to that queue. The
-    /// queue handed to the factory is always serial (`DispatchQueue(label:)` is).
+    /// A hook for tests and consumers. It is the peripheral-manager version of
+    /// ``centralBackendFactory``. The provider calls the factory once for each peripheral-role
+    /// session, with that session's serial queue. The factory must return a backend confined to
+    /// that queue.
     public var peripheralManagerBackendFactory: (@Sendable (DispatchQueue) -> any PeripheralManaging)?
 
-    /// Test hook: how many peripheral remotes each central-role session keeps. Deliberately
-    /// not `public` — a client cannot see this table, and the only reason to shrink it is a
-    /// test that would otherwise have to connect a thousand peripherals to force an eviction.
+    /// A hook for tests. It sets the number of peripheral remotes that each central-role
+    /// session keeps. It is not `public` on purpose, because only a test needs a smaller value.
+    /// Without it, a test must connect a thousand peripherals to force an eviction.
     var maximumRemotesPerCentralSession: Int = CentralSession.defaultMaximumRemotes
 
-    /// Creates a configuration with every field at its default.
+    /// Creates a configuration with the default value in every field.
     public init() {}
 }
 #endif

@@ -9,61 +9,45 @@ import Dispatch
 import Foundation
 import BLESwiftCompat17
 
-/// A `PeripheralRemote` whose GATT operations travel over the link to a provider's real
-/// `CBPeripheral`, backed by a local mirror of that peripheral's discovery state.
+/// A `PeripheralRemote` whose GATT operations travel over the link to a real `CBPeripheral` on a
+/// provider. A local mirror of the peripheral's discovery state backs it.
 ///
-/// A `LinkPeripheral` is never created directly: ``LinkCentral`` owns the table of them and
-/// vends the same instance for a given identifier every time, exactly as CoreBluetooth
-/// vends one `CBPeripheral` per peripheral.
+/// Code never creates one directly. ``LinkCentral`` owns the table of them. It gives the same
+/// instance for an identifier every time.
 ///
-/// **A mirror is not evidence the peripheral exists.**
-/// ``LinkCentral/retrievePeripherals(withIdentifiers:)`` mints one of these for *any*
-/// identifier, seen or not: the call is synchronous, so there is no way to ask the provider
-/// first. A placeholder carries no name, no services, and a `.disconnected` state until the
-/// provider reports otherwise, and an identifier nothing knows fails at the connect —
-/// `didFailToConnect`, `BLESwiftProvider` domain, code `1` — not at retrieval. It refers back to its central `unowned` — the
-/// central owns it, so it can never outlive it — and sends every request through the
-/// central's one session.
+/// - A mirror does not prove that the peripheral exists.
+///   ``LinkCentral/retrievePeripherals(withIdentifiers:)`` returns a placeholder for any
+///   identifier. An unknown identifier fails at the connect with `didFailToConnect`, domain
+///   `BLESwiftProvider`, code `1`.
+/// - Call every member on `queue`, except ``name``. A `Mutex` protects ``name``.
+/// - The mirror is current when its `PeripheralEvent` arrives.
 ///
-/// **The mirror cache.** CoreBluetooth answers `isDiscovered`/`properties(of:)`/
-/// `discoveredServices` synchronously from its own object graph; across a link there is no
-/// such graph to consult, so every discovery result the provider reports is mirrored here.
-/// The mirror is updated *inline* as each wire event arrives (both happen on `queue`), and
-/// the matching `PeripheralEvent` is delivered afterwards via `queue.async` — so by the time
-/// `Central` handles a discovery completion, the cache it is about to interrogate is already
-/// current.
-///
-/// **Concurrency — queue-confined, not lock-protected.** Every stored property is
-/// `nonisolated(unsafe)`, safe only because every `PeripheralRemote` method and property
-/// accessor asserts `dispatchPrecondition(condition: .onQueue(queue))` and touches state
-/// inline: the serial queue itself is the synchronization, exactly as for `FakePeripheral`
-/// and a real `CBPeripheral`. Event delivery is always `queue.async`, never inline. The one
-/// exception is ``name``, which callers read off-queue — `Central(backend:connectedPeripherals:)`
-/// does — so it is `Mutex`-protected, matching `VirtualPeripheralRemote`.
+/// For the full rules, see <doc:BLESwiftSimulatorLink#Peripherals-that-the-link-did-not-see>.
 public final class LinkPeripheral: PeripheralRemote, Sendable {
 
-    /// The identifier the provider's CoreBluetooth stack uses for this peripheral.
+    /// The identifier that the provider's CoreBluetooth stack uses for this peripheral.
     public let identifier: UUID
 
-    /// The central that owns this peripheral and carries its requests. `unowned` because the
-    /// central owns the table this peripheral lives in — it cannot outlive its central.
-    /// `Central` retains the backend (its `manager`) for at least as long as any
-    /// `PeripheralRemote` that backend hands out, so this reference can never dangle.
+    /// The central that owns this peripheral and carries its requests. It is `unowned` because
+    /// the central owns the table in which this peripheral lives, so the peripheral cannot
+    /// outlive its central. `Central` retains the backend (its `manager`) for at least as long
+    /// as any `PeripheralRemote` that the backend gives out. Thus this reference can never
+    /// dangle.
     private unowned let central: LinkCentral
 
     /// Whether `candidate` is the central that owns this peripheral.
     ///
-    /// The ownership test ``LinkCentral/connect(_:options:requiresANCS:)`` uses in place of a
-    /// table lookup, which the mirror cap can invalidate under a caller that still holds a
-    /// perfectly valid peripheral.
+    /// ``LinkCentral/connect(_:options:requiresANCS:)`` uses this ownership test in place of a
+    /// table lookup, because the mirror cap can invalidate a lookup under a caller that still
+    /// holds a valid peripheral.
     func isOwned(by candidate: LinkCentral) -> Bool { central === candidate }
 
-    /// The queue every mirroring method, property accessor, and event delivery is confined
-    /// to — the same queue the owning `Central` was constructed with.
+    /// The queue to which the code confines every mirroring method, property accessor, and event
+    /// delivery. It is the queue with which the owning `Central` was constructed.
     private let queue: DispatchQueue
 
-    /// The last name the provider reported. `Mutex`-protected rather than queue-confined:
-    /// ``name`` is read off-queue, and every writer already runs on ``queue``.
+    /// The last name that the provider reported. A `Mutex` protects it, and the queue does not
+    /// confine it: ``name`` is read off-queue, and every writer already runs on ``queue``.
     private let nameBox: Mutex<String?>
     nonisolated(unsafe) private var _connectionState: PeripheralConnectionState = .disconnected
     nonisolated(unsafe) private var _ancsAuthorized = false
@@ -74,26 +58,28 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
     nonisolated(unsafe) private var _notifying: Set<CharacteristicIdentifier> = []
     nonisolated(unsafe) private var _maximumWriteWithResponse = 512
     nonisolated(unsafe) private var _maximumWriteWithoutResponse = 20
-    /// The sequences of the `.withoutResponse` writes this peripheral has sent and not yet
-    /// been acknowledged for, oldest first. An array rather than a `Set`: it never holds more
-    /// than a window's worth in practice, order makes a stale acknowledgement obvious in a
-    /// debugger, and a linear scan of that many elements is cheaper than hashing.
+    /// The sequences of the `.withoutResponse` writes that this peripheral sent and that have no
+    /// acknowledgement yet, oldest first. This is an array and not a `Set`, for three reasons:
+    ///
+    /// - In practice it never holds more than the size of one window.
+    /// - The order makes a stale acknowledgement easy to see in a debugger.
+    /// - A linear scan of that many elements is cheaper than hashing.
     nonisolated(unsafe) private var _outstandingWithoutResponse: [UInt64] = []
     nonisolated(unsafe) private var _nextWriteSequence: UInt64 = 0
 
-    /// Whether each service discovery this peripheral has sent and not yet been answered for
-    /// named the services it wanted, oldest first — the flag
-    /// `recordDiscoveredServices(_:)` needs and the wire event does not carry. The provider
-    /// answers a peripheral's requests in the order they arrive, so the oldest entry belongs
-    /// to the answer landing now.
+    /// For each service discovery that this peripheral sent and that has no answer yet: whether
+    /// the request named the services that it wanted. The list is oldest first. This is the flag
+    /// that `recordDiscoveredServices(_:)` needs and that the wire event does not carry. The
+    /// provider answers a peripheral's requests in arrival order, so the oldest entry belongs to
+    /// the answer that lands now.
     nonisolated(unsafe) private var _pendingServiceDiscoveryFilters: [Bool] = []
 
     /// Creates a peripheral mirror. `LinkCentral` is the only caller.
     ///
     /// - Parameters:
     ///   - identifier: The peripheral's identifier on the provider's machine.
-    ///   - name: The last name the provider reported, if any.
-    ///   - central: The owning central, referenced `unowned`.
+    ///   - name: The last name that the provider reported, if any.
+    ///   - central: The owning central, referenced as `unowned`.
     ///   - queue: The central's serial queue.
     init(identifier: UUID, name: String?, central: LinkCentral, queue: DispatchQueue) {
         self.identifier = identifier
@@ -104,33 +90,34 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     // MARK: - PeripheralRemote state
 
-    /// The peripheral's advertised or cached name, as last reported by the provider.
-    /// `Mutex`-backed, so it is readable from any context — `Central`'s
-    /// `connectedPeripherals` adoption reads it off the central's queue.
+    /// The advertised or cached name of the peripheral, as the provider last reported it. A
+    /// `Mutex` backs it, so any context can read it. The `connectedPeripherals` adoption of
+    /// `Central` reads it off the central's queue.
     public var name: String? {
         nameBox.withLock { $0 }
     }
 
-    /// The peripheral's current connection state, mirrored from the provider.
+    /// The current connection state of the peripheral, mirrored from the provider.
     public var connectionState: PeripheralConnectionState {
         dispatchPrecondition(condition: .onQueue(queue))
         return _connectionState
     }
 
-    /// Whether the provider reported this connection's ANCS data sharing as authorized.
+    /// Whether the provider reported the ANCS data sharing of this connection as authorized.
     public var ancsAuthorized: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _ancsAuthorized
     }
 
-    /// Whether another `.withoutResponse` write fits in the link's flow-control window
-    /// (`LinkFlowControl.writeWithoutResponseWindow`).
+    /// Whether the flow-control window of the link has room for one more `.withoutResponse`
+    /// write (`LinkFlowControl.writeWithoutResponseWindow`).
     public var canSendWriteWithoutResponse: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _outstandingWithoutResponse.count < LinkFlowControl.writeWithoutResponseWindow
     }
 
-    /// Receives every `PeripheralEvent` translated from this peripheral's wire events.
+    /// Receives every `PeripheralEvent` that the code translated from this peripheral's wire
+    /// events.
     public var eventHandler: ((PeripheralEvent) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -144,18 +131,19 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     // MARK: - PeripheralRemote requests
 
-    /// Asks the provider to discover `services` (or every service, if `nil`), remembering
-    /// whether the request was filtered so `recordDiscoveredServices(_:)` can apply the
-    /// right rule to the answer.
+    /// Asks the provider to discover `services`. If `services` is `nil`, it asks for every
+    /// service. The peripheral remembers whether the request was filtered, so
+    /// `recordDiscoveredServices(_:)` can apply the correct rule to the answer.
     public func discoverServices(_ services: [ServiceIdentifier]?) {
         dispatchPrecondition(condition: .onQueue(queue))
         _pendingServiceDiscoveryFilters.append(services != nil)
         central.send(.discoverServices(peripheral: identifier, services: services?.map(\.uuidString)))
     }
 
-    /// Asks the provider to discover `characteristics` (or every characteristic, if `nil`)
-    /// of `service`. A no-op for a service the mirror cache has not seen discovered, for the
-    /// same reason as ``readValue(for:)-(CharacteristicIdentifier)``.
+    /// Asks the provider to discover `characteristics` of `service`. If `characteristics` is
+    /// `nil`, it asks for every characteristic. The function does nothing for a service that the
+    /// mirror cache has not seen discovered, for the reason that
+    /// ``readValue(for:)-(CharacteristicIdentifier)`` gives.
     public func discoverCharacteristics(_ characteristics: [CharacteristicIdentifier]?, for service: ServiceIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard isDiscovered(service) else { return }
@@ -166,11 +154,11 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         ))
     }
 
-    /// Asks the provider to read `characteristic`. A no-op for a characteristic the mirror
-    /// cache has not seen discovered, as the seam specifies and the CoreBluetooth shim does:
-    /// CoreBluetooth has no `CBCharacteristic` to read, so nothing is sent and no completion
-    /// arrives — and sending it anyway would have the provider answer for a characteristic
-    /// this client cannot name.
+    /// Asks the provider to read `characteristic`. The function does nothing for a characteristic
+    /// that the mirror cache has not seen discovered. The seam specifies this, and the
+    /// CoreBluetooth shim does the same: CoreBluetooth has no `CBCharacteristic` to read, so it
+    /// sends nothing and no completion arrives. A request sent anyway would make the provider
+    /// answer for a characteristic that this client cannot name.
     public func readValue(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard isDiscovered(characteristic) else { return }
@@ -179,15 +167,16 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     /// Asks the provider to write `data` to `characteristic`.
     ///
-    /// A `.withoutResponse` write is always sent, even when the flow-control window is
-    /// already full: `Central` consults ``canSendWriteWithoutResponse`` before writing, and
-    /// dropping a payload the caller believes was sent would be worse than exceeding the
-    /// window. The write is tagged with a monotonic sequence the provider echoes back as
+    /// The function always sends a `.withoutResponse` write, even when the flow-control window is
+    /// full. `Central` consults ``canSendWriteWithoutResponse`` before it writes, and dropping a
+    /// payload that the caller believes was sent is worse than exceeding the window. The function
+    /// tags the write with a monotonic sequence. The provider echoes the sequence back as
     /// `writeWithoutResponseAccepted`, which reopens the window.
     ///
-    /// A no-op for a characteristic the mirror cache has not seen discovered, for the same
-    /// reason as ``readValue(for:)-(CharacteristicIdentifier)``. The flow-control sequence is
-    /// not spent either: nothing goes out to be acknowledged.
+    /// The function does nothing for a characteristic that the mirror cache has not seen
+    /// discovered, for the reason that ``readValue(for:)-(CharacteristicIdentifier)`` gives. It
+    /// also does not spend the flow-control sequence, because nothing goes out to get an
+    /// acknowledgement.
     public func writeValue(_ data: Data, for characteristic: CharacteristicIdentifier, type: WriteType) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard isDiscovered(characteristic) else { return }
@@ -205,43 +194,43 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         ))
     }
 
-    /// Asks the provider to enable or disable notifications for `characteristic`. A no-op for
-    /// a characteristic the mirror cache has not seen discovered, for the same reason as
-    /// ``readValue(for:)-(CharacteristicIdentifier)``.
+    /// Asks the provider to enable or disable notifications for `characteristic`. The function
+    /// does nothing for a characteristic that the mirror cache has not seen discovered, for the
+    /// reason that ``readValue(for:)-(CharacteristicIdentifier)`` gives.
     public func setNotifyValue(_ enabled: Bool, for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard isDiscovered(characteristic) else { return }
         central.send(.setNotifyValue(peripheral: identifier, characteristic: WireCharacteristicRef(characteristic), enabled: enabled))
     }
 
-    /// Asks the provider to discover `characteristic`'s descriptors. A no-op for a
-    /// characteristic the mirror cache has not seen discovered, for the same reason as
-    /// ``readValue(for:)-(CharacteristicIdentifier)``.
+    /// Asks the provider to discover the descriptors of `characteristic`. The function does
+    /// nothing for a characteristic that the mirror cache has not seen discovered, for the
+    /// reason that ``readValue(for:)-(CharacteristicIdentifier)`` gives.
     public func discoverDescriptors(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard isDiscovered(characteristic) else { return }
         central.send(.discoverDescriptors(peripheral: identifier, characteristic: WireCharacteristicRef(characteristic)))
     }
 
-    /// Asks the provider to read `descriptor`. A no-op for a descriptor the mirror cache has
-    /// not seen discovered, for the same reason as
-    /// ``readValue(for:)-(CharacteristicIdentifier)``.
+    /// Asks the provider to read `descriptor`. The function does nothing for a descriptor that
+    /// the mirror cache has not seen discovered, for the reason that
+    /// ``readValue(for:)-(CharacteristicIdentifier)`` gives.
     public func readValue(for descriptor: DescriptorIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard isDiscovered(descriptor) else { return }
         central.send(.readDescriptor(peripheral: identifier, descriptor: WireDescriptorRef(descriptor)))
     }
 
-    /// Asks the provider to write `data` to `descriptor`. A no-op for a descriptor the mirror
-    /// cache has not seen discovered, for the same reason as
-    /// ``readValue(for:)-(CharacteristicIdentifier)``.
+    /// Asks the provider to write `data` to `descriptor`. The function does nothing for a
+    /// descriptor that the mirror cache has not seen discovered, for the reason that
+    /// ``readValue(for:)-(CharacteristicIdentifier)`` gives.
     public func writeValue(_ data: Data, for descriptor: DescriptorIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard isDiscovered(descriptor) else { return }
         central.send(.writeDescriptor(peripheral: identifier, descriptor: WireDescriptorRef(descriptor), value: data))
     }
 
-    /// Asks the provider to read this peripheral's RSSI.
+    /// Asks the provider to read the RSSI of this peripheral.
     public func readRSSI() {
         dispatchPrecondition(condition: .onQueue(queue))
         central.send(.readRSSI(peripheral: identifier))
@@ -249,9 +238,9 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     /// Asks the provider to open an L2CAP channel to `psm`.
     ///
-    /// The client half of the channel is created and filed with the central *before* the
-    /// request goes out, so the provider's `didOpenL2CAPChannel` — and any bytes that follow
-    /// it — always find a channel to route to. A failed open drops it again.
+    /// The code creates the client half of the channel and files it with the central *before* it
+    /// sends the request. Thus the provider's `didOpenL2CAPChannel`, and any bytes that follow
+    /// it, always find a channel to route to. A failed open drops the channel again.
     public func openL2CAPChannel(_ psm: L2CAPPSM) {
         dispatchPrecondition(condition: .onQueue(queue))
         let channel = central.allocateChannelIdentifier()
@@ -259,7 +248,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         central.send(.openL2CAPChannel(peripheral: identifier, psm: psm.rawValue, channel: channel))
     }
 
-    /// The provider-reported maximum payload length for a write of `type`.
+    /// The maximum payload length that the provider reported for a write of `type`.
     public func maximumWriteValueLength(for type: WriteType) -> Int {
         dispatchPrecondition(condition: .onQueue(queue))
         switch type {
@@ -294,26 +283,26 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         return _notifying.contains(characteristic)
     }
 
-    /// The properties the provider reported for `characteristic`, or `[]` if it has not been
-    /// discovered.
+    /// The properties that the provider reported for `characteristic`. The value is `[]` if the
+    /// characteristic has not been discovered.
     public func properties(of characteristic: CharacteristicIdentifier) -> CharacteristicProperties {
         dispatchPrecondition(condition: .onQueue(queue))
         return _characteristics[characteristic.service]?[characteristic] ?? []
     }
 
-    /// Every service currently in the mirror cache.
+    /// Every service that is now in the mirror cache.
     public var discoveredServices: [ServiceIdentifier] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _services
     }
 
-    /// Every characteristic currently in the mirror cache for `service`.
+    /// Every characteristic that is now in the mirror cache for `service`.
     public func discoveredCharacteristics(for service: ServiceIdentifier) -> [CharacteristicIdentifier] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _characteristics[service].map { Array($0.keys) } ?? []
     }
 
-    /// Every descriptor currently in the mirror cache for `characteristic`.
+    /// Every descriptor that is now in the mirror cache for `characteristic`.
     public func discoveredDescriptors(for characteristic: CharacteristicIdentifier) -> [DescriptorIdentifier] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _descriptors[characteristic] ?? []
@@ -321,26 +310,26 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     // MARK: - Mirror updates (called by LinkCentral, on `queue`)
 
-    /// This peripheral's identity, for the `CentralEvent`s that carry one.
+    /// The identity of this peripheral, for the `CentralEvent`s that carry one.
     var peripheralIdentifier: PeripheralIdentifier {
         dispatchPrecondition(condition: .onQueue(queue))
         return PeripheralIdentifier(uuid: identifier, name: name)
     }
 
-    /// Records a name the provider reported outside a connection (a scan sighting).
+    /// Records a name that the provider reported outside a connection (a scan sighting).
     func record(name: String?) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let name else { return }
         nameBox.withLock { $0 = name }
     }
 
-    /// Marks a connection attempt as under way, mirroring `CBPeripheral.state`.
+    /// Marks a connection attempt as under way. This mirrors `CBPeripheral.state`.
     func markConnecting() {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectionState = .connecting
     }
 
-    /// Marks an in-flight cancellation, mirroring `CBPeripheral.state` after
+    /// Marks a cancellation that is in flight. This mirrors `CBPeripheral.state` after
     /// `cancelPeripheralConnection(_:)`.
     func markDisconnecting() {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -349,11 +338,11 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Records a completed connection and the maxima the provider negotiated.
+    /// Records a completed connection and the maxima that the provider negotiated.
     ///
-    /// Both maxima are already past the wire boundary's ``BLESwiftLink/WireLengthValidation``
-    /// when they arrive here, so neither can be a value `Peripheral`'s chunked writer would
-    /// spin or trap on.
+    /// Both maxima already passed the wire boundary's ``BLESwiftLink/WireLengthValidation`` when
+    /// they arrive here. Thus neither can be a value on which the chunked writer of `Peripheral`
+    /// would loop or trap.
     func markConnected(name: String?, maximumWriteWithResponse: Int, maximumWriteWithoutResponse: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectionState = .connected
@@ -362,9 +351,13 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         _maximumWriteWithoutResponse = maximumWriteWithoutResponse
     }
 
-    /// Records a disconnect (or a failed connection attempt), discarding every piece of
-    /// per-connection state: the discovery caches, the notifying set, the flow-control
-    /// count, and the negotiated maxima.
+    /// Records a disconnect or a failed connection attempt. It discards all per-connection
+    /// state:
+    ///
+    /// - the discovery caches
+    /// - the notifying set
+    /// - the flow-control count
+    /// - the negotiated maxima
     func markDisconnected() {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectionState = .disconnected
@@ -381,19 +374,20 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
 
     /// Records the answer to a service discovery in the mirror.
     ///
-    /// **A filtered request's answer joins the mirror; an unfiltered request's answer replaces
-    /// it**, the same rule `VirtualPeripheralRemote.recordServices(_:filtered:)` applies on
-    /// the provider's side of the seam. The answer to `discoverServices([x])` describes `x`
-    /// and nothing else, so dropping the services missing from it would discard services the
-    /// device still has — and `GATTCompatibility.discovery` defaults to `.filtered`, so
-    /// `Central` asks for exactly one service at a time. An answer with no request behind it
-    /// is treated as unfiltered: a provider volunteering a service list is describing the
-    /// whole database.
+    /// **The answer to a filtered request joins the mirror. The answer to an unfiltered request
+    /// replaces it.** `VirtualPeripheralRemote.recordServices(_:filtered:)` applies the same rule
+    /// on the provider side of the seam. The answer to `discoverServices([x])` describes `x` and
+    /// nothing else, so dropping the services that are missing from it would discard services
+    /// that the device still has. Also, `GATTCompatibility.discovery` defaults to `.filtered`,
+    /// so `Central` asks for exactly one service at a time.
     ///
-    /// The invalidation paths are unchanged: `didModifyServices` prunes through
-    /// ``invalidate(services:)`` and a disconnect empties the mirror outright.
+    /// The code treats an answer with no request behind it as unfiltered. A provider that
+    /// volunteers a service list describes the whole database.
     ///
-    /// - Parameter services: The services the provider reported.
+    /// `didModifyServices` prunes through ``invalidate(services:)``, and a disconnect empties
+    /// the mirror.
+    ///
+    /// - Parameter services: The services that the provider reported.
     func recordDiscoveredServices(_ services: [ServiceIdentifier]) {
         dispatchPrecondition(condition: .onQueue(queue))
         let filtered = _pendingServiceDiscoveryFilters.isEmpty ? false : _pendingServiceDiscoveryFilters.removeFirst()
@@ -406,19 +400,19 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Replaces `service`'s mirrored characteristics and their properties.
+    /// Replaces the mirrored characteristics of `service` and their properties.
     func replaceCharacteristics(_ characteristics: [CharacteristicIdentifier: CharacteristicProperties], for service: ServiceIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         _characteristics[service] = characteristics
     }
 
-    /// Replaces `characteristic`'s mirrored descriptors.
+    /// Replaces the mirrored descriptors of `characteristic`.
     func replaceDescriptors(_ descriptors: [DescriptorIdentifier], for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         _descriptors[characteristic] = descriptors
     }
 
-    /// Drops `services` and everything beneath them from the mirror, as a `didModifyServices`
+    /// Drops `services` and everything below them from the mirror, as a `didModifyServices`
     /// invalidation requires.
     func invalidate(services: [ServiceIdentifier]) {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -433,10 +427,11 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Records `characteristic`'s new notification state. An enabled state is recorded only
-    /// while the characteristic is still in the mirror: the answer to a notify request can
+    /// Records the new notification state of `characteristic`. The code records an enabled state
+    /// only while the characteristic is still in the mirror. The answer to a notify request can
     /// arrive after a `didModifyServices` that ``invalidate(services:)`` already applied, and
-    /// re-arming then would report notifying on a characteristic that is gone.
+    /// arming the notification again then would report notifying on a characteristic that is
+    /// gone.
     func setNotifying(_ isNotifying: Bool, for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         if isNotifying, _characteristics[characteristic.service]?[characteristic] != nil {
@@ -446,18 +441,22 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Records the provider's acknowledgement of the `.withoutResponse` write tagged
+    /// Records the provider's acknowledgement for the `.withoutResponse` write that has the tag
     /// `sequence`.
     ///
-    /// An acknowledgement is only honored for a write this peripheral still has outstanding.
-    /// A sequence that was never sent, one already acknowledged, or one from before a
-    /// disconnect — ``markDisconnected()`` empties the set, and the provider's own
-    /// acknowledgement may still be in flight when it does — is ignored, rather than
-    /// crediting the window a later connection is filling.
+    /// The function honors an acknowledgement only for a write that this peripheral still has
+    /// outstanding. It ignores these sequences:
     ///
-    /// - Parameter sequence: The sequence the provider echoed back.
-    /// - Returns: `true` when this acknowledgement reopened a window that was full, meaning
-    ///   `PeripheralEvent.isReadyToSendWriteWithoutResponse` is now owed to the consumer.
+    /// - A sequence that was never sent.
+    /// - A sequence that was already acknowledged.
+    /// - A sequence from before a disconnect. ``markDisconnected()`` empties the set, and the
+    ///   provider's acknowledgement can still be in flight when it does.
+    ///
+    /// Thus the function does not credit the window that a later connection is filling.
+    ///
+    /// - Parameter sequence: The sequence that the provider echoed back.
+    /// - Returns: `true` if this acknowledgement reopened a window that was full. In that case the
+    ///   consumer is owed `PeripheralEvent.isReadyToSendWriteWithoutResponse`.
     func acknowledgeWriteWithoutResponse(sequence: UInt64) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let index = _outstandingWithoutResponse.firstIndex(of: sequence) else { return false }
@@ -467,14 +466,14 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         return wasFull && _outstandingWithoutResponse.count < window
     }
 
-    /// Records an ANCS authorization change reported by the provider.
+    /// Records an ANCS authorization change that the provider reported.
     func setANCSAuthorized(_ authorized: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         _ancsAuthorized = authorized
     }
 
-    /// Delivers `event` to ``eventHandler`` asynchronously on ``queue``, honoring the
-    /// seam's never-inline delivery contract.
+    /// Delivers `event` to ``eventHandler`` asynchronously on ``queue``, as the seam's
+    /// never-inline delivery contract requires.
     func deliver(_ event: PeripheralEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
         queue.async { [self] in
@@ -482,7 +481,7 @@ public final class LinkPeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Detaches event delivery. Called during ``LinkCentral/shutdown()``, already on
+    /// Detaches event delivery. ``LinkCentral/shutdown()`` calls this. It is already on
     /// ``queue``.
     func detachEventHandler() {
         dispatchPrecondition(condition: .onQueue(queue))

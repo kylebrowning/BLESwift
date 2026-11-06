@@ -3,15 +3,15 @@
 //  BLESwiftCore
 //
 
-/// A system-level connection event for a peripheral matched by
-/// `Central.connectionEventRegistration(services:peripherals:)` — delivered when the
-/// peripheral connects to or disconnects from the *system* (by any app, or the Bluetooth
-/// settings pane), not just through this `Central`.
+/// A system-level connection event for a peripheral that
+/// `Central.connectionEventRegistration(services:peripherals:)` matched. The system delivers it
+/// when the peripheral connects to, or disconnects from, the *system*. Any app or the Bluetooth
+/// settings pane can cause it, not only this `Central`.
 ///
-/// Mirrors `centralManager(_:connectionEventDidOccur:for:)`. Not available on macOS.
+/// Mirrors `centralManager(_:connectionEventDidOccur:for:)`. It is not available on macOS.
 public struct SystemConnectionEvent: Sendable, Equatable {
 
-    /// Whether the peripheral connected to or disconnected from the system. Mirrors
+    /// Whether the peripheral connected to the system or disconnected from it. Mirrors
     /// `CBConnectionEvent`.
     public enum Kind: Sendable, Equatable {
         /// The peripheral connected to the system.
@@ -20,7 +20,7 @@ public struct SystemConnectionEvent: Sendable, Equatable {
         case peerDisconnected
     }
 
-    /// The peripheral the event concerns.
+    /// The peripheral that the event concerns.
     public let peripheral: PeripheralIdentifier
 
     /// What happened.

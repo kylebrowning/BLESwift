@@ -2,14 +2,14 @@
 //  GATTAssignedNumbers+Descriptors.swift
 //  BLESwiftCore
 //
-//  GENERATED FILE — do not edit by hand.
+//  GENERATED FILE. Do not edit by hand.
 //  Source: Bluetooth SIG public assigned numbers (descriptors.yaml).
-//  Regenerate per Scripts/generate-assigned-numbers.md.
+//  To regenerate, follow Scripts/generate-assigned-numbers.md.
 //
 
 extension GATTAssignedNumbers {
 
-    /// SIG-assigned 16-bit descriptor UUIDs → names.
+    /// SIG-assigned 16-bit descriptor UUIDs and their names.
     static let descriptorNames: [UInt16: String] = [
         0x2900: "Characteristic Extended Properties",
         0x2901: "Characteristic User Description",

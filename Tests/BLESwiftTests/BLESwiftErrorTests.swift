@@ -7,9 +7,9 @@ import Foundation
 import Testing
 import BLESwiftCore
 
-/// Exercises ``BLESwiftError/errorDescription``, constructing a representative value of
-/// every case and asserting the description is non-`nil` and contains the expected
-/// substring. Pure `BLESwiftCore`, no CoreBluetooth or `@testable` needed.
+/// Tests ``BLESwiftError/errorDescription``. Each test makes a representative value of every case
+/// and asserts that the description is not `nil` and contains the expected substring. The tests use
+/// only `BLESwiftCore`, not CoreBluetooth or `@testable`.
 @Suite("BLESwiftError descriptions")
 struct BLESwiftErrorTests {
 

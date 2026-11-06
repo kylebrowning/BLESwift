@@ -61,8 +61,8 @@ struct FixtureTests {
         #expect(control.value == nil)
     }
 
-    /// A service, like a device and a characteristic, needs only its `uuid`: an omitted
-    /// `characteristics` is the same empty list an explicit `[]` declares.
+    /// A service needs only its `uuid`, like a device and a characteristic. An omitted
+    /// `characteristics` is the same empty list as an explicit `[]`.
     @Test("A minimal service decodes, hosting no characteristics")
     func minimalService() throws {
         let json = """
@@ -77,8 +77,8 @@ struct FixtureTests {
         #expect(device.gattServices.first?.characteristics.isEmpty == true)
     }
 
-    /// The keys with a memberwise default decode as that default when the JSON omits them, so
-    /// the smallest device a fixture can describe is its `id` alone.
+    /// Keys that have a memberwise default decode as that default when the JSON omits them. The
+    /// smallest device that a fixture can describe is therefore its `id` alone.
     @Test("A minimal device decodes, taking every optional key's default")
     func minimalDevice() throws {
         let json = """
@@ -131,9 +131,9 @@ struct FixtureTests {
         #expect(try FixtureDocument.load(from: url).devices.count == 1)
     }
 
-    /// A malformed UUID anywhere in a fixture used to trap the provider at load, inside the
-    /// identifier it was handed to. Each one is now a `DecodingError` naming its key, which
-    /// `bleswift-provider` prints before exiting 66.
+    /// A malformed UUID anywhere in a fixture is a `DecodingError` that names its key. It must not
+    /// trap the provider at load. `bleswift-provider` prints the error before it exits with code
+    /// 66.
     @Test(
         "A malformed UUID fails decoding rather than trapping",
         arguments: [
@@ -152,7 +152,6 @@ struct FixtureTests {
             Issue.record("expected a dataCorrupted error, got \(String(describing: error))")
             return
         }
-        // The message names both the offending string and where in the document it sits.
         #expect(context.codingPath.last?.stringValue == key)
         #expect(context.codingPath.first?.stringValue == "devices")
         #expect(context.debugDescription.contains("zzzz"))

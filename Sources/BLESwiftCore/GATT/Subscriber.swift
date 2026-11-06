@@ -5,22 +5,21 @@
 
 import Foundation
 
-/// A remote central that a hosted `PeripheralHost` is talking to — the peer that issued a
-/// read/write request, or that subscribed to a characteristic's notifications.
+/// A remote central that a hosted `PeripheralHost` communicates with: the peer that sent a read or
+/// write request, or subscribed to a characteristic's notifications.
 ///
-/// A `Sendable`, value-type mirror of CoreBluetooth's `CBCentral` (which is neither
-/// `Sendable` nor constructible in tests), carrying only the two fields BLESwift's
-/// peripheral role needs. The `CBCentral` bridge lives in the `BLESwift` module's
-/// CoreBluetooth seam.
+/// A `Sendable` value-type mirror of CoreBluetooth's `CBCentral`, which is not `Sendable` and which
+/// tests cannot construct. It has only the two fields that BLESwift's peripheral role needs. The
+/// `BLESwift` module's CoreBluetooth seam bridges `CBCentral` to this type.
 public struct Subscriber: Sendable, Hashable {
 
-    /// The remote central's identifier, stable for the duration of a connection. Mirrors
+    /// The remote central's identifier. It is stable for the duration of a connection. Mirrors
     /// `CBCentral.identifier`.
     public let id: UUID
 
-    /// The maximum number of bytes this central can receive in a single notification
-    /// update. Mirrors `CBCentral.maximumUpdateValueLength` — use it to fragment values
-    /// pushed via `PeripheralHost/updateValue(_:for:onSubscribed:)`.
+    /// The maximum number of bytes that this central can receive in a single notification update.
+    /// Mirrors `CBCentral.maximumUpdateValueLength`. Use it to split values into fragments that you
+    /// push with `PeripheralHost/updateValue(_:for:onSubscribed:)`.
     public let maximumUpdateValueLength: Int
 
     /// Creates a `Subscriber`.

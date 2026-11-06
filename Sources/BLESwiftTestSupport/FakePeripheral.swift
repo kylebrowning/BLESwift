@@ -7,29 +7,28 @@ import BLESwiftCore
 import Dispatch
 import Foundation
 
-/// A scriptable stand-in for `CBPeripheral`, conforming to `PeripheralRemote`.
+/// A scriptable stand-in for `CBPeripheral` that conforms to `PeripheralRemote`.
 ///
-/// `CBPeripheral` has no accessible public initializer and cannot be scripted in tests, so
-/// `FakePeripheral` lets you drive GATT operations and script the events a real peripheral
-/// would eventually deliver via its delegate.
+/// `CBPeripheral` has no public initializer, and you cannot script it in tests. `FakePeripheral`
+/// lets you drive GATT operations and script the events that a real peripheral delivers with its
+/// delegate.
 ///
-/// **Concurrency — queue-confined, not lock-protected.** See ``FakeCentral``'s doc comment
-/// for the full rationale; the same invariant holds here: every stored property is
-/// `nonisolated(unsafe)`, safe only because every `PeripheralRemote` method and property
-/// accessor asserts `dispatchPrecondition(condition: .onQueue(queue))` at entry and
-/// touches state inline — no `queue.sync` anywhere. ``onQueue(_:)`` is the only sanctioned
-/// door for off-queue code; event delivery is always `queue.async`, never inline.
+/// **Concurrency: a queue confines it and no lock protects it.** For the rationale, see
+/// ``FakeCentral``. Every stored property is `nonisolated(unsafe)`. This is safe because every
+/// `PeripheralRemote` method and property accessor asserts `dispatchPrecondition(condition:
+/// .onQueue(queue))` at entry and touches state inline. There is no `queue.sync`. ``onQueue(_:)``
+/// is the only door for off-queue code. Event delivery is always `queue.async`, never inline.
 public final class FakePeripheral: PeripheralRemote, Sendable {
 
-    /// The identifier CoreBluetooth would assign this peripheral. Immutable, so it needs
-    /// no queue confinement.
+    /// The identifier that CoreBluetooth would assign to this peripheral. It is immutable, so it
+    /// needs no queue confinement.
     public let identifier: UUID
 
-    /// The peripheral's advertised or cached name. Immutable, so it needs no queue
-    /// confinement — `FakePeripheral` doesn't currently support scripting a name change.
+    /// The peripheral's advertised or cached name. It is immutable, so it needs no queue
+    /// confinement. `FakePeripheral` cannot script a name change.
     public let name: String?
 
-    /// The queue every CB-mirroring method and event delivery is confined to.
+    /// The queue that confines every method and event delivery.
     public let queue: DispatchQueue
 
     nonisolated(unsafe) private var _connectionState: PeripheralConnectionState
@@ -75,13 +74,13 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
     /// Creates a `FakePeripheral` confined to `queue`.
     ///
     /// - Parameters:
-    ///   - identifier: The peripheral's identifier. Defaults to a fresh `UUID`.
-    ///   - name: The peripheral's advertised/cached name.
-    ///   - state: The initial `PeripheralConnectionState`. Defaults to `.disconnected`.
-    ///   - canSendWriteWithoutResponse: The initial back-pressure state. Defaults to
-    ///     `true` (ready).
-    ///   - queue: The queue every CB-mirroring method and event delivery is confined to.
-    ///     Must be serial (`DispatchQueue(label:)` is).
+    ///   - identifier: The peripheral's identifier. The default is a new `UUID`.
+    ///   - name: The peripheral's advertised or cached name.
+    ///   - state: The initial `PeripheralConnectionState`. The default is `.disconnected`.
+    ///   - canSendWriteWithoutResponse: The initial back-pressure state. The default is `true`
+    ///     (ready).
+    ///   - queue: The queue that confines every method and event delivery. It must be serial
+    ///     (`DispatchQueue(label:)` makes a serial queue).
     public init(
         identifier: UUID = UUID(),
         name: String? = "Fake Peripheral",
@@ -96,19 +95,18 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         self.queue = queue
     }
 
-    /// This peripheral's identity as a `PeripheralIdentifier`. Reads only immutable
-    /// state, so it needs no queue confinement.
+    /// This peripheral's identity as a `PeripheralIdentifier`. It reads only immutable state, so it
+    /// needs no queue confinement.
     public var peripheralIdentifier: PeripheralIdentifier {
         PeripheralIdentifier(uuid: identifier, name: name)
     }
 
-    /// Hops onto ``queue`` to run `body` and returns its result — the only sanctioned way
-    /// for off-queue code to configure this fake or read its counters/state for
-    /// assertions. Also flushes every previously-scheduled `.async` event delivery first.
-    /// Never blocks (see ``FakeCentral/onQueue(_:)``).
+    /// Runs `body` on ``queue`` and returns its result. Off-queue code must use this to configure
+    /// this fake or to read its counters and state. It also flushes every `.async` event delivery
+    /// that is already scheduled. It never blocks (see ``FakeCentral/onQueue(_:)``).
     ///
-    /// - Warning: Never `await` this from within an ``eventHandler`` callback, or from any
-    ///   other code already executing on `queue` — a deadlock.
+    /// - Warning: Never `await` this function from an ``eventHandler`` callback, or from other code
+    ///   that already runs on `queue`. That deadlocks.
     public func onQueue<T: Sendable>(_ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async {
@@ -117,9 +115,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Receives every `PeripheralEvent` this fake delivers, on ``queue``. The
-    /// `PeripheralRemote` protocol witness — configure via ``onQueue(_:)``. Every set
-    /// (attach *and* `nil` clear) increments ``eventHandlerSetCount``.
+    /// Receives every `PeripheralEvent` that this fake delivers, on ``queue``. It witnesses the
+    /// `PeripheralRemote` requirement. Configure it with ``onQueue(_:)``. Every set, attach or
+    /// `nil` clear, increments ``eventHandlerSetCount``.
     public var eventHandler: ((PeripheralEvent) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -132,36 +130,35 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// The number of times ``eventHandler`` has been set (attaches *and* `nil` clears) —
-    /// proves `Central` wires event delivery on every session-creating path before going
-    /// live. Read via ``onQueue(_:)``.
+    /// The number of times that ``eventHandler`` was set, attach or `nil` clear. It proves that
+    /// `Central` wires event delivery on every path that creates a session, before the session goes
+    /// live. Read it with ``onQueue(_:)``.
     public var eventHandlerSetCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _eventHandlerSetCount
     }
 
-    /// Characteristics currently "notifying", toggled by ``setNotifyValue(_:for:)``.
+    /// The characteristics that are now notifying. ``setNotifyValue(_:for:)`` changes them.
     public var notifyingCharacteristics: Set<CharacteristicIdentifier> {
         dispatchPrecondition(condition: .onQueue(queue))
         return _notifyingCharacteristics
     }
 
-    /// Every ``setNotifyValue(_:for:)`` call this fake has received, in order — lets
-    /// refcount-lifecycle tests assert exactly when notifications were enabled/disabled
-    /// (e.g. enabled once for the first subscriber, disabled only when the last one goes
-    /// away). Read via ``onQueue(_:)``.
+    /// Every ``setNotifyValue(_:for:)`` call that this fake received, in order. A test of the
+    /// reference-count lifecycle uses this to assert when notifications were enabled or disabled.
+    /// For example, they were enabled once for the first subscriber and disabled only when the last
+    /// subscriber left. Read it with ``onQueue(_:)``.
     public var setNotifyValueCalls: [(characteristic: CharacteristicIdentifier, enabled: Bool)] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _setNotifyValueCalls
     }
 
-    /// Invoked synchronously, on ``queue``, from inside ``writeValue(_:for:type:)`` before
-    /// the `didWriteValue` completion is enqueued. Lets you script a device that responds
-    /// to a write instantly — e.g. calling ``simulateNotification(for:value:error:)`` here
-    /// lands its delivery *ahead of* the write's own completion, the hardest ordering for
-    /// `writeAndAwaitNotification`'s no-loss-window guarantee. Reading queue-confined state
-    /// from the closure is legal; calling ``onQueue(_:)`` from it deadlocks. `nil` (the
-    /// default) does nothing.
+    /// ``writeValue(_:for:type:)`` calls this synchronously, on ``queue``, before it enqueues the
+    /// `didWriteValue` completion. Use it to script a device that responds to a write immediately.
+    /// For example, if you call ``simulateNotification(for:value:error:)`` here, its delivery
+    /// arrives *before* the write's completion. This is the hardest order for
+    /// `writeAndAwaitNotification`'s no-loss-window guarantee. The closure can read queue-confined
+    /// state. A call to ``onQueue(_:)`` from it deadlocks. The default is `nil`.
     public var onWrite: ((CharacteristicIdentifier, Data) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -173,13 +170,12 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Bridge hook invoked synchronously, on ``queue``, from inside ``readValue(for:)`` —
-    /// used by ``FakeGATTBridge`` to route a central-side read to a remote
-    /// ``FakePeripheralManager`` host. When non-`nil`, ``readValue(for:)`` fires this
-    /// closure and returns without delivering its own `didUpdateValue` completion
-    /// (bypassing ``scriptedReadValues``/``holdReadCompletions``); the bridge delivers the
-    /// eventual completion via ``simulateNotification(for:value:error:)``. `nil` (the
-    /// default) leaves the original scripted behavior untouched.
+    /// A bridge hook. ``FakeGATTBridge`` uses it to route a central-side read to a remote
+    /// ``FakePeripheralManager`` host. If it is not `nil`, ``readValue(for:)`` calls it
+    /// synchronously, on ``queue``, and returns. It does not deliver its own `didUpdateValue`
+    /// completion, and it bypasses ``scriptedReadValues`` and ``holdReadCompletions``. The bridge
+    /// delivers the final completion with ``simulateNotification(for:value:error:)``. The default
+    /// is `nil`, which keeps the scripted behavior.
     public var onReadRequest: ((CharacteristicIdentifier) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -191,13 +187,12 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Bridge hook invoked synchronously, on ``queue``, from inside
-    /// ``writeValue(_:for:type:)`` — used by ``FakeGATTBridge`` to route a central-side
-    /// write to a remote ``FakePeripheralManager`` host. Distinct from ``onWrite`` (never
-    /// suppresses completion): when non-`nil` and the write is `.withResponse`, this fires
-    /// and the fake does *not* auto-deliver `didWriteValue` — the bridge delivers it via
-    /// ``simulateWriteCompletion(for:error:)``. `.withoutResponse` writes still fire this
-    /// hook but complete as usual. `nil` (the default) is unchanged behavior.
+    /// A bridge hook. ``FakeGATTBridge`` uses it to route a central-side write to a remote
+    /// ``FakePeripheralManager`` host. Unlike ``onWrite``, it can suppress the completion.
+    /// ``writeValue(_:for:type:)`` calls it synchronously, on ``queue``. For a `.withResponse`
+    /// write, the fake does *not* deliver `didWriteValue` automatically, and the bridge delivers it
+    /// with ``simulateWriteCompletion(for:error:)``. A `.withoutResponse` write also calls the
+    /// hook, but it completes as usual. The default is `nil`.
     public var onWriteRequest: ((CharacteristicIdentifier, Data, WriteType) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -209,11 +204,10 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Bridge hook invoked synchronously, on ``queue``, from inside
-    /// ``setNotifyValue(_:for:)`` — used by ``FakeGATTBridge`` to forward a central-side
-    /// subscribe/unsubscribe to a remote ``FakePeripheralManager`` host. Never suppresses
-    /// the local `didUpdateNotificationState` confirmation. `nil` (the default) is
-    /// unchanged behavior.
+    /// A bridge hook. ``setNotifyValue(_:for:)`` calls it synchronously, on ``queue``.
+    /// ``FakeGATTBridge`` uses it to forward a central-side subscribe or unsubscribe to a remote
+    /// ``FakePeripheralManager`` host. It never suppresses the local `didUpdateNotificationState`
+    /// confirmation. The default is `nil`.
     public var onSubscriptionChange: ((CharacteristicIdentifier, Bool) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -225,9 +219,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// The value ``readValue(for:)`` reports back via `didUpdateValue`, keyed by
-    /// characteristic. `nil` (no entry) reports back `nil` data. Configure via
-    /// ``onQueue(_:)``.
+    /// The value that ``readValue(for:)`` reports with `didUpdateValue`, keyed by characteristic.
+    /// `nil` (no entry) reports `nil` data. Configure it with ``onQueue(_:)``.
     public var scriptedReadValues: [CharacteristicIdentifier: Data] {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -239,13 +232,13 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// The default ``properties(of:)`` reports for a characteristic with no entry in
+    /// The properties that ``properties(of:)`` reports for a characteristic with no entry in
     /// ``scriptedProperties``.
     public static let defaultProperties: CharacteristicProperties = [.read, .write, .writeWithoutResponse, .notify]
 
-    /// The ``CharacteristicProperties`` ``properties(of:)`` reports back, keyed by
-    /// characteristic. A characteristic with no entry reports ``defaultProperties``.
-    /// Configure via ``onQueue(_:)``.
+    /// The ``CharacteristicProperties`` that ``properties(of:)`` reports, keyed by characteristic.
+    /// A characteristic with no entry reports ``defaultProperties``. Configure it with
+    /// ``onQueue(_:)``.
     public var scriptedProperties: [CharacteristicIdentifier: CharacteristicProperties] {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -257,8 +250,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// The value ``maximumWriteValueLength(for:)`` returns. Defaults to 20, the classic
-    /// BLE ATT_MTU-3 default. Configure via ``onQueue(_:)``.
+    /// The value that ``maximumWriteValueLength(for:)`` returns. The default is 20, the classic BLE
+    /// ATT_MTU-3 default. Configure it with ``onQueue(_:)``.
     public var scriptedMaximumWriteValueLength: Int {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -270,10 +263,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// The value ``readRSSI()`` reports back via `didReadRSSI`. Defaults to `-50`. Configure
-    /// via ``onQueue(_:)`` — lets a multi-peripheral test give distinct fakes distinct
-    /// values, so a concurrent `readRSSI()` on each resolves with the right peripheral's own
-    /// value.
+    /// The value that ``readRSSI()`` reports with `didReadRSSI`. The default is `-50`. Configure it
+    /// with ``onQueue(_:)``. A test with several peripherals can give each fake a different value,
+    /// so a concurrent `readRSSI()` on each fake resolves with that peripheral's value.
     public var scriptedRSSI: Int {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -285,37 +277,36 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// The number of times ``readValue(for:)`` has been called.
+    /// The number of calls to ``readValue(for:)``.
     public var readCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _readCallCount
     }
 
-    /// The number of times ``writeValue(_:for:type:)`` has been called, keyed by
-    /// characteristic.
+    /// The number of calls to ``writeValue(_:for:type:)``, keyed by characteristic.
     public var writeCallCounts: [CharacteristicIdentifier: Int] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _writeCallCounts
     }
 
-    /// The number of times ``discoverServices(_:)`` has been called.
+    /// The number of calls to ``discoverServices(_:)``.
     public var discoverServicesCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoverServicesCallCount
     }
 
-    /// The number of times ``discoverServices(_:)`` has been called with `nil` (discover
-    /// all). A subset of ``discoverServicesCallCount``.
+    /// The number of ``discoverServices(_:)`` calls with `nil` (discover all). The total
+    /// ``discoverServicesCallCount`` includes them.
     public var discoverServicesAllCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoverServicesAllCallCount
     }
 
-    /// Whether ``discoverServices(_:)`` withholds its `didDiscoverServices` completion
-    /// instead of delivering it immediately — the service-discovery counterpart to
-    /// ``holdReadCompletions``. `false` by default. Held completions are released, in FIFO
-    /// order, by ``simulateNextHeldServiceDiscoveryCompletion()``. Configure via
-    /// ``onQueue(_:)``.
+    /// Whether ``discoverServices(_:)`` withholds its `didDiscoverServices` completion instead of
+    /// delivering it immediately. It is the service-discovery counterpart of
+    /// ``holdReadCompletions``. The default is `false`.
+    /// ``simulateNextHeldServiceDiscoveryCompletion()`` releases held completions in
+    /// first-in-first-out order. Configure it with ``onQueue(_:)``.
     public var holdServiceDiscoveryCompletions: Bool {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -327,9 +318,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Delivers the oldest still-held `didDiscoverServices` completion (FIFO), if any. A
-    /// no-op if none are held. ``discoverServices(_:)``'s scripted-graph mutations already
-    /// applied — only the completion event was withheld.
+    /// Delivers the oldest held `didDiscoverServices` completion (first-in-first-out). If none is
+    /// held, it does nothing. ``discoverServices(_:)`` has already applied its changes to the
+    /// scripted graph. Only the completion event was withheld.
     public func simulateNextHeldServiceDiscoveryCompletion() {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -339,20 +330,21 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// The number of times ``discoverCharacteristics(_:for:)`` has been called.
+    /// The number of calls to ``discoverCharacteristics(_:for:)``.
     public var discoverCharacteristicsCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoverCharacteristicsCallCount
     }
 
-    /// The GATT table this fake actually has, if scripted: keys are the services that
-    /// genuinely exist, values are the characteristics that genuinely exist under each.
-    /// `nil` (the default) is permissive — every discovery call reveals exactly what was
-    /// requested. When non-`nil`, ``discoverServices(_:)``/``discoverCharacteristics(_:for:)``
-    /// only reveal requested services/characteristics present in this table; anything
-    /// requested but absent is silently not added to the discovered-sets, exactly like real
-    /// CoreBluetooth, letting `Central`'s post-discovery `isDiscovered(_:)` recheck
-    /// genuinely fail. Configure via ``onQueue(_:)``.
+    /// The GATT table that this fake has, if scripted. The keys are the services that exist. The
+    /// values are the characteristics that exist under each service.
+    ///
+    /// `nil` (the default) is permissive. Every discovery call reveals exactly what it requested.
+    /// If the table is not `nil`, ``discoverServices(_:)`` and ``discoverCharacteristics(_:for:)``
+    /// reveal only the requested services and characteristics that are in this table. A requested
+    /// item that is absent is silently not added to the discovered sets, as in real CoreBluetooth.
+    /// `Central`'s `isDiscovered(_:)` recheck after discovery can therefore fail. Configure it
+    /// with ``onQueue(_:)``.
     public var availableServices: [ServiceIdentifier: Set<CharacteristicIdentifier>]? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -364,10 +356,10 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// The value ``readValue(for:)`` reports back via `didUpdateValueForDescriptor`, keyed
-    /// by descriptor. In permissive mode (``availableDescriptors`` is `nil`), scripting a
-    /// value here also makes that descriptor "exist" for ``discoverDescriptors(for:)``. A
-    /// descriptor with no entry reports back empty `Data`. Configure via ``onQueue(_:)``.
+    /// The value that ``readValue(for:)`` reports with `didUpdateValueForDescriptor`, keyed by
+    /// descriptor. In permissive mode (``availableDescriptors`` is `nil`), a value that you script
+    /// here also makes that descriptor exist for ``discoverDescriptors(for:)``. A descriptor with
+    /// no entry reports `nil` data. Configure it with ``onQueue(_:)``.
     public var scriptedDescriptorValues: [DescriptorIdentifier: Data] {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -379,12 +371,12 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// The descriptors this fake actually has, per characteristic — the descriptor
-    /// counterpart to ``availableServices``. Same permissive-vs-strict contract: `nil`
-    /// (default) reveals every descriptor scripted in ``scriptedDescriptorValues``; non-`nil`
-    /// reveals only the descriptors listed here, so an absent one stays undiscovered. Use
-    /// this (rather than scripting a read value) to make a write-only descriptor exist.
-    /// Configure via ``onQueue(_:)``.
+    /// The descriptors that this fake has, for each characteristic. It is the descriptor
+    /// counterpart of ``availableServices``, with the same permissive or strict contract. `nil`
+    /// (the default) reveals every descriptor in ``scriptedDescriptorValues``. A value that is not
+    /// `nil` reveals only the descriptors that it lists, and an absent descriptor stays
+    /// undiscovered. To make a write-only descriptor exist, set this property and not a scripted
+    /// read value. Configure it with ``onQueue(_:)``.
     public var availableDescriptors: [CharacteristicIdentifier: Set<DescriptorIdentifier>]? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -396,36 +388,36 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// The number of times ``writeValue(_:for:)`` (the descriptor overload) has been called,
-    /// keyed by descriptor. Read via ``onQueue(_:)``.
+    /// The number of ``writeValue(_:for:)`` calls (the descriptor overload), keyed by descriptor.
+    /// Read it with ``onQueue(_:)``.
     public var descriptorWriteCallCounts: [DescriptorIdentifier: Int] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _descriptorWriteCallCounts
     }
 
-    /// The most recent bytes written to each descriptor via ``writeValue(_:for:)`` (the
-    /// descriptor overload). Read via ``onQueue(_:)``.
+    /// The latest bytes that ``writeValue(_:for:)`` (the descriptor overload) wrote to each
+    /// descriptor. Read it with ``onQueue(_:)``.
     public var writtenDescriptorValues: [DescriptorIdentifier: Data] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _writtenDescriptorValues
     }
 
-    /// The number of times ``discoverDescriptors(for:)`` has been called.
+    /// The number of calls to ``discoverDescriptors(for:)``.
     public var discoverDescriptorsCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoverDescriptorsCallCount
     }
 
-    /// The number of times ``readValue(for:)`` (the descriptor overload) has been called.
+    /// The number of calls to ``readValue(for:)`` (the descriptor overload).
     public var descriptorReadCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _descriptorReadCallCount
     }
 
     /// Whether ``readValue(for:)`` (the descriptor overload) withholds its
-    /// `didUpdateValueForDescriptor` completion instead of delivering it immediately —
-    /// the descriptor counterpart to ``holdReadCompletions``. `false` by default. Configure
-    /// via ``onQueue(_:)``.
+    /// `didUpdateValueForDescriptor` completion instead of delivering it immediately. It is the
+    /// descriptor counterpart of ``holdReadCompletions``. The default is `false`. Configure it with
+    /// ``onQueue(_:)``.
     public var holdDescriptorReadCompletions: Bool {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -437,8 +429,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Delivers the oldest still-held descriptor-read completion (FIFO order), if any. A
-    /// no-op if none are held.
+    /// Delivers the oldest held descriptor-read completion (first-in-first-out). If none is held,
+    /// it does nothing.
     public func simulateNextHeldDescriptorReadCompletion() {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -448,8 +440,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Marks `descriptors` as discovered (along with their owning characteristic and
-    /// service) directly, without going through ``discoverDescriptors(for:)`` or an event.
+    /// Marks `descriptors` as discovered, with their characteristics and services, directly. It
+    /// does not use ``discoverDescriptors(for:)`` or deliver an event.
     public func simulateDiscoveredDescriptors(_ descriptors: [DescriptorIdentifier]) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -461,12 +453,12 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Simulates CoreBluetooth dropping this peripheral's cached service graph — as
-    /// happens on a real disconnect — clearing every discovered service, characteristic,
-    /// and descriptor along with the notifying set. ``availableServices``,
-    /// ``availableDescriptors``, and every scripted value are untouched, so a subsequent
-    /// re-discovery behaves per the same scripts. Use it to model a peripheral whose GATT
-    /// graph must be re-discovered (or has changed) across a reconnect.
+    /// Simulates CoreBluetooth dropping this peripheral's cached service graph, as happens on a
+    /// real disconnect. The function clears every discovered service, characteristic, and
+    /// descriptor, and the notifying set. It does not change ``availableServices``,
+    /// ``availableDescriptors``, or any scripted value, so a later discovery follows the same
+    /// scripts. Use it to model a peripheral whose GATT graph must be discovered again (or has
+    /// changed) across a reconnect.
     public func simulateGATTCacheReset() {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -477,9 +469,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Simulates a connection-state change, asynchronously. Does not itself deliver an
-    /// event — connection events are delivered by `FakeCentral`, which owns the
-    /// connect/disconnect flow.
+    /// Simulates a connection-state change, asynchronously. It does not deliver an event, because
+    /// `FakeCentral` owns the connect and disconnect flow and delivers those events.
     public func simulateStateChange(_ newState: PeripheralConnectionState) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -487,9 +478,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Simulates CoreBluetooth signaling renewed write-without-response capacity and,
-    /// asynchronously, delivers `PeripheralEvent.isReadyToSendWriteWithoutResponse` on
-    /// ``queue``.
+    /// Simulates CoreBluetooth signaling renewed capacity for write-without-response. It then
+    /// delivers `PeripheralEvent.isReadyToSendWriteWithoutResponse` asynchronously on ``queue``.
     public func simulateReadyToSendWriteWithoutResponse() {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -498,9 +488,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Marks this peripheral as no longer able to accept a write-without-response until
-    /// the next ``simulateReadyToSendWriteWithoutResponse()``. No event corresponds to this
-    /// in CoreBluetooth — only the "ready again" signal is a delegate callback.
+    /// Marks this peripheral as unable to accept a write-without-response until the next
+    /// ``simulateReadyToSendWriteWithoutResponse()``. CoreBluetooth has no event for this. Only the
+    /// "ready again" signal is a delegate callback.
     public func simulateWriteWithoutResponseBackPressure() {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -508,9 +498,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Simulates a notification (or an out-of-band read completion) by, asynchronously,
-    /// delivering `PeripheralEvent.didUpdateValue(characteristic:value:error:)` on
-    /// ``queue``.
+    /// Simulates a notification (or an out-of-band read completion). It delivers
+    /// `PeripheralEvent.didUpdateValue(characteristic:value:error:)` asynchronously on ``queue``.
     public func simulateNotification(for characteristic: CharacteristicIdentifier, value: Data?, error: NSError? = nil) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -518,10 +507,10 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Simulates the completion of an in-flight write by, asynchronously, delivering
-    /// `PeripheralEvent.didWriteValue(characteristic:error:)` on ``queue``. The write
-    /// counterpart to ``simulateNotification(for:value:error:)``, used by ``FakeGATTBridge``
-    /// to deliver a `.withResponse` write's completion once suppressed via ``onWriteRequest``.
+    /// Simulates the completion of an in-flight write. It delivers
+    /// `PeripheralEvent.didWriteValue(characteristic:error:)` asynchronously on ``queue``. It is
+    /// the write counterpart of ``simulateNotification(for:value:error:)``. ``FakeGATTBridge`` uses
+    /// it to complete a `.withResponse` write after ``onWriteRequest`` suppressed the completion.
     public func simulateWriteCompletion(for characteristic: CharacteristicIdentifier, error: NSError? = nil) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -529,8 +518,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Marks `services` as discovered directly, without going through
-    /// ``discoverServices(_:)`` or an event.
+    /// Marks `services` as discovered directly. It does not use ``discoverServices(_:)`` or deliver
+    /// an event.
     public func simulateDiscoveredServices(_ services: [ServiceIdentifier]) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -538,8 +527,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Marks `characteristics` as discovered on `service` without going through
-    /// ``discoverCharacteristics(_:for:)``/an event.
+    /// Marks `characteristics` as discovered on `service`. It does not use
+    /// ``discoverCharacteristics(_:for:)`` or deliver an event.
     public func simulateDiscoveredCharacteristics(_ characteristics: [CharacteristicIdentifier], for service: ServiceIdentifier) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -548,11 +537,11 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Simulates CoreBluetooth invalidating `invalidatedServices` — and, with them, any
-    /// characteristics previously discovered under those services — then, asynchronously,
-    /// delivers `didModifyServices` on ``queue``. Mirrors how a real `CBPeripheral` removes
-    /// invalidated services from its own `.services` array, so `isDiscovered(_:)` reflects
-    /// the invalidation (see `PeripheralRemote`'s doc comment on the discovery cache).
+    /// Simulates CoreBluetooth invalidating `invalidatedServices` and the characteristics that were
+    /// discovered under them. It then delivers `didModifyServices` asynchronously on ``queue``. A
+    /// real `CBPeripheral` also removes invalidated services from its `.services` array, so
+    /// `isDiscovered(_:)` shows the invalidation (see `PeripheralRemote` about the discovery
+    /// cache).
     public func simulateServiceModification(invalidatedServices: [ServiceIdentifier]) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -562,13 +551,14 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Mirrors one hosted `GATTService` into this fake's discovery state — driven by
-    /// ``FakeGATTBridge`` from a remote ``FakePeripheralManager`` host's `onAddService` hook.
+    /// Mirrors one hosted `GATTService` into the discovery state of this fake. ``FakeGATTBridge``
+    /// drives it from the `onAddService` hook of a remote ``FakePeripheralManager`` host.
     ///
-    /// Off-queue safe: hops onto ``queue`` itself, so the bridge can call it directly from
-    /// the host's (distinct) queue without an ``onQueue(_:)`` round trip. The read-modify-
-    /// write of ``availableServices``/``scriptedProperties`` runs inside that one
-    /// `queue.async`, so it's atomic and composes with any concurrently mirrored service.
+    /// You can call it off the queue, because it hops onto ``queue`` itself. The bridge therefore
+    /// calls it directly from the host's (different) queue, with no ``onQueue(_:)`` round trip. The
+    /// read-modify-write of ``availableServices`` and ``scriptedProperties`` runs inside one
+    /// `queue.async`, so it is atomic and composes with a service that is mirrored at the same
+    /// time.
     public func simulateMirroredService(_ service: GATTService) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -587,17 +577,17 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
 
     /// How this fake responds to ``openL2CAPChannel(_:)``.
     public enum L2CAPOpenBehavior: Sendable {
-        /// Vend a fresh ``FakeL2CAPChannel`` and deliver a successful
-        /// `didOpenL2CAPChannel`. The default.
+        /// Create a new ``FakeL2CAPChannel`` and deliver a successful `didOpenL2CAPChannel`. This
+        /// is the default.
         case succeed
-        /// Deliver a failing `didOpenL2CAPChannel` carrying `error` and no channel.
+        /// Deliver a failing `didOpenL2CAPChannel` with `error` and no channel.
         case fail(NSError)
-        /// Record the call but deliver nothing — for exercising open timeout / cancellation.
+        /// Record the call but deliver nothing. Use it to test open timeout and cancellation.
         case hold
     }
 
-    /// How ``openL2CAPChannel(_:)`` responds. Defaults to ``L2CAPOpenBehavior/succeed``.
-    /// Configure via ``onQueue(_:)``.
+    /// How ``openL2CAPChannel(_:)`` responds. The default is ``L2CAPOpenBehavior/succeed``.
+    /// Configure it with ``onQueue(_:)``.
     public var l2capOpenBehavior: L2CAPOpenBehavior {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -609,17 +599,17 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Every `L2CAPPSM` ``openL2CAPChannel(_:)`` was called with, in order. Read via
+    /// Every `L2CAPPSM` that ``openL2CAPChannel(_:)`` received, in order. Read it with
     /// ``onQueue(_:)``.
     public var openL2CAPChannelCalls: [L2CAPPSM] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _openL2CAPChannelCalls
     }
 
-    /// The most recent ``FakeL2CAPChannel`` this fake vended from a `.succeed`
-    /// ``openL2CAPChannel(_:)`` — use it to drive `simulateInbound`/inspect `writtenData` on
-    /// the channel the `Central` actually handed back. Read via ``onQueue(_:)``. `nil` if no
-    /// channel has been vended (or the last open failed / was held).
+    /// The latest ``FakeL2CAPChannel`` that this fake created in a `.succeed`
+    /// ``openL2CAPChannel(_:)``. Use it to drive `simulateInbound` and to inspect `writtenData` on
+    /// the channel that the `Central` received. Read it with ``onQueue(_:)``. It is `nil` if no
+    /// open has succeeded. A later failed or held open does not clear it.
     public var lastOpenedL2CAPChannel: FakeL2CAPChannel? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _lastOpenedL2CAPChannel
@@ -627,22 +617,22 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
 
     // MARK: - PeripheralRemote
 
-    /// The peripheral's current connection state.
+    /// The current connection state of the peripheral.
     public var connectionState: PeripheralConnectionState {
         dispatchPrecondition(condition: .onQueue(queue))
         return _connectionState
     }
 
-    /// Whether this fake is currently able to accept a write-without-response.
+    /// Whether this fake can accept a write-without-response now.
     public var canSendWriteWithoutResponse: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _canSendWriteWithoutResponse
     }
 
-    /// The scripted ANCS authorization value this fake reports. Defaults to `false`.
-    /// Settable via ``onQueue(_:)`` — set it before (or alongside) scripting
-    /// `FakeCentral.simulateANCSAuthorization(_:for:)`, as a real `CBPeripheral` would
-    /// reflect the new value by the time the callback lands.
+    /// The scripted ANCS authorization value that this fake reports. The default is `false`. Set it
+    /// with ``onQueue(_:)``, before or together with
+    /// `FakeCentral.simulateANCSAuthorization(_:for:)`. A real `CBPeripheral` shows the new value
+    /// when the callback arrives.
     public var ancsAuthorized: Bool {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -654,9 +644,10 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Records the call and asynchronously delivers `didDiscoverServices` on ``queue``. Per
-    /// ``availableServices``'s permissive-vs-strict contract: `nil` marks every requested
-    /// service discovered; non-`nil` marks only those that are keys of it.
+    /// Records the call and delivers `didDiscoverServices` asynchronously on ``queue``. The
+    /// ``availableServices`` contract (permissive or strict) applies. If ``availableServices`` is
+    /// `nil`, every requested service becomes discovered. Otherwise only the requested services
+    /// that are keys of it do.
     public func discoverServices(_ services: [ServiceIdentifier]?) {
         dispatchPrecondition(condition: .onQueue(queue))
         _discoverServicesCallCount += 1
@@ -676,8 +667,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         queue.async { [self] in deliver(.didDiscoverServices(error: nil)) }
     }
 
-    /// Records the call and asynchronously delivers `didDiscoverCharacteristics` on
-    /// ``queue``. Same ``availableServices`` contract as ``discoverServices(_:)``, scoped to
+    /// Records the call and delivers `didDiscoverCharacteristics` asynchronously on ``queue``. The
+    /// ``availableServices`` contract is the same as for ``discoverServices(_:)``, scoped to
     /// `service`'s characteristics.
     public func discoverCharacteristics(_ characteristics: [CharacteristicIdentifier]?, for service: ServiceIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -692,15 +683,15 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         queue.async { [self] in deliver(.didDiscoverCharacteristics(service: service, error: nil)) }
     }
 
-    /// Records the call and, unless ``holdReadCompletions`` is `true`, asynchronously
-    /// delivers `didUpdateValue` on ``queue`` with the value scripted in
-    /// ``scriptedReadValues`` for `characteristic` (`nil` if none). While held, the pending
-    /// completion queues up for ``simulateNextHeldReadCompletion()`` to deliver later.
+    /// Records the call. If ``holdReadCompletions`` is not `true`, it delivers `didUpdateValue`
+    /// asynchronously on ``queue``, with the value in ``scriptedReadValues`` for `characteristic`
+    /// (`nil` if none). While reads are held, each pending completion waits until
+    /// ``simulateNextHeldReadCompletion()`` delivers it.
     public func readValue(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         _readCallCount += 1
-        // A bridged read routes to a remote host; fire the hook and let the bridge deliver
-        // the completion later (see ``onReadRequest``).
+        // A bridged read routes to a remote host. The bridge delivers the completion later (see
+        // ``onReadRequest``).
         if let onReadRequest = _onReadRequest {
             onReadRequest(characteristic)
             return
@@ -713,9 +704,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         queue.async { [self] in deliver(.didUpdateValue(characteristic: characteristic, value: value, error: nil)) }
     }
 
-    /// Whether ``readValue(for:)`` withholds its `didUpdateValue` completion instead of
-    /// delivering it immediately. `false` by default (every read completes right away, as
-    /// every other operation on this fake does). Configure via ``onQueue(_:)``.
+    /// Whether ``readValue(for:)`` withholds its `didUpdateValue` completion instead of delivering
+    /// it immediately. The default is `false`: every read completes at once, as every other
+    /// operation on this fake does. Configure it with ``onQueue(_:)``.
     public var holdReadCompletions: Bool {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -727,8 +718,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Delivers the oldest still-held read completion (FIFO order among held reads), if
-    /// any. A no-op if none are held.
+    /// Delivers the oldest held read completion (first-in-first-out). If none is held, it does
+    /// nothing.
     public func simulateNextHeldReadCompletion() {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -738,25 +729,24 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         }
     }
 
-    /// Records the call, invokes ``onWrite`` (synchronously, so anything it enqueues —
-    /// e.g. a scripted response notification — lands ahead of the write's own completion),
-    /// and asynchronously delivers `didWriteValue` on ``queue``.
+    /// Records the call, calls ``onWrite`` synchronously, and delivers `didWriteValue`
+    /// asynchronously on ``queue``. Because ``onWrite`` is synchronous, anything that it enqueues,
+    /// such as a scripted response notification, arrives before the write's completion.
     public func writeValue(_ data: Data, for characteristic: CharacteristicIdentifier, type: WriteType) {
         dispatchPrecondition(condition: .onQueue(queue))
         _writeCallCounts[characteristic, default: 0] += 1
         _onWrite?(characteristic, data)
         if let onWriteRequest = _onWriteRequest {
             onWriteRequest(characteristic, data, type)
-            // A bridged `.withResponse` write's completion is delivered by the bridge (see
-            // ``simulateWriteCompletion(for:error:)``), so don't auto-complete it here.
+            // The bridge completes a bridged `.withResponse` write (see
+            // ``simulateWriteCompletion(for:error:)``), so do not complete it here.
             if type == .withResponse { return }
         }
         queue.async { [self] in deliver(.didWriteValue(characteristic: characteristic, error: nil)) }
     }
 
-    /// Records whether `characteristic` is now notifying (and the call itself, in
-    /// ``setNotifyValueCalls``) and asynchronously delivers `didUpdateNotificationState`
-    /// on ``queue``.
+    /// Records the call in ``setNotifyValueCalls`` and updates whether `characteristic` is
+    /// notifying. It delivers `didUpdateNotificationState` asynchronously on ``queue``.
     public func setNotifyValue(_ enabled: Bool, for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         _setNotifyValueCalls.append((characteristic, enabled))
@@ -765,17 +755,17 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         } else {
             _notifyingCharacteristics.remove(characteristic)
         }
-        // Forward the subscribe/unsubscribe to a remote host, if bridged (see
-        // ``onSubscriptionChange``). Never suppresses the local confirmation below.
+        // A bridged peripheral forwards the change to a remote host (see
+        // ``onSubscriptionChange``). This never suppresses the local confirmation below.
         _onSubscriptionChange?(characteristic, enabled)
         queue.async { [self] in
             deliver(.didUpdateNotificationState(characteristic: characteristic, isNotifying: enabled, error: nil))
         }
     }
 
-    /// Records the call and asynchronously delivers `didDiscoverDescriptors` on ``queue``.
-    /// Same permissive-vs-strict contract as ``availableServices``, via
-    /// ``availableDescriptors``/``scriptedDescriptorValues``.
+    /// Records the call and delivers `didDiscoverDescriptors` asynchronously on ``queue``. The
+    /// permissive or strict contract is the same as for ``availableServices``, through
+    /// ``availableDescriptors`` and ``scriptedDescriptorValues``.
     public func discoverDescriptors(for characteristic: CharacteristicIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         _discoverDescriptorsCallCount += 1
@@ -787,9 +777,9 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         queue.async { [self] in deliver(.didDiscoverDescriptors(characteristic: characteristic, error: nil)) }
     }
 
-    /// Records the call and, unless ``holdDescriptorReadCompletions`` is `true`,
-    /// asynchronously delivers `didUpdateValueForDescriptor` on ``queue`` with the value
-    /// scripted in ``scriptedDescriptorValues`` for `descriptor` (empty `Data` if none).
+    /// Records the call. If ``holdDescriptorReadCompletions`` is not `true`, it delivers
+    /// `didUpdateValueForDescriptor` asynchronously on ``queue``, with the value in
+    /// ``scriptedDescriptorValues`` for `descriptor` (`nil` if none).
     public func readValue(for descriptor: DescriptorIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         _descriptorReadCallCount += 1
@@ -801,8 +791,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         queue.async { [self] in deliver(.didUpdateValueForDescriptor(descriptor: descriptor, value: value, error: nil)) }
     }
 
-    /// Records the call (and the written bytes) and asynchronously delivers
-    /// `didWriteValueForDescriptor` on ``queue``.
+    /// Records the call and the written bytes, and delivers `didWriteValueForDescriptor`
+    /// asynchronously on ``queue``.
     public func writeValue(_ data: Data, for descriptor: DescriptorIdentifier) {
         dispatchPrecondition(condition: .onQueue(queue))
         _descriptorWriteCallCounts[descriptor, default: 0] += 1
@@ -810,7 +800,7 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         queue.async { [self] in deliver(.didWriteValueForDescriptor(descriptor: descriptor, error: nil)) }
     }
 
-    /// Asynchronously delivers `didReadRSSI` on ``queue`` with ``scriptedRSSI``.
+    /// Delivers `didReadRSSI` with ``scriptedRSSI`` asynchronously on ``queue``.
     public func readRSSI() {
         dispatchPrecondition(condition: .onQueue(queue))
         let rssi = _scriptedRSSI
@@ -823,66 +813,67 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         return _scriptedMaximumWriteValueLength
     }
 
-    /// Whether `service` has been discovered (via ``discoverServices(_:)`` or
+    /// Whether `service` is discovered (with ``discoverServices(_:)`` or
     /// ``simulateDiscoveredServices(_:)``).
     public func isDiscovered(_ service: ServiceIdentifier) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoveredServices.contains(service)
     }
 
-    /// Whether `characteristic` has been discovered (via ``discoverCharacteristics(_:for:)``
-    /// or ``simulateDiscoveredCharacteristics(_:for:)``).
+    /// Whether `characteristic` is discovered (with ``discoverCharacteristics(_:for:)`` or
+    /// ``simulateDiscoveredCharacteristics(_:for:)``).
     public func isDiscovered(_ characteristic: CharacteristicIdentifier) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoveredCharacteristics.contains(characteristic)
     }
 
-    /// Whether `characteristic` is currently notifying (toggled by
-    /// ``setNotifyValue(_:for:)``).
+    /// Whether `characteristic` is notifying (``setNotifyValue(_:for:)`` changes it).
     public func isNotifying(_ characteristic: CharacteristicIdentifier) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _notifyingCharacteristics.contains(characteristic)
     }
 
-    /// The scripted ``CharacteristicProperties`` for `characteristic` (see
-    /// ``scriptedProperties``), or ``defaultProperties`` if none was scripted. Unlike real
-    /// CoreBluetooth, this does not gate on discovery.
+    /// The scripted ``CharacteristicProperties`` for `characteristic` (see ``scriptedProperties``),
+    /// or ``defaultProperties`` if none was scripted. Unlike real CoreBluetooth, this function does
+    /// not require discovery.
     public func properties(of characteristic: CharacteristicIdentifier) -> CharacteristicProperties {
         dispatchPrecondition(condition: .onQueue(queue))
         return _scriptedProperties[characteristic] ?? Self.defaultProperties
     }
 
-    /// Whether `descriptor` has been discovered (via ``discoverDescriptors(for:)`` or
+    /// Whether `descriptor` is discovered (with ``discoverDescriptors(for:)`` or
     /// ``simulateDiscoveredDescriptors(_:)``).
     public func isDiscovered(_ descriptor: DescriptorIdentifier) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoveredDescriptors.contains(descriptor)
     }
 
-    /// Every service this fake has discovered so far (via ``discoverServices(_:)`` or
-    /// ``simulateDiscoveredServices(_:)``). Order is unspecified (a `Set` drives it), matching
-    /// the protocol contract — enumeration tests compare as sets.
+    /// Every service that this fake has discovered so far (with ``discoverServices(_:)`` or
+    /// ``simulateDiscoveredServices(_:)``). The order is unspecified, as the protocol allows.
+    /// Tests compare the results as sets.
     public var discoveredServices: [ServiceIdentifier] {
         dispatchPrecondition(condition: .onQueue(queue))
         return Array(_discoveredServices)
     }
 
-    /// Every characteristic this fake has discovered under `service`. Order is unspecified.
+    /// Every characteristic that this fake has discovered under `service`. The order is
+    /// unspecified.
     public func discoveredCharacteristics(for service: ServiceIdentifier) -> [CharacteristicIdentifier] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoveredCharacteristics.filter { $0.service == service }
     }
 
-    /// Every descriptor this fake has discovered under `characteristic`. Order is unspecified.
+    /// Every descriptor that this fake has discovered under `characteristic`. The order is
+    /// unspecified.
     public func discoveredDescriptors(for characteristic: CharacteristicIdentifier) -> [DescriptorIdentifier] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _discoveredDescriptors.filter { $0.characteristic == characteristic }
     }
 
-    /// Records the call and, per ``l2capOpenBehavior``, asynchronously delivers
-    /// `didOpenL2CAPChannel` on ``queue`` — a success carrying a fresh ``FakeL2CAPChannel``
-    /// (also stashed in ``lastOpenedL2CAPChannel``), a failure carrying the scripted error,
-    /// or nothing at all (`.hold`, for open timeout / cancellation tests).
+    /// Records the call. It delivers `didOpenL2CAPChannel` asynchronously on ``queue``, as
+    /// ``l2capOpenBehavior`` defines. Success delivers a new ``FakeL2CAPChannel`` and stores it in
+    /// ``lastOpenedL2CAPChannel``. Failure delivers the scripted error. `.hold` delivers nothing,
+    /// for tests of open timeout and cancellation.
     public func openL2CAPChannel(_ psm: L2CAPPSM) {
         dispatchPrecondition(condition: .onQueue(queue))
         _openL2CAPChannelCalls.append(psm)

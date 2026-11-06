@@ -10,10 +10,13 @@ import BLESwiftCore
 import BLESwiftTestSupport
 @testable import BLESwift
 
-/// Exercises characteristic property introspection: the `CBCharacteristicProperties` →
-/// ``CharacteristicProperties`` mapping at the CoreBluetooth seam, `Peripheral.properties(of:)`
-/// triggering lazy discovery, and the scriptable `FakePeripheral` round-trip — all driven
-/// through `makeConnectedTestCentral()`'s fakes.
+/// Tests characteristic properties:
+/// - the mapping from `CBCharacteristicProperties` to ``CharacteristicProperties`` at the
+///   CoreBluetooth seam
+/// - `Peripheral.properties(of:)`, which starts lazy discovery
+/// - the scriptable `FakePeripheral` round trip
+///
+/// All tests use the fakes of `makeConnectedTestCentral()`.
 @Suite("Characteristic properties")
 struct CharacteristicPropertiesTests {
 
@@ -49,10 +52,11 @@ struct CharacteristicPropertiesTests {
 
     @Test("CoreBluetooth bits BLESwift doesn't model are dropped, not mismapped")
     func dropsUnmodeledBits() {
-        // `notifyEncryptionRequired`/`indicateEncryptionRequired` have no BLESwift equivalent.
+        // BLESwift has no equivalent for `notifyEncryptionRequired` and
+        // `indicateEncryptionRequired`.
         #expect(CharacteristicProperties(CBCharacteristicProperties.notifyEncryptionRequired) == [])
         #expect(CharacteristicProperties(CBCharacteristicProperties.indicateEncryptionRequired) == [])
-        // A payload mixing modeled and unmodeled bits keeps only the modeled ones.
+        // A payload with modeled and unmodeled bits keeps only the modeled bits.
         let mixed: CBCharacteristicProperties = [.read, .notifyEncryptionRequired]
         #expect(CharacteristicProperties(mixed) == .read)
     }
@@ -110,11 +114,11 @@ struct CharacteristicPropertiesTests {
     func throwsWhenDisconnected() async throws {
         let (central, fakeCentral, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
 
-        // `disconnect(_:)` is graceful: while the radio is `.poweredOn` it asks CoreBluetooth
-        // to cancel the connection and suspends until the matching `.didDisconnect` callback
-        // arrives. `FakeCentral` never synthesizes that callback on its own, so drive it
-        // explicitly (exactly as the connection-lifecycle tests do) rather than deadlocking
-        // on the never-resumed continuation.
+        // `disconnect(_:)` is graceful. While the radio is `.poweredOn`, it asks CoreBluetooth to
+        // cancel the connection and suspends until the matching `.didDisconnect` callback arrives.
+        // `FakeCentral` never makes this callback by itself, so the test must drive it, as the
+        // connection-lifecycle tests do. Otherwise the test deadlocks on a continuation that
+        // nothing resumes.
         let disconnectTask = Task { try await central.disconnect(fakePeripheral.peripheralIdentifier) }
         await waitFor { await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)

@@ -9,93 +9,92 @@ import BLESwiftLink
 import Dispatch
 import Foundation
 
-/// One accepted central-role link connection, served by one ``BLESwiftCore/CentralManaging``.
+/// One accepted central-role link connection. One ``BLESwiftCore/CentralManaging`` serves it.
 ///
-/// A session is the translator sitting between the wire and a backend: every
-/// ``BLESwiftLink/CentralRequest`` that arrives becomes a `CentralManaging` or
-/// `PeripheralRemote` call, and every `CentralEvent`/`PeripheralEvent` the backend produces
-/// becomes a ``BLESwiftLink/CentralWireEvent`` on the way back.
+/// A session is the translator between the wire and a backend. Every
+/// ``BLESwiftLink/CentralRequest`` that arrives becomes a `CentralManaging` call or a
+/// `PeripheralRemote` call. Every `CentralEvent` or `PeripheralEvent` that the backend
+/// produces becomes a ``BLESwiftLink/CentralWireEvent`` on the way back.
 ///
-/// **Two queues, one hop.** The connection's handlers are delivered on the *listener*
-/// queue; the backend and its remotes are confined to this session's own serial ``queue``
-/// and assert it. So every inbound request hops once — `queue.async` — before touching the
-/// backend, and every outbound event is already on ``queue`` when it arrives and is written
+/// **Two queues, one hop.** The connection delivers its handlers on the *listener* queue. The
+/// backend and its remotes are confined to the serial ``queue`` of this session, and they assert
+/// it. Thus every inbound request hops once, with `queue.async`, before it touches the backend.
+/// Every outbound event is already on ``queue`` when it arrives, so the session writes it
 /// straight to the connection, whose `send` serializes internally.
 ///
-/// **Concurrency — queue-confined, not lock-protected.** Every mutable property is
-/// `nonisolated(unsafe)` and touched only on ``queue``, exactly as ``VirtualCentralBackend``
-/// and ``CompositeCentral`` do.
+/// **Concurrency: the queue confines the state, and no lock protects it.** Every mutable
+/// property is `nonisolated(unsafe)`. Code touches the properties only on ``queue``. This is
+/// the same rule as in ``VirtualCentralBackend`` and ``CompositeCentral``.
 ///
-/// - Note: The session holds its ``BLESwiftLink/LinkConnection`` strongly: nothing else
-///   does — the listener does not retain what it accepts, and the connection's own receive
-///   loop refers to itself weakly.
+/// - Note: The session holds its ``BLESwiftLink/LinkConnection`` strongly, and nothing else
+///   holds it. The listener does not retain the connections that it accepts, and the
+///   connection's receive loop refers to itself weakly.
 final class CentralSession: Sendable {
 
-    /// One `.withoutResponse` write waiting for the peripheral to be ready for it. Internal
-    /// for ``pendingWrites``' reason.
+    /// One `.withoutResponse` write that waits until the peripheral is ready for it. It is
+    /// internal for the reason that ``pendingWrites`` gives.
     struct PendingWrite {
         let sequence: UInt64
         let characteristic: CharacteristicIdentifier
         let value: Data
     }
 
-    /// One `openL2CAPChannel` request waiting for its completion, so the completion can be
-    /// tagged with the channel id the client allocated.
+    /// One `openL2CAPChannel` request that waits for its completion. It lets the code tag the
+    /// completion with the channel id that the client allocated.
     struct PendingOpen {
         let channel: UInt32
         let psm: UInt16
     }
 
-    /// The `.withResponse` maximum reported for a connection whose remote this session never
-    /// saw — CoreBluetooth's own ATT-MTU-derived ceiling, not a zero-length write budget.
+    /// The `.withResponse` maximum that the session reports for a connection whose remote it
+    /// never saw. It is the ceiling that CoreBluetooth derives from the ATT MTU.
     private static let defaultMaximumWriteWithResponse = 182
 
-    /// The `.withoutResponse` maximum reported for a connection whose remote this session
-    /// never saw — the conservative default a client assumes before any negotiation.
+    /// The `.withoutResponse` maximum that the session reports for a connection whose remote it
+    /// never saw. It is the conservative default that a client assumes before any negotiation.
     private static let defaultMaximumWriteWithoutResponse = 20
 
-    /// How many unsent `.withoutResponse` writes this session parks for one peripheral before
-    /// it gives up on that peripheral's queue.
+    /// The number of unsent `.withoutResponse` writes that this session parks for one
+    /// peripheral. After this number, it gives up on that peripheral's queue.
     ///
-    /// Far past the window a client agreed to honor, because exceeding that window is not by
-    /// itself dishonest: `Central.awaitWriteWithoutResponseReadiness` resumes every parked
-    /// writer on one readiness signal, so a few hundred writers can legitimately fire at once
-    /// — CoreBluetooth would simply queue them. They are parked here and drained on the
-    /// backend's readiness, exactly as a smaller queue was. A thousand of them for one
-    /// peripheral is another matter: the client has stopped consuming acknowledgements
-    /// altogether, and *this peripheral's* queue goes rather than the provider's memory — or
-    /// the whole link, which took the scan and every other peripheral and channel with it.
-    /// Those writes are dropped with nothing reported, exactly as CoreBluetooth drops a
-    /// `.withoutResponse` write it cannot send.
+    /// This number is much more than the window that a client agreed to honor. A client that
+    /// exceeds the window is not necessarily dishonest.
+    /// `Central.awaitWriteWithoutResponseReadiness` resumes every parked writer on one readiness
+    /// signal, so a few hundred writers can legitimately fire at once, and CoreBluetooth would
+    /// queue them. The session parks them and drains them on the backend's readiness.
+    ///
+    /// A thousand writes for one peripheral is a different case. The client has stopped consuming
+    /// acknowledgements altogether. Then *this peripheral's* queue goes, and neither the
+    /// provider's memory nor the whole link goes. The session drops those writes and reports
+    /// nothing. CoreBluetooth also drops a `.withoutResponse` write that it cannot send.
     static let maximumPendingWrites = 1024
 
-    /// How many bytes of unsent `.withoutResponse` writes this session parks for one
-    /// peripheral, whichever cap is reached first.
+    /// The number of bytes of unsent `.withoutResponse` writes that this session parks for one
+    /// peripheral. The session applies the cap that it reaches first.
     ///
-    /// ``maximumPendingWrites`` alone bounds the count and not the memory: one frame may
-    /// carry up to ``BLESwiftLink/LinkFraming/maximumPayloadLength``, so a thousand of them
-    /// is a great deal more than a megabyte.
+    /// ``maximumPendingWrites`` alone bounds the count and not the memory. One frame can carry
+    /// up to ``BLESwiftLink/LinkFraming/maximumPayloadLength``, so a thousand frames are much
+    /// more than a megabyte.
     static let maximumPendingWriteBytes = 1 << 20
 
-    /// How many `openL2CAPChannel` completions this session waits on for one peripheral before
-    /// it stops believing the client.
+    /// The number of `openL2CAPChannel` completions for which this session waits, for one
+    /// peripheral, before it stops believing the client.
     ///
-    /// A channel open is answered by exactly one completion, and a client with sixteen opens
-    /// outstanding on a single peripheral is not waiting on a Bluetooth stack — it is filling
-    /// this session's memory with tags nothing will ever consume. Sixteen rather than a
-    /// multiple of a window because there is no window here to be slack for: it is simply more
-    /// simultaneous opens than any honest client has.
+    /// Exactly one completion answers a channel open. A client with sixteen opens outstanding on
+    /// one peripheral is not waiting for a Bluetooth stack. It fills this session's memory with
+    /// tags that nothing will consume. Sixteen is more simultaneous opens than any honest client
+    /// has, and no window exists here to give slack for.
     static let maximumPendingOpens = 16
 
-    /// How many peripheral remotes a session keeps by default.
+    /// The number of peripheral remotes that a session keeps by default.
     ///
-    /// The same 1024 the client's own mirror table is capped at, for the same reason: a
-    /// long-lived client that connects across a busy room would otherwise grow this table
-    /// without limit, one remote per identifier ever connected. Tests override it rather than
-    /// connecting a thousand peripherals to force an eviction.
+    /// It is the same 1024 at which the client's mirror table is capped, for the same reason: a
+    /// long-lived client can connect across a busy room, and without a cap this table would grow
+    /// with one remote for each identifier ever connected. Tests override it, because otherwise
+    /// a test must connect a thousand peripherals to force an eviction.
     static let defaultMaximumRemotes = 1024
 
-    /// The error a channel-open completion reports when the backend reported neither a
+    /// The error that a channel-open completion reports when the backend reported neither a
     /// channel nor an error of its own.
     static var l2capOpenFailed: NSError {
         NSError(
@@ -105,83 +104,85 @@ final class CentralSession: Sendable {
         )
     }
 
-    /// The connection this session serves, held strongly for its whole lifetime.
+    /// The connection that this session serves. The session holds it strongly for its whole
+    /// lifetime.
     private let connection: LinkConnection
 
-    /// The serial queue the backend, its remotes, and every piece of session state are
-    /// confined to. Internal rather than private so the L2CAP bridge in
-    /// `CentralSession+L2CAP.swift` shares it.
+    /// The serial queue to which the backend, its remotes, and all session state are confined.
+    /// It is internal so that the L2CAP bridge in `CentralSession+L2CAP.swift` shares it.
     let queue: DispatchQueue
 
-    /// Receives one line per notable session event. Internal for the same reason as
+    /// Receives one line for each notable session event. It is internal for the same reason as
     /// ``queue``.
     let log: (@Sendable (String) -> Void)?
 
     /// How this session names itself in the provider's log.
     let label: String
 
-    /// The backend this session drives. `nonisolated(unsafe)` because `any CentralManaging`
-    /// is not `Sendable`; it is immutable and only ever touched on ``queue``.
+    /// The backend that this session drives. It is `nonisolated(unsafe)` because
+    /// `any CentralManaging` is not `Sendable`. It is immutable. Code touches it only on
+    /// ``queue``.
     nonisolated(unsafe) private let backend: any CentralManaging
 
-    /// Every remote this session has connected, keyed by identifier — the object the client's
-    /// requests are routed to and whose events are routed back.
+    /// Every remote that this session has connected, keyed by identifier. The client's requests
+    /// go to these objects, and their events come back from them.
     ///
-    /// **Bounded, least-recently-connected first.** Mirrors the cap on the client's own
-    /// `LinkCentral` table: beyond ``maximumRemotes`` entries the least recently connected are
-    /// dropped, and only ones that are `.disconnected` and have nothing of this session's in
-    /// flight for them — no queued writes, no channel open awaiting its completion, no bridged
-    /// L2CAP channel. Anything else is still referenced by a live operation whose events must
-    /// reach the instance the client is talking about, so it is kept however old it is.
-    /// Forgetting a remote costs the client nothing it has not already finished with: the next
-    /// `connect` retrieves it from the backend again.
+    /// **The table is bounded. The least recently connected remote goes first.** It mirrors the
+    /// cap on the client's `LinkCentral` table. When there are more than ``maximumRemotes``
+    /// entries, the session drops the least recently connected entries. It drops only remotes
+    /// that are `.disconnected` and have nothing of this session in flight: no queued writes, no
+    /// channel open that waits for its completion, and no bridged L2CAP channel. Any other remote
+    /// stays however old it is, because a live operation still references it and its events must
+    /// reach the instance that the client talks about. When the session forgets a remote, the
+    /// client loses nothing that it has not finished with. The next `connect` retrieves the
+    /// remote from the backend again.
     nonisolated(unsafe) private var remotes: [UUID: any PeripheralRemote] = [:]
 
-    /// ``remotes``' keys in least-recently-connected order, which is what the cap evicts from.
-    /// Linear to update, over a list bounded by ``maximumRemotes``.
+    /// The keys of ``remotes`` in order of least recent connection. The cap evicts from this
+    /// order. An update is linear, over a list that ``maximumRemotes`` bounds.
     nonisolated(unsafe) private var connectOrder: [UUID] = []
 
-    /// How many remotes this session keeps — ``defaultMaximumRemotes``, unless a test asked
-    /// for a smaller table.
+    /// The number of remotes that this session keeps. It is ``defaultMaximumRemotes``, unless a
+    /// test asked for a smaller table.
     private let maximumRemotes: Int
 
-    /// The `.withoutResponse` writes parked for each peripheral, oldest first, against
-    /// ``maximumPendingWrites`` and ``maximumPendingWriteBytes``. Internal rather than private
-    /// so a test can watch a burst arrive rather than guess at when it has. Session ``queue``
-    /// only.
+    /// The `.withoutResponse` writes that are parked for each peripheral, oldest first. They
+    /// count against ``maximumPendingWrites`` and ``maximumPendingWriteBytes``. It is internal so
+    /// that a test can watch a burst arrive and does not need to guess when it has arrived. Use
+    /// it only on the session ``queue``.
     nonisolated(unsafe) var pendingWrites: [UUID: [PendingWrite]] = [:]
 
-    /// How many bytes of payload ``pendingWrites`` is holding per peripheral, against
-    /// ``maximumPendingWriteBytes``. Kept rather than summed on every arrival, which would be
-    /// quadratic over a queue this long. Session ``queue`` only.
+    /// The number of payload bytes that ``pendingWrites`` holds for each peripheral. They count
+    /// against ``maximumPendingWriteBytes``. The session keeps this count and does not sum the
+    /// bytes at each arrival, because a sum would be quadratic over a queue this long. Use it
+    /// only on the session ``queue``.
     nonisolated(unsafe) private var pendingWriteBytes: [UUID: Int] = [:]
     nonisolated(unsafe) var pendingOpens: [UUID: [PendingOpen]] = [:]
     nonisolated(unsafe) private var isClosed = false
 
-    /// The L2CAP channels this session is bridging, keyed by the id the client allocated.
-    /// Internal so `CentralSession+L2CAP.swift` can service them.
+    /// The L2CAP channels that this session bridges, keyed by the id that the client allocated.
+    /// It is internal so that `CentralSession+L2CAP.swift` can service them.
     nonisolated(unsafe) var channels: [UInt32: OpenChannel] = [:]
 
-    /// Creates a session serving `connection` from `backend`.
+    /// Creates a session that serves `connection` from `backend`.
     ///
-    /// **Ordering.** The session first schedules its own opening work on `queue` — writing
-    /// the accepted `hello`, attaching to the backend, and sending the opening
-    /// `didUpdateState` — and only then, synchronously, installs its message handler with
-    /// `install`. So the hello is still the first frame on the wire, while every request the
-    /// client sent behind its `ClientHello` is handed over (and replayed by `install`) with
-    /// no window in which it has nowhere to go. Requests reach the backend behind the opening
-    /// block because they hop onto the same serial `queue`, which it is already enqueued on.
+    /// **Ordering.** The initializer first schedules the opening work on `queue`. That work writes
+    /// `hello`, attaches to the backend, and sends the first `didUpdateState`. Then the
+    /// initializer calls `install` synchronously. Thus the hello is the first frame. `install`
+    /// replays the requests that arrived behind the `ClientHello`. They hop onto the same serial
+    /// `queue`, behind the opening work.
     ///
     /// - Parameters:
-    ///   - connection: The accepted link connection, already started.
-    ///   - backend: The central backend serving this connection. Must be confined to `queue`.
+    ///   - connection: The accepted link connection. It is already started.
+    ///   - backend: The central backend that serves this connection. It must be confined to
+    ///     `queue`.
     ///   - queue: This session's own serial queue.
-    ///   - ordinal: This session's number, for log lines.
-    ///   - hello: The accepted `ServerHello`, written as this session's first frame.
-    ///   - install: Hands this session the connection's messages, replaying any that arrived
-    ///     behind the hello. Called once, synchronously.
-    ///   - log: Receives one line per notable session event.
-    ///   - maximumRemotes: How many peripheral remotes this session keeps.
+    ///   - ordinal: The number of this session, for log lines.
+    ///   - hello: The accepted `ServerHello`. The session writes it as its first frame.
+    ///   - install: Gives this session the connection's messages. It replays any message that
+    ///     arrived behind the hello. The initializer calls it once, synchronously.
+    ///   - log: Receives one line for each notable session event.
+    ///   - maximumRemotes: The number of peripheral remotes that this session keeps.
     init(
         connection: LinkConnection,
         backend: any CentralManaging,
@@ -200,14 +201,15 @@ final class CentralSession: Sendable {
         self.log = log
         queue.async { [self] in
             guard !isClosed else { return }
-            // Nothing may precede the hello on the wire, so it goes out from here — ahead of
-            // every event this session can produce — rather than from the provider, which
-            // would be racing this block.
+            // Nothing can precede the hello on the wire, so it goes out from here, ahead of every
+            // event that this session can produce. It does not go out from the provider, because
+            // the provider would race with this block.
             connection.send(.serverHello(hello))
             self.backend.eventHandler = { [weak self] event in self?.translate(event) }
             send(.didUpdateState(WireCentralState(self.backend.radioState)))
         }
-        // Weak, because the session owns the connection and a strong capture would be a cycle.
+        // The capture is weak. The session owns the connection, and a strong capture would be a
+        // cycle.
         install { [weak self] message in
             guard let self, case .centralRequest(let request) = message else { return }
             self.queue.async {
@@ -220,9 +222,9 @@ final class CentralSession: Sendable {
         }
     }
 
-    /// Tears the session down: stops the scan, cancels every live connection, detaches every
-    /// event handler, and closes the link connection. Idempotent, and safe to call from any
-    /// thread.
+    /// Tears the session down. It stops the scan, cancels every live connection, detaches every
+    /// event handler, and closes the link connection. Repeated calls are safe. It is safe to
+    /// call from any thread.
     func close() {
         queue.async { [self] in
             guard !isClosed else { return }
@@ -242,20 +244,20 @@ final class CentralSession: Sendable {
             pendingWrites.removeAll()
             pendingWriteBytes.removeAll()
             pendingOpens.removeAll()
-            // Nothing to detach on the connection: the provider's table routes its
-            // messages, and it drops this session's handler when the link ends — which
-            // cancelling it below is what brings about.
+            // There is nothing to detach on the connection. The provider's table routes its
+            // messages and drops this session's handler when the link ends. The cancel below
+            // ends the link.
             connection.cancel()
         }
     }
 
     // MARK: - Requests
 
-    /// Applies one request to the backend. Must be called on ``queue``.
+    /// Applies one request to the backend. Call it on ``queue``.
     ///
-    /// - Throws: ``BLESwiftLink/WireDecodingError`` for a request carrying a field no
-    ///   BLESwift type can represent — a malformed UUID string, say. The caller treats it as
-    ///   a protocol violation and drops the connection.
+    /// - Throws: ``BLESwiftLink/WireDecodingError`` for a request that carries a field that no
+    ///   BLESwift type can represent, for example a malformed UUID string. The caller treats this
+    ///   as a protocol violation and drops the connection.
     private func perform(_ request: CentralRequest) throws {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !isClosed else { return }
@@ -272,20 +274,19 @@ final class CentralSession: Sendable {
 
         case .connect(let peripheral, let options, let requiresANCS):
             guard let remote = backend.retrievePeripherals(withIdentifiers: [peripheral]).first else {
-                // Answered rather than ignored: the client's `connect` is waiting on an
-                // event, and an identifier no backend knows will never produce one, so
-                // silence would cost it the full connect timeout for a failure that is
-                // already certain.
+                // Answer, and do not ignore. The client's `connect` waits for an event, and no
+                // backend knows the identifier, so no event would come. The client would wait for
+                // the full connect timeout for a failure that is already certain.
                 log?("no remote for peripheral \(peripheral); failing the connect")
                 send(.didFailToConnect(peripheral: peripheral, error: WireError(VirtualRadio.unknownDeviceError)))
                 return
             }
-            // Evicted *before* the insert, never after: a remote this session has only just
-            // filed is disconnected with nothing in flight, which is exactly what the cap
-            // calls idle, so a table full of busy remotes would otherwise answer an overflow
-            // by dropping the very peripheral being connected — the same ordering
-            // `LinkCentral.connect` fixes by marking its mirror connecting first. A slot is
-            // reserved for the insert, so the table still settles at `maximumRemotes`.
+            // Evict *before* the insert and never after. The session has only just filed a
+            // remote, which is disconnected with nothing in flight, so the cap would call it
+            // idle. If a table is full of busy remotes, an overflow would then drop the very
+            // peripheral that the session connects. `LinkCentral.connect` fixes the same ordering
+            // when it marks its mirror as connecting first. The session reserves a slot for the
+            // insert, so the table still settles at `maximumRemotes`.
             evictStaleRemotes(reserving: remotes[peripheral] == nil ? 1 : 0)
             remotes[peripheral] = remote
             touch(peripheral)
@@ -305,10 +306,10 @@ final class CentralSession: Sendable {
         case .unregisterForConnectionEvents:
             backend.unregisterForConnectionEvents()
 
-        // Each of these converts *before* looking the remote up: a malformed identifier is a
-        // protocol violation whether or not this session happens to know the peripheral it
-        // was sent for, and a client that gets away with it for an unknown peripheral would
-        // simply be told nothing.
+        // Each of these cases converts *before* it looks up the remote. A malformed identifier
+        // is a protocol violation even when this session does not know the peripheral for which
+        // the client sent it. Otherwise a client could get away with it for an unknown
+        // peripheral, and the session would tell it nothing.
         case .discoverServices(let peripheral, let services):
             let requested = try services?.map(Self.service(_:))
             guard let remote = self.remote(peripheral, for: "discoverServices") else { return }
@@ -330,28 +331,28 @@ final class CentralSession: Sendable {
         case .writeValue(let peripheral, let characteristic, let value, let type, let sequence):
             let identifier = try characteristic.identifier
             guard let remote = self.remote(peripheral, for: "writeValue") else {
-                // Dropped, but still acknowledged: a `.withoutResponse` write occupies a slot
-                // in the client's window until `writeWithoutResponseAccepted` reopens it, so
-                // silence here would cost the client that slot for the life of the session —
-                // and enough of them would wedge its writer for good. A `.withResponse` write
-                // has no window to reopen; its caller is answered by `didWriteValue`, or by
-                // the disconnect that follows a peripheral this session cannot reach.
+                // Drop the write, but still acknowledge it. A `.withoutResponse` write uses a
+                // slot in the client's window until `writeWithoutResponseAccepted` reopens it.
+                // Without the acknowledgement, the client would lose that slot for the life of the
+                // session, and enough lost slots would block its writer for good. A `.withResponse`
+                // write has no window to reopen: `didWriteValue` answers its caller, or the
+                // disconnect that follows an unreachable peripheral answers it.
                 if type == .withoutResponse {
                     send(.writeWithoutResponseAccepted(peripheral: peripheral, sequence: sequence))
                 }
                 return
             }
             guard type == .withoutResponse else {
-                // A `.withResponse` write is acknowledged by `didWriteValue`, so it needs no
-                // flow control of its own.
+                // `didWriteValue` acknowledges a `.withResponse` write, so it needs no flow
+                // control of its own.
                 remote.writeValue(value, for: identifier, type: .withResponse)
                 return
             }
-            // Parked, however far past its window the client is: writers released together by
-            // one readiness signal are honest, and CoreBluetooth would queue them. Only a
-            // queue past both caps is a client that has stopped consuming acknowledgements,
-            // and then this peripheral's queue is what goes — dropped silently, as a
-            // `.withoutResponse` write always is — rather than the link.
+            // Park the write, however far past its window the client is. Writers that one
+            // readiness signal releases together are honest, and CoreBluetooth would queue them.
+            // Only a queue past both caps shows a client that has stopped consuming
+            // acknowledgements. Then this peripheral's queue goes and not the link. The session
+            // drops it silently, as it always drops a `.withoutResponse` write.
             guard pendingWrites[peripheral, default: []].count < Self.maximumPendingWrites,
                   pendingWriteBytes[peripheral, default: 0] + value.count <= Self.maximumPendingWriteBytes else {
                 discardPendingWrites(for: peripheral, including:
@@ -390,10 +391,10 @@ final class CentralSession: Sendable {
 
         case .openL2CAPChannel(let peripheral, let psm, let channel):
             guard let remote = self.remote(peripheral, for: "openL2CAPChannel") else {
-                // Answered rather than ignored, exactly as `.connect` is: the client's open
-                // is waiting on a completion, and a peripheral this session has no remote for
-                // will never produce one — silence would cost the caller its whole open
-                // timeout and leave the client's half-channel filed until then.
+                // Answer, and do not ignore, as `.connect` does. The client's open waits for a
+                // completion, and this session has no remote for the peripheral, so none would
+                // come. The caller would wait for its whole open timeout, and the client's
+                // half-channel would stay filed until then.
                 send(.didOpenL2CAPChannel(
                     peripheral: peripheral,
                     channel: channel,
@@ -402,9 +403,9 @@ final class CentralSession: Sendable {
                 ))
                 return
             }
-            // Every open is answered by exactly one completion, so a client with more than
-            // this many outstanding on one peripheral has stopped consuming them; the link
-            // goes rather than this session's memory.
+            // Exactly one completion answers every open. A client with more opens than this
+            // outstanding on one peripheral has stopped consuming them. The link goes, and not
+            // this session's memory.
             guard pendingOpens[peripheral, default: []].count < Self.maximumPendingOpens else {
                 failProtocol(ProtocolViolation.openWindowExceeded(peripheral: peripheral))
                 return
@@ -423,40 +424,41 @@ final class CentralSession: Sendable {
         }
     }
 
-    /// What a client did that the protocol does not permit, beyond the malformed fields the
-    /// wire boundary itself rejects.
+    /// The client actions that the protocol does not permit, in addition to the malformed fields
+    /// that the wire boundary rejects.
     enum ProtocolViolation: Error, Equatable {
-        /// More `openL2CAPChannel` completions were outstanding for one peripheral than
-        /// ``maximumPendingOpens`` allows — the client has stopped consuming them.
+        /// More `openL2CAPChannel` completions than ``maximumPendingOpens`` allows were
+        /// outstanding for one peripheral. The client has stopped consuming them.
         case openWindowExceeded(peripheral: UUID)
 
-        /// A `l2capData` frame was larger than the chunk size both ends chunk to — see
+        /// A `l2capData` frame was larger than the chunk size to which both ends chunk. See
         /// ``maximumChunk``.
         case l2capFrameTooLarge(channel: UInt32, bytes: Int)
 
-        /// More client-written bytes were unwritten on one channel than
-        /// ``maximumOutstandingWrites`` allows — the client has ignored its credit window.
+        /// More client-written bytes than ``maximumOutstandingWrites`` allows were unwritten on
+        /// one channel. The client has ignored its credit window.
         case l2capWriteWindowExceeded(channel: UInt32)
     }
 
-    /// `uuid` as a `ServiceIdentifier`, rejecting a string no `ServiceIdentifier` could
-    /// represent rather than trapping on it.
+    /// `uuid` as a `ServiceIdentifier`. The method rejects a string that no `ServiceIdentifier`
+    /// could represent and does not trap on it.
     private static func service(_ uuid: String) throws -> ServiceIdentifier {
         ServiceIdentifier(uuid: try WireIdentifierValidation.validated(uuid))
     }
 
-    /// Drops the client's link because it sent something the protocol does not allow — a
-    /// malformed identifier, or more outstanding channel opens than any honest client has.
-    /// The provider's own termination path then closes this session. Must be called on
-    /// ``queue``. Internal so the L2CAP bridge can refuse a client on the same terms.
+    /// Drops the client's link because the client sent something that the protocol does not
+    /// allow, such as a malformed identifier or more outstanding channel opens than any honest
+    /// client has. The provider's termination path then closes this session. Call it on
+    /// ``queue``. It is internal so that the L2CAP bridge can refuse a client on the same
+    /// terms.
     func failProtocol(_ error: some Error) {
         dispatchPrecondition(condition: .onQueue(queue))
         log?("\(label): protocol violation (\(error)); closing the connection")
         connection.cancel()
     }
 
-    /// Moves `identifier` to the most-recently-connected end of ``connectOrder``. Must be
-    /// called on ``queue``.
+    /// Moves `identifier` to the most recently connected end of ``connectOrder``. Call it on
+    /// ``queue``.
     private func touch(_ identifier: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         if let index = connectOrder.firstIndex(of: identifier) {
@@ -465,14 +467,14 @@ final class CentralSession: Sendable {
         connectOrder.append(identifier)
     }
 
-    /// Drops the least recently connected idle remotes until the table is back within
-    /// ``maximumRemotes``, detaching each one's event handler on the way out so a backend that
-    /// still holds it cannot deliver into a session that has forgotten it. A remote is idle
-    /// only when it is `.disconnected` and this session has nothing in flight for it; anything
-    /// else is left alone however old it is. Must be called on ``queue``.
+    /// Drops the least recently connected idle remotes until the table is within
+    /// ``maximumRemotes`` again. It detaches each remote's event handler on the way out, so a
+    /// backend that still holds the remote cannot deliver into a session that has forgotten it.
+    /// A remote is idle only when it is `.disconnected` and this session has nothing in flight
+    /// for it. The method leaves any other remote alone however old it is. Call it on ``queue``.
     ///
-    /// - Parameter reserving: How many slots the caller is about to fill, kept free on top of
-    ///   the entries already in the table.
+    /// - Parameter reserving: The number of slots that the caller is about to fill. The method
+    ///   keeps these slots free, in addition to the entries that are already in the table.
     private func evictStaleRemotes(reserving: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         let limit = maximumRemotes - reserving
@@ -488,8 +490,8 @@ final class CentralSession: Sendable {
             }
             candidate.eventHandler = nil
             remotes.removeValue(forKey: identifier)
-            // Both are empty — that is what made the remote idle — but the keys would
-            // otherwise outlive it, so the side tables stay bounded by this one.
+            // Both are empty, and that is what made the remote idle. The keys would otherwise
+            // outlive the remote, so this table bounds the side tables.
             pendingWrites.removeValue(forKey: identifier)
             pendingWriteBytes.removeValue(forKey: identifier)
             pendingOpens.removeValue(forKey: identifier)
@@ -498,12 +500,14 @@ final class CentralSession: Sendable {
         connectOrder = kept
     }
 
-    /// Whether `remote` is disconnected and has nothing of this session's in flight — the one
-    /// state in which forgetting it costs the client nothing. Must be called on ``queue``.
+    /// Whether `remote` is disconnected and has nothing of this session in flight. This is the
+    /// one state in which the client loses nothing if the session forgets the remote. Call it on
+    /// ``queue``.
     private func isIdle(_ remote: any PeripheralRemote, _ identifier: UUID) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         guard remote.connectionState == .disconnected else { return false }
-        // Emptied rather than removed is idle too: a drained queue leaves the key behind.
+        // A queue that is emptied but not removed is idle too, because a drained queue leaves
+        // its key behind.
         guard pendingWrites[identifier]?.isEmpty ?? true, pendingOpens[identifier]?.isEmpty ?? true else {
             return false
         }
@@ -513,18 +517,21 @@ final class CentralSession: Sendable {
     /// The write maximum to put on the wire for `peripheral`, given what the backend reported.
     ///
     /// The client applies ``BLESwiftLink/WireLengthValidation`` to whatever arrives, and a
-    /// maximum it refuses costs it the whole session — so the same rule is applied here,
-    /// before the value is sent, and a backend that reports an unusable one costs this
-    /// connection its negotiated maxima instead. A non-positive maximum is one no caller
-    /// could divide a payload by, so the conservative default stands in for it; an
-    /// implausibly large one is clamped, exactly as the client clamps it.
+    /// maximum that it refuses costs it the whole session. Thus the session applies the same
+    /// rule before it sends the value. If a backend reports an unusable maximum, only the
+    /// connection loses its negotiated maxima and the session continues. A non-positive maximum
+    /// is one that no caller could divide a payload by, and the conservative default replaces
+    /// it. The method clamps a maximum that is too large to be plausible, as the client clamps
+    /// it.
     ///
     /// - Parameters:
-    ///   - reported: What the remote reported, or `nil` when this session has no remote.
+    ///   - reported: What the remote reported. The value is `nil` when this session has no
+    ///     remote.
     ///   - fallback: The default for this write type.
-    ///   - type: The write type's name, for the log line.
-    ///   - peripheral: The peripheral the maximum was reported for, for the log line.
-    /// - Returns: A maximum the client will accept. Must be called on ``queue``.
+    ///   - type: The name of the write type, for the log line.
+    ///   - peripheral: The peripheral for which the remote reported the maximum, for the log
+    ///     line.
+    /// - Returns: A maximum that the client will accept. Call it on ``queue``.
     private func reportableMaximum(
         _ reported: Int?,
         default fallback: Int,
@@ -540,8 +547,8 @@ final class CentralSession: Sendable {
         return min(reported, WireLengthValidation.maximumLength)
     }
 
-    /// The remote for `peripheral`, or `nil` — with a log line — if this session has never
-    /// connected it. Must be called on ``queue``.
+    /// The remote for `peripheral`. The value is `nil`, with a log line, if this session never
+    /// connected it. Call it on ``queue``.
     private func remote(_ peripheral: UUID, for request: String) -> (any PeripheralRemote)? {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let remote = remotes[peripheral] else {
@@ -551,8 +558,8 @@ final class CentralSession: Sendable {
         return remote
     }
 
-    /// Sends as many queued `.withoutResponse` writes as the peripheral will currently take,
-    /// acknowledging each one as it goes. Must be called on ``queue``.
+    /// Sends as many queued `.withoutResponse` writes as the peripheral can take now. It
+    /// acknowledges each write as it sends it. Call it on ``queue``.
     private func drainWrites(for peripheral: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let remote = remotes[peripheral] else { return }
@@ -564,25 +571,25 @@ final class CentralSession: Sendable {
         }
     }
 
-    /// Gives up on everything queued for `peripheral`, plus the write that would not fit,
-    /// and tells the client. Must be called on ``queue``.
+    /// Gives up on everything that is queued for `peripheral`, and on the write that would not
+    /// fit. It tells the client. Call it on ``queue``.
     ///
-    /// Each discarded write is still *acknowledged*: a `.withoutResponse` write holds a slot
-    /// in the client's window until `writeWithoutResponseAccepted` reopens it, and enough
-    /// unreturned slots wedge its writer for good — the same reason a write this session
-    /// cannot route is acknowledged rather than dropped in silence.
+    /// The session still *acknowledges* each discarded write. A `.withoutResponse` write uses a
+    /// slot in the client's window until `writeWithoutResponseAccepted` reopens it, and enough
+    /// unreturned slots block its writer for good. For the same reason, the session acknowledges
+    /// a write that it cannot route and does not drop it in silence.
     ///
-    /// **Nothing else is reported.** A `.withoutResponse` write has no completion in
-    /// CoreBluetooth: the payload is dropped and the caller is told nothing, which is exactly
-    /// what a write too large for one packet does on device. Synthesizing a `didWriteValue`
-    /// would put an event on the wire that no real write of this type produces — invisible to
-    /// a client that has no API to surface it, and worse than invisible to one with a live
-    /// `.withResponse` write outstanding on the same characteristic, whose completion it would
-    /// be taken for. The discard is a provider-side fault, and it is logged there.
+    /// **The session reports nothing else.** A `.withoutResponse` write has no completion in
+    /// CoreBluetooth. The payload is dropped and the caller is told nothing, as for a write that
+    /// is too large for one packet on a device. A synthesized `didWriteValue` would put an event
+    /// on the wire that no real write of this type produces. A client with a live
+    /// `.withResponse` write outstanding on the same characteristic would take it for that
+    /// write's completion. The discard is a fault of the provider, and the provider logs it.
     ///
     /// - Parameters:
-    ///   - peripheral: The peripheral whose queue is being given up on.
-    ///   - including: The write that did not fit, discarded with the rest of them.
+    ///   - peripheral: The peripheral whose queue the session gives up on.
+    ///   - including: The write that did not fit. The session discards it with the other
+    ///     writes.
     private func discardPendingWrites(for peripheral: UUID, including overflow: PendingWrite) {
         dispatchPrecondition(condition: .onQueue(queue))
         let discarded = (pendingWrites.removeValue(forKey: peripheral) ?? []) + [overflow]
@@ -599,14 +606,14 @@ final class CentralSession: Sendable {
 
     // MARK: - Events
 
-    /// Installs the per-peripheral event translator on `remote`. Must be called on ``queue``.
+    /// Installs the translator for one peripheral's events on `remote`. Call it on ``queue``.
     private func attachHandler(to remote: any PeripheralRemote, for peripheral: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         remote.eventHandler = { [weak self] event in self?.translate(event, from: peripheral) }
     }
 
-    /// Translates one backend-level ``BLESwiftCore/CentralEvent`` and sends it. Arrives on
-    /// ``queue``, per the backend delivery contract.
+    /// Translates one backend-level ``BLESwiftCore/CentralEvent`` and sends it. The event arrives
+    /// on ``queue``, as the backend's delivery contract states.
     private func translate(_ event: CentralEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !isClosed else { return }
@@ -660,25 +667,26 @@ final class CentralSession: Sendable {
             send(.didUpdateANCSAuthorization(peripheral: peripheral, authorized: authorized))
 
         case .willRestoreState:
-            // State restoration is the provider process's own business: the client's
-            // `Central` has its own lifecycle and nothing to restore from this one.
+            // State restoration belongs to the provider process. The client's `Central` has its
+            // own lifecycle and nothing to restore from this one.
             break
         }
     }
 
-    /// Translates one ``BLESwiftCore/PeripheralEvent`` from `peripheral` and sends it,
-    /// enriching each discovery completion from the remote's own caches. Arrives on
-    /// ``queue``, per the backend delivery contract.
+    /// Translates one ``BLESwiftCore/PeripheralEvent`` from `peripheral` and sends it. It adds
+    /// data to each discovery completion from the remote's caches. The event arrives on
+    /// ``queue``, as the backend's delivery contract states.
     private func translate(_ event: PeripheralEvent, from peripheral: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !isClosed, let remote = remotes[peripheral] else { return }
         switch event {
 
-        // The backend's whole service cache, not the answer to the request that produced this
-        // completion: `discoveredServices` is `CBPeripheral.services` for the passthrough
-        // backend and the union cache for the virtual one, so a filtered discovery reports
-        // every service known — which is what the client's own filtered-joins rule then folds
-        // into its mirror, leaving the two halves of the seam agreeing on the same list.
+        // The completion carries the backend's whole service cache, not the answer to the
+        // request that produced it. `discoveredServices` is `CBPeripheral.services` for the
+        // passthrough backend and the union cache for the virtual backend. Thus a filtered
+        // discovery reports every service that is known. The client's rule for filtered joins
+        // then folds this list into its mirror, and the two halves of the seam agree on the
+        // same list.
         case .didDiscoverServices(let error):
             send(.didDiscoverServices(
                 peripheral: peripheral,
@@ -750,8 +758,8 @@ final class CentralSession: Sendable {
             send(.didModifyServices(peripheral: peripheral, invalidated: services.map(\.uuidString)))
 
         case .isReadyToSendWriteWithoutResponse:
-            // Never forwarded: the client synthesizes its own readiness from the
-            // acknowledgements this drain produces.
+            // Never forward it. The client synthesizes its own readiness from the
+            // acknowledgements that this drain produces.
             drainWrites(for: peripheral)
 
         case .didOpenL2CAPChannel(let channel, let error):
@@ -759,22 +767,22 @@ final class CentralSession: Sendable {
         }
     }
 
-    /// Drops everything that belonged to a connection that has just ended. Must be called on
-    /// ``queue``.
+    /// Drops everything that belonged to a connection that just ended. Call it on ``queue``.
     private func discardPerConnectionState(for peripheral: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         pendingWrites.removeValue(forKey: peripheral)
         pendingWriteBytes.removeValue(forKey: peripheral)
-        // Dropped rather than remembered: a completion the backend still delivers for an open
-        // this connection issued finds no pending open and has its channel closed. See
-        // ``CentralSession/bridgeOpenedChannel(_:error:from:)`` for what that cannot catch.
+        // Drop it and do not remember it. The backend can still deliver a completion for an
+        // open that this connection issued. That completion finds no pending open, and the
+        // session closes its channel. See ``CentralSession/bridgeOpenedChannel(_:error:from:)``
+        // for what this cannot catch.
         pendingOpens.removeValue(forKey: peripheral)
-        // The client tears its own halves down off the disconnect; closing the backend's
-        // ends here is what stops their pumps and releases the transports.
+        // The client tears down its own halves when it sees the disconnect. Closing the
+        // backend's ends here stops their pumps and releases the transports.
         closeChannels(matching: { $0.peripheral == peripheral })
     }
 
-    /// Writes one event to the link. Must be called on ``queue``. Internal so the L2CAP
+    /// Writes one event to the link. Call it on ``queue``. It is internal so that the L2CAP
     /// bridge can answer on the same path.
     func send(_ event: CentralWireEvent) {
         dispatchPrecondition(condition: .onQueue(queue))

@@ -2,9 +2,8 @@
 //  SavedDevicesView.swift
 //  BLESwiftExplorer
 //
-//  Screen 5: saved-device list persisted in UserDefaults, reconnecting via
-//  `central.connect(identifier:fallbackScan:reconnect:)` (Task 4) with a fallback
-//  `ScanFilter`.
+//  Screen 5: list of saved devices, persisted in UserDefaults. The screen reconnects with
+//  `central.connect(identifier:fallbackScan:reconnect:)` and a fallback `ScanFilter`.
 //
 
 import BLESwift

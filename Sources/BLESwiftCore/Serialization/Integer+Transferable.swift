@@ -7,23 +7,23 @@ import Foundation
 
 extension FixedWidthInteger where Self: BitwiseCopyable {
 
-    /// Encodes this integer as its raw, machine-endian byte representation.
+    /// Encodes this integer as its raw byte representation in the machine endianness.
     public func toBluetoothData() throws -> Data {
         var value = self
         return withUnsafeBytes(of: &value) { Data($0) }
     }
 
-    /// Decodes an integer from its raw, machine-endian byte representation.
+    /// Decodes an integer from its raw byte representation in the machine endianness.
     ///
-    /// - Throws: ``BLESwiftError/dataOutOfBounds(start:length:count:)`` if `bluetoothData`
-    ///   is not exactly `MemoryLayout<Self>.size` bytes.
+    /// - Throws: ``BLESwiftError/dataOutOfBounds(start:length:count:)`` if `bluetoothData` is not
+    ///   exactly `MemoryLayout<Self>.size` bytes.
     public init(bluetoothData: Data) throws {
         self = try bluetoothData.extract(start: 0, length: MemoryLayout<Self>.size)
     }
 }
 
-// Fixed-width integer types only — deliberately not `Int`/`UInt`, whose size is
-// platform-dependent and therefore unsafe to serialize across devices.
+// Only fixed-width integer types. `Int` and `UInt` are excluded on purpose: their size depends on
+// the platform, so they are not safe to serialize across devices.
 
 /// `Int8` conforms to ``Transmittable`` and ``Receivable`` via its raw byte representation.
 extension Int8: Transmittable, Receivable {}

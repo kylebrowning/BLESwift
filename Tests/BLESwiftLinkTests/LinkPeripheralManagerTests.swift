@@ -3,8 +3,8 @@
 //  BLESwiftLinkTests
 //
 
-// Sockets in a CI simulator are unreliable, exactly as `LinkCentralTests` describes, so this
-// suite is compiled out there; the simulator-side path is covered by the two-simulator E2E.
+// Sockets in a CI simulator are not reliable, as `LinkCentralTests` describes. The compiler removes
+// this suite from the simulator build, and the two-simulator E2E covers that path.
 #if !targetEnvironment(simulator)
 import BLESwiftCore
 import BLESwiftLink
@@ -14,11 +14,11 @@ import Foundation
 import BLESwiftCompat17
 import Testing
 
-/// A scripted provider for the peripheral role: accepts the handshake, records the requests a
-/// ``LinkPeripheralManager`` sends, and lets a test inject events a real provider would never
-/// send — a stale acknowledgement, say.
+/// A scripted provider for the peripheral role. It accepts the handshake, records the requests that
+/// a ``LinkPeripheralManager`` sends, and lets a test inject events that a real provider would
+/// never send, such as a stale acknowledgement.
 ///
-/// The peripheral-role counterpart to `ScriptedProvider`.
+/// This is the peripheral-role counterpart to `ScriptedProvider`.
 final class ScriptedHostProvider: Sendable {
     let listener: LinkListener
     let requests = Mutex<[HostRequest]>([])
@@ -70,15 +70,15 @@ struct LinkPeripheralManagerTests {
     private static let service = ServiceIdentifier(uuid: "180D")
     private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
 
-    /// Hops onto `queue` to run `body` and returns its result — the door for off-queue test
-    /// code to touch queue-confined state.
+    /// Hops onto `queue` to run `body` and returns its result. Test code that runs off the queue
+    /// uses this to touch state that the queue confines.
     private func onQueue<T: Sendable>(_ queue: DispatchQueue, _ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async { continuation.resume(returning: body()) }
         }
     }
 
-    /// The sequences of every `updateValue` the provider has received, in order.
+    /// The sequences of every `updateValue` that the provider has received, in order.
     private static func updateSequences(_ provider: ScriptedHostProvider) -> [UInt64] {
         provider.requests.withLock { requests in
             requests.compactMap {
@@ -122,8 +122,8 @@ struct LinkPeripheralManagerTests {
         await waitFor(timeout: .seconds(5)) { subscribes.withLock { $0 } == 1 }
         #expect(subscribes.withLock { $0 } == 1)
 
-        // Tearing the link down is not the same as the link staying up: a host must hear its
-        // subscribers leave and the radio go, or it waits on both forever.
+        // Tearing the link down is not the same as letting it stay up. A host must hear its
+        // subscribers leave and the radio go. Otherwise it waits on both forever.
         link.shutdown()
         await waitFor(timeout: .seconds(1)) { states.withLock { $0.last == .unsupported } }
         #expect(states.withLock { $0.last } == .unsupported)
@@ -157,8 +157,9 @@ struct LinkPeripheralManagerTests {
         }
         await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .poweredOn } }
 
-        // An offset a handler would slice its value at — `value[offset...]` — and trap on.
-        // It is refused at the boundary instead: the session goes, and the client redials.
+        // A handler would slice its value at this offset, as `value[offset...]`, and trap. The
+        // session refuses it at the boundary instead, so the session goes and the client dials
+        // again.
         provider.emit(.didReceiveRead(WireReadRequest(
             token: UUID(),
             central: WireSubscriber(id: UUID(), maximumUpdateValueLength: 20),
@@ -169,7 +170,6 @@ struct LinkPeripheralManagerTests {
         await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .unsupported } }
         await waitFor(timeout: .seconds(10)) { states.withLock { $0.last == .poweredOn } }
         #expect(states.withLock { $0.last } == .poweredOn)
-        // The malformed request never reached the host.
         #expect(reads.withLock { $0 } == 0)
     }
 
@@ -200,8 +200,8 @@ struct LinkPeripheralManagerTests {
         }
         await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .poweredOn } }
 
-        // Both calls on one queue turn — the interleaving a provider answers by applying the
-        // start and then the stop, with the start's completion already on its way back.
+        // Both calls are in one queue turn. A provider answers this interleaving when it applies
+        // the start and then the stop, while the start's completion is already on its way back.
         await onQueue(queue) {
             link.startAdvertising(PeripheralAdvertisement(localName: "Latched", serviceUUIDs: [Self.service]))
             link.stopAdvertising()
@@ -212,14 +212,13 @@ struct LinkPeripheralManagerTests {
             }
         }
 
-        // The completion of the start the stop cancelled. It is still reported to the host —
-        // a `startAdvertising` awaiting it must not hang — but it may not claim the radio.
+        // This is the completion of the start that the stop cancelled. The session still reports
+        // it, so a waiting `startAdvertising` does not hang, but it must not claim the radio.
         provider.emit(.didStartAdvertising(error: nil))
         await waitFor(timeout: .seconds(5)) { starts.withLock { $0 } == 1 }
         #expect(starts.withLock { $0 } == 1)
         #expect(await onQueue(queue) { link.isAdvertising } == false)
 
-        // A start with nothing behind it still claims it.
         await onQueue(queue) {
             link.startAdvertising(PeripheralAdvertisement(localName: "Latched", serviceUUIDs: [Self.service]))
         }
@@ -258,7 +257,6 @@ struct LinkPeripheralManagerTests {
         await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .poweredOn } }
         #expect(readyCount.withLock { $0 } == 0)
 
-        // ---- Fill the window on the first session ----
         let window = LinkFlowControl.updateValueWindow
         let filled = await onQueue(queue) {
             (0..<window).map { _ in link.updateValue(Data([0, 72]), for: Self.measurement, onSubscribed: nil) }
@@ -269,16 +267,14 @@ struct LinkPeripheralManagerTests {
         let stale = Self.updateSequences(provider)
         #expect(stale.count == window)
 
-        // ---- The session resets. Its outstanding pushes go with it — but the provider's
+        // ---- The session resets. Its outstanding pushes go with it, but the provider's
         // acknowledgements for them may already be on the wire. ----
         provider.dropClient()
         await waitFor(timeout: .seconds(5)) { states.withLock { $0.last == .unsupported } }
         await waitFor(timeout: .seconds(10)) { states.withLock { $0.last == .poweredOn } }
-        // The reconnect releases the host that was blocked at the drop, exactly once.
         await waitFor(timeout: .seconds(5)) { readyCount.withLock { $0 } == 1 }
         #expect(readyCount.withLock { $0 } == 1)
 
-        // ---- The second session fills the window again, with fresh sequences ----
         let refilled = await onQueue(queue) {
             (0..<window).map { _ in link.updateValue(Data([0, 73]), for: Self.measurement, onSubscribed: nil) }
         }
@@ -288,22 +284,22 @@ struct LinkPeripheralManagerTests {
         let live = Self.updateSequences(provider).filter { !stale.contains($0) }
         #expect(live.count == window)
 
-        // ---- Every acknowledgement from the first session now lands. None of those sequences
-        // is outstanding any more, so none of them may credit this session's window. ----
+        // ---- Every acknowledgement from the first session now lands. None of those sequences is
+        // outstanding any more, so none may credit this session's window. ----
         for sequence in stale {
             provider.emit(.updateValueDelivered(sequence: sequence))
         }
-        // And one for a sequence that was never sent at all, for good measure.
         provider.emit(.updateValueDelivered(sequence: .max))
 
-        // A barrier: the link is ordered, so an event behind those acknowledgements cannot be
-        // observed until every one of them has been handled. The window must still be shut.
+        // A barrier. The link is ordered, so the test sees nothing behind those acknowledgements
+        // until the session has handled all of them. The window must still be shut.
         provider.emit(.didStartAdvertising(error: nil))
         await waitFor(timeout: .seconds(5)) { advertising.withLock { $0 } }
         #expect(readyCount.withLock { $0 } == 1)
         #expect(await onQueue(queue) { link.updateValue(Data([0, 74]), for: Self.measurement, onSubscribed: nil) } == false)
 
-        // ---- An acknowledgement this session did earn opens it, and nothing else does ----
+        // ---- An acknowledgement that this session did earn opens the window, and nothing else
+        // does ----
         provider.emit(.updateValueDelivered(sequence: try #require(live.first)))
         await waitFor(timeout: .seconds(5)) { readyCount.withLock { $0 } == 2 }
         #expect(readyCount.withLock { $0 } == 2)

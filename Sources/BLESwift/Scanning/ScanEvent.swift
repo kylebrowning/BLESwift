@@ -5,22 +5,22 @@
 
 import BLESwiftCore
 
-/// An event produced by an in-progress
-/// ``Central/scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``. Breaking
-/// out of (or cancelling the task consuming) the stream stops the scan; connecting while a
-/// scan is live is permitted and does not stop it.
+/// An event from
+/// ``Central/scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``.
+/// To stop the scan, break out of the stream or cancel the task that consumes it. A connection
+/// does not stop a live scan.
 public enum ScanEvent: Sendable {
 
-    /// A peripheral was sighted for the first time in this scan session — or again after
-    /// previously being reported as ``lost(_:)``.
+    /// The scan sighted a peripheral for the first time in this scan. This event also occurs
+    /// when the scan sights a peripheral again after it reported it as ``lost(_:)``.
     case discovered(Discovery)
 
-    /// A previously-``discovered(_:)`` peripheral was sighted again. Only emitted with
-    /// `allowDuplicates: true`; otherwise CoreBluetooth never redelivers a discovery.
+    /// The scan sighted a peripheral again after it reported ``discovered(_:)``. The scan
+    /// emits this event only with `allowDuplicates: true`.
     case updated(Discovery)
 
-    /// A previously-sighted peripheral has not been re-sighted within `lossTimeout`. Only
-    /// emitted with `allowDuplicates: true`. A later re-sighting is reported as a fresh
+    /// The scan did not sight a known peripheral again within `lossTimeout`. The scan emits
+    /// this event only with `allowDuplicates: true`. A later sighting is a new
     /// ``discovered(_:)``, not ``updated(_:)``.
     case lost(Discovery)
 }

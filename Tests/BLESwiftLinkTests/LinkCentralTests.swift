@@ -3,10 +3,9 @@
 //  BLESwiftLinkTests
 //
 
-// Sockets in a CI simulator are unreliable — a runner's simulator network can wedge outright,
-// leaving a loopback connect stuck in `.connecting` for tens of seconds — so every suite that
-// opens one is compiled out there. The simulator-side path is covered by the two-simulator
-// E2E, which runs on real simulators.
+// Sockets in a CI simulator are not reliable: a wedged simulator network leaves a loopback connect
+// in `.connecting` for tens of seconds. So the compiler removes every socket suite from the
+// simulator build. The two-simulator E2E covers that path.
 #if !targetEnvironment(simulator)
 import BLESwift
 import BLESwiftCore
@@ -17,12 +16,12 @@ import Foundation
 import BLESwiftCompat17
 import Testing
 
-/// A scripted provider: accepts the handshake, records requests, lets tests inject events.
+/// A scripted provider. It accepts the handshake, records requests, and lets tests inject events.
 final class ScriptedProvider: Sendable {
     let listener: LinkListener
     let requests = Mutex<[CentralRequest]>([])
-    /// How many client hellos this provider has answered — one per dial, so a test can tell a
-    /// client that reconnected from one that merely stayed put.
+    /// The number of client hellos that this provider has answered, one for each dial. A test can
+    /// tell a client that reconnected from one that only stayed in place.
     let helloCount = Mutex<Int>(0)
     private let connection = Mutex<LinkConnection?>(nil)
 
@@ -52,9 +51,9 @@ final class ScriptedProvider: Sendable {
     func emit(_ event: CentralWireEvent) { connection.withLock { $0 }?.send(.centralEvent(event)) }
     func dropClient() { connection.withLock { $0 }?.cancel() }
 
-    /// Stops the provider the way a real one goes away: the accepted connection is closed
-    /// *and* the listener cancelled. Cancelling the listener alone deliberately leaves
-    /// accepted connections open (see `LinkClientSessionTests.reconnects`).
+    /// Stops the provider the way a real one goes away: it closes the accepted connection *and*
+    /// cancels the listener, because cancelling the listener alone leaves accepted connections
+    /// open. See `LinkClientSessionTests.reconnects`.
     func stop() {
         connection.withLock { $0 }?.cancel()
         listener.cancel()
@@ -67,8 +66,8 @@ struct LinkCentralTests {
     private static let service = ServiceIdentifier(uuid: "180D")
     private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
 
-    /// Hops onto `queue` to run `body` and returns its result — the door for off-queue test
-    /// code to touch queue-confined state.
+    /// Hops onto `queue` to run `body` and returns its result. Test code that runs off the queue
+    /// uses this to touch state that the queue confines.
     private func onQueue<T: Sendable>(_ queue: DispatchQueue, _ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async { continuation.resume(returning: body()) }
@@ -81,19 +80,18 @@ struct LinkCentralTests {
         let queue = DispatchQueue(label: "LinkCentralTests")
         let link = LinkCentral(endpoint: provider.endpoint, queue: queue, clientName: "test", retryInterval: .milliseconds(50))
         let central = Central(backend: link, queue: queue)
-        // Generous, and asserted: a starved runner can take seconds to hand over a loopback
-        // connection, and a rig that gave up early would leave every wait after it racing a
-        // central that is not powered on yet.
+        // The wait is generous, and the test asserts it. A starved runner can take seconds to hand
+        // over a loopback connection, and a short wait would race a central that is not powered on
+        // yet.
         await waitFor(timeout: .seconds(30)) { central.state == .poweredOn }
         #expect(central.state == .poweredOn)
         return (central, link, provider)
     }
 
-    /// How many `.connect` requests `provider` has received for `peripheral`.
+    /// The number of `.connect` requests that `provider` has received for `peripheral`.
     ///
-    /// The observable a test waits on before emitting a `didConnect`: the client is in
-    /// `.connecting` only once its request has actually arrived, and a completion emitted
-    /// ahead of that has nowhere to land — the connect then waits out its own bound instead.
+    /// A test waits on this before it emits a `didConnect`. A completion that arrives before the
+    /// request has nowhere to land.
     private static func connectCount(_ provider: ScriptedProvider, for peripheral: UUID) -> Int {
         provider.requests.withLock { $0 }.filter { request in
             if case .connect(peripheral, _, _) = request { return true }
@@ -101,11 +99,10 @@ struct LinkCentralTests {
         }.count
     }
 
-    /// Every event whose fields the client validates, made malformed — one per `handle(_:)`
+    /// Every event whose fields the client validates, made malformed: one for each `handle(_:)`
     /// case that names a peripheral *and* carries an identifier of its own.
     ///
-    /// The identifier is the same one in each: what matters is that it never reaches the
-    /// mirror table, so the test can name it and then prove nothing was filed under it.
+    /// The identifier is the same in each event and must never reach the mirror table.
     static let malformedEvents: [(name: String, event: CentralWireEvent)] = {
         let peripheral = UUID(uuidString: "1F2E3D4C-5B6A-4798-8877-665544332211")!
         let badCharacteristic = WireCharacteristicRef(service: "180D", uuid: "zz")
@@ -180,12 +177,11 @@ struct LinkCentralTests {
 
         provider.emit(Self.malformedEvents[index].event)
 
-        // The session is dropped and redialed: the provider is faulty, not merely unlucky.
         await waitFor(timeout: .seconds(30)) { provider.helloCount.withLock { $0 } >= 2 }
         #expect(provider.helloCount.withLock { $0 } >= 2, "\(Self.malformedEvents[index].name)")
-        // And the mirror table never heard of the peripheral it named. A mirror minted for an
-        // event that then threw is `.disconnected`, so it survives the reconnect, is reported
-        // to the caller as a peripheral this central knows, and can evict a real one.
+        // The mirror table never heard of the peripheral that the event named. A mirror created for
+        // an event that then threw would be `.disconnected`, survive the reconnect, be reported as
+        // a known peripheral, and could evict a real mirror.
         #expect(await onQueue(queue) { link.peripheralCount } == 0, "\(Self.malformedEvents[index].name)")
     }
 
@@ -207,14 +203,13 @@ struct LinkCentralTests {
         let link = LinkCentral(endpoint: provider.endpoint, queue: queue, clientName: "late", retryInterval: .milliseconds(50))
         defer { provider.stop(); link.shutdown() }
 
-        // Let the handshake complete AND the provider's `didUpdateState(.poweredOn)` land
-        // before any handler exists. `radioState` is queue-confined and cannot be read from
-        // here, so the settle is a short sleep after the link reports itself connected.
+        // Let the handshake complete AND the provider's `didUpdateState(.poweredOn)` land before
+        // any handler exists. The test cannot read `radioState` off the queue, so it sleeps briefly
+        // after the link reports connected.
         await waitFor { link.isProviderConnected }
         #expect(link.isProviderConnected)
         try await Task.sleep(for: .milliseconds(100))
 
-        // Only now does a `Central` attach its handler: it must still observe `.poweredOn`.
         let central = Central(backend: link, queue: queue)
         await waitFor { central.state == .poweredOn }
         #expect(central.state == .poweredOn)
@@ -247,13 +242,11 @@ struct LinkCentralTests {
         let id = UUID()
         let ref = WireCharacteristicRef(Self.measurement)
 
-        // Connect: the provider answers with maxima.
         let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: "HRM")) }
         await waitFor { provider.requests.withLock { $0 }.contains { if case .connect(let p, _, _) = $0 { return p == id }; return false } }
         provider.emit(.didConnect(peripheral: id, name: "HRM", maximumWriteWithResponse: 200, maximumWriteWithoutResponse: 100))
         let peripheral = try await bounded { try await connectTask.value }
 
-        // Discovery is driven by the read: the provider must answer both discovery steps.
         let readTask = Task { () -> Data in try await peripheral.read(from: Self.measurement) }
         await waitFor { provider.requests.withLock { $0 }.contains(.discoverServices(peripheral: id, services: ["180D"])) }
         provider.emit(.didDiscoverServices(peripheral: id, services: ["180D"], error: nil))
@@ -263,13 +256,11 @@ struct LinkCentralTests {
         provider.emit(.didUpdateValue(peripheral: id, characteristic: ref, value: Data([0, 72]), error: nil))
         #expect(try await bounded { try await readTask.value } == Data([0, 72]))
 
-        // Write with response.
         let writeTask = Task { try await peripheral.write(Data([1]), to: Self.measurement) }
         await waitFor { provider.requests.withLock { $0 }.contains { if case .writeValue(id, ref, Data([1]), .withResponse, _) = $0 { return true }; return false } }
         provider.emit(.didWriteValue(peripheral: id, characteristic: ref, error: nil))
         try await bounded { try await writeTask.value }
 
-        // Notification.
         let notifyTask = Task { () -> Data? in
             let stream: AsyncThrowingStream<Data, Error> = peripheral.notifications(for: Self.measurement)
             for try await value in stream { return value }
@@ -280,7 +271,6 @@ struct LinkCentralTests {
         provider.emit(.didUpdateValue(peripheral: id, characteristic: ref, value: Data([9]), error: nil))
         #expect(try await bounded { try await notifyTask.value } == Data([9]))
 
-        // Disconnect.
         let disconnectTask = Task { try await central.disconnect(peripheral.id) }
         await waitFor { provider.requests.withLock { $0 }.contains(.cancelConnection(peripheral: id)) }
         provider.emit(.didDisconnect(peripheral: id, error: nil))
@@ -299,7 +289,7 @@ struct LinkCentralTests {
         provider.emit(.didConnect(peripheral: id, name: "HRM", maximumWriteWithResponse: 200, maximumWriteWithoutResponse: 100))
         let peripheral = try await bounded { try await connectTask.value }
 
-        // A read the provider is given and never answers — the state a consumer is in when it
+        // The provider receives a read and never answers it. A consumer is in this state when it
         // decides to tear the link down.
         let readTask = Task { () -> Data in try await peripheral.read(from: Self.measurement) }
         await waitFor { provider.requests.withLock { $0 }.contains(.discoverServices(peripheral: id, services: ["180D"])) }
@@ -313,9 +303,8 @@ struct LinkCentralTests {
         ))
         await waitFor { provider.requests.withLock { $0 }.contains(.readValue(peripheral: id, characteristic: ref)) }
 
-        // The teardown the branch's own tests use. It must fail what is in flight, exactly as
-        // the provider going away does — a read left awaiting a completion nobody will ever
-        // deliver is the hang this guards against.
+        // This is the teardown that the branch's tests use. It must fail what is in flight, as it
+        // does when the provider goes away, instead of hanging on a completion that never comes.
         link.shutdown()
         await #expect(throws: BLESwiftError.unexpectedDisconnect) {
             try await bounded("read after shutdown", seconds: 1) { try await readTask.value }
@@ -333,9 +322,8 @@ struct LinkCentralTests {
         await waitFor { !provider.requests.withLock { $0 }.isEmpty }
         provider.emit(.didConnect(peripheral: id, name: "x", maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
         _ = try await bounded { try await connectTask.value }
-        // Subscribed before the stimulus, for the reason spelled out in `VirtualRadioTests`:
-        // the broadcast does not replay, so a subscription created inside the task can miss
-        // the very event the task exists to see.
+        // Subscribe before the stimulus, as in `VirtualRadioTests`: the broadcast does not replay,
+        // so a subscription created inside the task can miss the event.
         let events = await central.connectionEvents()
         let disconnects = Task { () -> ConnectionEvent? in
             for await event in events {
@@ -369,8 +357,8 @@ struct LinkCentralTests {
         let peripheral = await onQueue(queue) {
             link.retrievePeripherals(withIdentifiers: [id]).first as? LinkPeripheral
         }
-        // Read from the test's own context, off `queue`, exactly as
-        // `Central(backend:connectedPeripherals:)` reads it while adopting a peripheral.
+        // The test reads from its own context, off `queue`, as
+        // `Central(backend:connectedPeripherals:)` does when it adopts a peripheral.
         #expect(peripheral?.name == "Named")
     }
 
@@ -382,13 +370,12 @@ struct LinkCentralTests {
         let id = UUID()
         let window = LinkFlowControl.writeWithoutResponseWindow
 
-        // Connect, then fill the flow-control window from the mirror itself: `Central` honors
-        // the window, so only driving the peripheral directly gets it to the brim.
+        // Connect, then fill the flow-control window from the mirror itself. `Central` honors the
+        // window, so only a direct drive gets it to the brim.
         //
-        // Every wait below gates on something observable — a request the provider recorded, a
-        // state the mirror reports — and is bounded widely enough for a badly starved runner.
-        // Nothing here waits on elapsed time, and nothing is emitted before the request it
-        // answers has arrived.
+        // Every wait gates on something observable (a recorded request or a mirror state) with a
+        // bound wide enough for a starved runner. Nothing waits on elapsed time, and the test emits
+        // nothing before the request that it answers has arrived.
         let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: nil)) }
         await waitFor(timeout: .seconds(30)) { Self.connectCount(provider, for: id) == 1 }
         #expect(Self.connectCount(provider, for: id) == 1)
@@ -405,22 +392,21 @@ struct LinkCentralTests {
         let stale = Self.writeSequences(provider, for: id)
         #expect(stale.count == window)
 
-        // The connection resets. Its outstanding writes go with it — but the provider's
-        // acknowledgements for them may already be on the wire.
+        // The connection resets and its outstanding writes go with it, but the provider's
+        // acknowledgements for these writes may already be on the wire.
         provider.emit(.didDisconnect(peripheral: id, error: nil))
         await waitFor(timeout: .seconds(30)) { await onQueue(queue) { peripheral.connectionState == .disconnected } }
         #expect(await onQueue(queue) { peripheral.connectionState == .disconnected })
 
-        // A second connection fills the window again, with fresh sequences. The completion
-        // waits for the second `connect` to arrive: emitted ahead of it, it would land on a
-        // mirror that is not connecting yet and the reconnect would never finish.
+        // A second connection fills the window again with fresh sequences. The completion waits for
+        // the second `connect`, or it would land on a mirror that is not connecting yet.
         let reconnectTask = Task { try await central.connect(PeripheralIdentifier(uuid: id, name: nil)) }
         await waitFor(timeout: .seconds(30)) { Self.connectCount(provider, for: id) == 2 }
         #expect(Self.connectCount(provider, for: id) == 2)
         provider.emit(.didConnect(peripheral: id, name: nil, maximumWriteWithResponse: 512, maximumWriteWithoutResponse: 20))
         _ = try await bounded(seconds: 30) { try await reconnectTask.value }
-        // The disconnect emptied the mirror's discovery cache along with everything else
-        // per-connection, so the second connection discovers again.
+        // The disconnect emptied the mirror's discovery cache, together with everything else that
+        // belongs to one connection. The second connection therefore discovers again.
         await discoverMeasurement(provider, peripheral, for: id, on: queue)
         await Self.fillWindow(peripheral, on: queue, count: window)
         #expect(await onQueue(queue) { !peripheral.canSendWriteWithoutResponse })
@@ -428,28 +414,26 @@ struct LinkCentralTests {
         let live = Self.writeSequences(provider, for: id).filter { !stale.contains($0) }
         #expect(live.count == window)
 
-        // Every acknowledgement from the first connection now lands. None of those sequences
-        // is outstanding any more, so none of them may credit this connection's window.
+        // Every acknowledgement from the first connection now lands. None of those sequences is
+        // outstanding any more, so none may credit this connection's window.
         for sequence in stale {
             provider.emit(.writeWithoutResponseAccepted(peripheral: id, sequence: sequence))
         }
-        // And one for a sequence that was never sent at all, for good measure.
         provider.emit(.writeWithoutResponseAccepted(peripheral: id, sequence: .max))
 
-        // A barrier: the link is ordered, so an event behind those acknowledgements cannot be
-        // observed until every one of them has been handled. The window must still be shut.
+        // A barrier. The link is ordered, so the test sees nothing behind those acknowledgements
+        // until the session has handled all of them. The window must still be shut.
         provider.emit(.didUpdateANCSAuthorization(peripheral: id, authorized: true))
         await waitFor(timeout: .seconds(30)) { await onQueue(queue) { peripheral.ancsAuthorized } }
         #expect(await onQueue(queue) { peripheral.ancsAuthorized })
         #expect(await onQueue(queue) { !peripheral.canSendWriteWithoutResponse })
 
-        // An acknowledgement this connection did earn opens it, and nothing else does.
         provider.emit(.writeWithoutResponseAccepted(peripheral: id, sequence: try #require(live.first)))
         await waitFor(timeout: .seconds(30)) { await onQueue(queue) { peripheral.canSendWriteWithoutResponse } }
         #expect(await onQueue(queue) { peripheral.canSendWriteWithoutResponse })
     }
 
-    /// Issues `count` `.withoutResponse` writes straight at `peripheral`, filling the link's
+    /// Issues `count` `.withoutResponse` writes straight at `peripheral`, which fills the link's
     /// flow-control window.
     @Test("A read for a characteristic the mirror has not seen discovered is a no-op")
     func undiscoveredReadIsANoOp() async throws {
@@ -468,12 +452,12 @@ struct LinkCentralTests {
         })
         #expect(await onQueue(queue) { !peripheral.isDiscovered(Self.measurement) })
 
-        // Nothing was discovered, so nothing is sent — the same silence CoreBluetooth answers
-        // a read on a characteristic it has no object for.
+        // Nothing was discovered, so the client sends nothing. CoreBluetooth gives the same silence
+        // to a read on a characteristic for which it has no object.
         await onQueue(queue) { peripheral.readValue(for: Self.measurement) }
 
-        // A barrier behind it: the link is ordered, so once this request has been recorded the
-        // read would have been too, had one been sent.
+        // A barrier behind it. The link is ordered, so when the provider has recorded this request,
+        // it would also have recorded the read if the client had sent one.
         await onQueue(queue) { peripheral.readRSSI() }
         await waitFor(timeout: .seconds(30)) { provider.requests.withLock { $0 }.contains(.readRSSI(peripheral: id)) }
         let reads = provider.requests.withLock { $0 }.filter { request in
@@ -482,7 +466,8 @@ struct LinkCentralTests {
         }
         #expect(reads.isEmpty)
 
-        // Discovered, the very same read goes out: the guard is the cache, not the request.
+        // When the characteristic is discovered, the very same read goes out. The cache is the
+        // guard, not the request.
         await discoverMeasurement(provider, peripheral, for: id, on: queue)
         await onQueue(queue) { peripheral.readValue(for: Self.measurement) }
         await waitFor(timeout: .seconds(30)) {
@@ -495,15 +480,15 @@ struct LinkCentralTests {
         ))
     }
 
-    /// The descriptor the descriptor-side guards are exercised with — never discovered, so
-    /// the mirror cache has no record of it or of the characteristic under it.
+    /// The descriptor that the test uses to exercise the descriptor-side guards. It was never
+    /// discovered, so the mirror cache has no record of it or of the characteristic under it.
     private static let configuration = DescriptorIdentifier(uuid: "2902", characteristic: measurement)
 
-    /// Runs `body` against a connected peripheral whose mirror cache is empty, puts a
-    /// `readRSSI` barrier behind it, and returns every request the provider saw.
+    /// Runs `body` against a connected peripheral whose mirror cache is empty, then puts a
+    /// `readRSSI` barrier behind it and returns every request that the provider saw.
     ///
-    /// The link is ordered, so once the barrier has been recorded, whatever `body` would have
-    /// sent has been recorded too — the absence that follows is real, not a race.
+    /// The link is ordered, so once the barrier is recorded, anything `body` would have sent is
+    /// too. The absence is real, not a race.
     private func requestsAfterUndiscovered(
         _ body: @Sendable @escaping (LinkPeripheral) -> Void
     ) async throws -> [CentralRequest] {
@@ -566,12 +551,10 @@ struct LinkCentralTests {
         })
     }
 
-    /// Puts ``measurement`` in `peripheral`'s mirror cache, the way a real provider would:
-    /// a `PeripheralRemote` no-ops a write to a characteristic it has not seen discovered, so
-    /// a test that drives one directly has to discover it first.
+    /// Puts ``measurement`` in `peripheral`'s mirror cache, as a real provider would. A
+    /// `PeripheralRemote` ignores a write to a characteristic that it has not seen discovered.
     ///
-    /// The events are emitted unprompted — the mirror is updated from whatever the provider
-    /// reports, request or no request — and the wait gates on the cache itself.
+    /// The test emits the events unprompted and waits on the cache itself.
     private func discoverMeasurement(
         _ provider: ScriptedProvider,
         _ peripheral: LinkPeripheral,
@@ -602,8 +585,8 @@ struct LinkCentralTests {
         }
     }
 
-    /// The sequences of every `.withoutResponse` write `provider` has received for
-    /// `peripheral`, in the order they arrived.
+    /// The sequences of every `.withoutResponse` write that `provider` has received for
+    /// `peripheral`, in arrival order.
     private static func writeSequences(_ provider: ScriptedProvider, for peripheral: UUID) -> [UInt64] {
         provider.requests.withLock { $0 }.compactMap { request in
             guard case .writeValue(peripheral, _, _, .withoutResponse, let sequence) = request else { return nil }
@@ -624,13 +607,12 @@ struct LinkCentralTests {
 
         let connecting = UUID()
         let oldest = UUID()
-        // One more than the cap, so two of the three oldest mirrors have to go.
         let overflowing = (0..<1024).map { _ in UUID() }
 
         let (heldSurvived, oldestSurvived) = await onQueue(queue) { () -> (Bool, Bool) in
             let held = link.retrievePeripherals(withIdentifiers: [connecting]).first as? LinkPeripheral
-            // A connect in flight: `held` is `.connecting`, so however stale it becomes the
-            // cap must not drop it — the provider's events for it have to reach this object.
+            // A connect is in flight. `held` is `.connecting`, so the cap must not drop it, however
+            // stale it becomes. The provider's events for it have to reach this object.
             if let held { link.connect(held, options: nil, requiresANCS: false) }
             let stale = link.retrievePeripherals(withIdentifiers: [oldest]).first as? LinkPeripheral
             _ = link.retrievePeripherals(withIdentifiers: overflowing)
@@ -640,8 +622,8 @@ struct LinkCentralTests {
         }
 
         #expect(heldSurvived)
-        // The least recently sighted disconnected mirror was forgotten, so retrieving that
-        // identifier again mints a fresh one.
+        // The central forgot the disconnected mirror that it sighted least recently. When the test
+        // retrieves that identifier again, the central creates a fresh mirror.
         #expect(oldestSurvived == false)
     }
 
@@ -661,7 +643,6 @@ struct LinkCentralTests {
         let newest = UUID()
         let survived = await onQueue(queue) { () -> Bool in
             let first = link.retrievePeripherals(withIdentifiers: [oldest]).first as? LinkPeripheral
-            // One over the cap, and the older mirror is disconnected, so it is the one to go.
             _ = link.retrievePeripherals(withIdentifiers: [newest])
             return link.retrievePeripherals(withIdentifiers: [oldest]).first as? LinkPeripheral === first
         }
@@ -686,10 +667,9 @@ struct LinkCentralTests {
             guard let first = link.retrievePeripherals(withIdentifiers: [oldest]).first as? LinkPeripheral else {
                 return false
             }
-            // What `Central` installs on a mirror it is holding.
             first.eventHandler = { _ in }
-            // One over the cap: the older, disconnected mirror is the one to go — and its
-            // owner may well still be holding it.
+            // One over the cap. The older, disconnected mirror is the one to go. Its owner may well
+            // still hold it.
             _ = link.retrievePeripherals(withIdentifiers: [newest])
             return first.eventHandler == nil
         }
@@ -711,14 +691,14 @@ struct LinkCentralTests {
         let busy = UUID()
         let fresh = UUID()
         let filed = await onQueue(queue) { () -> Bool in
-            // The one slot the cap allows, occupied by a connect in flight — a mirror the cap
-            // is never allowed to drop.
+            // The one slot that the cap allows holds a connect in flight. The cap may never drop
+            // such a mirror.
             if let held = link.retrievePeripherals(withIdentifiers: [busy]).first as? LinkPeripheral {
                 link.connect(held, options: nil, requiresANCS: false)
             }
-            // Retrieving a second identifier overflows a table with nothing evictable in it.
-            // The mirror minted here must still be the one filed under `fresh`, or its owner
-            // holds an object the provider's events can never reach.
+            // Retrieving a second identifier overflows a table with nothing evictable. The mirror
+            // created here must still be the one filed under `fresh`, or its owner holds an object
+            // that the provider's events never reach.
             let created = link.retrievePeripherals(withIdentifiers: [fresh]).first as? LinkPeripheral
             let again = link.retrievePeripherals(withIdentifiers: [fresh]).first as? LinkPeripheral
             return created != nil && created === again
@@ -746,16 +726,16 @@ struct LinkCentralTests {
         let held = try #require(await onQueue(queue) {
             link.retrievePeripherals(withIdentifiers: [target]).first as? LinkPeripheral
         })
-        // Overflows the cap of one, evicting `held` between the retrieval and the connect —
-        // the window a caller holding a perfectly valid peripheral cannot see.
+        // The test overflows the cap of one, which evicts `held` between the retrieval and the
+        // connect. A caller that holds a perfectly valid peripheral cannot see this window.
         await onQueue(queue) { _ = link.retrievePeripherals(withIdentifiers: [UUID()]) }
 
         await onQueue(queue) { link.connect(held, options: nil, requiresANCS: false) }
 
         await waitFor(timeout: .seconds(10)) { Self.connectCount(provider, for: target) == 1 }
         #expect(Self.connectCount(provider, for: target) == 1)
-        // Re-filed under its identifier, so the provider's events for it reach the very
-        // object the caller is holding.
+        // The central files the mirror again under its identifier, so the provider's events for it
+        // reach the very object that the caller holds.
         #expect(await onQueue(queue) { link.retrievePeripherals(withIdentifiers: [target]).first as? LinkPeripheral === held })
         #expect(await onQueue(queue) { held.connectionState } == .connecting)
     }
@@ -788,8 +768,8 @@ struct LinkCentralTests {
         let stale = try #require(await onQueue(queue) {
             link.retrievePeripherals(withIdentifiers: [target]).first as? LinkPeripheral
         })
-        // Evicted by the overflow, then re-minted: the central now files a *different* mirror
-        // for `target`, and the provider's events for it would go there, not to `stale`.
+        // The overflow evicted the mirror and the central created it again, so the central files a
+        // *different* mirror for `target`. The provider's events would go there, not to `stale`.
         await onQueue(queue) { _ = link.retrievePeripherals(withIdentifiers: [UUID()]) }
         let current = try #require(await onQueue(queue) {
             link.retrievePeripherals(withIdentifiers: [target]).first as? LinkPeripheral
@@ -804,7 +784,8 @@ struct LinkCentralTests {
         #expect(reported.first?.peripheral == target)
         #expect(reported.first?.error?.domain == "BLESwiftLink")
         #expect(reported.first?.error?.code == 7)
-        // Refused, not sent: the provider never saw a connect for the stale handle.
+        // The client refused the connect and did not send it. The provider never saw a connect for
+        // the stale handle.
         #expect(Self.connectCount(provider, for: target) == 0)
         #expect(await onQueue(queue) { stale.connectionState } == .disconnected)
     }

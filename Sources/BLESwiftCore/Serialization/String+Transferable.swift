@@ -9,9 +9,7 @@ extension String: Transmittable, Receivable {
 
     /// Decodes `bluetoothData` as a UTF-8 string.
     ///
-    /// - Throws: ``BLESwiftError/invalidStringEncoding`` if `bluetoothData` is not valid
-    ///   UTF-8. A naive force-unwrapping implementation (`String(data:encoding:)!`) would
-    ///   crash on malformed input; this never does.
+    /// - Throws: ``BLESwiftError/invalidStringEncoding`` if `bluetoothData` is not valid UTF-8.
     public init(bluetoothData: Data) throws {
         guard let decoded = String(data: bluetoothData, encoding: .utf8) else {
             throw BLESwiftError.invalidStringEncoding
@@ -21,9 +19,9 @@ extension String: Transmittable, Receivable {
 
     /// Encodes this string as UTF-8 data.
     ///
-    /// - Throws: ``BLESwiftError/invalidStringEncoding`` if the string cannot be represented
-    ///   as UTF-8 (not reachable in practice; kept `throws` for symmetry and to avoid a
-    ///   force-unwrap).
+    /// - Throws: ``BLESwiftError/invalidStringEncoding`` if the string cannot be represented as
+    ///   UTF-8. This does not occur in practice. The function is `throws` for symmetry and to avoid
+    ///   a force-unwrap.
     public func toBluetoothData() throws -> Data {
         guard let encoded = data(using: .utf8) else {
             throw BLESwiftError.invalidStringEncoding

@@ -9,8 +9,8 @@ import Foundation
 
 /// The Bluetooth SIG "Battery Level" characteristic (GSS §3.27 Battery Level, `0x2A19`).
 ///
-/// Byte layout: a single `UInt8` giving the remaining battery as a percentage, 0–100.
-/// Values above 100 are invalid and cause decoding to throw.
+/// Byte layout: a single `UInt8` with the remaining battery as a percentage, 0–100. Decoding
+/// throws for a value above 100.
 public struct BatteryLevel: Receivable, Transmittable, Sendable, Equatable {
 
     /// The Bluetooth SIG-assigned Battery service (`0x180F`).
@@ -21,6 +21,8 @@ public struct BatteryLevel: Receivable, Transmittable, Sendable, Equatable {
     /// The remaining battery charge, as a percentage, 0–100.
     public let percentage: UInt8
 
+    /// Creates a value from a battery percentage. The initializer does not check the range.
+    /// ``toBluetoothData()`` writes the value as is.
     public init(percentage: UInt8) {
         self.percentage = percentage
     }

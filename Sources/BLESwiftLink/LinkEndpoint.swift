@@ -5,29 +5,29 @@
 
 import Foundation
 
-/// Where a provider listens: a host and TCP port.
+/// The place where a provider listens: a host and a TCP port.
 ///
-/// **`localhost` is normalized to `127.0.0.1`.** The name resolves to both loopback families
-/// and the two ends of a link would not have to pick the same one: a listener bound to the
-/// IPv4 loopback is unreachable from a client that dialed `::1`, and the connect fails with
-/// nothing to explain it. Storing the literal address makes both ends agree by construction,
-/// and is why ``host`` may not read back exactly what was passed in.
+/// **The endpoint changes `localhost` to `127.0.0.1`.** The name `localhost` resolves to both
+/// loopback families, so the two ends could pick different families. A client that dials `::1`
+/// cannot reach a listener on the IPv4 loopback, and the connect fails with no explanation. The
+/// endpoint stores the literal address, so both ends use the same address. Thus ``host`` can
+/// differ from the string that you gave to the endpoint.
 public struct LinkEndpoint: Sendable, Hashable, Codable, CustomStringConvertible {
 
-    /// The environment variable both the client and the provider honor.
+    /// The environment variable that the client and the provider both read.
     public static let environmentKey = "BLESWIFT_LINK"
 
     /// `127.0.0.1:45541`.
     public static let `default` = LinkEndpoint(host: "127.0.0.1", port: 45541)
 
-    /// The hostname or IP address to connect to. `localhost` is stored as `127.0.0.1`; see
-    /// the type's overview.
+    /// The hostname or IP address to connect to. The endpoint stores `localhost` as
+    /// `127.0.0.1`.
     public var host: String {
         get { _host }
         set { _host = Self.normalized(newValue) }
     }
 
-    /// Backs ``host``, always already normalized.
+    /// The stored value of ``host``. It is always normalized.
     private var _host: String
     /// The TCP port to connect to.
     public var port: UInt16
@@ -35,27 +35,26 @@ public struct LinkEndpoint: Sendable, Hashable, Codable, CustomStringConvertible
     /// Creates an endpoint from a host and port.
     ///
     /// - Parameters:
-    ///   - host: The hostname or IP address. `localhost` becomes `127.0.0.1`, so a listener
-    ///     and a client given the same string bind and dial the same address.
+    ///   - host: The hostname or IP address. `localhost` becomes `127.0.0.1`. Thus a listener
+    ///     and a client that get the same string bind and dial the same address.
     ///   - port: The TCP port.
     public init(host: String, port: UInt16) {
         self._host = Self.normalized(host)
         self.port = port
     }
 
-    /// `host` with `localhost` — in any casing, hostnames being case-insensitive — replaced by
-    /// the IPv4 loopback literal it is stored as. Every other host is returned unchanged.
+    /// Returns `host`, with the IPv4 loopback literal in place of `localhost`. The match ignores
+    /// case. Every other host stays the same.
     private static func normalized(_ host: String) -> String {
         host.lowercased() == "localhost" ? "127.0.0.1" : host
     }
 
     /// Parses `"host:port"`, or `"[host]:port"` for an IPv6 address. Returns `nil` for
-    /// anything else.
+    /// any other string.
     ///
-    /// The brackets are what make the split unambiguous: an IPv6 address is itself full of
-    /// colons, so `"::1:45541"` could be read either way. A bracketed host is stored without
-    /// its brackets — ``host`` is what a socket API is handed — and ``description`` puts them
-    /// back, so the two round-trip.
+    /// The brackets make the split clear, because an IPv6 address has many colons. The endpoint
+    /// stores a bracketed host without its brackets, because a socket API needs that form.
+    /// ``description`` adds the brackets again, so the two operations reverse each other.
     public init?(string: String) {
         if string.hasPrefix("["), let close = string.firstIndex(of: "]") {
             let host = String(string[string.index(after: string.startIndex)..<close])
@@ -72,38 +71,41 @@ public struct LinkEndpoint: Sendable, Hashable, Codable, CustomStringConvertible
         self.init(host: host, port: port)
     }
 
-    /// Keeps the encoded shape `{"host": …, "port": …}` even though ``host`` is computed over
-    /// a private stored property.
+    /// Keeps the encoded shape `{"host": …, "port": …}`. ``host`` is a computed property over a
+    /// private stored property.
     private enum CodingKeys: String, CodingKey {
         case _host = "host"
         case port
     }
 
-    /// Decodes an endpoint, normalizing the decoded host exactly as ``init(host:port:)``
-    /// does — a value encoded before the normalization existed still reads back agreeing with
-    /// what a listener binds.
+    /// Decodes an endpoint. This initializer normalizes the decoded host in the same way as
+    /// ``init(host:port:)``.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self._host = Self.normalized(try container.decode(String.self, forKey: ._host))
         self.port = try container.decode(UInt16.self, forKey: .port)
     }
 
-    /// The endpoint named by `BLESWIFT_LINK`, if set and well-formed.
+    /// The endpoint that `BLESWIFT_LINK` names, or `nil` if the variable is not set or is not
+    /// well-formed.
     public static func fromEnvironment(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> LinkEndpoint? {
         environment[environmentKey].flatMap(LinkEndpoint.init(string:))
     }
 
-    /// Whether ``host`` names the loopback interface — `localhost`, any address in
-    /// `127.0.0.0/8`, or the IPv6 loopback `::1` (bracketed or not).
+    /// Whether ``host`` names the loopback interface. The loopback interface is one of these:
     ///
-    /// The link is **unauthenticated**: anything that can open a TCP connection to a provider
-    /// is served, with the Mac's Bluetooth radio behind it when `--passthrough` is on. It is
-    /// meant for loopback, and a listener bound anywhere else is exposing that to the network.
-    /// A ``LinkListener`` binds loopback-only exactly when this is `true`.
+    /// - `localhost`
+    /// - any address in `127.0.0.0/8`
+    /// - the IPv6 loopback `::1`, with or without brackets
+    ///
+    /// The link is **unauthenticated**. The provider serves anything that can open a TCP
+    /// connection to it. If `--passthrough` is on, the Mac's Bluetooth radio is behind that
+    /// connection. A listener on any other address exposes the radio to the network. A
+    /// ``LinkListener`` binds to loopback only when this value is `true`.
     public var isLoopback: Bool { LinkTransportParameters.isLoopback(host) }
 
-    /// `"host:port"` — or `"[host]:port"` when ``host`` is an IPv6 address, so that what this
-    /// prints is what ``init(string:)`` reads back.
+    /// `"host:port"`, or `"[host]:port"` when ``host`` is an IPv6 address. ``init(string:)`` reads
+    /// this text back.
     public var description: String {
         host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
     }

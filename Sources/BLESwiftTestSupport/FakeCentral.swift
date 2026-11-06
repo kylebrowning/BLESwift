@@ -8,38 +8,36 @@ import Dispatch
 import Foundation
 import BLESwiftCompat17
 
-/// A scriptable stand-in for `CBCentralManager`, conforming to `CentralManaging`.
+/// A scriptable stand-in for `CBCentralManager`. It conforms to `CentralManaging`.
 ///
-/// `CBCentralManager` cannot be instantiated or scripted in tests; `FakeCentral` lets you
-/// drive the shim protocol's call sites and script the events a real manager would
-/// eventually deliver via its delegate, with no hardware or mocking library. Construct via
-/// ``init(queue:state:)``.
+/// You cannot instantiate or script `CBCentralManager` in tests. `FakeCentral` lets you drive the
+/// shim protocol's call sites and script the events that a real manager delivers with its
+/// delegate. It needs no hardware and no mocking library. Construct it with ``init(queue:state:)``.
 ///
-/// **Concurrency — queue-confined, not lock-protected.** Every stored property is
-/// `nonisolated(unsafe)`, safe only because of a structural invariant:
-/// - Every `CentralManaging` method and property accessor asserts
-///   `dispatchPrecondition(condition: .onQueue(queue))` at entry and touches state
-///   inline — the serial queue itself is the synchronization, as it is for a real
-///   `CBCentralManager`.
-/// - Event delivery is always `queue.async`, mirroring CoreBluetooth's asynchronous
-///   delegate delivery; callers needing an event to have landed use ``onQueue(_:)``.
-/// - ``onQueue(_:)`` is the only sanctioned door for off-queue code to configure or
-///   inspect state. `static var bluetoothAuthorization` is the one exception — not scoped
-///   to any single fake's queue, so it's backed by a `Mutex` instead.
+/// **Concurrency: a queue confines it and no lock protects it.** Every stored property is
+/// `nonisolated(unsafe)`. This is safe because of a structural invariant:
+/// - Every `CentralManaging` method and property accessor asserts `dispatchPrecondition(condition:
+///   .onQueue(queue))` at entry and touches state inline. The serial queue is the synchronization,
+///   as it is for a real `CBCentralManager`.
+/// - Event delivery is always `queue.async`, which mirrors CoreBluetooth's asynchronous delegate
+///   delivery. A caller that needs an event to have arrived uses ``onQueue(_:)``.
+/// - ``onQueue(_:)`` is the only door for off-queue code to configure or inspect state. The one
+///   exception is `static var bluetoothAuthorization`. It belongs to no single fake's queue, so a
+///   `Mutex` backs it.
 public final class FakeCentral: CentralManaging, Sendable {
 
     /// How a scripted call to ``connect(_:options:)`` resolves.
     public enum ConnectBehavior: Sendable {
-        /// Deliver `CentralEvent.didConnect` on the queue, asynchronously — as CB would.
+        /// Deliver `CentralEvent.didConnect` on the queue, asynchronously, as CoreBluetooth does.
         case succeed
         /// Deliver `CentralEvent.didFailToConnect` on the queue, asynchronously.
         case fail(NSError)
-        /// Never deliver an event, simulating a connection attempt that never completes
-        /// (for exercising timeout/cancellation behavior).
+        /// Never deliver an event, to simulate a connection attempt that never completes. Use it to
+        /// test timeout and cancellation.
         case hang
     }
 
-    /// The queue every CB-mirroring method and event delivery is confined to.
+    /// The queue that confines every method and event delivery.
     public let queue: DispatchQueue
 
     nonisolated(unsafe) private var _radioState: CentralState
@@ -63,12 +61,12 @@ public final class FakeCentral: CentralManaging, Sendable {
     nonisolated(unsafe) private var _retrievablePeripherals: [UUID: FakePeripheral] = [:]
     nonisolated(unsafe) private var _systemConnectedPeripherals: [(peripheral: FakePeripheral, services: [ServiceIdentifier])] = []
 
-    /// Backs ``bluetoothAuthorization``; a `static var` (mirroring `CBManager.authorization`)
-    /// isn't scoped to one fake's queue, so it's `Mutex`-protected instead.
+    /// Backs ``bluetoothAuthorization``. A `static var` (it mirrors `CBManager.authorization`)
+    /// belongs to no single fake's queue, so a `Mutex` protects it.
     private static let authorizationBox = Mutex<BluetoothAuthorization>(.allowedAlways)
 
-    /// The `BluetoothAuthorization` this fake reports. Settable directly — `Mutex`
-    /// protects it, so no queue confinement or `onQueue(_:)` hop is needed.
+    /// The `BluetoothAuthorization` that this fake reports. A `Mutex` protects it, so you can set
+    /// it directly, with no ``onQueue(_:)`` hop.
     public static var bluetoothAuthorization: BluetoothAuthorization {
         get { authorizationBox.withLock { $0 } }
         set { authorizationBox.withLock { $0 = newValue } }
@@ -77,29 +75,28 @@ public final class FakeCentral: CentralManaging, Sendable {
     /// Creates a `FakeCentral` confined to `queue`.
     ///
     /// - Parameters:
-    ///   - queue: The queue every CB-mirroring method and event delivery is confined to —
-    ///     the same queue the `Central` actor's executor must be tied to. Must be serial
-    ///     (`DispatchQueue(label:)` is).
-    ///   - state: The initial `CentralState`. Defaults to `.unknown`, matching a real
-    ///     `CBCentralManager` before its first `centralManagerDidUpdateState(_:)`.
+    ///   - queue: The queue that confines every method and event delivery. It must be the queue
+    ///     that the `Central` actor's executor uses. It must be serial (`DispatchQueue(label:)`
+    ///     makes a serial queue).
+    ///   - state: The initial `CentralState`. The default is `.unknown`. A real `CBCentralManager`
+    ///     has this state before its first `centralManagerDidUpdateState(_:)`.
     public init(queue: DispatchQueue, state: CentralState = .unknown) {
         self.queue = queue
         self._radioState = state
     }
 
-    /// Hops onto ``queue`` to run `body` and returns its result — the only sanctioned way
-    /// for off-queue code to configure this fake or read its counters/state for
-    /// assertions. Because `queue` is serial, this also flushes every previously-scheduled
-    /// `.async` event delivery first.
+    /// Runs `body` on ``queue`` and returns its result. Off-queue code must use this to configure
+    /// this fake or to read its counters and state. Because `queue` is serial, it also flushes
+    /// every `.async` event delivery that is already scheduled.
     ///
-    /// Never blocks the calling thread — deliberately not `queue.sync`: under `swift
-    /// test`'s parallel runner, test bodies run on a fixed-width cooperative thread pool,
-    /// and a blocking `queue.sync` there risks parking enough threads to deadlock other
-    /// tests' timing continuations.
+    /// It never blocks the calling thread, and deliberately does not use `queue.sync`. Under the
+    /// parallel runner of `swift test`, test bodies run on a cooperative thread pool of fixed
+    /// width. A blocking `queue.sync` there can park enough threads to deadlock other tests' timing
+    /// continuations.
     ///
-    /// - Warning: Never `await` this from within an ``eventHandler`` callback, or any other
-    ///   code already on `queue` — the caller would hold `queue` while awaiting a `body`
-    ///   enqueued behind itself, a deadlock.
+    /// - Warning: Never `await` this function from an ``eventHandler`` callback or from other code
+    ///   that already runs on `queue`. The caller would hold `queue` while it awaits a `body` that
+    ///   waits behind it, and that deadlocks.
     public func onQueue<T: Sendable>(_ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async {
@@ -114,8 +111,8 @@ public final class FakeCentral: CentralManaging, Sendable {
         return _radioState
     }
 
-    /// Receives every `CentralEvent` this fake delivers, on ``queue``. The
-    /// `CentralManaging` protocol witness — configure via ``onQueue(_:)``.
+    /// Receives every `CentralEvent` that this fake delivers, on ``queue``. It witnesses the
+    /// `CentralManaging` requirement. Configure it with ``onQueue(_:)``.
     public var eventHandler: ((CentralEvent) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -127,9 +124,8 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Determines how the next call(s) to ``connect(_:options:)`` resolve, for a peripheral
-    /// with no entry in ``connectBehaviors``. Defaults to `.succeed`. Configure via
-    /// ``onQueue(_:)``.
+    /// How ``connect(_:options:requiresANCS:)`` resolves for a peripheral that has no entry in
+    /// ``connectBehaviors``. The default is `.succeed`. Configure it with ``onQueue(_:)``.
     public var connectBehavior: ConnectBehavior {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -141,11 +137,10 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Per-peripheral overrides of ``connectBehavior``, keyed by identifier — lets a
-    /// multi-peripheral test script independent outcomes for `connect(_:options:)` calls
-    /// against different fakes (e.g. one `.succeed`, one `.hang`). A peripheral with no
-    /// entry here falls back to ``connectBehavior``. Empty by default. Configure via
-    /// ``onQueue(_:)``.
+    /// Per-peripheral overrides of ``connectBehavior``, keyed by identifier. A test with several
+    /// peripherals uses this to script independent connect results, such as one `.succeed` and one
+    /// `.hang`. A peripheral with no entry uses ``connectBehavior``. The default is empty.
+    /// Configure it with ``onQueue(_:)``.
     public var connectBehaviors: [UUID: ConnectBehavior] {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -157,112 +152,104 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// The number of times ``connect(_:options:)`` has been called, across every
-    /// peripheral.
+    /// The number of ``connect(_:options:requiresANCS:)`` calls, across every peripheral.
     public var connectCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _connectCallCount
     }
 
-    /// The number of times ``connect(_:options:)`` has been called, keyed by the target
-    /// peripheral's identifier — lets a multi-peripheral test assert connection attempts
-    /// per peripheral independently. Missing keys mean zero calls for that identifier.
+    /// The number of ``connect(_:options:requiresANCS:)`` calls, keyed by the target peripheral's
+    /// identifier. A test with several peripherals uses this to assert each one's connection
+    /// attempts. A missing key means zero calls.
     public var connectCallCounts: [UUID: Int] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _connectCallCounts
     }
 
-    /// The `options` passed to the most recent ``connect(_:options:)`` call (`nil` before
-    /// any connect, or when the caller passed `nil`). Lets you assert that `WarningOptions`
-    /// plumbing reaches the backend seam.
+    /// The `options` of the latest ``connect(_:options:requiresANCS:)`` call. It is `nil` before
+    /// any connect, or when the caller passed `nil`. Use it to assert that the `WarningOptions`
+    /// reach the backend seam.
     public var lastConnectOptions: WarningOptions? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _lastConnectOptions
     }
 
-    /// The `requiresANCS` flag passed to the most recent
-    /// ``connect(_:options:requiresANCS:)`` call, or `nil` before any connect. Lets you
-    /// assert that `requiresANCS:` plumbing reaches the backend seam.
+    /// The `requiresANCS` flag of the latest ``connect(_:options:requiresANCS:)`` call. It is `nil`
+    /// before any connect. Use it to assert that the value reaches the backend seam.
     public var lastConnectRequiresANCS: Bool? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _lastConnectRequiresANCS
     }
 
-    /// The number of times ``registerForConnectionEvents(services:peripherals:)`` has been
-    /// called.
+    /// The number of calls to ``registerForConnectionEvents(services:peripherals:)``.
     public var connectionEventRegistrationCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _connectionEventRegistrationCount
     }
 
-    /// The number of times ``unregisterForConnectionEvents()`` has been called.
+    /// The number of calls to ``unregisterForConnectionEvents()``.
     public var connectionEventUnregistrationCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _connectionEventUnregistrationCount
     }
 
-    /// The `services` passed to the most recent
-    /// ``registerForConnectionEvents(services:peripherals:)`` call (`nil` before any, or
-    /// when the caller passed `nil`).
+    /// The `services` of the latest ``registerForConnectionEvents(services:peripherals:)`` call. It
+    /// is `nil` before any call, or when the caller passed `nil`.
     public var lastConnectionEventServices: [ServiceIdentifier]? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _lastConnectionEventServices
     }
 
-    /// The peripheral UUIDs passed to the most recent
-    /// ``registerForConnectionEvents(services:peripherals:)`` call (`nil` before any, or
-    /// when the caller passed `nil`).
+    /// The peripheral UUIDs of the latest ``registerForConnectionEvents(services:peripherals:)``
+    /// call. It is `nil` before any call, or when the caller passed `nil`.
     public var lastConnectionEventPeripherals: [UUID]? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _lastConnectionEventPeripherals
     }
 
-    /// The number of times ``cancelPeripheralConnection(_:)`` has been called, across every
-    /// peripheral.
+    /// The number of calls to ``cancelPeripheralConnection(_:)``, across every peripheral.
     public var cancelCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _cancelCallCount
     }
 
-    /// The number of times ``cancelPeripheralConnection(_:)`` has been called, keyed by the
-    /// target peripheral's identifier. Missing keys mean zero calls for that identifier.
+    /// The number of ``cancelPeripheralConnection(_:)`` calls, keyed by the target peripheral's
+    /// identifier. A missing key means zero calls.
     public var cancelCallCounts: [UUID: Int] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _cancelCallCounts
     }
 
-    /// The number of times ``scanForPeripherals(withServices:options:)`` has been called.
+    /// The number of calls to ``scanForPeripherals(withServices:options:)``.
     public var scanCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _scanCallCount
     }
 
-    /// The `options` passed to the most recent ``scanForPeripherals(withServices:options:)``
-    /// call (`nil` before any scan). Lets you assert `ScanOptions` plumbing without
-    /// dictionary assertions.
+    /// The `options` of the latest ``scanForPeripherals(withServices:options:)`` call. It is `nil`
+    /// before any scan. Use it to assert `ScanOptions` without dictionary comparisons.
     public var lastScanOptions: ScanOptions? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _lastScanOptions
     }
 
-    /// The `services` passed to the most recent ``scanForPeripherals(withServices:options:)``
-    /// call, double-optional: the outer `nil` means no scan has been started yet, an inner
-    /// `nil` means the last scan was unscoped (`services: nil`). Lets you assert that
+    /// The `services` of the latest ``scanForPeripherals(withServices:options:)`` call. The type is
+    /// a double optional. The outer `nil` means that no scan has started. The inner `nil` means
+    /// that the last scan was unscoped (`services: nil`). Use it to assert that
     /// `ScanFilter.services` reaches the radio seam.
     public var lastScanServices: [ServiceIdentifier]?? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _lastScanServices
     }
 
-    /// The number of times ``stopScan()`` has been called.
+    /// The number of calls to ``stopScan()``.
     public var stopScanCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _stopScanCallCount
     }
 
-    /// Peripherals ``retrievePeripherals(withIdentifiers:)`` should return, keyed by
-    /// identifier. Empty (i.e. "nothing cached") by default. Configure via
-    /// ``onQueue(_:)``.
+    /// The peripherals that ``retrievePeripherals(withIdentifiers:)`` returns, keyed by identifier.
+    /// The default is empty (nothing cached). Configure it with ``onQueue(_:)``.
     public var retrievablePeripherals: [UUID: FakePeripheral] {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -274,12 +261,12 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Peripherals ``retrieveConnectedPeripherals(withServices:)`` filters over, paired
-    /// with the services each should be treated as containing. Empty by default. Configure
-    /// via ``onQueue(_:)``.
+    /// The peripherals that ``retrieveConnectedPeripherals(withServices:)`` filters, each with the
+    /// services that the fake treats it as containing. The default is empty. Configure it with
+    /// ``onQueue(_:)``.
     ///
-    /// Deliberately separate from `FakePeripheral.availableServices`: `nil` there means
-    /// permissive auto-discovery, which has no meaning as a connected-services filter.
+    /// This is separate from `FakePeripheral.availableServices` on purpose. There, `nil` means
+    /// permissive auto-discovery, which has no meaning as a filter for connected services.
     public var systemConnectedPeripherals: [(peripheral: FakePeripheral, services: [ServiceIdentifier])] {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -291,10 +278,9 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Simulates CoreBluetooth updating the radio state and, asynchronously, delivers
-    /// `CentralEvent.didUpdateState(_:)` on ``queue``. Off-queue safe to call directly —
-    /// hops onto `queue` itself. Flush with ``onQueue(_:)`` before asserting the event
-    /// landed.
+    /// Simulates a radio state update. It then delivers `CentralEvent.didUpdateState(_:)`
+    /// asynchronously on ``queue``. You can call it off the queue, because it hops onto `queue`
+    /// itself. Flush with ``onQueue(_:)`` before you assert that the event arrived.
     public func simulateStateChange(_ newState: CentralState) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -303,8 +289,8 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Simulates CoreBluetooth discovering a peripheral during a scan and, asynchronously,
-    /// delivers `CentralEvent.didDiscover(peripheral:advertisement:rssi:)` on ``queue``.
+    /// Simulates a peripheral discovery during a scan. It then delivers
+    /// `CentralEvent.didDiscover(peripheral:advertisement:rssi:)` asynchronously on ``queue``.
     public func simulateDiscovery(peripheral: PeripheralIdentifier, advertisement: AdvertisementData, rssi: Int) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -312,8 +298,8 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Simulates an unexpected disconnect and, asynchronously, delivers
-    /// `CentralEvent.didDisconnect(_:error:)` on ``queue``.
+    /// Simulates an unexpected disconnect. It then delivers `CentralEvent.didDisconnect(_:error:)`
+    /// asynchronously on ``queue``.
     public func simulateDisconnect(_ peripheral: PeripheralIdentifier, error: NSError?) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -321,8 +307,8 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Simulates a system-level connection event for `peripheral` and, asynchronously,
-    /// delivers `CentralEvent.connectionEventDidOccur(peripheral:event:)` on ``queue``.
+    /// Simulates a system-level connection event for `peripheral`. It then delivers
+    /// `CentralEvent.connectionEventDidOccur(peripheral:event:)` asynchronously on ``queue``.
     public func simulateConnectionEvent(_ kind: SystemConnectionEvent.Kind, for peripheral: PeripheralIdentifier) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -330,10 +316,10 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Simulates an ANCS authorization change for `peripheral` and, asynchronously,
-    /// delivers `CentralEvent.didUpdateANCSAuthorization(peripheral:authorized:)` on
-    /// ``queue``. Pair with setting `FakePeripheral.ancsAuthorized`, as a real
-    /// `CBPeripheral` would reflect the new value by the time the callback lands.
+    /// Simulates an ANCS authorization change for `peripheral`. It then delivers
+    /// `CentralEvent.didUpdateANCSAuthorization(peripheral:authorized:)` asynchronously on
+    /// ``queue``. Also set `FakePeripheral.ancsAuthorized`, because a real `CBPeripheral` shows the
+    /// new value when the callback arrives.
     public func simulateANCSAuthorization(_ authorized: Bool, for peripheral: PeripheralIdentifier) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -342,13 +328,13 @@ public final class FakeCentral: CentralManaging, Sendable {
     }
 
     #if os(iOS)
-    /// Simulates CoreBluetooth restoring preserved state after a background relaunch and,
-    /// asynchronously, delivers `CentralEvent.willRestoreState(_:)` on ``queue``.
+    /// Simulates CoreBluetooth restoring preserved state after a background relaunch. It then
+    /// delivers `CentralEvent.willRestoreState(_:)` asynchronously on ``queue``.
     ///
-    /// Call **before** the `.poweredOn` ``simulateStateChange(_:)`` — CoreBluetooth
-    /// guarantees `willRestoreState` precedes `centralManagerDidUpdateState`, and
-    /// `Central`'s routing relies on that ordering. Both deliveries are `queue.async`, so
-    /// calling the two simulate methods in that order preserves it.
+    /// Call it **before** the `.poweredOn` ``simulateStateChange(_:)``. CoreBluetooth guarantees
+    /// that `willRestoreState` comes before `centralManagerDidUpdateState`, and `Central`'s routing
+    /// relies on that order. Both deliveries use `queue.async`, so calling the two simulate
+    /// methods in that order keeps the order.
     public func simulateRestoration(_ state: RestoredState) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -356,8 +342,8 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
     #else
-    /// `package` mirror of the iOS-only public `simulateRestoration(_:)` — see the
-    /// dual-access note on `RestoredState` (`BLESwiftCore`). **Keep the two in sync.**
+    /// A `package` mirror of the public `simulateRestoration(_:)`, which exists on iOS only. See
+    /// the dual-access note on `RestoredState` (`BLESwiftCore`). **Keep the two in sync.**
     package func simulateRestoration(_ state: RestoredState) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -368,8 +354,8 @@ public final class FakeCentral: CentralManaging, Sendable {
 
     // MARK: - CentralManaging
 
-    /// Records the call. Does not itself deliver a discovery event — use
-    /// ``simulateDiscovery(peripheral:advertisement:rssi:)`` to script sightings.
+    /// Records the call. It does not deliver a discovery event. To script sightings, use
+    /// ``simulateDiscovery(peripheral:advertisement:rssi:)``.
     public func scanForPeripherals(withServices services: [ServiceIdentifier]?, options: ScanOptions) {
         dispatchPrecondition(condition: .onQueue(queue))
         _scanCallCount += 1
@@ -383,10 +369,10 @@ public final class FakeCentral: CentralManaging, Sendable {
         _stopScanCallCount += 1
     }
 
-    /// Records the call and, per ``connectBehaviors`` (falling back to ``connectBehavior``),
-    /// asynchronously delivers `.didConnect`, `.didFailToConnect`, or nothing (`.hang`) on
-    /// ``queue``. A no-op beyond the call count if `peripheral` isn't a `FakePeripheral` —
-    /// not a trap.
+    /// Records the call. It then delivers `.didConnect` or `.didFailToConnect` asynchronously on
+    /// ``queue``, as ``connectBehaviors`` defines (``connectBehavior`` if there is no entry). For
+    /// `.hang`, it delivers nothing. If `peripheral` is not a `FakePeripheral`, the function only
+    /// counts the call and does not trap.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectCallCount += 1
@@ -409,8 +395,8 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Records the call, including a per-peripheral count in ``cancelCallCounts`` (a no-op
-    /// beyond the total ``cancelCallCount`` if `peripheral` is not a `FakePeripheral`).
+    /// Records the call and counts it for the peripheral in ``cancelCallCounts``. If `peripheral`
+    /// is not a `FakePeripheral`, the function only adds to the total ``cancelCallCount``.
     public func cancelPeripheralConnection(_ peripheral: any PeripheralRemote) {
         dispatchPrecondition(condition: .onQueue(queue))
         _cancelCallCount += 1
@@ -419,16 +405,14 @@ public final class FakeCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Returns the scripted peripherals from ``retrievablePeripherals`` matching
-    /// `identifiers`.
+    /// Returns the scripted peripherals from ``retrievablePeripherals`` that match `identifiers`.
     public func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote] {
         dispatchPrecondition(condition: .onQueue(queue))
         return identifiers.compactMap { _retrievablePeripherals[$0] }
     }
 
-    /// Returns the scripted peripherals (``systemConnectedPeripherals``) whose services
-    /// intersect `services` (any-of, mirroring CoreBluetooth). Order follows the scripted
-    /// array.
+    /// Returns the scripted peripherals (``systemConnectedPeripherals``) that have a service in
+    /// `services` (any of them, as CoreBluetooth does). The order follows the scripted array.
     public func retrieveConnectedPeripherals(withServices services: [ServiceIdentifier]) -> [any PeripheralRemote] {
         dispatchPrecondition(condition: .onQueue(queue))
         let query = Set(services)
@@ -437,8 +421,8 @@ public final class FakeCentral: CentralManaging, Sendable {
             .map(\.peripheral)
     }
 
-    /// Records the call and its match options. Does not itself deliver events — use
-    /// ``simulateConnectionEvent(_:for:)`` to script them.
+    /// Records the call and its match options. It does not deliver events. To script events, use
+    /// ``simulateConnectionEvent(_:for:)``.
     public func registerForConnectionEvents(services: [ServiceIdentifier]?, peripherals: [UUID]?) {
         dispatchPrecondition(condition: .onQueue(queue))
         _connectionEventRegistrationCount += 1

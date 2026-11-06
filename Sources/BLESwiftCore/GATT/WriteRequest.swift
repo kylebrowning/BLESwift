@@ -5,25 +5,25 @@
 
 import Foundation
 
-/// A write request from a remote central for one or more characteristics your
-/// `PeripheralHost` hosts, surfaced on `PeripheralHost/writeRequests()`.
+/// A write request from a remote central for one or more characteristics that your `PeripheralHost`
+/// hosts. It appears on `PeripheralHost/writeRequests()`.
 ///
-/// CoreBluetooth delivers writes in a batch, answered by a single
-/// `PeripheralHost/respond(to:with:)-(WriteRequest,_)` call: `.success` applies every
-/// ``entries`` write; `.failure(ATTError)` rejects the whole batch.
+/// CoreBluetooth delivers writes in a batch. A single
+/// `PeripheralHost/respond(to:with:)-(WriteRequest,_)` call answers the batch. `.success` applies
+/// every ``entries`` write. `.failure(ATTError)` rejects the whole batch.
 public struct WriteRequest: Sendable, Hashable {
 
-    /// One write within a batch.
+    /// One write in a batch.
     public struct Entry: Sendable, Hashable {
 
-        /// The remote central that issued the write.
+        /// The remote central that sent the write.
         public let central: Subscriber
 
-        /// The characteristic being written.
+        /// The characteristic that the central writes.
         public let characteristic: CharacteristicIdentifier
 
-        /// The byte offset into the characteristic's value at which to begin writing.
-        /// Mirrors `CBATTRequest.offset`.
+        /// The byte offset in the characteristic's value where the write begins. Mirrors
+        /// `CBATTRequest.offset`.
         public let offset: Int
 
         /// The value to write.
@@ -43,11 +43,11 @@ public struct WriteRequest: Sendable, Hashable {
         }
     }
 
-    /// The opaque token mapping this batch back to its underlying `CBATTRequest`(s) at the
-    /// CoreBluetooth seam. Carried through to `PeripheralHost/respond(to:with:)-(WriteRequest,_)`.
+    /// The opaque token that maps this batch back to its `CBATTRequest` values at the CoreBluetooth
+    /// seam. `PeripheralHost/respond(to:with:)-(WriteRequest,_)` passes it through.
     public let token: RequestToken
 
-    /// The writes in this batch, in the order CoreBluetooth delivered them. Never empty.
+    /// The writes in this batch, in the order that CoreBluetooth delivered them. It is never empty.
     public let entries: [Entry]
 
     /// Creates a `WriteRequest`.

@@ -9,12 +9,11 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Covers a few small, previously-untested gaps:
-///
-/// - `Peripheral.disconnect()` — a public API with 0% prior coverage.
-/// - `Peripheral.resolveCentral()`'s `.notConnected` throw once the owning `Central` actor
-///   has deallocated (exercised through the public `disconnect()` call site, since
-///   `resolveCentral()` itself is `internal`).
+/// Covers small gaps that no test covered before:
+/// - `Peripheral.disconnect()`, a public API.
+/// - The `.notConnected` throw of `Peripheral.resolveCentral()` after the owning `Central` actor
+///   has deallocated. The test uses the public `disconnect()` call site because `resolveCentral()`
+///   is `internal`.
 /// - `RestoredScanOptions.init(allowDuplicates:solicitedServices:)`.
 @Suite("Peripheral disconnect")
 struct PeripheralDisconnectTests {
@@ -49,15 +48,13 @@ struct PeripheralDisconnectTests {
         }
         let peripheral = try await central!.connect(fakePeripheral.peripheralIdentifier)
 
-        // Release every strong reference to `Central`. `Central.init(backend:queue:...)`'s
-        // doc comment ("Retention") spells out that, unlike the production initializers,
-        // this custom-backend init deliberately makes `backend.eventHandler` capture `self`
-        // strongly — a `Central` <-> `FakeCentral` cycle. So dropping this test's own
-        // `central` reference alone would not be enough: `fakeCentral`, which this test
-        // still holds, keeps the actor alive via that closure until it too is cleared,
-        // exactly as the doc comment prescribes ("clear it explicitly: backend.eventHandler
-        // = nil"). Once both are gone, `WeakCentralBox`'s weak reference zeroes and
-        // `resolveCentral()` observes it as gone.
+        // Release every strong reference to `Central`. As the "Retention" doc comment of
+        // `Central.init(backend:queue:...)` explains, this custom-backend init deliberately makes
+        // `backend.eventHandler` capture `self` strongly, which forms a `Central` <-> `FakeCentral`
+        // cycle. Dropping the test's `central` reference is not enough. `fakeCentral` keeps the
+        // actor alive through that closure until the test also clears it ("backend.eventHandler =
+        // nil", as the doc comment prescribes). When both are gone, `WeakCentralBox`'s weak
+        // reference becomes zero and `resolveCentral()` sees that the actor is gone.
         central = nil
         await fakeCentral.onQueue { fakeCentral.eventHandler = nil }
 
@@ -75,9 +72,9 @@ struct PeripheralDisconnectTests {
 
     @Test("RestoredScanOptions.init(allowDuplicates:solicitedServices:) stores both properties unchanged")
     func restoredScanOptionsStoresProperties() {
-        // The untested initializer with this exact `(allowDuplicates:solicitedServices:)`
-        // signature lives on `RestoredScanOptions`, not `RestoredState` (whose own init
-        // takes `peripherals:scanServices:scanOptions:`) — confirmed against
+        // The initializer with the exact signature `(allowDuplicates:solicitedServices:)` is on
+        // `RestoredScanOptions`, not on `RestoredState`, whose init takes
+        // `peripherals:scanServices:scanOptions:`. Confirmed against
         // Sources/BLESwiftCore/Restoration/RestoredState.swift.
         let service = ServiceIdentifier(uuid: "180D")
         let options = RestoredScanOptions(allowDuplicates: true, solicitedServices: [service])

@@ -3,8 +3,8 @@
 //  BLESwiftCore
 //
 
-/// A single scan sighting of a peripheral: its identity, advertisement payload, and
-/// signal strength.
+/// A single scan sighting of a peripheral: its identity, advertisement payload, and signal
+/// strength.
 public struct Discovery: Sendable {
 
     /// The identity of the discovered peripheral.

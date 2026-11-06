@@ -6,22 +6,22 @@
 import BLESwiftCore
 import Foundation
 
-/// Progress for a chunked write: how many bytes have been sent so far, out of the total.
+/// Progress of a chunked write: the bytes sent so far, out of the total.
 ///
-/// Emitted by the `AsyncThrowingStream` variant of `Peripheral.writeChunked(...)` after each
-/// chunk completes. ``bytesSent`` is monotonically non-decreasing and ends exactly at
-/// ``totalBytes``.
+/// The stream variant of `Peripheral.writeChunked(...)` emits this value after each chunk.
+/// ``bytesSent`` never decreases and ends exactly at ``totalBytes``.
 public struct WriteProgress: Sendable, Equatable {
 
-    /// Cumulative bytes sent (and confirmed, for `.withResponse`) so far.
+    /// Cumulative bytes sent so far. For `.withResponse`, the peripheral also confirmed them.
     public let bytesSent: Int
 
-    /// The payload's total size in bytes.
+    /// The total size of the payload in bytes.
     public let totalBytes: Int
 
-    /// Whether every byte has been sent — i.e. `bytesSent == totalBytes`.
+    /// Whether every byte is sent (`bytesSent == totalBytes`).
     public var isComplete: Bool { bytesSent == totalBytes }
 
+    /// Creates a progress value from the bytes sent so far and the total payload size.
     public init(bytesSent: Int, totalBytes: Int) {
         self.bytesSent = bytesSent
         self.totalBytes = totalBytes
@@ -30,38 +30,37 @@ public struct WriteProgress: Sendable, Equatable {
 
 extension Peripheral {
 
-    /// Writes `value` to `characteristic` split into chunks, sending each only after the
-    /// previous one completes — the outbound counterpart to
-    /// ``writeAndAssemble(write:to:assembleFrom:expectedLength:timeout:)``. Awaits full
-    /// completion.
-    ///
-    /// The chunk sequence holds `characteristic`'s serialization lane as a single unit, so no
-    /// other write can interleave between chunks. Each chunk goes through the same write path
-    /// as ``write(_:to:type:timeout:)``: `.withResponse` chunks await their `didWriteValueFor`
-    /// confirmation before the next is sent; `.withoutResponse` chunks await CoreBluetooth's
-    /// `canSendWriteWithoutResponse` back-pressure signal first.
+    /// Writes `value` to `characteristic` in chunks. It sends each chunk only after the
+    /// previous chunk completes. The whole sequence holds the characteristic, so no other
+    /// write can occur between chunks. Each chunk uses the same write path as
+    /// ``write(_:to:type:timeout:)``. A `.withoutResponse` chunk first waits for the
+    /// `canSendWriteWithoutResponse` signal. See <doc:ReadingWritingNotifications#Chunked-writes>.
     ///
     /// - Important: `timeout` applies **per chunk**, not to the whole payload.
-    /// - Important: Cancelling the task between chunks stops sending and throws
-    ///   ``BLESwiftError/operationCancelled``. A partially-sent payload is the caller's
-    ///   problem to reconcile at the protocol level.
-    /// - Note: There is no framing hook — BLESwift sends the raw payload bytes, sliced on
-    ///   `chunkSize` boundaries. Any per-chunk headers/sequence numbers are the caller's
-    ///   responsibility; encode them into `value` yourself.
+    /// - Important: If the task is cancelled between chunks, the method stops and throws
+    ///   ``BLESwiftError/operationCancelled``. The caller must resolve a partially sent payload
+    ///   at the protocol level.
+    /// - Note: There is no framing hook. BLESwift slices the raw bytes on `chunkSize`
+    ///   boundaries. Encode any header or sequence number into `value`.
     ///
     /// - Parameters:
     ///   - value: The value to write.
     ///   - characteristic: The characteristic to write to.
-    ///   - type: Whether each chunk waits for CoreBluetooth's write confirmation. Defaults to
+    ///   - type: Whether each chunk waits for the write confirmation. The default is
     ///     `.withResponse`.
-    ///   - chunkSize: Bytes per chunk. Defaults to ``maximumWriteValueLength(for:)`` for
-    ///     `type`. A `chunkSize` larger than the payload sends it as a single chunk.
-    ///   - timeout: Per-chunk timeout. `nil` (the default) waits indefinitely per chunk.
-    /// - Throws: ``BLESwiftError/invalidArgument(_:)`` if `chunkSize` is not positive or
-    ///   exceeds ``maximumWriteValueLength(for:)`` for `type`; ``BLESwiftError/notConnected``;
-    ///   ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``;
-    ///   ``BLESwiftError/timedOut``; ``BLESwiftError/operationCancelled``; whatever `value`'s
-    ///   `Transmittable` encoding throws; or whatever error CoreBluetooth reports.
+    ///   - chunkSize: Bytes for each chunk. The default is ``maximumWriteValueLength(for:)``
+    ///     for `type`. If `chunkSize` is larger than the payload, the method sends the payload
+    ///     as one chunk.
+    ///   - timeout: The timeout for each chunk. The default `nil` waits without a limit.
+    /// - Throws: One of these errors:
+    ///   - ``BLESwiftError/invalidArgument(_:)`` if `chunkSize` is not positive or is more
+    ///     than ``maximumWriteValueLength(for:)`` for `type`.
+    ///   - ``BLESwiftError/notConnected``.
+    ///   - ``BLESwiftError/missingService(_:)`` or ``BLESwiftError/missingCharacteristic(_:)``.
+    ///   - ``BLESwiftError/timedOut``.
+    ///   - ``BLESwiftError/operationCancelled``.
+    ///   - The error that the `Transmittable` encoding of `value` throws.
+    ///   - The error that CoreBluetooth reports.
     public func writeChunked(
         _ value: some Transmittable,
         to characteristic: CharacteristicIdentifier,
@@ -83,29 +82,29 @@ extension Peripheral {
         )
     }
 
-    /// The progress-reporting variant of the plain `writeChunked(_:to:type:chunkSize:timeout:)`
-    /// above — same work, but emits a ``WriteProgress`` after each chunk completes. Intended
-    /// for firmware-update UIs and the like.
+    /// The progress-reporting variant of `writeChunked(_:to:type:chunkSize:timeout:)`. It
+    /// emits a ``WriteProgress`` after each chunk. Use it for firmware-update UIs and similar
+    /// tasks.
     ///
-    /// The returned stream emits one ``WriteProgress`` per chunk with the cumulative
-    /// ``WriteProgress/bytesSent``, then finishes. An empty payload emits exactly one
-    /// `WriteProgress(bytesSent: 0, totalBytes: 0)` and finishes. Any error (validation,
-    /// timeout, cancellation, CoreBluetooth failure) terminates the stream by throwing.
-    /// Cancelling the consuming task cancels the underlying write between chunks.
+    /// The stream emits one ``WriteProgress`` for each chunk, with the cumulative
+    /// ``WriteProgress/bytesSent``, and then finishes. An empty payload emits exactly one
+    /// `WriteProgress(bytesSent: 0, totalBytes: 0)`. A validation, timeout, cancellation, or
+    /// CoreBluetooth error ends the stream with that error. If the consuming task is
+    /// cancelled, the write stops between chunks.
     ///
-    /// The same caveats as the plain variant apply: `timeout` is per chunk, cancellation
-    /// between chunks leaves a partially-sent payload for the caller to handle, and there is
-    /// no framing hook.
+    /// The cautions of the plain variant apply: `timeout` is for each chunk, cancellation
+    /// leaves a partially sent payload, and there is no framing hook.
     ///
     /// - Parameters:
     ///   - value: The value to write.
     ///   - characteristic: The characteristic to write to.
-    ///   - type: Whether each chunk waits for CoreBluetooth's write confirmation. Defaults to
+    ///   - type: Whether each chunk waits for the write confirmation. The default is
     ///     `.withResponse`.
-    ///   - chunkSize: Bytes per chunk. Defaults to ``maximumWriteValueLength(for:)`` for
-    ///     `type`.
-    ///   - timeout: Per-chunk timeout. `nil` (the default) waits indefinitely per chunk.
-    /// - Returns: A stream of ``WriteProgress`` values, one per chunk, ending at the total.
+    ///   - chunkSize: Bytes for each chunk. The default is ``maximumWriteValueLength(for:)``
+    ///     for `type`.
+    ///   - timeout: The timeout for each chunk. The default `nil` waits without a limit.
+    /// - Returns: A stream of ``WriteProgress`` values, one for each chunk. The last value
+    ///   reaches the total.
     public func writeChunked(
         _ value: some Transmittable,
         to characteristic: CharacteristicIdentifier,
@@ -114,8 +113,8 @@ extension Peripheral {
         timeout: Duration? = nil
     ) -> AsyncThrowingStream<WriteProgress, Error> {
         AsyncThrowingStream { continuation in
-            // Encode eagerly here: `Transmittable` isn't `Sendable`, so `value` can't cross
-            // into the producing `Task`; the resulting `Data` can.
+            // Encode before the task starts. `Transmittable` is not `Sendable`, so `value` cannot
+            // enter the `Task`, but the resulting `Data` can.
             let data: Data
             do {
                 data = try value.toBluetoothData()
@@ -148,7 +147,7 @@ extension Peripheral {
     }
 
     /// Validates `chunkSize` against ``maximumWriteValueLength(for:)`` for `type` and slices
-    /// `data` into that many-byte chunks. An empty `data` yields no chunks.
+    /// `data` into chunks of that size. An empty `data` gives no chunks.
     func makeChunks(from data: Data, type: WriteType, chunkSize: Int?) async throws -> [Data] {
         let maxLength = await maximumWriteValueLength(for: type)
         let size: Int

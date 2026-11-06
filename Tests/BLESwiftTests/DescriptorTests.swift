@@ -9,11 +9,12 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Exercises `Peripheral`'s characteristic-descriptor surface: `readDescriptor` and
-/// `writeDescriptor`, their lazy (service → characteristic → descriptor) discovery and
-/// caching, the `.missingDescriptor` failure, timeout, and disconnect teardown — all driven
-/// through `makeTestCentral()`'s `FakeCentral`/`FakePeripheral` pair, connected first via
-/// the connection lifecycle.
+/// Tests the descriptor API of `Peripheral` for characteristics:
+/// - `readDescriptor` and `writeDescriptor`
+/// - their lazy discovery (service, then characteristic, then descriptor) and the cache
+/// - the `.missingDescriptor` failure, the timeout, and the teardown at disconnect
+///
+/// All tests connect the `FakeCentral` and `FakePeripheral` pair of `makeTestCentral()` first.
 @Suite("Characteristic descriptors")
 struct DescriptorTests {
 
@@ -23,8 +24,8 @@ struct DescriptorTests {
     private static let heartRateMeasurement = CharacteristicIdentifier(uuid: "2A37", service: heartRateService)
     /// Characteristic User Description (0x2901).
     private static let userDescription = DescriptorIdentifier(uuid: "2901", characteristic: heartRateMeasurement)
-    /// Characteristic Presentation Format (0x2904) — a second descriptor under the same
-    /// characteristic, for absence tests.
+    /// Characteristic Presentation Format (0x2904). A second descriptor under the same
+    /// characteristic, for the absence tests.
     private static let presentationFormat = DescriptorIdentifier(uuid: "2904", characteristic: heartRateMeasurement)
 
     // MARK: - Read / write round-trips
@@ -42,7 +43,7 @@ struct DescriptorTests {
     @Test("writeDescriptor() sends the raw bytes and completes")
     func writeRoundTrip() async throws {
         let (_, _, fakePeripheral, peripheral) = try await descriptorConnected()
-        // Make the descriptor exist without scripting a read value (write-only path).
+        // Make the descriptor exist without a scripted read value (write-only path).
         await fakePeripheral.onQueue {
             fakePeripheral.availableDescriptors = [Self.heartRateMeasurement: [Self.userDescription]]
         }
@@ -90,7 +91,7 @@ struct DescriptorTests {
     @Test("A descriptor genuinely absent from the characteristic's GATT table throws .missingDescriptor")
     func missingDescriptorThrows() async throws {
         let (_, _, fakePeripheral, peripheral) = try await descriptorConnected()
-        // The characteristic exists and has a descriptor — but not the one we ask for.
+        // The characteristic exists and has a descriptor, but not the one the test asks for.
         await fakePeripheral.onQueue {
             fakePeripheral.availableDescriptors = [Self.heartRateMeasurement: [Self.presentationFormat]]
         }
@@ -111,7 +112,8 @@ struct DescriptorTests {
     func readTimesOut() async throws {
         let (_, _, fakePeripheral, peripheral) = try await descriptorConnected()
         await fakePeripheral.onQueue {
-            // Descriptor exists (so discovery succeeds) but its read completion is withheld.
+            // The descriptor exists, so the discovery succeeds. The fake withholds its read
+            // completion.
             fakePeripheral.scriptedDescriptorValues[Self.userDescription] = Data([1])
             fakePeripheral.holdDescriptorReadCompletions = true
         }
@@ -162,8 +164,8 @@ struct DescriptorTests {
 
 // MARK: - Test helpers
 
-/// Registers `peripheral` as retrievable and connects to it, returning the connected
-/// `Peripheral` handle alongside the `Central`/`FakeCentral`/`FakePeripheral` backing it.
+/// Registers `peripheral` as retrievable and connects to it. Returns the connected `Peripheral`
+/// handle and the supporting `Central`, `FakeCentral`, and `FakePeripheral`.
 private func descriptorConnected() async throws -> (Central, FakeCentral, FakePeripheral, Peripheral) {
     let (central, fakeCentral, fakePeripheral) = makeTestCentral()
     await fakeCentral.onQueue {
@@ -174,7 +176,7 @@ private func descriptorConnected() async throws -> (Central, FakeCentral, FakePe
     return (central, fakeCentral, fakePeripheral, peripheral)
 }
 
-/// Polls `condition` until it's `true`, or a generous timeout elapses.
+/// Polls `condition` until it is `true` or a long timeout ends.
 private func waitUntilDescriptor(timeout: Duration = .seconds(2), _ condition: () async -> Bool) async {
     let deadline = ContinuousClock.now + timeout
     while await !condition() {

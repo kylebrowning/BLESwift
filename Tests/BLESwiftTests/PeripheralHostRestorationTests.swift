@@ -10,18 +10,20 @@ import Foundation
 import Testing
 @testable import BLESwift
 
-/// Exercises peripheral-role background restoration (issue #10): `willRestoreState` buffering
-/// and replay, the restored services/advertisement surfacing on `restorationEvents()`, and the
-/// `isAdvertising` snapshot reflecting a restored advertisement — all driven through
-/// `FakePeripheralManager.simulateRestoration`, which delivers `willRestoreState` before the
-/// state flip, mirroring CoreBluetooth's guaranteed ordering.
+/// Tests background restoration of the peripheral role:
+/// - the buffer and replay of `willRestoreState`
+/// - the restored services and advertisement, which appear on `restorationEvents()`
+/// - the `isAdvertising` snapshot, which reflects a restored advertisement
+///
+/// All tests use `FakePeripheralManager.simulateRestoration`, which delivers `willRestoreState`
+/// before the state flip, as CoreBluetooth guarantees.
 @Suite("PeripheralHost background restoration")
 struct PeripheralHostRestorationTests {
 
     private static let heartRate = ServiceIdentifier(uuid: "180D")
 
-    /// A `PeripheralHost` wired to a fresh queue-confined `FakePeripheralManager`, with
-    /// peripheral-role restoration enabled via the internal seam (see the dual-access note in
+    /// A `PeripheralHost` wired to a new `FakePeripheralManager` confined to a queue. It enables
+    /// peripheral-role restoration through the internal seam (see the dual-access note in
     /// `RestorationConfiguration.swift`).
     private func makeRestorationHost(
         label: String = "BLESwiftTests.FakePeripheralManager.restoration"
@@ -36,8 +38,8 @@ struct PeripheralHostRestorationTests {
         return (host, fake, queue)
     }
 
-    /// Collects up to `count` restoration events, giving up (and returning what arrived) after
-    /// `timeout` so a missing event fails the test's assertions instead of hanging it. Mirrors
+    /// Collects up to `count` restoration events. After `timeout` it returns what arrived, so a
+    /// missing event fails the assertions instead of hanging. Same as
     /// `RestorationTests.collectRestorationEvents`.
     private func collectRestorationEvents(
         _ host: PeripheralHost,
@@ -73,11 +75,10 @@ struct PeripheralHostRestorationTests {
             advertisement: PeripheralAdvertisement(localName: "Rig", serviceUUIDs: [Self.heartRate])
         )
 
-        // Deliver restoration and power-on BEFORE any subscriber exists — the buffered-replay
-        // guarantee is the point of this test. CoreBluetooth delivers willRestoreState before
-        // the first didUpdateState; the fake mirrors that ordering. The `onQueue {}` flush
-        // ensures both deliveries have run through the actor (and been buffered) before we
-        // subscribe.
+        // Deliver restoration and power-on BEFORE any subscriber exists, to test the buffered
+        // replay. CoreBluetooth delivers willRestoreState before the first didUpdateState, and the
+        // fake has the same order. The `onQueue {}` flush ensures that the actor has run and
+        // buffered both deliveries before the test subscribes.
         fake.simulateRestoration(restored)
         fake.simulateStateChange(.poweredOn)
         await fake.onQueue {}
@@ -124,8 +125,9 @@ struct PeripheralHostRestorationTests {
         fake.simulateStateChange(.poweredOn)
         await fake.onQueue {}
 
-        // CoreBluetooth resumes the restored advertisement itself; BLESwift brings the snapshot
-        // back in line without re-issuing startAdvertising (no startAdvertising call recorded).
+        // CoreBluetooth resumes the restored advertisement by itself. BLESwift only brings the
+        // snapshot in line and does not issue startAdvertising again. The test records no
+        // startAdvertising call.
         #expect(host.isAdvertising)
         #expect(await fake.onQueue { fake.startAdvertisingCallCount } == 0)
     }

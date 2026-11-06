@@ -2,14 +2,14 @@
 //  GATTAssignedNumbers+Characteristics.swift
 //  BLESwiftCore
 //
-//  GENERATED FILE — do not edit by hand.
-//  Source: Bluetooth SIG public assigned numbers (characteristic_uuids.yaml), plus a curated
-//  set of widely-deployed vendor UUIDs. Regenerate per Scripts/generate-assigned-numbers.md.
+//  GENERATED FILE. Do not edit by hand.
+//  Source: Bluetooth SIG public assigned numbers (characteristic_uuids.yaml), and a curated set of
+//  widely-deployed vendor UUIDs. To regenerate, follow Scripts/generate-assigned-numbers.md.
 //
 
 extension GATTAssignedNumbers {
 
-    /// SIG-assigned 16-bit characteristic UUIDs → names.
+    /// SIG-assigned 16-bit characteristic UUIDs and their names.
     static let characteristicNames: [UInt16: String] = [
         0x2A00: "Device Name",
         0x2A01: "Appearance",
@@ -517,7 +517,7 @@ extension GATTAssignedNumbers {
         0x2C3A: "HID SCI Information",
     ]
 
-    /// Widely-deployed vendor characteristic UUIDs that have no 16-bit SIG form, keyed by
+    /// Widely-deployed vendor characteristic UUIDs that have no 16-bit SIG form. The key is the
     /// full normalized (uppercase) UUID string.
     static let vendorCharacteristicNames: [String: String] = [
         "6E400002-B5A3-F393-E0A9-E50E24DCCA9E": "Nordic UART RX",

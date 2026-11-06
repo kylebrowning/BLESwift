@@ -9,8 +9,8 @@ import BLESwiftCore
 @Suite("GATTAssignedNumbers")
 struct GATTAssignedNumbersTests {
 
-    // The Bluetooth Base UUID, parameterized on its 16-bit field, is how a 16-bit SIG UUID
-    // expands to its full 128-bit form.
+    // The Bluetooth Base UUID takes a 16-bit field. A 16-bit SIG UUID expands to its full 128-bit
+    // form through this field.
     private func baseUUID(_ short: String) -> String {
         "0000\(short)-0000-1000-8000-00805F9B34FB"
     }
@@ -63,7 +63,7 @@ struct GATTAssignedNumbersTests {
         let expanded = ServiceIdentifier(uuid: baseUUID("180D"))
         #expect(expanded.name == short.name)
         #expect(expanded.name == "Heart Rate")
-        // Lowercase input still resolves (identifiers normalize to uppercase).
+        // Lowercase input still resolves, because identifiers normalize to uppercase.
         #expect(ServiceIdentifier(uuid: "0000180d-0000-1000-8000-00805f9b34fb").name == "Heart Rate")
     }
 
@@ -116,10 +116,11 @@ struct GATTAssignedNumbersTests {
 
     @Test("A 128-bit UUID with a non-zero high field is not treated as a SIG short UUID")
     func nonZeroHighFieldIsNotSIG() {
-        // Same low 16 bits as Heart Rate (180D) but a non-zero 32-bit prefix → not SIG.
+        // The low 16 bits are the same as for Heart Rate (180D), but the 32-bit prefix is not zero,
+        // so this is not a SIG UUID.
         let service = ServiceIdentifier(uuid: "1234180D-0000-1000-8000-00805F9B34FB")
         #expect(service.name == nil)
-        // 32-bit shorthand with non-zero high half likewise does not resolve.
+        // A 32-bit shorthand with a non-zero high half also does not resolve.
         #expect(ServiceIdentifier(uuid: "1234180D").name == nil)
     }
 

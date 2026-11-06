@@ -9,49 +9,29 @@ import Foundation
 
 extension VirtualRadio {
 
-    /// Everything mutable, guarded by one lock.
+    /// The state that one lock guards.
     private struct InstallState {
         var radio: VirtualRadio?
     }
 
     private static let installState = Mutex(InstallState())
 
-    /// Routes every subsequently-constructed `Central()` / `PeripheralHost()` to `radio`
-    /// (`PeripheralHost` exists on iOS and macOS only).
+    /// Routes every `Central()` and `PeripheralHost()` that the app constructs later to `radio`.
+    /// `PeripheralHost` exists on iOS and macOS only. Use it for UI tests, previews, or demo
+    /// builds. It works on a device and in the simulator, with no provider and no TCP.
     ///
-    /// A single call at launch is enough to point an app's default-initialized instances at an
-    /// in-process radio instead of CoreBluetooth — for UI tests, previews or demo builds, on
-    /// device or in the simulator, with no provider and no TCP:
+    /// - Call it before the app's first `Central()` or `PeripheralHost()`. The default initializers
+    ///   read `BackendRegistry` once, so an existing instance does not change.
+    /// - `BackendRegistry` has one slot for each backend kind, so this call and
+    ///   `SimulatorLink.install` replace each other. ``installed`` reports only what this type did
+    ///   last.
+    /// - The call is idempotent. A second call replaces the factories and ``installed``.
+    /// - In unit tests, use `Central(backend:queue:)` with a ``VirtualCentralBackend``. It does not
+    ///   use the registry.
     ///
-    /// ```swift
-    /// import BLESwiftVirtualRadio
-    ///
-    /// #if DEBUG
-    /// let radio = VirtualRadio()
-    /// // ... register devices on `radio` ...
-    /// VirtualRadio.install(radio)
-    /// #endif
-    /// ```
-    ///
-    /// This must run before the app's first `Central()` / `PeripheralHost()`: those default
-    /// initializers consult `BackendRegistry` once, at construction, so installing after one
-    /// has already been built has no effect on it.
-    ///
-    /// `BackendRegistry` has one slot per backend kind, so `VirtualRadio.install` and
-    /// `SimulatorLink.install` replace each other, and ``installed`` reports only what *this*
-    /// type last did — it does not notice a later `SimulatorLink.install` taking the slot.
-    /// `Central(backend: VirtualCentralBackend(radio:queue:), queue:)` bypasses the registry
-    /// entirely and is preferred in unit tests, where a process-global is a liability.
-    ///
-    /// Idempotent: calling this again simply replaces the registered factories and ``installed``.
-    ///
-    /// The registry and ``installed`` change together: both factories go in through
-    /// `BackendRegistry.setFactories(central:peripheralManager:)`, one lock acquisition,
-    /// from inside this type's own state lock — so no `Central()`, `PeripheralHost()`, or
-    /// ``installed`` read on another thread can see a radio-backed central next to the
-    /// previous peripheral factory, or a registry already routing to the radio while
-    /// ``installed`` still says `nil`. The lock order is this state, then the registry's; the
-    /// registry never takes this lock.
+    /// The registry and ``installed`` change together. The code takes this type's state lock and
+    /// then the registry's lock, and the registry never takes this type's lock. See
+    /// <doc:InProcessMocking#Route-your-app-to-the-radio>.
     public static func install(_ radio: VirtualRadio) {
         installState.withLock { state in
             BackendRegistry.setFactories(
@@ -62,17 +42,17 @@ extension VirtualRadio {
         }
     }
 
-    /// Reverts `Central()` / `PeripheralHost()` to their default `CoreBluetooth` backend.
+    /// Reverts `Central()` and `PeripheralHost()` to their default `CoreBluetooth` backend.
     ///
-    /// Clears both `BackendRegistry` factories and ``installed``. Idempotent; safe to call
-    /// even when nothing is installed.
+    /// This call clears both `BackendRegistry` factories and ``installed``. It is idempotent, and
+    /// safe when nothing is installed.
     ///
-    /// The registry slot is cleared whoever filled it: after a later `SimulatorLink.install`,
-    /// this removes the link's routing too (and `SimulatorLink.isInstalled` does not notice).
-    /// Use one installer per process.
+    /// The call clears the registry slot, whoever filled it. After a later `SimulatorLink.install`,
+    /// it also removes the link's routing, and `SimulatorLink.isInstalled` does not show this. Use
+    /// one installer for each process.
     ///
-    /// Cleared the way ``install(_:)`` sets them: both factories and ``installed`` under the
-    /// same lock, so nothing can observe one gone and the other still routing.
+    /// Like ``install(_:)``, it clears both factories and ``installed`` under one lock, so no
+    /// thread sees one cleared while the other still routes.
     public static func uninstall() {
         installState.withLock { state in
             BackendRegistry.setFactories(central: nil, peripheralManager: nil)
@@ -80,7 +60,7 @@ extension VirtualRadio {
         }
     }
 
-    /// The radio ``install(_:)`` registered, or `nil` when none is installed.
+    /// The radio that ``install(_:)`` registered, or `nil` if no radio is installed.
     public static var installed: VirtualRadio? {
         installState.withLock { $0.radio }
     }

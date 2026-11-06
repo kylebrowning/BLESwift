@@ -2,8 +2,8 @@
 //  AdvertiseView.swift
 //  BLESwiftExplorer
 //
-//  The peripheral-role screen: advertise a Heart Rate service, watch the simulated BPM
-//  cycle, and see every write a remote central sends.
+//  The peripheral-role screen. It advertises a Heart Rate service, shows the simulated BPM cycle,
+//  and shows every write that a remote central sends.
 //
 
 #if os(iOS) || os(macOS)
@@ -25,9 +25,9 @@ struct AdvertiseView: View {
             Section {
                 Toggle("Advertise as BLESwift Explorer Sim", isOn: advertising)
                     .accessibilityIdentifier("advertise.toggle")
-                // The E2E's advertiser flow asserts on this label by identifier with an
-                // exact text match, so the idle wording is free to read naturally: it says
-                // what the host is doing, not what it is not.
+                // The E2E advertiser flow asserts on this label by identifier with an exact text
+                // match, so the idle wording is free. It says what the host does, not what it does
+                // not do.
                 Text(model.isAdvertising ? "Advertising" : "Not advertising")
                     .accessibilityIdentifier("advertise.status")
                 Text("\(model.bpm) bpm")

@@ -5,60 +5,62 @@
 
 import Foundation
 
-/// Why a message that arrived on the wire could not be turned into the BLESwift types it
-/// stands for.
+/// The reason why BLESwift could not convert a message from the wire into BLESwift types.
 ///
-/// A link peer is not trusted input: a frame decodes cleanly and still carries a field no
-/// BLESwift type can represent. Every such field is rejected here rather than passed on, and
-/// both ends treat the rejection as a protocol violation — the provider closes the offending
-/// connection, and a client drops its session and reconnects.
+/// A link peer is not trusted input. A frame can decode cleanly and still carry a field that no
+/// BLESwift type can represent. The code rejects each such field. Both ends treat the rejection
+/// as a protocol violation. The provider closes the connection that sent the field. A client
+/// drops its session and reconnects.
 public enum WireDecodingError: Error, Equatable, Sendable {
 
-    /// A UUID string that is not one BLESwift's identifiers accept, carried verbatim.
+    /// A UUID string that BLESwift identifiers do not accept. The case carries the string
+    /// unchanged.
     case invalidIdentifier(String)
 
-    /// Two UUID strings in the same keyed collection that name the same identifier once
-    /// normalized — `"180d"` and `"180D"`, say — carried as the normalized form they collide
-    /// on.
+    /// Two UUID strings in the same keyed collection that name the same identifier after
+    /// normalization. An example is `"180d"` and `"180D"`. The case carries the normalized form
+    /// on which they collide.
     ///
-    /// A well-formed peer never sends one: the collections this can arise in are keyed by an
-    /// identifier on both sides, so a duplicate means the sender either invented the frame or
-    /// corrupted it. Rejecting is the only safe answer — the alternative, building a
-    /// dictionary from colliding keys, traps.
+    /// A well-formed peer never sends this, because an identifier is the key of the collections
+    /// where it can occur. The frame is invented or corrupt, and the code must reject it. A
+    /// dictionary that is built from colliding keys traps.
     case duplicateIdentifier(String)
 
-    /// A negotiated maximum payload length that no CoreBluetooth stack could report and no
-    /// caller could use — zero or negative — carried verbatim. See ``WireLengthValidation``.
+    /// A negotiated maximum payload length of zero or less. No CoreBluetooth stack can report
+    /// this length, and no caller can use it. The case carries the length unchanged. See
+    /// ``WireLengthValidation``.
     case invalidMaximumLength(Int)
 
-    /// An attribute offset no CoreBluetooth stack could report and no caller could slice a
-    /// payload at — a negative one — carried verbatim. See ``WireLengthValidation``.
+    /// A negative attribute offset. No CoreBluetooth stack can report it, and no caller can slice
+    /// a payload at it. The case carries the offset unchanged. See ``WireLengthValidation``.
     case invalidOffset(Int)
 }
 
-/// The wire boundary's copy of the UUID rule BLESwift's identifiers enforce.
+/// A copy of the BLESwift identifiers' UUID rule, applied at the wire boundary.
 ///
-/// `ServiceIdentifier`, `CharacteristicIdentifier`, and `DescriptorIdentifier` normalize the
-/// string they are given and **trap** on one they cannot — the same thing `CBUUID(string:)`
-/// does, and the right answer for a programming error in an app. It is the wrong answer for
-/// bytes that arrived over a socket: a peer that sends `"zz"` would take the process down on
-/// whichever end decoded it.
+/// `ServiceIdentifier`, `CharacteristicIdentifier`, and `DescriptorIdentifier` **trap** on a
+/// string that they cannot normalize. `CBUUID(string:)` does the same. This is correct for a
+/// programming error in an app. It is wrong for bytes from a socket, because a peer that sends
+/// `"zz"` would stop the process on the end that decoded it.
 ///
-/// So the rule is checked here first, on every string that crosses the wire, and a string
-/// that fails becomes a thrown ``WireDecodingError/invalidIdentifier(_:)`` instead of a trap.
-/// The rule is replicated rather than shared because `BLESwiftCore`'s own normalizer is
-/// internal to it and deliberately non-throwing; a table-driven test pins the two to each
-/// other.
+/// Thus the code checks every string that crosses the wire. A string that fails the check causes
+/// a thrown ``WireDecodingError/invalidIdentifier(_:)``. The code copies the rule and does not
+/// share it, because the `BLESwiftCore` normalizer is internal and does not throw on purpose. A
+/// table-driven test keeps the two rules the same.
 ///
-/// **The rule.** A 4-character (16-bit) or 8-character (32-bit) string of ASCII hex digits,
-/// or a 36-character dashed 128-bit string whose dashes sit at indices 8, 13, 18 and 23 and
-/// whose every other character is an ASCII hex digit. Case is irrelevant. Nothing else.
+/// **The rule.** A valid string is one of these:
+///
+/// - A 4-character (16-bit) or 8-character (32-bit) string of ASCII hex digits.
+/// - A 36-character dashed 128-bit string. The dashes are at indices 8, 13, 18 and 23. Every
+///   other character is an ASCII hex digit.
+///
+/// Case does not matter. No other string is valid.
 public enum WireIdentifierValidation {
 
-    /// Whether `uuid` is a string BLESwift's identifiers accept.
+    /// Whether `uuid` is a string that BLESwift identifiers accept.
     ///
     /// - Parameter uuid: The candidate UUID string, as it arrived on the wire.
-    /// - Returns: `true` if passing it to a BLESwift identifier is safe.
+    /// - Returns: `true` if it is safe to pass the string to a BLESwift identifier.
     public static func isValid(_ uuid: String) -> Bool {
         switch uuid.count {
         case 4, 8:
@@ -78,12 +80,13 @@ public enum WireIdentifierValidation {
         }
     }
 
-    /// Returns `uuid` unchanged once it is known to be safe to hand to a BLESwift identifier.
+    /// Returns `uuid` unchanged, after it checks that the string is safe to pass to a BLESwift
+    /// identifier.
     ///
     /// - Parameter uuid: The candidate UUID string, as it arrived on the wire.
     /// - Returns: The same string.
-    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if `uuid` is not one BLESwift's
-    ///   identifiers accept.
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if BLESwift identifiers do not accept
+    ///   `uuid`.
     @discardableResult
     public static func validated(_ uuid: String) throws -> String {
         guard isValid(uuid) else { throw WireDecodingError.invalidIdentifier(uuid) }
@@ -92,8 +95,8 @@ public enum WireIdentifierValidation {
 
     /// Whether `character` is a single ASCII hex digit (`0`-`9`, `A`-`F`, `a`-`f`).
     ///
-    /// Deliberately not `Character.isHexDigit`, which is Unicode-aware and accepts "hex
-    /// digit" code points outside ASCII that the identifiers themselves reject.
+    /// This function does not use `Character.isHexDigit`, which accepts "hex digit" code points
+    /// outside ASCII.
     private static func isASCIIHexDigit(_ character: Character) -> Bool {
         guard character.unicodeScalars.count == 1, let scalar = character.unicodeScalars.first else {
             return false

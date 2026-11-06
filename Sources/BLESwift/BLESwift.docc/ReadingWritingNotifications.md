@@ -1,14 +1,10 @@
 # Reading, Writing & Notifications
 
-GATT reads, writes, multicast notification streams, and the composite request/response helpers.
+Read and write GATT characteristics, subscribe to notification streams, and use the composite request/response helpers.
 
 ## Overview
 
-Every operation in this article is a method on ``Peripheral`` — the handle
-``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` returns. Each lazily discovers the
-service and characteristic it needs the first time it's used (cached thereafter), and each
-serializes against other operations on the *same* characteristic (a different characteristic
-proceeds concurrently, unaffected).
+Each operation in this article is a method on ``Peripheral``. ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` returns this handle. Each operation discovers the service and characteristic that it needs the first time, and caches the result. Operations on the *same* characteristic run one after another. Operations on different characteristics run at the same time.
 
 ### Reading and writing
 
@@ -18,30 +14,38 @@ let value: UInt16 = try await peripheral.read(from: characteristic, timeout: .se
 try await peripheral.write(someTransmittableValue, to: characteristic, type: .withResponse)
 ```
 
-`type: .withoutResponse` waits for CoreBluetooth's write-without-response back-pressure signal
-(`canSendWriteWithoutResponse`) before writing, if needed, avoiding a payload that CoreBluetooth
-silently drops.
+For `type: .withoutResponse`, BLESwift waits for the CoreBluetooth signal `canSendWriteWithoutResponse` before it writes. This prevents CoreBluetooth from dropping the payload.
+
+Any type that conforms to ``Receivable`` or ``Transmittable`` can be read or written. These types conform already:
+
+- The fixed-width integer types (`Int8`, `Int16`, `Int32`, `Int64`, `UInt8`, `UInt16`, `UInt32`, `UInt64`).
+- `String` (UTF-8). Invalid data throws ``BLESwiftError/invalidStringEncoding``.
+- `Data`.
+
+To support a custom binary format, conform your own type. Use ``combine(_:)`` and ``DataPadding`` to build a ``Transmittable`` value from several typed parts:
+
+```swift
+struct Command: Transmittable {
+    let opcode: UInt8
+    let argument: UInt16
+
+    func toBluetoothData() throws -> Data {
+        try combine([opcode, DataPadding(1), argument])
+    }
+}
+```
 
 ### Chunked writes
 
-A payload larger than a single ATT write must be split into chunks.
-`Peripheral.writeChunked(_:to:type:chunkSize:timeout:)` does this — the outbound
-counterpart to `writeAndAssemble` — sending each chunk only after the previous one completes and
-holding the characteristic's serialization lane for the whole sequence, so no other write can
-interleave between chunks:
+If a payload is larger than one ATT write, split it into chunks. `Peripheral.writeChunked(_:to:type:chunkSize:timeout:)` sends each chunk after the previous chunk completes. It holds the characteristic for the whole sequence, so no other write can come between chunks.
 
 ```swift
 try await peripheral.writeChunked(firmwareImage, to: dataCharacteristic, chunkSize: 244)
 ```
 
-`chunkSize` defaults to ``Peripheral/maximumWriteValueLength(for:)`` for the chosen write type;
-a `chunkSize` that is not positive or that exceeds that maximum throws
-``BLESwiftError/invalidArgument(_:)``. Each chunk goes through the same path as a plain
-``Peripheral/write(_:to:type:timeout:)``, so `.withResponse` chunks await their confirmation and
-`.withoutResponse` chunks await back-pressure.
+`chunkSize` defaults to ``Peripheral/maximumWriteValueLength(for:)`` for the write type. A `chunkSize` that is zero, negative, or above this maximum throws ``BLESwiftError/invalidArgument(_:)``. Each chunk uses the same path as ``Peripheral/write(_:to:type:timeout:)``.
 
-A second overload returns an `AsyncThrowingStream` of ``WriteProgress`` for driving a
-firmware-update UI — same work, one progress value emitted per chunk, ending at the total:
+A second overload returns an `AsyncThrowingStream` of ``WriteProgress``. It emits one value for each chunk, and the last value is the total. Use it for a progress display:
 
 ```swift
 let stream: AsyncThrowingStream<WriteProgress, Error> =
@@ -51,22 +55,15 @@ for try await progress in stream {
 }
 ```
 
-Three caveats:
+Note these rules:
 
-- **`timeout` applies per chunk**, not to the whole payload — a chunk that stalls times out
-  independently of the others.
-- **Cancellation between chunks** stops sending and throws ``BLESwiftError/operationCancelled``.
-  A partially-sent payload is yours to reconcile at the protocol level.
-- **There is no framing hook.** BLESwift sends the raw payload bytes sliced on `chunkSize`
-  boundaries; any per-chunk headers or sequence numbers are your responsibility — encode them
-  into the value you pass.
+- `timeout` applies to each chunk. It does not apply to the whole payload.
+- If you cancel between chunks, the call stops and throws ``BLESwiftError/operationCancelled``. You must reconcile a partly sent payload in your protocol.
+- BLESwift has no framing hook. It slices the raw bytes at `chunkSize` boundaries. Put any header or sequence number in the value that you pass.
 
-### Introspecting a characteristic's capabilities
+### Characteristic properties
 
-``Peripheral/properties(of:)`` reports the set of operations a characteristic advertises —
-whether it's readable, writable, notifiable, and so on — as a ``CharacteristicProperties``
-option set. Use it to drive capability-based UI, or to branch before an operation, instead of
-attempting the operation and inspecting the error:
+``Peripheral/properties(of:)`` returns the operations that a characteristic supports, as a ``CharacteristicProperties`` option set. Use it to choose an operation before you try it:
 
 ```swift
 let properties = try await peripheral.properties(of: characteristic)
@@ -78,16 +75,13 @@ if properties.contains(.notify) {
 }
 ```
 
-Like every other operation here, it lazily discovers the service and characteristic the first
-time it's used, and serializes against other operations on the same characteristic.
+### Discovering an unknown peripheral
 
-### Enumerating an unknown peripheral's GATT graph
+The operations above need the ``CharacteristicIdentifier`` in advance. To inspect a peripheral with unknown UUIDs, enumerate its GATT graph:
 
-Every operation above is *UUID-first*: you name the ``CharacteristicIdentifier`` up front. To
-inspect a peripheral whose UUIDs you *don't* know — a `ble inspect`-style browser — enumerate
-the GATT graph instead. ``Peripheral/discoverServices()`` lists every service; feed one of the
-results to ``Peripheral/discoverCharacteristics(for:)`` to list its characteristics; and
-``Peripheral/discoverDescriptors(for:)`` lists a characteristic's descriptors:
+- ``Peripheral/discoverServices()`` lists every service.
+- ``Peripheral/discoverCharacteristics(for:)`` lists the characteristics of one service.
+- ``Peripheral/discoverDescriptors(for:)`` lists the descriptors of one characteristic.
 
 ```swift
 for service in try await peripheral.discoverServices() {
@@ -103,37 +97,11 @@ for service in try await peripheral.discoverServices() {
 }
 ```
 
-Each enumeration is cached for the connection: a second ``Peripheral/discoverServices()`` (or
-``Peripheral/discoverCharacteristics(for:)`` for the same service) re-uses the first discovery
-and issues no further round-trip, until a `didModifyServices` invalidation — observable on
-``Peripheral/serviceChanges()`` — resets it, after which the next call re-enumerates and picks
-up whatever changed. The listed identifiers are exactly the value types the UUID-first
-operations take, so a browser can read/write/subscribe against anything it discovered with no
-extra bridging.
-
-Any type conforming to ``Receivable``/``Transmittable`` can be read/written — every fixed-width
-integer type (`Int8`/`16`/`32`/`64`, `UInt8`/`16`/`32`/`64`), `String` (UTF-8, throwing
-``BLESwiftError/invalidStringEncoding`` instead of crashing on invalid data), and
-`Data` itself (identity conformance) all conform out of the box. Conform your own types for
-custom binary formats, and use ``combine(_:)`` (with ``DataPadding`` where needed) to assemble a
-``Transmittable`` value out of several typed pieces:
-
-```swift
-struct Command: Transmittable {
-    let opcode: UInt8
-    let argument: UInt16
-
-    func toBluetoothData() throws -> Data {
-        try combine([opcode, DataPadding(1), argument])
-    }
-}
-```
+BLESwift caches each enumeration for the connection. A second call for the same service sends no new request. A `didModifyServices` event clears the cache. You can observe this event on ``Peripheral/serviceChanges()``. The next call then enumerates again. The identifiers that these calls return are the same types that the other operations take. You can read, write, or subscribe to anything that you discover.
 
 ### Notification streams
 
-``Peripheral/notifications(for:policy:survivesReconnect:)`` supports any number of concurrent
-subscribers. BLESwift's notification streams are **multicast**: each subscriber independently
-receives every value.
+``Peripheral/notifications(for:policy:survivesReconnect:)`` supports any number of subscribers. The streams are **multicast**. Each subscriber receives every value.
 
 ```swift
 let readings: AsyncThrowingStream<HeartRateMeasurement, Error> =
@@ -144,53 +112,36 @@ for try await reading in readings {
 }
 ```
 
-Underneath, the underlying CoreBluetooth notify state is refcounted: the first subscriber
-enables notifications (`setNotifyValue(true)`, its handshake awaited before the call returns —
-though the subscription itself is registered *before* that handshake completes, so nothing
-delivered mid-handshake is ever lost), and only the last subscriber to stop consuming disables
-them again (and only while still connected with the radio powered on).
+The CoreBluetooth notify state is reference-counted. The first subscriber enables notifications with `setNotifyValue(true)`. The call returns after the handshake. BLESwift registers the subscription before the handshake ends, so no value is lost. The last subscriber that stops disables notifications, if the peripheral is still connected and the radio is on.
 
-There is no explicit "stop listening" call: stop consuming (`break`, or cancel the consuming
-`Task`) to unsubscribe. By default a stream ends by **throwing** when the connection ends;
-pass `survivesReconnect: true` to instead keep the stream parked across an unexpected
-disconnect that an active ``ReconnectPolicy`` will retry, resuming delivery on the same
-stream once the reconnect re-arms the subscription:
+There is no call to stop a subscription. To unsubscribe, leave the loop with `break` or cancel the consuming `Task`.
+
+By default, a stream finishes by **throwing** when its connection ends. To keep the stream through an unexpected disconnect that a ``ReconnectPolicy`` will retry, pass `survivesReconnect: true`:
 
 ```swift
 let readings: AsyncThrowingStream<HeartRateMeasurement, Error> =
     peripheral.notifications(for: heartRateMeasurement, survivesReconnect: true)
 ```
 
-See <doc:ConnectionsAndReconnection> for the full survival semantics — the
-``ConnectionEvent/notificationsRestored(_:restored:failed:)`` event, what happens when the
-reconnect never succeeds or a characteristic can't be re-armed — and for how to resubscribe
-manually in the default mode.
+For the full rules, see <doc:ConnectionsAndReconnection>. That article also describes the ``ConnectionEvent/notificationsRestored(_:restored:failed:)`` event and how to subscribe again in the default mode.
 
-``BufferingPolicy`` (BLESwift's own mirror of `AsyncStream.Continuation.BufferingPolicy`, since the
-stdlib one is generic over the stream's element and so can't appear in `notifications`'s own
-signature) controls what happens when a subscriber falls behind: `.unbounded` (the default)
-keeps everything; `.bufferingOldest(n)`/`.bufferingNewest(n)` cap the buffer, dropping the
-newest or oldest value respectively once full.
+``BufferingPolicy`` controls what happens when a subscriber falls behind:
+
+- `.unbounded` (the default) keeps every value.
+- `.bufferingOldest(n)` keeps the first `n` values and drops new values when the buffer is full.
+- `.bufferingNewest(n)` keeps the last `n` values and drops the oldest value when the buffer is full.
 
 #### Decode isolation
 
-`notifications(for:policy:survivesReconnect:)` decodes each raw value into `Value` **per
-subscriber** — every
-subscriber has its own decode layer over one shared raw-`Data` multicast. If `Value`'s
-``Receivable`` decoding throws for a particular value, only *that* subscriber's stream finishes
-with the decode error; sibling subscribers (and the underlying subscription) are unaffected,
-since a typed stream can't silently skip a value it failed to decode. Subscribe with `Value ==
-Data` for a stream that can never fail decoding (its ``Receivable`` conformance is the
-identity).
+Each subscriber decodes the raw values into `Value` on its own, from one shared stream of `Data`. If ``Receivable`` decoding throws for a value, only the stream of that subscriber finishes, with the decode error. The other subscribers and the subscription are not affected. To get a stream that cannot fail to decode, subscribe with `Value == Data`.
 
 ### Composite helpers
 
-These are request/response conveniences implemented as plain `async` methods, with no
-semaphore-based background task machinery required.
+These helpers are plain `async` methods for request/response exchanges.
 
-``Peripheral/writeAndAwaitNotification(write:to:awaitOn:timeout:)`` writes a value and returns
-the first notification received on another characteristic — subscribing *before* writing, in one
-atomic step, so a device that replies instantly can't slip its notification past you:
+- ``Peripheral/writeAndAwaitNotification(write:to:awaitOn:timeout:)`` writes a value and returns the first notification from another characteristic. It subscribes *before* it writes, in one atomic step. A device that replies immediately cannot send its notification before the subscription exists.
+- ``Peripheral/writeAndAssemble(write:to:assembleFrom:expectedLength:timeout:)`` is the same for replies that arrive in an unknown number of packets. It collects payloads until exactly `expectedLength` bytes arrive, and then decodes them. More data throws ``BLESwiftError/tooMuchData(expected:received:)``. `timeout` covers the **whole** assembly. A partial packet does not reset it.
+- ``Peripheral/flush(_:quietPeriod:)`` discards stale buffered notifications on a characteristic. It returns after a full `quietPeriod` with no data. Each packet resets the period. Call it before an exchange so that an old notification is not read as the new reply.
 
 ```swift
 let response: ResponseType = try await peripheral.writeAndAwaitNotification(
@@ -200,36 +151,18 @@ let response: ResponseType = try await peripheral.writeAndAwaitNotification(
 )
 ```
 
-``Peripheral/writeAndAssemble(write:to:assembleFrom:expectedLength:timeout:)`` is the same, but
-for replies that arrive as an unknown number of packets: raw payloads accumulate until exactly
-`expectedLength` bytes have arrived, then decode. Receiving more than `expectedLength` throws
-``BLESwiftError/tooMuchData(expected:received:)``. The `timeout` covers the **whole** assembly — a
-device that sends part of a reply and then goes silent still times out, rather than resetting
-its clock on every partial packet.
+### Peripherals that do not follow the specification
 
-``Peripheral/flush(_:quietPeriod:)`` drains and discards stale, buffered notifications on a
-characteristic, returning once a full `quietPeriod` passes with no data (every packet that
-arrives resets the window) — useful immediately before a request/response exchange, so a
-leftover notification from an earlier, abandoned exchange can't be mistaken for the fresh reply.
+After discovery, each read, write, and subscription checks the ``CharacteristicProperties`` of the characteristic:
 
-### Non-compliant peripherals
+- A read needs `.read`.
+- A `.withResponse` write needs `.write`.
+- A `.withoutResponse` write needs `.writeWithoutResponse`.
+- A subscription needs `.notify` or `.indicate`.
 
-Every read, write, and notification subscription validates the characteristic's advertised
-``CharacteristicProperties`` after discovery — a read requires `.read`, a `.withResponse`
-write requires `.write`, a `.withoutResponse` write requires `.writeWithoutResponse`, and a
-subscription requires `.notify` or `.indicate` — throwing
-``BLESwiftError/unsupportedCharacteristicOperation(_:required:)`` when the property is
-missing. This check runs on a fresh call to ``Peripheral/notifications(for:policy:survivesReconnect:)``,
-but not when a `survivesReconnect: true` subscription is re-armed after a reconnect — re-arming
-re-enables notify directly, so if the peripheral's GATT table changed such that the
-characteristic lost `.notify`/`.indicate` in the meantime, the stream instead surfaces
-CoreBluetooth's enable error rather than the fast ``BLESwiftError/unsupportedCharacteristicOperation(_:required:)``.
+If the property is missing, the call throws ``BLESwiftError/unsupportedCharacteristicOperation(_:required:)``. A new call to ``Peripheral/notifications(for:policy:survivesReconnect:)`` makes this check. The re-arm of a `survivesReconnect: true` subscription after a reconnect does not make it. If the characteristic lost `.notify` and `.indicate` in the meantime, the stream finishes with the CoreBluetooth enable error.
 
-Cheap modules routinely misreport: notifying on characteristics that never advertise
-`.notify`, or only populating their GATT table under unfiltered service discovery. For those,
-pass a ``GATTCompatibility`` to
-``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` — it applies to that
-connection only, so one non-compliant device never loosens another's checks:
+Some low-cost modules report their properties incorrectly. For example, they notify on a characteristic that does not advertise `.notify`. Some fill the GATT table only for unfiltered service discovery. For these devices, pass a ``GATTCompatibility`` to ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)``. It applies to that connection only:
 
 ```swift
 // Known-noncompliant module: bypass every property check, discover all services.
@@ -242,14 +175,9 @@ let peripheral = try await central.connect(
 )
 ```
 
-``GATTCompatibility/DiscoveryMode/all`` replaces targeted service discovery with a single
-`discoverServices(nil)` per connection, cached, for modules that only behave under unfiltered
-discovery. When a bypass actually skips a check that would have failed, BLESwift logs a
-warning once per characteristic and operation; a bypass on compliant hardware stays silent.
+``GATTCompatibility/DiscoveryMode/all`` replaces targeted service discovery with one cached `discoverServices(nil)` for each connection. When a bypass skips a check that would fail, BLESwift logs one warning for each characteristic and operation. A bypass on a compliant device logs nothing.
 
-> Important: Keep the ``GATTCompatibility/strict`` default for compliant hardware — the
-> property checks catch real protocol errors (wrong characteristic, wrong write type) at the
-> call site instead of as an opaque CoreBluetooth failure.
+> Important: Use the ``GATTCompatibility/strict`` default for compliant hardware. The property checks find real protocol errors, for example a wrong characteristic or write type, at the call site. Without them, you get an unclear CoreBluetooth failure.
 
 ## See Also
 

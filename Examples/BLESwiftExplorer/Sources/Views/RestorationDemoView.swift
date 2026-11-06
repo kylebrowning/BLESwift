@@ -2,10 +2,10 @@
 //  RestorationDemoView.swift
 //  BLESwiftExplorer
 //
-//  Screen 7: background state restoration demo (iOS). `Central` is built with a
-//  `RestorationConfiguration` in the App initializer, and `restorationEvents()` is consumed
-//  from the same launch path (see `ExplorerModel.init`), per `BackgroundRestoration.md`.
-//  macOS shows a note that restoration is iOS-only.
+//  Screen 7: demo of background state restoration (iOS). The App initializer builds `Central` with a
+//  `RestorationConfiguration`, and the same launch path consumes `restorationEvents()` (see
+//  `ExplorerModel.init`), as `BackgroundRestoration.md` describes. macOS shows a note that
+//  restoration is only for iOS.
 //
 
 import SwiftUI

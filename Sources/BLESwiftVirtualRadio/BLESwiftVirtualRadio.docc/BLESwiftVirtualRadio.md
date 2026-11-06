@@ -5,17 +5,16 @@ An in-process Bluetooth radio that serves virtual devices to a real `Central` or
 
 ## Overview
 
-`BLESwiftVirtualRadio` hosts devices you describe in code (or load from a fixture document)
-and serves them to any number of `Central`s and `PeripheralHost`s in the same process — no
-hardware, no entitlement, and no provider process. It is the radio the `bleswift-provider`
-runs underneath, available to your app directly: use it for unit tests, UI tests, previews,
-and demo builds on iOS, macOS, watchOS, tvOS and visionOS.
+`BLESwiftVirtualRadio` hosts devices that you describe in code or load from a fixture document. It serves them to any number of `Central` and `PeripheralHost` instances in the same process. It needs no hardware, no entitlement, and no provider process.
 
-Register a ``VirtualDevice`` on a ``VirtualRadio``, then point a `Central` at the radio —
-either by installing it once at launch with ``VirtualRadio/install(_:)`` or by handing a
-``VirtualCentralBackend`` to `Central(backend:queue:)`. See <doc:InProcessMocking> for both.
+The `bleswift-provider` uses this radio. Your app can use it directly for unit tests, UI tests, previews, and demo builds. It works on iOS, macOS, watchOS, tvOS, and visionOS.
 
-`BLESwiftProvider` re-exports this module, so code that already imports it keeps compiling.
+To use the radio, register a ``VirtualDevice`` on a ``VirtualRadio``. Then point a `Central` at the radio in one of two ways:
+
+- Call ``VirtualRadio/install(_:)`` once at launch.
+- Pass a ``VirtualCentralBackend`` to `Central(backend:queue:)`.
+
+See <doc:InProcessMocking> for both. `BLESwiftProvider` re-exports this module.
 
 ## Topics
 
@@ -46,10 +45,18 @@ either by installing it once at launch with ``VirtualRadio/install(_:)`` or by h
 
 ### Delays on a clock
 
+- ``VirtualRadio/init(clock:)``
 - ``VirtualRadio/clock``
 - ``VirtualLatency``
 - ``VirtualDeviceDescriptor/latency``
 - ``VirtualDeviceHandle/setLatency(_:)``
+
+### Limits and MTU
+
+- ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``
+- ``VirtualRadio/maximumWriteWithoutResponseLength``
+- ``VirtualRadio/maximumValueLength``
+- ``VirtualRadio/rssi``
 
 ### Backends
 

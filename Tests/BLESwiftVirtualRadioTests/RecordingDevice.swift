@@ -9,22 +9,22 @@ import BLESwiftVirtualRadio
 import Dispatch
 import Foundation
 
-/// A handler that records every write and subscription change it is told about, and
-/// publishes each on a stream, so a test waits on the event instead of sleeping and can
-/// assert afterwards that nothing else arrived.
+/// A handler that records every write and subscription change that it receives and publishes each
+/// on a stream. A test waits on the event instead of sleeping, and can assert afterward that
+/// nothing else arrived.
 actor RecordingHandler: VirtualDeviceHandler {
 
-    /// Every write batch's values, in arrival order.
+    /// The values of every write batch, in order of arrival.
     private(set) var written: [Data] = []
 
-    /// Every subscription change, in arrival order.
+    /// Every subscription change, in order of arrival.
     private(set) var subscriptionLog: [(characteristic: CharacteristicIdentifier, isSubscribed: Bool)] = []
 
-    /// Each value written, as it arrives.
+    /// Each value written, when it arrives.
     let writes: AsyncStream<Data>
     private let writesContinuation: AsyncStream<Data>.Continuation
 
-    /// Each subscription change, as it arrives.
+    /// Each subscription change, when it arrives.
     let subscriptions: AsyncStream<Bool>
     private let subscriptionsContinuation: AsyncStream<Bool>.Continuation
 
@@ -51,8 +51,9 @@ actor RecordingHandler: VirtualDeviceHandler {
     }
 }
 
-/// The fixture every suite in this target shares: a heart-rate device with one static
-/// readable characteristic and one dynamic one that can be written either way and notified.
+/// The fixture that every suite in this target shares: a heart-rate device with one static readable
+/// characteristic and one dynamic characteristic. A central can write the dynamic characteristic
+/// either way, and the device can notify it.
 enum RecordingDevice {
 
     static let service = ServiceIdentifier(uuid: "180D")
@@ -94,7 +95,8 @@ enum RecordingDevice {
         )
     }
 
-    /// A `Central` on a fresh `VirtualCentralBackend` over `radio`, waited to `.poweredOn`.
+    /// A `Central` on a fresh `VirtualCentralBackend` over `radio`. The function waits until it is
+    /// `.poweredOn`.
     static func central(on radio: VirtualRadio, label: String) async -> (central: Central, backend: VirtualCentralBackend, queue: DispatchQueue) {
         let queue = DispatchQueue(label: label)
         let backend = VirtualCentralBackend(radio: radio, queue: queue)
@@ -103,9 +105,9 @@ enum RecordingDevice {
         return (central, backend, queue)
     }
 
-    /// Polls `condition` every 5 ms until it is `true` or `timeout` elapses, for the things
-    /// the public surface offers no event for: the backend reaching `.poweredOn`, and a
-    /// synchronous radio table change a test must see before it goes on.
+    /// Polls `condition` every 5 ms until it is `true` or `timeout` elapses. It covers what the
+    /// public surface gives no event for: the backend reaching `.poweredOn`, and a synchronous
+    /// radio table change that a test must see before it continues.
     static func waitFor(timeout: Duration = .seconds(5), _ condition: () async -> Bool) async {
         let deadline = ContinuousClock.now + timeout
         while await !condition() {
@@ -114,33 +116,33 @@ enum RecordingDevice {
         }
     }
 
-    /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.
+    /// Runs `body` on `queue` and returns its result. It does not block a cooperative thread.
     static func onQueue<T: Sendable>(_ queue: DispatchQueue, _ body: @escaping @Sendable () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async { continuation.resume(returning: body()) }
         }
     }
 
-    /// Whether `central` currently holds `id` connected — `ConnectionState` carries the
-    /// `Peripheral` and is not `Equatable`, so this is the comparison a test makes.
+    /// Whether `central` currently holds `id` as connected. `ConnectionState` carries the
+    /// `Peripheral` and is not `Equatable`, so tests use this function.
     static func isConnected(_ central: Central, _ id: PeripheralIdentifier) async -> Bool {
         if case .connected = await central.connectionState(of: id) { return true }
         return false
     }
 
-    /// Whether `central` reports `id` disconnected.
+    /// Whether `central` reports `id` as disconnected.
     static func isDisconnected(_ central: Central, _ id: PeripheralIdentifier) async -> Bool {
         if case .disconnected = await central.connectionState(of: id) { return true }
         return false
     }
 
-    /// The first value `stream` yields.
+    /// The first value that `stream` yields.
     static func first<Value>(of stream: AsyncStream<Value>) async -> Value? {
         for await value in stream { return value }
         return nil
     }
 
-    /// The error `body` throws, as an `NSError`, or `nil` when it does not throw.
+    /// The error that `body` throws, as an `NSError`, or `nil` if it does not throw.
     static func failure(of body: () async throws -> some Any) async -> NSError? {
         do {
             _ = try await body()

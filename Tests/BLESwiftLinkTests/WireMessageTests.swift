@@ -17,7 +17,7 @@ struct WireMessageTests {
     private static let descriptor = DescriptorIdentifier(uuid: "2902", characteristic: characteristic)
     private static let err = WireError(domain: "D", code: 3, description: "boom")
 
-    /// Every `LinkMessage` case with a non-trivial payload. Extend when a case is added.
+    /// Every `LinkMessage` case with a non-trivial payload. Extend this list when you add a case.
     static let samples: [LinkMessage] = [
         .clientHello(ClientHello(protocolVersion: 1, role: .central, clientName: "app")),
         .clientHello(ClientHello(protocolVersion: 1, role: .peripheral, clientName: "app", hostIdentifier: id)),
@@ -122,8 +122,8 @@ struct WireMessageTests {
 
     @Test("A client hello with no hostIdentifier decodes, leaving the field nil")
     func helloWithoutAHostIdentifierDecodes() throws {
-        // Written by hand rather than by encoding a `ClientHello`: this is the shape a client
-        // that predates the field puts on the wire, and it must still be readable.
+        // The test writes this by hand and does not encode a `ClientHello`. This is the shape that
+        // a client puts on the wire when it predates the field. The decoder must still read it.
         let json = Data(#"{"clientHello":{"_0":{"protocolVersion":1,"role":"peripheral","clientName":"old"}}}"#.utf8)
         let decoded = try LinkCodec.json.decode(LinkMessage.self, from: json)
         #expect(decoded == .clientHello(ClientHello(protocolVersion: 1, role: .peripheral, clientName: "old")))
@@ -136,7 +136,8 @@ struct WireMessageTests {
 
     @Test("A server hello with no assignedHostIdentifier decodes, leaving the field nil")
     func serverHelloWithoutAnAssignedIdentifierDecodes() throws {
-        // The shape a provider that predates the field puts on the wire; still readable.
+        // This is the shape that a provider puts on the wire when it predates the field. The
+        // decoder still reads it.
         let json = Data(#"{"serverHello":{"_0":{"protocolVersion":1,"accepted":true,"providerName":"old"}}}"#.utf8)
         let decoded = try LinkCodec.json.decode(LinkMessage.self, from: json)
         #expect(decoded == .serverHello(ServerHello(protocolVersion: 1, accepted: true, reason: nil, providerName: "old")))

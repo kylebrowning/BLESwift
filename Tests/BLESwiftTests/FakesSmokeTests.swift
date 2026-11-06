@@ -11,19 +11,22 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Proves the CoreBluetooth shim's test doubles (`FakeCentral`/`FakePeripheral`) exist,
-/// conform to the shim protocols, and are genuinely queue-confined: every CB-mirroring
-/// method and property is only legal to touch from on `queue` (guarded by
-/// `dispatchPrecondition`), event delivery is always asynchronous, and `onQueue(_:)` is
-/// the one sanctioned door for off-queue (test) code — the property the eventual delegate
-/// proxy's `assumeIsolated` will depend on. Later phases exercise the fakes' full
-/// scriptable behavior in depth; this suite only smoke-tests the seam itself.
+/// Proves these properties of the CoreBluetooth shim test doubles (`FakeCentral` and
+/// `FakePeripheral`):
+/// - They exist and conform to the shim protocols.
+/// - They are confined to queues. Code can touch every method and property that mirrors
+///   CoreBluetooth only from `queue`. `dispatchPrecondition` guards this.
+/// - Event delivery is always asynchronous.
+/// - `onQueue(_:)` is the one permitted door for code outside the queue, such as test code. The
+///   delegate proxy's `assumeIsolated` will depend on this.
 ///
-/// `onQueue(_:)` is `async` (it hops onto `queue` via `queue.async` + a continuation, never
-/// blocking the caller's thread), so its `@Sendable` body must not mutate captured `var`s.
-/// The event-accumulating tests therefore collect into a `Mutex`, which the handler mutates
-/// under lock and the test reads back after a flush — a happens-before the serial queue
-/// already guarantees.
+/// Other tests exercise the full scriptable behavior of the fakes. This suite only smoke-tests the
+/// seam.
+///
+/// `onQueue(_:)` is `async`. It hops onto `queue` with `queue.async` and a continuation, and never
+/// blocks the caller's thread. Its `@Sendable` body must not mutate captured `var` values. Tests
+/// that accumulate events collect them into a `Mutex`, which the handler changes under lock and the
+/// test reads after a flush. The serial queue guarantees the happens-before order.
 @Suite("CoreBluetooth shim fakes")
 struct FakesSmokeTests {
 
@@ -44,7 +47,7 @@ struct FakesSmokeTests {
         #expect(await central.onQueue { central.radioState } == .unknown)
 
         central.simulateStateChange(.poweredOn)
-        await central.onQueue {} // flush the async didUpdateState delivery
+        await central.onQueue {} // Flush the async didUpdateState delivery.
 
         #expect(observedStates.withLock { $0 } == [.poweredOn])
         #expect(await central.onQueue { central.radioState } == .poweredOn)
@@ -63,16 +66,16 @@ struct FakesSmokeTests {
             }
         }
 
-        // simulateStateChange only *schedules* the delivery via queue.async. Scheduled and
-        // checked from inside one block on that serial queue, the delivery provably cannot run
-        // before the check (#50): checked from the test thread instead, the queue could
-        // deliver first on a busy machine and the expectation failed with nothing wrong.
+        // simulateStateChange only *schedules* the delivery with queue.async. The test schedules
+        // and checks inside one block on that serial queue, so the delivery cannot run before the
+        // check. Checking from the test thread would let the queue deliver first on a busy machine
+        // and fail the expectation spuriously.
         await central.onQueue {
             central.simulateStateChange(.poweredOn)
             #expect(observedStates.withLock { $0 }.isEmpty)
         }
 
-        await central.onQueue {} // now flush
+        await central.onQueue {} // Now flush.
         #expect(observedStates.withLock { $0 } == [.poweredOn])
     }
 
@@ -80,8 +83,8 @@ struct FakesSmokeTests {
     func onQueueDoorSatisfiesPrecondition() async {
         let (central, peripheral, _) = makeFakeCentral()
 
-        // Every one of these would trap via dispatchPrecondition if called directly from
-        // this (off-queue) test body; routed through onQueue, they succeed.
+        // Each of these would trap through dispatchPrecondition if called directly from this test
+        // body, which is off the queue. Routed through onQueue, they succeed.
         let state = await central.onQueue { central.radioState }
         let connectCount = await central.onQueue { central.connectCallCount }
         let peripheralState = await peripheral.onQueue { peripheral.connectionState }
@@ -109,7 +112,7 @@ struct FakesSmokeTests {
         central.simulateStateChange(.resetting)
         central.simulateStateChange(.poweredOn)
         central.simulateStateChange(.poweredOff)
-        await central.onQueue {} // flush all three async deliveries (FIFO on a serial queue)
+        await central.onQueue {} // Flush all three async deliveries. A serial queue delivers them first in, first out.
 
         #expect(observedStates.withLock { $0 } == [.resetting, .poweredOn, .poweredOff])
     }
@@ -123,7 +126,7 @@ struct FakesSmokeTests {
         await central.onQueue { central.eventHandler = { event in events.withLock { $0.append(event) } } }
 
         await central.onQueue { central.connect(peripheral, options: nil) }
-        await central.onQueue {} // flush the async didConnect enqueued by connect(_:options:)
+        await central.onQueue {} // Flush the async didConnect that connect(_:options:) queued.
 
         #expect(await central.onQueue { central.connectCallCount } == 1)
         guard case .didConnect(let identifier) = events.withLock({ $0 }).first else {
@@ -143,7 +146,7 @@ struct FakesSmokeTests {
         await central.onQueue { central.eventHandler = { event in events.withLock { $0.append(event) } } }
 
         await central.onQueue { central.connect(peripheral, options: nil) }
-        await central.onQueue {} // flush the async didFailToConnect enqueued by connect(_:options:)
+        await central.onQueue {} // Flush the async didFailToConnect that connect(_:options:) queued.
 
         guard case .didFailToConnect(let identifier, let error) = events.withLock({ $0 }).first else {
             Issue.record("expected a single didFailToConnect event, got \(events.withLock { $0 })")
@@ -162,7 +165,7 @@ struct FakesSmokeTests {
         await central.onQueue { central.eventHandler = { event in events.withLock { $0.append(event) } } }
 
         await central.onQueue { central.connect(peripheral, options: nil) }
-        await central.onQueue {} // nothing was enqueued, so this returns immediately
+        await central.onQueue {} // The code queued nothing, so this returns immediately.
 
         #expect(await central.onQueue { central.connectCallCount } == 1)
         #expect(events.withLock { $0 }.isEmpty)
@@ -178,7 +181,7 @@ struct FakesSmokeTests {
         await peripheral.onQueue { peripheral.eventHandler = { event in events.withLock { $0.append(event) } } }
 
         peripheral.simulateNotification(for: characteristic, value: value)
-        await peripheral.onQueue {} // flush
+        await peripheral.onQueue {} // Flush.
 
         guard case .didUpdateValue(let receivedCharacteristic, let receivedValue, let error) = try #require(events.withLock({ $0 }).first) else {
             Issue.record("expected a single didUpdateValue event, got \(events.withLock { $0 })")

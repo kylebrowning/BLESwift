@@ -7,27 +7,25 @@ import Foundation
 
 /// A value-type definition of one characteristic in a hosted GATT service.
 ///
-/// Compiled to a `CBMutableCharacteristic` **inside the `PeripheralHost` actor's
-/// CoreBluetooth seam** (never here) when the owning ``GATTService`` is added; this type
-/// stays CoreBluetooth-free.
+/// When you add the owning ``GATTService``, the `PeripheralHost` actor compiles this type to a
+/// `CBMutableCharacteristic` inside its CoreBluetooth seam. This type stays free of CoreBluetooth.
 public struct GATTCharacteristic: Sendable, Hashable {
 
-    /// The characteristic's identifier, scoped to its owning service.
+    /// The characteristic's identifier. Its scope is the owning service.
     public let identifier: CharacteristicIdentifier
 
-    /// The operations this characteristic advertises (read, write, notify, …).
+    /// The operations that this characteristic advertises (read, write, notify, and others).
     public let properties: CharacteristicProperties
 
-    /// The access permissions gating this characteristic's value.
+    /// The access permissions for this characteristic's value.
     public let permissions: AttributePermissions
 
-    /// The characteristic's cached value, or `nil` for a *dynamic* characteristic whose
-    /// value is served on demand.
+    /// The cached value of the characteristic.
     ///
-    /// A non-`nil` value makes this a **static** characteristic: CoreBluetooth answers reads
-    /// itself, and the characteristic must be read-only, mirroring
-    /// `CBMutableCharacteristic`'s own rule. `nil` makes it **dynamic**: reads and writes
-    /// surface on `PeripheralHost/readRequests()`/`PeripheralHost/writeRequests()`.
+    /// A value that is not `nil` makes this a **static** characteristic. CoreBluetooth answers the
+    /// reads itself, and the characteristic must be read-only, as for `CBMutableCharacteristic`. A
+    /// `nil` value makes it **dynamic**: reads and writes appear on `PeripheralHost/readRequests()`
+    /// and `PeripheralHost/writeRequests()`, and you serve the value on demand.
     public let value: Data?
 
     /// Creates a characteristic definition.

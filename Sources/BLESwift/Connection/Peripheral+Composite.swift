@@ -6,30 +6,31 @@
 import BLESwiftCore
 import Foundation
 
-/// Composite async helpers — `writeAndAwaitNotification`, `writeAndAssemble`, and `flush`
-/// — built on plain sequential `await`s in the caller's task rather than a semaphore-based
-/// background-task subsystem.
+/// Composite async helpers: `writeAndAwaitNotification`, `writeAndAssemble`, and `flush`.
+/// They use sequential `await` calls in the caller's task.
 extension Peripheral {
 
-    /// Writes `value` to one characteristic, then returns the first notification
-    /// subsequently received on another — with the listen installed **before** the write
-    /// is issued (inside one actor-isolated critical section), so a device that responds
-    /// instantly cannot slip its notification into the gap. The write is always
-    /// `.withResponse`. If `notifyCharacteristic` already has active subscribers, this call
-    /// transparently joins their shared subscription without disturbing it.
+    /// Writes `value` to one characteristic. Then it returns the first notification that
+    /// arrives on another characteristic. The method starts to listen **before** it writes, in
+    /// one actor-isolated critical section, so a device that responds immediately cannot
+    /// notify too early. The write is always `.withResponse`. If `notifyCharacteristic`
+    /// already has subscribers, this call joins their subscription and does not disturb it.
     ///
     /// - Parameters:
     ///   - value: The value to write.
     ///   - writeCharacteristic: The characteristic to write to.
-    ///   - notifyCharacteristic: The characteristic to await a notification on.
-    ///   - timeout: How long the **whole** sequence (subscribe + write + wait) may take
-    ///     before throwing ``BLESwiftError/listenTimedOut``. Defaults to 15 seconds; `nil`
-    ///     waits indefinitely.
+    ///   - notifyCharacteristic: The characteristic on which to wait for a notification.
+    ///   - timeout: The maximum time for the **whole** sequence (subscribe, write, and wait).
+    ///     After this time, the method throws ``BLESwiftError/listenTimedOut``. The default is
+    ///     15 seconds. `nil` waits without a limit.
     /// - Returns: The first notification value, decoded as `R`.
-    /// - Throws: ``BLESwiftError/notConnected``; ``BLESwiftError/listenTimedOut`` on timeout;
-    ///   discovery/write errors as documented on ``write(_:to:type:timeout:)``; whatever
-    ///   `value`'s `Transmittable` encoding or `R`'s `Receivable` decoding throws; or the
-    ///   error the connection tore down with.
+    /// - Throws: One of these errors:
+    ///   - ``BLESwiftError/notConnected``.
+    ///   - ``BLESwiftError/listenTimedOut`` on timeout.
+    ///   - The discovery and write errors that ``write(_:to:type:timeout:)`` documents.
+    ///   - The error that the `Transmittable` encoding of `value` or the `Receivable`
+    ///     decoding of `R` throws.
+    ///   - The error that ended the connection.
     public func writeAndAwaitNotification<W: Transmittable, R: Receivable>(
         write value: W,
         to writeCharacteristic: CharacteristicIdentifier,
@@ -49,26 +50,26 @@ extension Peripheral {
     }
 
     /// Like ``writeAndAwaitNotification(write:to:awaitOn:timeout:)``, but for replies that
-    /// arrive as an unknown number of packets: raw notification payloads are accumulated
-    /// until exactly `expectedLength` bytes have been received, then decoded as `R`.
+    /// arrive as an unknown number of packets. The method accumulates raw notification
+    /// payloads until it has exactly `expectedLength` bytes. Then it decodes them as `R`.
     ///
-    /// Accumulation past `expectedLength` throws
-    /// ``BLESwiftError/tooMuchData(expected:received:)`` (carrying everything received), and
-    /// `timeout` covers the **whole assembly** — a device that sends part of the reply and
-    /// then goes silent still times out.
+    /// If more than `expectedLength` bytes arrive, the method throws
+    /// ``BLESwiftError/tooMuchData(expected:received:)`` with everything received. `timeout`
+    /// covers the **whole assembly**, so a device that sends part of the reply and stops
+    /// causes a timeout.
     ///
     /// - Parameters:
     ///   - value: The value to write.
     ///   - writeCharacteristic: The characteristic to write to.
-    ///   - notifyCharacteristic: The characteristic the reply packets arrive on.
+    ///   - notifyCharacteristic: The characteristic on which the reply packets arrive.
     ///   - expectedLength: The total size, in bytes, of the assembled reply.
-    ///   - timeout: How long the whole sequence (subscribe + write + full assembly) may
-    ///     take before throwing ``BLESwiftError/listenTimedOut``. Defaults to 15 seconds;
-    ///     `nil` waits indefinitely.
+    ///   - timeout: The maximum time for the whole sequence (subscribe, write, and full
+    ///     assembly). After this time, the method throws ``BLESwiftError/listenTimedOut``. The
+    ///     default is 15 seconds. `nil` waits without a limit.
     /// - Returns: The assembled reply, decoded as `R`.
     /// - Throws: ``BLESwiftError/tooMuchData(expected:received:)`` if more than
-    ///   `expectedLength` bytes arrive; otherwise everything documented on
-    ///   ``writeAndAwaitNotification(write:to:awaitOn:timeout:)``.
+    ///   `expectedLength` bytes arrive, and each error that
+    ///   ``writeAndAwaitNotification(write:to:awaitOn:timeout:)`` documents.
     public func writeAndAssemble<W: Transmittable, R: Receivable>(
         write value: W,
         to writeCharacteristic: CharacteristicIdentifier,
@@ -89,22 +90,22 @@ extension Peripheral {
         return try R(bluetoothData: assembled)
     }
 
-    /// Drains and discards any stale, buffered notifications on `characteristic`,
-    /// returning once a full `quietPeriod` passes with no data — every packet that does
-    /// arrive restarts the window. Useful before a request/response exchange so a leftover
-    /// notification from an abandoned exchange can't be mistaken for the fresh reply.
-    /// Notifications are enabled for the duration and released afterward (refcounted — an
-    /// existing subscription is joined, not disturbed; concurrent subscribers also observe
-    /// the flushed packets).
+    /// Discards stale notifications on `characteristic`. It returns when a full `quietPeriod`
+    /// passes with no data. Each packet that arrives restarts the window. Use it before a
+    /// request/response exchange, so a leftover notification cannot be mistaken for the new
+    /// reply. The method enables notifications for its duration and releases them afterward.
+    /// It joins an existing subscription and does not disturb it. Concurrent subscribers also
+    /// see the flushed packets.
     ///
     /// - Parameters:
     ///   - characteristic: The characteristic to flush.
     ///   - quietPeriod: How long the characteristic must stay silent before the flush is
-    ///     considered complete. Must be strictly positive. Defaults to 3 seconds.
-    /// - Throws: ``BLESwiftError/invalidArgument(_:)`` if `quietPeriod` is not strictly
-    ///   positive (BLESwift never crashes on argument validation); ``BLESwiftError/notConnected``; discovery errors as
-    ///   documented on ``read(from:timeout:)``; or the error the connection tore down
-    ///   with mid-flush.
+    ///     complete. It must be strictly positive. The default is 3 seconds.
+    /// - Throws: One of these errors:
+    ///   - ``BLESwiftError/invalidArgument(_:)`` if `quietPeriod` is not strictly positive.
+    ///   - ``BLESwiftError/notConnected``.
+    ///   - The discovery errors that ``read(from:timeout:)`` documents.
+    ///   - The error that ended the connection during the flush.
     public func flush(
         _ characteristic: CharacteristicIdentifier,
         quietPeriod: Duration = .seconds(3)

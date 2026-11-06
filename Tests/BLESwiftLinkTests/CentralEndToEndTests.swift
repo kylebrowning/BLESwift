@@ -29,7 +29,7 @@ struct CentralEndToEndTests {
     private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
     private static let control = CharacteristicIdentifier(uuid: "2A39", service: service)
 
-    /// A provider listening on a system-assigned loopback port, serving the fixture device.
+    /// A provider that listens on a system-assigned loopback port and serves the fixture device.
     private func makeProvider() async throws -> Provider {
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
@@ -39,7 +39,7 @@ struct CentralEndToEndTests {
         return provider
     }
 
-    /// A `Central` driven by a `LinkCentral` dialing `port`, plus the link itself.
+    /// A `Central` driven by a `LinkCentral` that dials `port`. The result includes the link.
     private func makeCentral(port: UInt16, label: String) -> (Central, LinkCentral) {
         let queue = DispatchQueue(label: label)
         let link = LinkCentral(
@@ -83,9 +83,9 @@ struct CentralEndToEndTests {
             }
             return nil
         }
-        // `Peripheral` publishes no "notifications are armed" signal of its own, so the wait is
-        // on the provider radio's own subscription table — the state the push consults — rather
-        // than on a delay a starved runner can outrun.
+        // `Peripheral` has no "notifications are armed" signal, so the test waits on the radio's
+        // subscription table, which the push consults. A fixed delay could be outrun by a starved
+        // runner.
         await waitFor(timeout: .seconds(10)) { await provider.radio.isSubscribed(characteristic: Self.control) }
         #expect(await provider.radio.isSubscribed(characteristic: Self.control))
         try await peripheral.write(Data([0x3C]), to: Self.control)
@@ -142,9 +142,8 @@ struct CentralEndToEndTests {
                 if count == 500 { return }
             }
         }
-        // See `endToEnd()` — no public arming signal, so the wait is on the radio's own
-        // subscription table. Getting this wrong is what made this test receive [] on a
-        // starved runner: every one of the 500 pushes below went out with nothing subscribed.
+        // See `endToEnd()`. A wrong wait here made the test receive [] on a starved runner, because
+        // all 500 pushes went out with nothing subscribed.
         await waitFor(timeout: .seconds(10)) { await provider.radio.isSubscribed(characteristic: Self.control) }
         #expect(await provider.radio.isSubscribed(characteristic: Self.control))
 
@@ -170,10 +169,9 @@ struct CentralEndToEndTests {
     func handshakeRace() async throws {
         let provider = try await makeProvider()
         let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
-        // The hello leaves on the `.ready` transition itself, so it races the provider's own
-        // bookkeeping for the connection it just accepted. Repeated because the race is
-        // scheduler-dependent: one iteration proves nothing, fifty consistently caught the
-        // dropped handshake before the pending table was made synchronous.
+        // The hello leaves on the `.ready` transition, so it races the provider's bookkeeping for
+        // the new connection. The race depends on the scheduler, so the test repeats it fifty
+        // times.
         for iteration in 0..<50 {
             let connection = LinkConnection.connect(
                 to: endpoint,
@@ -212,10 +210,8 @@ struct CentralEndToEndTests {
         await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
         #expect(central.state == .poweredOn)
 
-        // The client vends a remote for any identifier — it cannot know what the provider
-        // holds — so this reaches the session, which has no backend remote for it. Answering
-        // with a failure is what keeps the client from sitting out its whole connect timeout
-        // for an outcome that is already settled.
+        // The client vends a remote for any identifier. The session has no backend remote for this
+        // one, so the answer is a failure and the client does not wait out its connect timeout.
         let start = ContinuousClock.now
         do {
             _ = try await central.connect(PeripheralIdentifier(uuid: UUID(), name: nil), timeout: .seconds(15))
@@ -236,12 +232,10 @@ struct CentralEndToEndTests {
     func requestBehindTheHelloIsServed() async throws {
         let provider = try await makeProvider()
         let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
-        // The scan leaves on the heels of the hello — same `.ready` callback, so both frames
-        // are decoded from the same receive and delivered back to back on the provider's
-        // listener queue, long before the handshake has hopped onto the actor and built a
-        // session. Repeated because the window is scheduler-dependent: before the provider
-        // held the messages behind the hello, this dropped the scan (or refused the
-        // connection outright, reading the scan as a first message that was not a hello).
+        // The scan leaves right after the hello, on the same `.ready` callback. The provider
+        // delivers both frames back to back, long before the handshake builds a session. The window
+        // depends on the scheduler, so the test repeats it. The provider must hold the scan behind
+        // the hello and not drop it or refuse the connection.
         for iteration in 0..<25 {
             let connection = LinkConnection.connect(
                 to: endpoint,
@@ -276,9 +270,9 @@ struct CentralEndToEndTests {
 
     @Test("Requests sent behind the hello reach the backend in the order they were sent")
     func requestsBehindTheHelloKeepTheirOrder() async throws {
-        // The backlog is replayed to the session outside the connection table's lock, so the
-        // table has to keep holding what arrives during the replay. A `FakeCentral` records
-        // the order the provider's session actually drove it in.
+        // The provider replays the backlog outside the connection table's lock, so the table must
+        // keep holding what arrives during the replay. A `FakeCentral` records the order in which
+        // the session drove it.
         let fakeBox = FakeCentralBox()
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
@@ -292,9 +286,8 @@ struct CentralEndToEndTests {
         try await provider.start()
         let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
 
-        // Every frame leaves in the one `.ready` callback, so they are all on the wire before
-        // the handshake has hopped onto the actor and built a session: the whole run is
-        // backlog, replayed, and must arrive in this order.
+        // Every frame leaves in the one `.ready` callback, so the whole run is backlog. The
+        // provider replays it, and it must arrive in this order.
         let rounds = 32
         let last = ServiceIdentifier(uuid: "FFFF")
         let connection = LinkConnection.connect(
@@ -321,8 +314,8 @@ struct CentralEndToEndTests {
         let fake = try #require(fakeBox.fake)
         await waitFor(timeout: .seconds(5)) { await fake.onQueue { fake.scanCallCount } == rounds + 1 }
 
-        // One scan more than the stops, and the *last* thing the backend saw is the scan that
-        // was sent last — not a `stopScan` that overtook it during the replay.
+        // There is one more scan than stops, so the backend's last event is the client's last scan.
+        // It is not a `stopScan` that overtook the scan during the replay.
         #expect(await fake.onQueue { fake.scanCallCount } == rounds + 1)
         #expect(await fake.onQueue { fake.stopScanCallCount } == rounds)
         #expect(await fake.onQueue { fake.lastScanServices ?? nil } == [last])
@@ -334,7 +327,7 @@ struct CentralEndToEndTests {
         await provider.stop()
     }
 
-    /// A `Sendable` hand-off for the `FakeCentral` the backend factory builds on the session's
+    /// A `Sendable` hand-off for the `FakeCentral` that the backend factory builds on the session's
     /// queue.
     private final class FakeCentralBox: Sendable {
         private let storage = Mutex<FakeCentral?>(nil)
@@ -365,8 +358,8 @@ struct CentralEndToEndTests {
         await waitFor(timeout: .seconds(2)) { ready.withLock { $0 } }
         #expect(ready.withLock { $0 })
 
-        // The provider is torn down with the connection accepted but not yet handshaken; the
-        // hello that follows must not be answered with a session.
+        // The test tears the provider down with the connection accepted but not yet handshaken. The
+        // hello that follows must not get a session.
         await provider.stop()
         connection.send(.clientHello(ClientHello(
             protocolVersion: LinkProtocol.version,
@@ -382,12 +375,12 @@ struct CentralEndToEndTests {
         connection.cancel()
     }
 
-    /// One silent client: a connection that opens the socket and then says nothing, with a
-    /// flag recording whether the provider has since dropped it.
+    /// A silent client: a connection that opens the socket and then says nothing. A flag records
+    /// whether the provider has since dropped it.
     private final class SilentClient: Sendable {
 
-        /// The two flags a silent client has, in a class the connection's handler can capture —
-        /// a `Mutex` is noncopyable, so it is wrapped rather than closed over.
+        /// The two flags of a silent client, in a class that the connection handler can capture. A
+        /// `Mutex` is noncopyable, so the code wraps it instead of closing over it.
         private final class Flags: Sendable {
             private let storage = Mutex<(isReady: Bool, hasEnded: Bool)>((false, false))
             var isReady: Bool { storage.withLock { $0.isReady } }
@@ -402,13 +395,12 @@ struct CentralEndToEndTests {
         /// Whether the socket reached `.ready`.
         var isReady: Bool { flags.isReady }
 
-        /// Whether the connection has since reached a terminal state — which, for a client
-        /// that never writes, only the provider can have caused.
+        /// Whether the connection has since reached a terminal state. A client that never writes
+        /// cannot cause this, so only the provider can.
         var hasEnded: Bool { flags.hasEnded }
 
-        /// Opens a socket to `endpoint` and never writes to it. Several clients share one
-        /// `queue` — a silent client's only callbacks are its own state transitions, and a
-        /// queue apiece would put dozens of threads behind sixty-four idle sockets.
+        /// Opens a socket to `endpoint` and never writes. Clients share one `queue`, because a
+        /// queue for each would put dozens of threads behind sixty-four idle sockets.
         init(endpoint: LinkEndpoint, queue: DispatchQueue) {
             connection = LinkConnection.connect(
                 to: endpoint,
@@ -437,7 +429,6 @@ struct CentralEndToEndTests {
     func silentConnectionIsReleasedAtTheHandshakeDeadline() async throws {
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
-        // Short enough to test, far longer than a loopback handshake needs.
         configuration.handshakeTimeout = .milliseconds(300)
         let log = Mutex<[String]>([])
         configuration.log = { line in log.withLock { $0.append(line) } }
@@ -450,14 +441,13 @@ struct CentralEndToEndTests {
         #expect(silent.isReady)
         #expect(!silent.hasEnded)
 
-        // Nothing is ever sent, so only the deadline can end this.
         await waitFor(timeout: .seconds(10)) { silent.hasEnded }
         #expect(silent.hasEnded)
         #expect(log.withLock { $0 }.contains { $0.contains("no client hello") })
         #expect(await provider.sessionCount == 0)
 
-        // And a client that does handshake, on the same provider, is served as before — the
-        // deadline only ever fires on a connection that has not been claimed.
+        // A client that does handshake on the same provider gets service as before. The deadline
+        // fires only on a connection that nobody has claimed.
         let (central, link) = makeCentral(port: await provider.port, label: "e2e.silent.real")
         await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
         #expect(central.state == .poweredOn)
@@ -474,14 +464,12 @@ struct CentralEndToEndTests {
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
         configuration.maximumPendingConnections = 64
-        // The default deadline, so nothing below can be released before the cap is reached.
         let log = Mutex<[String]>([])
         configuration.log = { line in log.withLock { $0.append(line) } }
         let provider = Provider(configuration: configuration)
         try await provider.start()
         let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
 
-        // One queue for all sixty-five: see `SilentClient.init(endpoint:queue:)`.
         let clientQueue = DispatchQueue(label: "e2e.cap")
         var silent: [SilentClient] = []
         defer { for client in silent { client.close() } }
@@ -491,8 +479,8 @@ struct CentralEndToEndTests {
             await waitFor(timeout: .seconds(10)) { client.isReady }
             #expect(client.isReady, "connection \(index)")
         }
-        // The accepts are delivered on the provider's listener queue, one behind the other;
-        // this settles the last of them before the connection that must be refused is opened.
+        // The provider delivers accepts one behind the other on its listener queue. This settles
+        // the last of them before the test opens the connection that must be refused.
         try await Task.sleep(for: .milliseconds(300))
         #expect(silent.allSatisfy { !$0.hasEnded })
 
@@ -501,7 +489,6 @@ struct CentralEndToEndTests {
         await waitFor(timeout: .seconds(10)) { refused.hasEnded }
         #expect(refused.hasEnded)
         #expect(log.withLock { $0 }.contains { $0.contains("too many are awaiting a handshake") })
-        // The cap sheds the newcomer, never the connections already waiting.
         #expect(silent.allSatisfy { !$0.hasEnded })
 
         await provider.stop()
@@ -509,17 +496,14 @@ struct CentralEndToEndTests {
 
     @Test("A connection holding a megabyte behind its own handshake is dropped")
     func backlogByteCapDropsTheConnection() async throws {
-        // A session's backend is built inside the handshake, on the actor, so a factory that
-        // waits holds the handshake open — and that is the only window in which a connection's
-        // messages are held rather than served. Nothing else can keep it open on demand.
+        // The provider builds the backend inside the handshake, so a factory that waits holds the
+        // handshake open. This is the only way to keep messages unserved on demand.
         //
-        // The wait is released by the drop itself, and bounded: it occupies a cooperative
-        // thread while it lasts, and a test that held one until *another* async assertion
-        // completed could starve the very pool that assertion needs. The drop does not need
-        // that thread — it is decided on the listener queue, in `onMessage`, before any
-        // handshake work reaches the actor the factory is holding — so the log line it
-        // writes is what opens the gate; the timeout is a fallback for a run where it never
-        // comes, wide enough that a loaded runner cannot open the gate early on its own.
+        // The drop releases the wait, and a bound limits it. The wait occupies a cooperative
+        // thread, so it must not depend on another async assertion. The drop is decided on the
+        // listener queue before any handshake work reaches the actor, so the log line it writes
+        // opens the gate. The timeout is only a fallback and is too wide for a loaded runner to
+        // open the gate early.
         let gate = DispatchSemaphore(value: 0)
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
@@ -559,8 +543,8 @@ struct CentralEndToEndTests {
             role: .central,
             clientName: "backlog"
         )))
-        // A megabyte and a quarter behind a handshake that cannot complete — past the cap, and
-        // well under the count cap, so only the byte cap can answer it.
+        // The test sends 1.25 MB behind a handshake that cannot complete. This is past the byte cap
+        // and well under the count cap, so only the byte cap can answer it.
         let value = Data(repeating: 0x5A, count: 128 * 1024)
         for sequence in 0..<10 {
             connection.send(.centralRequest(.writeValue(
@@ -583,7 +567,7 @@ struct CentralEndToEndTests {
         await provider.stop()
     }
 
-    /// The name on the first peripheral `central` sights, or `nil` if the scan ends first.
+    /// The name of the first peripheral that `central` sights, or `nil` if the scan ends first.
     private static func firstSighting(of central: Central) async -> String? {
         do {
             for try await event in await central.scan(services: [Self.service], timeout: .seconds(5)) {

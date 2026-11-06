@@ -3,9 +3,9 @@
 //  BLESwift
 //
 
-/// A snapshot of one peripheral's connection lifecycle. Unlike ``CentralState`` (the radio's
-/// state, readable `nonisolated`), ``Central/connectionState(of:)`` reflects actor-isolated
-/// state and so is read via `await`. Every peripheral has its own independent state.
+/// A snapshot of one peripheral's connection lifecycle. Each peripheral has its own state.
+/// Unlike ``CentralState``, you read ``Central/connectionState(of:)`` with `await`, because it
+/// is actor-isolated.
 public enum ConnectionState: Sendable {
 
     /// Not connected, and no connection attempt is in progress.
@@ -17,7 +17,7 @@ public enum ConnectionState: Sendable {
     /// Connected to `Peripheral`.
     case connected(Peripheral)
 
-    /// Disconnecting — either an explicit disconnect call is in flight, or
-    /// ``Central/cancelAllOperations(error:)`` cancelled a pending connection attempt.
+    /// Disconnecting. This occurs during an explicit disconnect, and when
+    /// ``Central/cancelAllOperations(error:)`` cancels a pending connection attempt.
     case disconnecting
 }

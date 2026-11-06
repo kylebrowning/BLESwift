@@ -9,8 +9,8 @@ import BLESwiftVirtualRadio
 import Foundation
 import Testing
 
-/// Per-device `maximumWriteWithoutResponseLength` (#66): what a connected `Central` reports,
-/// and what the radio drops, truncates, and still accepts against it.
+/// Per-device `maximumWriteWithoutResponseLength`. The tests check what a connected `Central`
+/// reports, and what the radio drops, truncates, and accepts against this length.
 @Suite("Per-device write length")
 struct WriteLengthTests {
 
@@ -27,20 +27,22 @@ struct WriteLengthTests {
         #expect(await peripheral.maximumWriteValueLength(for: .withoutResponse) == 100)
         #expect(await peripheral.maximumWriteValueLength(for: .withResponse) == VirtualRadio.maximumValueLength)
 
-        // Oversize first, then exactly at the limit: the remote's serial chain keeps the two
-        // in order, so once the 100-byte write has reached the handler the 101-byte one has
-        // already been judged — and dropped.
+        // Oversize first, then exactly at the limit. The remote's serial chain keeps the writes in
+        // order, so when the 100-byte write has reached the handler, the radio has already judged
+        // and dropped the 101-byte write.
         try await peripheral.write(Data(repeating: 0xAA, count: 101), to: RecordingDevice.control, type: .withoutResponse)
         try await peripheral.write(Data(repeating: 0xBB, count: 100), to: RecordingDevice.control, type: .withoutResponse)
         let arrived = await RecordingDevice.first(of: handler.writes)
         #expect(arrived?.count == 100)
         #expect(await handler.written.map(\.count) == [100])
 
-        // `.withResponse` is held to the attribute maximum whatever the device's packet size.
+        // A `.withResponse` write is limited to the attribute maximum, for any packet size of the
+        // device.
         try await peripheral.write(Data(repeating: 0xCC, count: VirtualRadio.maximumValueLength), to: RecordingDevice.control)
         #expect(await handler.written.map(\.count) == [100, VirtualRadio.maximumValueLength])
 
-        // A notification is one packet too: clipped to the device's length, not the radio's.
+        // A notification is also one packet. The radio clips it to the device's length, not the
+        // radio's.
         let notifications = Task { () -> Data? in
             for try await value in peripheral.notifications(for: RecordingDevice.control) as AsyncThrowingStream<Data, Error> {
                 return value

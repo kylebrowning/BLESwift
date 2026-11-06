@@ -9,10 +9,10 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Exercises issue #12's GATT enumeration surface: `Peripheral.discoverServices()`,
-/// `discoverCharacteristics(for:)`, and `discoverDescriptors(for:)` — listing a connected
-/// peripheral's GATT graph without knowing UUIDs up front, driven through the scriptable
-/// `FakePeripheral` service/characteristic/descriptor graph (`availableServices`,
+/// Tests the GATT enumeration API: `Peripheral.discoverServices()`,
+/// `discoverCharacteristics(for:)`, and `discoverDescriptors(for:)`. They list the GATT graph of a
+/// connected peripheral without prior knowledge of the UUIDs. The tests use `FakePeripheral`'s
+/// scriptable service, characteristic, and descriptor graph (`availableServices` and
 /// `availableDescriptors`).
 @Suite("GATT enumeration")
 struct GATTEnumerationTests {
@@ -29,7 +29,7 @@ struct GATTEnumerationTests {
     private static let userDescription = DescriptorIdentifier(uuid: "2901", characteristic: heartRateMeasurement)
     private static let presentationFormat = DescriptorIdentifier(uuid: "2904", characteristic: heartRateMeasurement)
 
-    /// Scripts `fakePeripheral` with a two-service GATT graph, on its queue.
+    /// Scripts `fakePeripheral` with a GATT graph of two services, on its queue.
     private static func scriptGraph(_ fakePeripheral: FakePeripheral) async {
         await fakePeripheral.onQueue {
             fakePeripheral.availableServices = [
@@ -158,17 +158,17 @@ struct GATTEnumerationTests {
     @Test("A pending discoverServices() fails when the connection is lost mid-flight")
     func disconnectFailsPendingEnumeration() async throws {
         let (central, fakeCentral, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-        // Withhold the `didDiscoverServices` completion so the enumeration stays genuinely
-        // pending (rather than resolving within the fake's own `queue.async` turn), letting the
-        // disconnect land while its continuation is still parked.
+        // Withhold the `didDiscoverServices` completion so that the enumeration stays pending and
+        // does not resolve within the fake's `queue.async` turn. The disconnect then arrives while
+        // the continuation is parked.
         await Self.scriptGraph(fakePeripheral)
         await fakePeripheral.onQueue { fakePeripheral.holdServiceDiscoveryCompletions = true }
 
         let enumerationTask = Task<[ServiceIdentifier], Error> {
             try await peripheral.discoverServices()
         }
-        // Wait until the enumeration has issued its (held) discoverServices call, then tear
-        // the connection down out from under it.
+        // Wait until the enumeration has issued its held discoverServices call, then tear the
+        // connection down while the call is in progress.
         await waitFor { await fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == 1 }
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
 

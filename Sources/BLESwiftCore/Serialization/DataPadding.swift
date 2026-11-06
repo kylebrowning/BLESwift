@@ -5,11 +5,11 @@
 
 import Foundation
 
-/// Produces empty (zero-filled) `Data` of a fixed length, useful as padding when
-/// constructing a packet with ``combine(_:)``.
+/// Produces empty (zero-filled) `Data` of a fixed length. Use it as padding when you construct a
+/// packet with ``combine(_:)``.
 public struct DataPadding: Transmittable, Sendable {
 
-    /// The number of zero bytes this padding will produce.
+    /// The number of zero bytes that this padding produces.
     private let amount: Int
 
     /// Creates a padding value.

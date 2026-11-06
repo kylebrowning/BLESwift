@@ -5,72 +5,72 @@
 
 import Foundation
 
-/// A protocol seam over `CBCentralManager`, speaking exclusively in BLESwift-owned types.
-/// Conformances: CoreBluetooth (`BLESwift`) and scriptable fakes (`BLESwiftTestSupport`);
-/// conforming your own type is possible but unsupported.
+/// A protocol seam over `CBCentralManager`. It uses only types that BLESwift owns. The conformances
+/// are CoreBluetooth (`BLESwift`) and scriptable fakes (`BLESwiftTestSupport`). You can conform
+/// your own type, but this is not supported.
 ///
-/// - Important: Every ``eventHandler`` delivery must happen asynchronously, on the serial
-///   queue the owning `Central` was constructed with — never deliver inline.
-/// - Note: ``radioState``/``bluetoothAuthorization`` are renamed to avoid clashing with
-///   `CBCentralManager`/`CBManager`'s identically-named members.
+/// - Important: Every ``eventHandler`` delivery must happen asynchronously, on the serial queue
+///   that the owning `Central` was created with. Never deliver inline.
+/// - Note: ``radioState`` and ``bluetoothAuthorization`` are renamed to avoid a clash with the
+///   same-named members of `CBCentralManager` and `CBManager`.
 public protocol CentralManaging: AnyObject {
 
-    /// Receives every ``CentralEvent`` this backend produces; `nil` detaches delivery.
+    /// Receives every ``CentralEvent`` that this backend produces. `nil` stops the delivery.
     var eventHandler: ((CentralEvent) -> Void)? { get set }
 
     /// The current state of the Bluetooth radio. Mirrors `CBCentralManager.state`.
     var radioState: CentralState { get }
 
-    /// The app's Bluetooth authorization status. Mirrors the `CBManager.authorization`
-    /// class property (the *instance* property of the same name is deprecated).
+    /// The Bluetooth authorization status of the app. Mirrors the `CBManager.authorization` class
+    /// property. The *instance* property with the same name is deprecated.
     static var bluetoothAuthorization: BluetoothAuthorization { get }
 
-    /// Begins scanning for peripherals. Mirrors
+    /// Starts a scan for peripherals. Mirrors
     /// `CBCentralManager.scanForPeripherals(withServices:options:)`.
     func scanForPeripherals(withServices services: [ServiceIdentifier]?, options: ScanOptions)
 
-    /// Stops any active scan. Mirrors `CBCentralManager.stopScan()`.
+    /// Stops each active scan. Mirrors `CBCentralManager.stopScan()`.
     func stopScan()
 
-    /// Initiates a connection to `peripheral`. Mirrors `CBCentralManager.connect(_:options:)`,
-    /// with `requiresANCS` mapping to `CBConnectPeripheralOptionRequiresANCS` (applied on
-    /// iOS only; conformances ignore it elsewhere).
+    /// Starts a connection to `peripheral`. Mirrors `CBCentralManager.connect(_:options:)`.
+    /// `requiresANCS` maps to `CBConnectPeripheralOptionRequiresANCS`. It applies on iOS only, and
+    /// conformances ignore it on other platforms.
     ///
-    /// `peripheral` is an existential (not an associated type) so `Central` can hold this
-    /// protocol as `any CentralManaging`. Conformances downcast internally; `peripheral`
-    /// values from a mismatched shim family are silently ignored rather than trapped.
+    /// `peripheral` is an existential and not an associated type, so `Central` can hold this
+    /// protocol as `any CentralManaging`. Conformances downcast internally. A `peripheral` from a
+    /// mismatched shim family is silently ignored and does not trap.
     func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool)
 
     /// Cancels an active or pending connection to `peripheral`. Mirrors
-    /// `CBCentralManager.cancelPeripheralConnection(_:)`. See ``connect(_:options:)`` for
-    /// how mismatched shim families are handled.
+    /// `CBCentralManager.cancelPeripheralConnection(_:)`. For mismatched shim families, see
+    /// ``connect(_:options:)``.
     func cancelPeripheralConnection(_ peripheral: any PeripheralRemote)
 
-    /// Looks up previously-seen peripherals by identifier. Mirrors
+    /// Looks up peripherals that the system saw before, by identifier. Mirrors
     /// `CBCentralManager.retrievePeripherals(withIdentifiers:)`.
     func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote]
 
-    /// Looks up peripherals currently connected to the system (by any app) that expose at
-    /// least one of the given services. Mirrors
+    /// Looks up peripherals that are connected to the system (by any app) and that have at least
+    /// one of the given services. Mirrors
     /// `CBCentralManager.retrieveConnectedPeripherals(withServices:)`.
     func retrieveConnectedPeripherals(withServices services: [ServiceIdentifier]) -> [any PeripheralRemote]
 
-    /// Registers for system connection events matching `services`/`peripherals` (any-of;
-    /// both `nil` matches nothing, per CoreBluetooth). Mirrors
-    /// `CBCentralManager.registerForConnectionEvents(options:)`. A no-op on macOS, where
-    /// the underlying API does not exist.
+    /// Registers for system connection events that match `services` or `peripherals` (any of them).
+    /// If both are `nil`, nothing matches, as in CoreBluetooth. Mirrors
+    /// `CBCentralManager.registerForConnectionEvents(options:)`. On macOS, the underlying API does
+    /// not exist and this function does nothing.
     func registerForConnectionEvents(services: [ServiceIdentifier]?, peripherals: [UUID]?)
 
-    /// Cancels a prior ``registerForConnectionEvents(services:peripherals:)``. Mirrors
-    /// `CBCentralManager.registerForConnectionEvents(options:)` with `nil` options. A
-    /// no-op on macOS.
+    /// Cancels an earlier ``registerForConnectionEvents(services:peripherals:)``. Mirrors
+    /// `CBCentralManager.registerForConnectionEvents(options:)` with `nil` options. On macOS, this
+    /// function does nothing.
     func unregisterForConnectionEvents()
 }
 
 extension CentralManaging {
 
-    /// ``connect(_:options:requiresANCS:)`` with `requiresANCS: false` — kept so existing
-    /// two-argument call sites read unchanged.
+    /// The same as ``connect(_:options:requiresANCS:)`` with `requiresANCS: false`. Existing
+    /// two-argument call sites keep working.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?) {
         connect(peripheral, options: options, requiresANCS: false)
     }

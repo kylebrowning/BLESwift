@@ -2,8 +2,8 @@
 //  StateView.swift
 //  BLESwiftExplorer
 //
-//  Screen 1: Bluetooth state & authorization — the "power on" gate, driven by
-//  `central.stateEvents()` and `central.authorization`.
+//  Screen 1: Bluetooth state and authorization.
+//  It is the "power on" gate. `central.stateEvents()` and `central.authorization` drive it.
 //
 
 import BLESwift

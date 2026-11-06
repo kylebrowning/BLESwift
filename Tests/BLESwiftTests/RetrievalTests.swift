@@ -10,10 +10,10 @@ import BLESwiftTestSupport
 import Dispatch
 import Testing
 
-/// Exercises plan 04's system-known peripheral retrieval surface:
+/// Tests the retrieval of peripherals that the system knows:
 /// ``Central/knownPeripherals(withIdentifiers:)`` and
-/// ``Central/systemConnectedPeripherals(withServices:)``, driven entirely through the
-/// fakes (`makeTestCentral()`), plus the `.stopped` guard on a real `CBCentralManager`.
+/// ``Central/systemConnectedPeripherals(withServices:)``. Most tests use only the fakes
+/// (`makeTestCentral()`). One test also checks the `.stopped` guard on a real `CBCentralManager`.
 @Suite("Retrieval")
 struct RetrievalTests {
 
@@ -49,7 +49,7 @@ struct RetrievalTests {
         let results = try await central.knownPeripherals(withIdentifiers: [fakePeripheral.identifier, unknown])
         #expect(results == [fakePeripheral.peripheralIdentifier])
 
-        // Nothing scripted at all.
+        // The test scripts nothing.
         let (emptyCentral, _, _) = makeTestCentral()
         let emptyResults = try await emptyCentral.knownPeripherals(withIdentifiers: [UUID()])
         #expect(emptyResults == [])
@@ -85,11 +85,11 @@ struct RetrievalTests {
         let (central, fakeCentral, queue) = makeFakeCentralOnly()
         fakeCentral.simulateStateChange(.poweredOn)
 
-        // Nothing scripted at all.
+        // The test scripts nothing.
         let noneScripted = try await central.systemConnectedPeripherals(withServices: [Self.heartRateService])
         #expect(noneScripted == [])
 
-        // Scripted, but disjoint from the query.
+        // The scripted peripheral is disjoint from the query.
         let batteryPeripheral = FakePeripheral(name: "Battery Pack", queue: queue)
         await fakeCentral.onQueue {
             fakeCentral.systemConnectedPeripherals = [
@@ -107,9 +107,8 @@ struct RetrievalTests {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
 
-        // Plan 04 §6: on real CoreBluetooth, a system-connected peripheral is a fortiori
-        // known; in fakes these are two separately scripted maps, so both must be scripted
-        // to mirror that reality.
+        // On real CoreBluetooth, a system-connected peripheral is always also a known peripheral.
+        // The fakes have two separately scripted maps, so the test must script both.
         await fakeCentral.onQueue {
             fakeCentral.systemConnectedPeripherals = [
                 (peripheral: fakePeripheral, services: [Self.heartRateService])
@@ -136,10 +135,9 @@ struct RetrievalTests {
 
     @Test("knownPeripherals and systemConnectedPeripherals throw .stopped after stopAndExtractState()")
     func bothMethodsThrowStoppedAfterExtraction() async throws {
-        // Same real-CBCentralManager adopting-init pattern as
-        // CentralTests.adoptingInitWiresGivenManager — the only way to make `.stopped`
-        // reachable for a `Central` backed by a real (rather than test-adopted `nil`)
-        // manager.
+        // Same adopting-init pattern with a real CBCentralManager as
+        // CentralTests.adoptingInitWiresGivenManager. It is the only way to reach `.stopped` for a
+        // `Central` backed by a real manager. A test-adopted `nil` manager would not work.
         let mainQueue = DispatchQueue.main
         let manager = CBCentralManager(delegate: nil, queue: mainQueue)
         let central = Central(adopting: manager, callbackQueue: mainQueue)
@@ -167,9 +165,9 @@ struct RetrievalTests {
 
     // MARK: - Helpers
 
-    /// Like `makeFakeCentral()`, but returns the queue directly rather than pairing the
-    /// fake central with a single fake peripheral — the service-intersection tests above
-    /// script multiple independent `FakePeripheral`s on the same queue.
+    /// Like `makeFakeCentral()`, but returns the queue directly and does not pair the fake central
+    /// with a single fake peripheral. The service-intersection tests above script several
+    /// independent `FakePeripheral` objects on the same queue.
     private func makeFakeCentralOnly(label: String = "RetrievalTests.FakeCentral") -> (Central, FakeCentral, DispatchQueue) {
         let queue = DispatchQueue(label: label)
         let fakeCentral = FakeCentral(queue: queue)

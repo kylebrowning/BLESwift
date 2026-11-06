@@ -2,9 +2,9 @@
 //  SystemEventsView.swift
 //  BLESwiftExplorer
 //
-//  Screen 6: system-level connection events. `connectionEventRegistration` +
-//  `SystemConnectionEvent` are iOS/tvOS/watchOS only (Task 7); macOS shows a note. ANCS
-//  status is surfaced on the peripheral detail screen (iOS only).
+//  Screen 6: system-level connection events. `connectionEventRegistration` and
+//  `SystemConnectionEvent` are only for iOS, tvOS, and watchOS. macOS shows a note. The peripheral
+//  detail screen shows the ANCS status (iOS only).
 //
 
 import BLESwift

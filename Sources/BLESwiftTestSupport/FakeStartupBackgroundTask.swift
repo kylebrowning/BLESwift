@@ -6,11 +6,11 @@
 import BLESwiftCore
 import BLESwiftCompat17
 
-/// A scriptable stand-in for `StartupBackgroundTaskRunning`; records the `begin`/`end`
-/// lifecycle and lets you fire the captured expiration handler as UIKit would.
+/// A scriptable stand-in for `StartupBackgroundTaskRunning`. It records the `begin` and `end` calls
+/// and lets you fire the captured expiration handler, as UIKit does.
 ///
-/// `Mutex`-guarded, not queue-confined like `FakeCentral`/`FakePeripheral`: the real
-/// conformance is callable from any thread/actor, and this fake mirrors that.
+/// A `Mutex` guards it. Unlike `FakeCentral` and `FakePeripheral`, no queue confines it. The real
+/// conformance can be called from any thread or actor, and this fake mirrors that.
 public final class FakeStartupBackgroundTask: StartupBackgroundTaskRunning {
 
     private struct State {
@@ -24,17 +24,17 @@ public final class FakeStartupBackgroundTask: StartupBackgroundTaskRunning {
     /// Creates a `FakeStartupBackgroundTask`.
     public init() {}
 
-    /// How many times ``begin(onExpiration:)`` has been called.
+    /// The number of calls to ``begin(onExpiration:)``.
     public var beginCount: Int {
         state.withLock { $0.beginCount }
     }
 
-    /// How many times ``end()`` has been called.
+    /// The number of calls to ``end()``.
     public var endCount: Int {
         state.withLock { $0.endCount }
     }
 
-    /// Records the call and captures `onExpiration`, incrementing ``beginCount``.
+    /// Records the call and captures `onExpiration`. It increments ``beginCount``.
     public func begin(onExpiration: @escaping @Sendable () -> Void) {
         state.withLock {
             $0.beginCount += 1
@@ -42,13 +42,13 @@ public final class FakeStartupBackgroundTask: StartupBackgroundTaskRunning {
         }
     }
 
-    /// Records the call, incrementing ``endCount``.
+    /// Records the call. It increments ``endCount``.
     public func end() {
         state.withLock { $0.endCount += 1 }
     }
 
-    /// Fires the expiration handler captured by ``begin(onExpiration:)``, as UIKit would
-    /// when the app's background time runs out. A no-op if `begin` was never called.
+    /// Fires the expiration handler that ``begin(onExpiration:)`` captured, as UIKit does when the
+    /// app's background time ends. If `begin` was never called, it does nothing.
     public func fireExpiration() {
         let handler = state.withLock { $0.onExpiration }
         handler?()

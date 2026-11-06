@@ -9,11 +9,12 @@ import Dispatch
 import Foundation
 import BLESwiftCompat17
 
-/// The app-facing entry point for routing BLESwift's backends over the link.
+/// The app-facing entry point that routes the BLESwift backends over the link.
 ///
-/// A single call, made before the app constructs its first `Central()` or `PeripheralHost()`,
-/// is enough to route every default-initialized instance through a host-side provider instead
-/// of `CoreBluetooth` — the usual adoption in an iOS Simulator target:
+/// One call is enough. The app makes the call before it creates its first `Central()` or
+/// `PeripheralHost()`. The call routes every default-initialized instance through a host-side
+/// provider and not through `CoreBluetooth`. This is the usual adoption in an iOS Simulator
+/// target:
 ///
 /// ```swift
 /// import BLESwiftSimulatorLink
@@ -23,43 +24,47 @@ import BLESwiftCompat17
 /// #endif
 /// ```
 ///
-/// This must run before the app's first `Central()` / `PeripheralHost()`: those default
-/// initializers consult `BackendRegistry` once, at construction, so installing after one has
-/// already been built has no effect on it.
+/// Call this before the app's first `Central()` or `PeripheralHost()`. Those default
+/// initializers consult `BackendRegistry` once, when they construct the instance. An install
+/// after the app built an instance has no effect on that instance.
 ///
-/// `install()` works through `BackendRegistry` — nothing in `BLESwiftCore`, `BLESwift`,
-/// `BLESwiftLink`, or `BLESwiftProvider` knows this module exists.
+/// `install()` works through `BackendRegistry`. Nothing in `BLESwiftCore`, `BLESwift`,
+/// `BLESwiftLink`, or `BLESwiftProvider` knows that this module exists.
 public enum SimulatorLink {
 
-    /// Everything mutable, guarded by one lock.
+    /// All mutable state. One lock guards it.
     private struct State {
         var endpoint: LinkEndpoint?
     }
 
     private static let state = Mutex(State())
 
-    /// Routes every subsequently-constructed `Central()` / `PeripheralHost()` through a
-    /// provider at `endpoint`.
+    /// Routes every `Central()` and `PeripheralHost()` that the app constructs after this call
+    /// through a provider at `endpoint`.
     ///
     /// - Parameters:
-    ///   - endpoint: The provider's host and port. `nil` resolves to
-    ///     `LinkEndpoint.fromEnvironment(_:)` (the `BLESWIFT_LINK` environment
-    ///     variable), falling back to `LinkEndpoint.default`.
-    ///   - clientName: A human-readable name sent in the handshake, for provider-side
-    ///     logging. Defaults to the current process's name.
-    ///   - codec: The codec used to encode link messages. Defaults to
+    ///   - endpoint: The host and port of the provider. If `nil`, the function uses
+    ///     `LinkEndpoint.fromEnvironment(_:)` (the `BLESWIFT_LINK` environment variable), and if
+    ///     that is unavailable, `LinkEndpoint.default`.
+    ///   - clientName: A name that people can read, sent in the handshake for provider-side logs.
+    ///     The default is the name of the current process.
+    ///   - codec: The codec that encodes link messages. The default is
     ///     `LinkCodec.binaryPropertyList`.
     ///
-    /// Idempotent: calling this again — with the same or different parameters — simply
-    /// replaces the registered factories and the resolved ``endpoint``.
+    /// A repeated call, with the same or different parameters, replaces the registered factories
+    /// and the resolved ``endpoint``.
     ///
-    /// The registry and ``endpoint`` change together: both factories go in through
-    /// `BackendRegistry.setFactories(central:peripheralManager:)`, one lock acquisition,
-    /// from inside this type's own state lock — so no `Central()`, `PeripheralHost()`, or
-    /// ``isInstalled`` read on another thread can see a link-backed central next to the
-    /// previous peripheral factory, or a registry already routing over the link while
-    /// ``endpoint`` still says `nil`. The lock order is this state, then the registry's; the
-    /// registry never takes this lock.
+    /// The registry and ``endpoint`` change together. Both factories go in through
+    /// `BackendRegistry.setFactories(central:peripheralManager:)`, which takes one lock from
+    /// inside this type's state lock. Thus another thread cannot see an inconsistent state
+    /// through `Central()`, `PeripheralHost()`, or ``isInstalled``. It cannot see either of
+    /// these:
+    ///
+    /// - A link-backed central next to the previous peripheral factory.
+    /// - A registry that already routes over the link while ``endpoint`` still says `nil`.
+    ///
+    /// The lock order is this type's state, then the registry's lock. The registry never takes
+    /// this type's lock.
     public static func install(
         endpoint: LinkEndpoint? = nil,
         clientName: String = ProcessInfo.processInfo.processName,
@@ -79,11 +84,11 @@ public enum SimulatorLink {
         }
     }
 
-    /// Reverts `Central()` / `PeripheralHost()` to their default `CoreBluetooth` backend.
+    /// Reverts `Central()` and `PeripheralHost()` to their default `CoreBluetooth` backend.
     ///
-    /// Clears both `BackendRegistry` factories and ``endpoint``, under the same lock
-    /// ``install(endpoint:clientName:codec:)`` sets them. Idempotent; safe to call even when
-    /// nothing is installed.
+    /// Clears both `BackendRegistry` factories and ``endpoint``, under the same lock as
+    /// ``install(endpoint:clientName:codec:)``. Repeated calls are safe, including when nothing
+    /// is installed.
     public static func uninstall() {
         state.withLock { state in
             BackendRegistry.setFactories(central: nil, peripheralManager: nil)
@@ -91,31 +96,30 @@ public enum SimulatorLink {
         }
     }
 
-    /// Whether ``install(endpoint:clientName:codec:)`` has registered the link backends.
+    /// Whether ``install(endpoint:clientName:codec:)`` registered the link backends.
     public static var isInstalled: Bool {
         state.withLock { $0.endpoint != nil }
     }
 
-    /// The endpoint ``install(endpoint:clientName:codec:)`` resolved and is currently routing
-    /// through, or `nil` when not installed.
+    /// The endpoint that ``install(endpoint:clientName:codec:)`` resolved and now routes
+    /// through. The value is `nil` if the link is not installed.
     public static var endpoint: LinkEndpoint? {
         state.withLock { $0.endpoint }
     }
 
-    /// Dials `endpoint` and completes the link handshake, then disconnects — a lightweight
-    /// check for "is a provider listening and willing to accept clients", without leaving a
-    /// session running.
+    /// Dials `endpoint`, completes the link handshake, and then disconnects. It is a light check
+    /// for whether a provider listens and accepts clients. It does not leave a session running.
     ///
     /// - Parameters:
-    ///   - endpoint: The provider's host and port. `nil` resolves the same way
-    ///     ``install(endpoint:clientName:codec:)`` does.
-    ///   - timeout: How long to keep trying before giving up. A dial that fails without an
-    ///     answer is retried until this budget is spent — the local stack refusing to open a
-    ///     socket (an `EADDRINUSE` from a busy machine, say) says nothing about whether a
-    ///     provider is listening, and neither does a dial that lost a race with the
-    ///     provider's own startup.
-    /// - Returns: `true` if a provider accepted the handshake within `timeout`; `false` if a
-    ///   provider answered and refused, or if the budget ran out. Never throws.
+    ///   - endpoint: The host and port of the provider. If `nil`, it resolves as in
+    ///     ``install(endpoint:clientName:codec:)``.
+    ///   - timeout: How long to keep trying before the function gives up. The function retries a
+    ///     dial that fails without an answer until this budget ends, because such a failure says
+    ///     nothing about whether a provider listens. Two examples are a local stack that refuses
+    ///     to open a socket (for example `EADDRINUSE` on a busy machine) and a dial that lost a
+    ///     race with the provider's startup.
+    /// - Returns: `true` if a provider accepted the handshake within `timeout`. `false` if a
+    ///   provider answered and refused, or if the budget ran out. The function never throws.
     public static func isProviderReachable(
         _ endpoint: LinkEndpoint? = nil,
         timeout: Duration = .seconds(2)
@@ -129,7 +133,7 @@ public enum SimulatorLink {
             case .accepted:
                 return true
             case .refused:
-                // A provider answered and said no. Retrying cannot change that answer.
+                // A provider answered and said no. A retry cannot change that answer.
                 return false
             case .unanswered:
                 let left = deadline - ContinuousClock.now
@@ -140,18 +144,18 @@ public enum SimulatorLink {
         return false
     }
 
-    /// What one dial of ``isProviderReachable(_:timeout:)`` established.
+    /// The result of one dial of ``isProviderReachable(_:timeout:)``.
     private enum HandshakeOutcome: Sendable {
         /// A provider answered and accepted the hello.
         case accepted
-        /// A provider answered and refused, or answered with something that is not a hello.
+        /// A provider answered and refused, or it answered with something that is not a hello.
         case refused
-        /// Nobody answered within the attempt's budget: the dial failed, the connection was
+        /// Nobody answered within the attempt's budget. The dial failed, the connection was
         /// cancelled, or the host accepted the socket and stayed silent.
         case unanswered
     }
 
-    /// Dials `endpoint` once and completes the link handshake, giving up after `budget`.
+    /// Dials `endpoint` once and completes the link handshake. It gives up after `budget`.
     private static func attemptHandshake(
         with endpoint: LinkEndpoint,
         within budget: Duration
@@ -162,14 +166,14 @@ public enum SimulatorLink {
 
         return await withTaskGroup(of: HandshakeOutcome.self) { group in
             group.addTask {
-                // Cancellation (from `group.cancelAll()` below, once the sleep task wins the
-                // race) only flags this task — it does nothing to the in-flight `NWConnection`
-                // by itself. Without `onCancel` cancelling `connection` explicitly, a host that
-                // accepts the TCP connection and then goes silent (or one that black-holes the
-                // SYN outright) leaves this continuation suspended for as long as the OS gives
-                // the connect/read a chance to fail, which can be tens of seconds — far past
-                // `timeout`. Cancelling `connection` here publishes a terminal `.cancelled`
-                // state, which `onStateChange` below turns into a `resumeOnce(false)`.
+                // Cancellation comes from `group.cancelAll()` below, when the sleep task wins the
+                // race. It only sets a flag on this task and does nothing to the in-flight
+                // `NWConnection`, so `onCancel` must cancel `connection` explicitly. Otherwise a
+                // host that accepts the TCP connection and goes silent, or black-holes the SYN,
+                // keeps this continuation suspended until the OS lets the connect or the read
+                // fail. That can take tens of seconds, much more than `timeout`. Cancelling
+                // `connection` here makes it publish a terminal `.cancelled` state, which
+                // `onStateChange` below turns into a `resumeOnce(false)`.
                 await withTaskCancellationHandler {
                     await withCheckedContinuation { (continuation: CheckedContinuation<HandshakeOutcome, Never>) in
                         let resumed = Mutex(false)
@@ -204,14 +208,14 @@ public enum SimulatorLink {
                             resumeOnce(hello.accepted ? .accepted : .refused)
                         }
                         connection.start()
-                        // If this task was already cancelled when it reached
-                        // `withTaskCancellationHandler`, `onCancel` ran *before*
-                        // `onStateChange` was installed: the connection published its
-                        // terminal `.cancelled` with nothing listening, and `start()` then
-                        // returned without doing anything, because it refuses to start a
-                        // connection that is already terminal. Nothing would ever resume the
-                        // continuation. Re-check the state now that a handler exists; the
-                        // one-shot `resumeOnce` makes an overlap with the handler harmless.
+                        // If the task was already cancelled when it reached
+                        // `withTaskCancellationHandler`, `onCancel` ran *before* the code
+                        // installed `onStateChange`. The connection published its terminal
+                        // `.cancelled` state and nothing listened, and `start()` then returned
+                        // without any action, because it refuses to start a terminal connection.
+                        // Nothing would ever resume the continuation. Thus the code checks the
+                        // state again now that a handler exists. The one-shot `resumeOnce` makes
+                        // an overlap with the handler harmless.
                         switch connection.state {
                         case .failed, .cancelled: resumeOnce(.unanswered)
                         case .idle, .connecting, .ready: break

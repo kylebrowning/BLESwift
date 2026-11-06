@@ -7,12 +7,12 @@ import BLESwift
 import BLESwiftCore
 import Foundation
 
-/// The Bluetooth SIG "Body Sensor Location" characteristic (GSS §3.34 Body Sensor
-/// Location, `0x2A38`).
+/// The Bluetooth SIG "Body Sensor Location" characteristic (GSS §3.34 Body Sensor Location,
+/// `0x2A38`).
 ///
-/// Byte layout: a single `UInt8` enumerating where on the body the sensor sits. Values
-/// 7–255 are reserved by the SIG; they decode to ``Location/reserved(_:)`` rather than
-/// throwing, so an unknown value from a nonstandard peripheral is preserved, not rejected.
+/// Byte layout: a single `UInt8` for where on the body the sensor sits. The SIG reserves the values
+/// 7–255. They decode to ``Location/reserved(_:)`` and do not throw, so the code keeps an unknown
+/// value from a nonstandard peripheral.
 public struct BodySensorLocation: Receivable, Sendable, Equatable {
 
     /// Where on the body a heart-rate (or similar) sensor is worn.
@@ -24,7 +24,7 @@ public struct BodySensorLocation: Receivable, Sendable, Equatable {
         case hand
         case earLobe
         case foot
-        /// A value the SIG has reserved (7–255), preserved verbatim.
+        /// A value that the SIG reserves (7–255), kept unchanged.
         case reserved(UInt8)
 
         init(rawValue: UInt8) {

@@ -3,28 +3,24 @@
 //  BLESwift
 //
 
-/// Races `operation` against a `duration`-long timer on `clock`, task-group style (no stdlib
-/// timeout API exists in Swift 6.2). `nil` duration disables the timeout entirely. If the
-/// timer wins, `operation`'s task is cooperatively cancelled and `error()` is thrown.
+/// Races `operation` against a timer of `duration` on `clock`, with a task group. A `nil`
+/// duration disables the timeout. If the timer wins, the function cancels `operation`'s task
+/// and throws `error()`.
 ///
-/// Cancelling `operation`'s task does **not** by itself force it to return — Swift task
-/// cancellation is cooperative. An `operation` built around a `CheckedContinuation` must
-/// itself be wrapped in `withTaskCancellationHandler` to react to that; until it does, this
-/// function will not return until `operation` genuinely completes, per structured
-/// concurrency's guarantee that a task group waits for every child task.
+/// Cancellation is cooperative. An `operation` that wraps a `CheckedContinuation` must use
+/// `withTaskCancellationHandler` to react to the cancel. Until `operation` returns, this
+/// function does not return, because a task group waits for every child task.
 ///
-/// Uses `group.addTask { }`, not a bare `Task { }` spawn (grep-forbidden elsewhere in
-/// `Sources/`) — `addTask` is structured-concurrency, and its child task cannot outlive
-/// `withThrowingTaskGroup`'s scope.
+/// It uses `group.addTask { }` and not a bare `Task { }`, which a grep check forbids elsewhere
+/// in `Sources/`.
 ///
 /// - Parameters:
-///   - clock: The clock the timer sleeps on — `Configuration.clock`, so a test can drive it.
-///   - duration: How long to wait for `operation` before timing out. `nil` disables the
-///     timeout entirely.
-///   - error: Lazily evaluated; thrown if the timer wins the race.
+///   - clock: The clock for the timer. It is `Configuration.clock`, so a test can drive it.
+///   - duration: How long to wait for `operation`. `nil` disables the timeout.
+///   - error: Evaluated lazily. The function throws it if the timer wins the race.
 ///   - operation: The work to race against the timer.
-/// - Returns: `operation`'s result, if it wins the race.
-/// - Throws: `error()` if the timer wins the race; otherwise whatever `operation` throws.
+/// - Returns: The result of `operation`, if it wins the race.
+/// - Throws: `error()` if the timer wins. Otherwise, the error that `operation` throws.
 func withTimeout<T: Sendable>(
     clock: any Clock<Duration>,
     _ duration: Duration?,
@@ -47,7 +43,7 @@ func withTimeout<T: Sendable>(
         defer { group.cancelAll() }
 
         guard let result = try await group.next() else {
-            // Unreachable: two tasks were just added above, so at least one result exists.
+            // Unreachable. The group has two tasks, so at least one result exists.
             throw error()
         }
         return result

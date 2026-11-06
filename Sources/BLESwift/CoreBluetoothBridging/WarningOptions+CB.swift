@@ -8,7 +8,7 @@ import CoreBluetooth
 
 extension WarningOptions {
 
-    /// This options set expressed as the `[String: Bool]` dictionary CoreBluetooth's
+    /// These options as the `[String: Bool]` dictionary that CoreBluetooth's
     /// `connect(_:options:)` expects.
     var cbConnectOptions: [String: Bool] {
         [

@@ -3,8 +3,7 @@
 //  BLESwift
 //
 
-// iOS/macOS-only, like `PeripheralHost` and the `CBPeripheralManager` conformance it
-// serves (issue #22).
+// iOS and macOS only, like `PeripheralHost` and the `CBPeripheralManager` conformance.
 #if os(iOS) || os(macOS)
 
 import BLESwiftCore
@@ -12,95 +11,97 @@ import CoreBluetooth
 import Foundation
 import BLESwiftCompat17
 
-/// Bridges real `CBPeripheralManagerDelegate` callbacks into a ``PeripheralHostEvent``
-/// handler closure — the `PeripheralManaging` conformance's implementation of
-/// `eventHandler` for `CBPeripheralManager`. The peripheral-role counterpart to
-/// ``CentralDelegateProxy``.
+/// Bridges `CBPeripheralManagerDelegate` callbacks into a ``PeripheralHostEvent`` handler
+/// closure. It implements `eventHandler` for `CBPeripheralManager` in the `PeripheralManaging`
+/// conformance. It is the peripheral-role counterpart to ``CentralDelegateProxy``.
 ///
-/// Every callback forwards **synchronously** to ``handler``, no `Task {}`: sound because
-/// CoreBluetooth only ever calls back on the queue the manager was created with, exactly
-/// the `DispatchQueue` backing `PeripheralHost`'s custom `SerialExecutor`.
+/// Each callback forwards **synchronously** to ``handler``, with no `Task {}`. This is safe,
+/// because CoreBluetooth calls back only on the queue that `PeripheralHost` used to create the
+/// manager. That queue is the `DispatchQueue` behind `PeripheralHost`'s custom
+/// `SerialExecutor`.
 ///
-/// Beyond forwarding, this proxy owns three CoreBluetooth-object registries the
-/// `CBPeripheralManager` conformance reaches via the shared associated object, so raw
-/// CoreBluetooth objects never cross into BLESwift-owned code: a ``RequestToken`` →
-/// `[CBATTRequest]` map, a ``CharacteristicIdentifier`` → `CBMutableCharacteristic` map, and
-/// a subscribed-central map (`UUID` → `CBCentral`).
+/// This proxy also owns three registries of CoreBluetooth objects, so raw CoreBluetooth
+/// objects never cross into BLESwift code. The `CBPeripheralManager` conformance reaches them
+/// through the shared associated object. The registries are:
 ///
-/// **Concurrency.** ``handler`` is `Mutex`-guarded, like ``CentralDelegateProxy``'s. The
-/// three registries below are `nonisolated(unsafe)` and **queue-confined** — touched only
-/// from a delegate callback or a `PeripheralManaging` conformance method, both on the same
-/// serial queue, never off-queue.
+/// - a map from ``RequestToken`` to `[CBATTRequest]`
+/// - a map from ``CharacteristicIdentifier`` to `CBMutableCharacteristic`
+/// - a map of subscribed centrals (`UUID` to `CBCentral`)
+///
+/// **Concurrency.** A `Mutex` guards ``handler``, as in ``CentralDelegateProxy``. The three
+/// registries are `nonisolated(unsafe)` and **queue-confined**. Only delegate callbacks and
+/// `PeripheralManaging` conformance methods touch them, and both run on the same serial queue.
 final class PeripheralManagerDelegateProxy: NSObject, CBPeripheralManagerDelegate {
 
-    /// Receives every ``PeripheralHostEvent`` this proxy converts from a real CoreBluetooth
-    /// callback. `Mutex`-guarded (assigned off-queue during construction). Typed `@Sendable`
-    /// for the same reason as ``CentralDelegateProxy/handler`` — see that type — and wrapped in
-    /// a struct rather than stored as the `Mutex`'s `Value` directly, as documented on
-    /// `CentralDelegateProxy.handlerBox` (#53).
+    /// Receives each ``PeripheralHostEvent`` that this proxy converts from a CoreBluetooth
+    /// callback. A `Mutex` guards it, because the assignment happens off the queue during
+    /// construction. The type is `@Sendable` for the reason in ``CentralDelegateProxy/handler``.
+    /// The struct wrapper avoids storing the handler directly as the `Mutex` `Value`. See
+    /// `CentralDelegateProxy.handlerBox`.
     private struct HandlerStorage: Sendable {
         var handler: (@Sendable (PeripheralHostEvent) -> Void)?
     }
     private let handlerBox = Mutex(HandlerStorage())
 
-    /// The `PeripheralHostEvent` handler this proxy forwards to. Set once, by `PeripheralHost`.
+    /// The `PeripheralHostEvent` handler that this proxy forwards to. `PeripheralHost` sets it
+    /// once.
     var handler: (@Sendable (PeripheralHostEvent) -> Void)? {
         get { handlerBox.withLock { $0.handler } }
         set { handlerBox.withLock { $0.handler = newValue } }
     }
 
-    /// In-flight read/write requests, keyed by the ``RequestToken`` this proxy minted for
-    /// each. Queue-confined (see the type's concurrency note).
+    /// In-flight read and write requests, by the ``RequestToken`` that this proxy created.
+    /// Queue-confined (see the type's concurrency note).
     private nonisolated(unsafe) var pendingRequests: [UUID: [CBATTRequest]] = [:]
 
-    /// Live `CBMutableCharacteristic` handles, keyed by identifier — populated as services
-    /// are added, cleared by `removeAllServices()`. Queue-confined.
+    /// Live `CBMutableCharacteristic` handles by identifier. Adding services adds them and
+    /// `removeAllServices()` clears them. Queue-confined.
     private nonisolated(unsafe) var characteristicHandles: [CharacteristicIdentifier: CBMutableCharacteristic] = [:]
 
-    /// Currently-subscribed centrals, keyed by `CBCentral.identifier`, so a value-type
-    /// ``Subscriber`` can be resolved back to its `CBCentral`. Queue-confined.
+    /// The subscribed centrals by `CBCentral.identifier`, to resolve a value-type
+    /// ``Subscriber`` back to its `CBCentral`. Queue-confined.
     private nonisolated(unsafe) var subscribedCentrals: [UUID: CBCentral] = [:]
 
     #if os(iOS)
-    /// Buffers the (already-converted) peripheral-role `willRestoreState` payload until the
-    /// first `peripheralManagerDidUpdateState(_:)` drains it into ``handler``. Same delivery
-    /// timing hazard as ``CentralDelegateProxy/bufferedRestoredState``: `willRestoreState`
-    /// can arrive during `CBPeripheralManager.init` itself.
+    /// Buffers the converted peripheral-role `willRestoreState` payload. The first
+    /// `peripheralManagerDidUpdateState(_:)` drains it into ``handler``. As in
+    /// ``CentralDelegateProxy/bufferedRestoredState``, `willRestoreState` can arrive during
+    /// `CBPeripheralManager.init` itself.
     private let bufferedRestoredState = Mutex<RestoredPeripheralState?>(nil)
     #endif
 
     // MARK: - Registry access (queue-confined; called from the CB conformance)
 
-    /// Mints a token for `requests` and stores them for a later `respond(to:…)`.
+    /// Creates a token for `requests` and stores them for a later `respond(to:…)`.
     func storeRequests(_ requests: [CBATTRequest]) -> RequestToken {
         let token = RequestToken()
         pendingRequests[token.rawValue] = requests
         return token
     }
 
-    /// Removes and returns the requests stored for `token`, or `nil` if unknown (already
-    /// answered, or minted by a different manager).
+    /// Removes and returns the requests stored for `token`. Returns `nil` if the token is
+    /// unknown: it was already answered, or a different manager created it.
     func takeRequests(for token: RequestToken) -> [CBATTRequest]? {
         pendingRequests.removeValue(forKey: token.rawValue)
     }
 
-    /// Records a live characteristic handle so `updateValue` can resolve it later.
+    /// Records a live characteristic handle for `updateValue` to resolve.
     func registerCharacteristic(_ characteristic: CBMutableCharacteristic, for identifier: CharacteristicIdentifier) {
         characteristicHandles[identifier] = characteristic
     }
 
-    /// The live `CBMutableCharacteristic` for `identifier`, if it has been added.
+    /// The live `CBMutableCharacteristic` for `identifier`, if added.
     func characteristicHandle(for identifier: CharacteristicIdentifier) -> CBMutableCharacteristic? {
         characteristicHandles[identifier]
     }
 
-    /// Clears every recorded characteristic handle (mirrors `removeAllServices()`).
+    /// Clears every recorded characteristic handle. This mirrors `removeAllServices()`.
     func removeAllCharacteristicHandles() {
         characteristicHandles.removeAll()
     }
 
-    /// Resolves value-type ``Subscriber``s back to the live `CBCentral`s currently known to
-    /// be subscribed. Unknown subscribers are dropped.
+    /// Resolves value-type ``Subscriber`` values to the live `CBCentral` objects of the current
+    /// subscribers. It drops unknown subscribers.
     func resolveCentrals(_ subscribers: [Subscriber]) -> [CBCentral] {
         subscribers.compactMap { subscribedCentrals[$0.id] }
     }
@@ -124,17 +125,17 @@ final class PeripheralManagerDelegateProxy: NSObject, CBPeripheralManagerDelegat
     }
 
     #if os(iOS)
-    /// Captures CoreBluetooth's peripheral-role restoration payload **synchronously**:
-    /// converts the raw dictionary to the `Sendable` ``RestoredPeripheralState`` eagerly and
-    /// buffers it for ``peripheralManagerDidUpdateState(_:)`` to drain. See
-    /// ``CentralDelegateProxy``'s equivalent for why this cannot forward directly.
+    /// Captures CoreBluetooth's peripheral-role restoration payload **synchronously**, converts
+    /// it to the `Sendable` ``RestoredPeripheralState``, and buffers it for
+    /// ``peripheralManagerDidUpdateState(_:)`` to drain. For why it cannot forward directly,
+    /// see ``CentralDelegateProxy``.
     func peripheralManager(_ peripheral: CBPeripheralManager, willRestoreState dict: [String: Any]) {
         let services = (dict[CBPeripheralManagerRestoredStateServicesKey] as? [CBMutableService]) ?? []
         let serviceIdentifiers = services.map { ServiceIdentifier(cbuuid: $0.uuid) }
 
-        // Re-register the live characteristic handles CoreBluetooth restored, so
-        // `updateValue(_:for:onSubscribed:)` can resolve them after a background relaunch.
-        // Idempotent with a later `add(_:)`.
+        // Register the restored live characteristic handles again, so
+        // `updateValue(_:for:onSubscribed:)` can resolve them after a background relaunch. A
+        // later `add(_:)` does the same, so this is idempotent.
         for service in services {
             let serviceIdentifier = ServiceIdentifier(cbuuid: service.uuid)
             for characteristic in service.characteristics ?? [] {
@@ -230,8 +231,8 @@ final class PeripheralManagerDelegateProxy: NSObject, CBPeripheralManagerDelegat
 }
 
 extension Subscriber {
-    /// Bridges a `CBCentral` to a value-type ``Subscriber``. Internal to the CoreBluetooth
-    /// seam — the only place `CBCentral` is read.
+    /// Bridges a `CBCentral` to a value-type ``Subscriber``. It is the only place that reads a
+    /// `CBCentral`.
     init(_ central: CBCentral) {
         self.init(id: central.identifier, maximumUpdateValueLength: central.maximumUpdateValueLength)
     }

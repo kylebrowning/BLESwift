@@ -27,8 +27,8 @@ struct LinkEndpointTests {
 
     @Test("Parses a bracketed IPv6 host")
     func parseIPv6() {
-        // Brackets, because the address is itself full of colons: the last-colon split alone
-        // could not tell the port from the address.
+        // Use brackets, because the address itself is full of colons. A split at the last colon
+        // alone could not tell the port from the address.
         #expect(LinkEndpoint(string: "[::1]:8080") == LinkEndpoint(host: "::1", port: 8080))
         #expect(LinkEndpoint(string: "[fe80::1]:1") == LinkEndpoint(host: "fe80::1", port: 1))
         #expect(LinkEndpoint(string: "[::1]") == nil)
@@ -75,7 +75,7 @@ struct LinkEndpointTests {
     }
     @Test("localhost is normalized to the IPv4 loopback literal, on every route in")
     func localhostIsNormalized() throws {
-        // The name resolves to both loopback families, so a listener and a client handed the
+        // The name resolves to both loopback families, so a listener and a client that receive the
         // same string could otherwise bind and dial different addresses.
         #expect(LinkEndpoint(host: "localhost", port: 1).host == "127.0.0.1")
         #expect(LinkEndpoint(host: "LocalHost", port: 1).host == "127.0.0.1")
@@ -88,7 +88,6 @@ struct LinkEndpointTests {
         mutated.host = "localhost"
         #expect(mutated.host == "127.0.0.1")
 
-        // Nothing else is touched, and a hostname that merely contains it is not the name.
         #expect(LinkEndpoint(host: "localhost.example.com", port: 1).host == "localhost.example.com")
         #expect(LinkEndpoint(host: "::1", port: 1).host == "::1")
     }
@@ -99,8 +98,8 @@ struct LinkEndpointTests {
         #expect(String(decoding: encoded, as: UTF8.self).contains("\"host\""))
         #expect(try JSONDecoder().decode(LinkEndpoint.self, from: encoded) == LinkEndpoint.default)
 
-        // A value encoded before the normalization existed still reads back agreeing with
-        // what a listener binds.
+        // A value that was encoded before the normalization existed still reads back and agrees
+        // with what a listener binds.
         let legacy = Data(#"{"host":"localhost","port":45541}"#.utf8)
         #expect(try JSONDecoder().decode(LinkEndpoint.self, from: legacy) == LinkEndpoint.default)
     }

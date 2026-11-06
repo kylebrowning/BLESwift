@@ -8,38 +8,43 @@ import Dispatch
 import Foundation
 import BLESwiftCompat17
 
-/// The client half of a link: dials a provider, performs the handshake, and reconnects.
+/// The client half of a link. It dials a provider, performs the handshake, and reconnects.
 ///
-/// A session owns one ``LinkConnection`` at a time. ``start()`` dials the endpoint; once the
-/// connection is ready the session sends a `ClientHello` and waits for the provider's
-/// `ServerHello`, which must be the first message it receives. A hello that is accepted and
-/// speaks ``LinkProtocol/version`` makes the session connected — ``onConnected`` fires and
-/// subsequent messages are delivered to ``onMessage``. Anything else ends the connection:
+/// A session owns one ``LinkConnection`` at a time. ``start()`` dials the endpoint. When the
+/// connection is ready, the session sends a `ClientHello` and waits for the provider's
+/// `ServerHello`, which must be the first message that the session receives.
 ///
-/// - A transport failure or a refused dial retries: quickly at first (see
-///   ``init(endpoint:role:clientName:codec:queue:retryInterval:)``), then at `retryInterval`.
-/// - A rejected hello reports `LinkError.handshakeRejected` and retries.
-/// - A protocol version mismatch reports `LinkError.protocolVersionMismatch` and never retries:
-///   a provider speaking another version will not become compatible by trying again.
+/// If the provider accepts the hello and uses ``LinkProtocol/version``, the session becomes
+/// connected. ``onConnected`` fires, and the session delivers later messages to ``onMessage``.
+/// Anything else ends the connection:
 ///
-/// Every handler is invoked on the `queue` supplied at initialization, which is also the queue
-/// the underlying connection delivers on, so callbacks arrive in order and never reentrantly.
+/// - A transport failure or a refused dial causes a retry. The first retries are fast (see
+///   ``init(endpoint:role:clientName:codec:queue:retryInterval:)``). Later retries use
+///   `retryInterval`.
+/// - A rejected hello reports `LinkError.handshakeRejected` and causes a retry.
+/// - A protocol version mismatch reports `LinkError.protocolVersionMismatch` and never causes
+///   a retry, because a provider that uses another version does not become compatible if the
+///   session tries again.
+///
+/// The session calls every handler on the `queue` from the initializer. The underlying
+/// connection delivers on the same queue, so callbacks arrive in order and never reentrantly.
 package final class LinkClientSession: Sendable {
 
-    /// Everything mutable, guarded by one lock.
+    /// All mutable state. One lock guards it.
     private struct State {
-        /// The connection currently owned by the session. Held strongly: nothing else retains a
-        /// ``LinkConnection``, and its receive loop keeps only a weak reference to itself.
+        /// The connection that the session owns now. The session holds it strongly, because
+        /// nothing else retains a ``LinkConnection`` and its receive loop keeps only a weak
+        /// reference to itself.
         var connection: LinkConnection?
         var isConnected = false
         var stopped = false
         var didStart = false
         var handshakeComplete = false
-        /// Set once a provider answers with a different protocol version; suppresses all retries.
+        /// Set when a provider answers with a different protocol version. It stops all retries.
         var versionMismatch = false
         var retryScheduled = false
-        /// Dials scheduled since the session started or since the last link dropped. The
-        /// first `fastRetryAttempts` of them are the fast burst.
+        /// The dials that the session scheduled since it started or since the last link dropped.
+        /// The first `fastRetryAttempts` of them are the fast burst.
         var retriesSinceConnected = 0
         var onConnected: (@Sendable (ServerHello) -> Void)?
         var onDisconnected: (@Sendable (NSError?) -> Void)?
@@ -48,7 +53,8 @@ package final class LinkClientSession: Sendable {
         var onDial: (@Sendable (LinkConnection) -> Void)?
     }
 
-    /// What a `ServerHello` means for the session, decided under the lock and acted on outside it.
+    /// The meaning of a `ServerHello` for the session. The session decides it under the lock
+    /// and acts on it outside the lock.
     private enum HandshakeOutcome {
         case accepted
         case rejected(NSError)
@@ -59,10 +65,10 @@ package final class LinkClientSession: Sendable {
     private let role: LinkRole
     private let clientName: String
 
-    /// The identity this client asks the provider to host its device under, sent on every
-    /// hello — the opening one and every reconnect's — so a dropped link comes back as the
-    /// same device rather than a new one. `nil` for a central-role client, which hosts
-    /// nothing.
+    /// The identity under which this client asks the provider to host its device. The client
+    /// sends it in every hello, including each reconnect's hello, so a dropped link comes back as
+    /// the same device and not as a new device. The value is `nil` for a central-role client,
+    /// which hosts nothing.
     private let hostIdentifier: UUID?
     private let codec: LinkCodec
     private let queue: DispatchQueue
@@ -72,25 +78,20 @@ package final class LinkClientSession: Sendable {
     /// Creates a session that will dial `endpoint` and identify itself as `role`.
     ///
     /// - Parameters:
-    ///   - endpoint: The provider's host and port.
-    ///   - role: Which side of the link this client drives.
-    ///   - clientName: A human-readable name sent in the hello, for provider-side logging.
-    ///   - hostIdentifier: The identity a `.peripheral` client asks the provider to host its
-    ///     device under, kept across reconnects. `nil` — the default, and the only value a
-    ///     central-role client has — leaves the provider to mint one per session.
-    ///   - codec: The codec used to encode outgoing messages.
-    ///   - queue: The serial queue every callback is delivered on — the owning actor's queue.
-    ///   - retryInterval: How long to wait before redialing after a failure, once the
-    ///     opening burst is spent.
+    ///   - endpoint: The host and port of the provider.
+    ///   - role: The side of the link that this client controls.
+    ///   - clientName: A name that people can read, sent in the hello for provider-side logs.
+    ///   - hostIdentifier: The identity under which a `.peripheral` client asks the provider to
+    ///     host its device. The session keeps it across reconnects. It is `nil` by default and
+    ///     always `nil` for a central-role client. Then the provider creates one for each session.
+    ///   - codec: The codec that encodes outgoing messages.
+    ///   - queue: The serial queue on which the session delivers every callback.
+    ///   - retryInterval: The wait before a new dial after a failure, after the opening burst.
     ///
-    /// **Fast, then slow.** The first `fastRetryAttempts` dials after ``start()`` — and
-    /// after every drop of an established link — are spaced `min(retryInterval, 100 ms)`
-    /// apart; every dial after that waits `retryInterval`. Two things need the burst: a
-    /// provider that is slow to accept, or momentarily refusing (a loopback dial storm on a
-    /// loaded machine), otherwise costs a full `retryInterval` to recover from; and an app
-    /// launched before its provider, which should come up within about a tenth of a second of
-    /// the provider appearing rather than up to `retryInterval` later. The counter resets on
-    /// every successful handshake, so a link that keeps dropping keeps getting the burst.
+    /// The first `fastRetryAttempts` dials after ``start()`` are fast. So are the first dials
+    /// after each drop of an established link. They are `min(retryInterval, 100 ms)` apart. Each
+    /// dial after that waits `retryInterval`. A successful handshake resets the counter. The burst
+    /// helps a slow provider, and an app that starts before its provider.
     package init(
         endpoint: LinkEndpoint,
         role: LinkRole,
@@ -109,42 +110,43 @@ package final class LinkClientSession: Sendable {
         self.retryInterval = retryInterval
     }
 
-    /// Called on `queue` once a provider has accepted the handshake, for every connection,
-    /// with the `ServerHello` that accepted it — which is where the provider reports the
-    /// identity it actually hosted a `.peripheral` client under.
+    /// Called on `queue` for every connection after a provider accepts the handshake. It gets
+    /// the `ServerHello` that accepted the connection. In this message, the provider reports the
+    /// identity under which it actually hosted a `.peripheral` client.
     package var onConnected: (@Sendable (ServerHello) -> Void)? {
         get { state.withLock { $0.onConnected } }
         set { state.withLock { $0.onConnected = newValue } }
     }
 
-    /// Called on `queue` when a connected link drops — with `LinkError.providerDisconnected` —
-    /// or when a provider refuses the handshake, with the refusal's error. A dial that never
-    /// completed a handshake does not report a disconnect; it is simply retried.
+    /// Called on `queue` when a connected link drops (the error is
+    /// `LinkError.providerDisconnected`) or when a provider refuses the handshake (the error is
+    /// the refusal's error). A dial that never completed a handshake does not report a
+    /// disconnect. The session retries it.
     package var onDisconnected: (@Sendable (NSError?) -> Void)? {
         get { state.withLock { $0.onDisconnected } }
         set { state.withLock { $0.onDisconnected = newValue } }
     }
 
-    /// Called on `queue` for every message received after the handshake completed.
+    /// Called on `queue` for every message that arrives after the handshake completed.
     package var onMessage: (@Sendable (LinkMessage) -> Void)? {
         get { state.withLock { $0.onMessage } }
         set { state.withLock { $0.onMessage = newValue } }
     }
 
-    /// Whether a provider has accepted the handshake and the link is live.
+    /// Whether a provider accepted the handshake and the link is live.
     package var isConnected: Bool { state.withLock { $0.isConnected } }
 
-    /// Called on the dialling thread with every connection a dial creates.
+    /// Called on the dialing thread with every connection that a dial creates.
     ///
-    /// Not API: it exists so a test can take a `weak` reference to what a dial created and
-    /// assert that reaching a terminal state actually releases it.
+    /// This is not API. A test can use it to take a `weak` reference to what a dial created and
+    /// assert that a terminal state releases it.
     package var onDial: (@Sendable (LinkConnection) -> Void)? {
         get { state.withLock { $0.onDial } }
         set { state.withLock { $0.onDial = newValue } }
     }
 
-    /// Dials the endpoint and begins the connect-and-retry loop. Calling this more than once has
-    /// no additional effect, and it does nothing after ``stop()``.
+    /// Dials the endpoint and begins the connect-and-retry loop. Calls after the first have no
+    /// effect. After ``stop()``, it does nothing.
     package func start() {
         let shouldDial = state.withLock { state -> Bool in
             guard !state.didStart, !state.stopped else { return false }
@@ -155,8 +157,8 @@ package final class LinkClientSession: Sendable {
         dial()
     }
 
-    /// Tears the session down: the current connection is cancelled, no retry is scheduled, and no
-    /// further callback is delivered. Idempotent.
+    /// Tears down the session. The session cancels the current connection, schedules no retry,
+    /// and delivers no more callbacks. Repeated calls are safe.
     package func stop() {
         let connection = state.withLock { state -> LinkConnection? in
             state.stopped = true
@@ -170,8 +172,8 @@ package final class LinkClientSession: Sendable {
 
     /// Sends `message` to the provider.
     ///
-    /// Messages sent while the session is not connected are dropped silently: the link is a
-    /// best-effort transport, and every caller already handles a dropped link.
+    /// If the session is not connected, it drops the message silently. The link is a best-effort
+    /// transport, and every caller already handles a dropped link.
     package func send(_ message: LinkMessage) {
         let connection = state.withLock { state -> LinkConnection? in
             guard state.isConnected, !state.stopped else { return nil }
@@ -180,13 +182,14 @@ package final class LinkClientSession: Sendable {
         connection?.send(message)
     }
 
-    /// Drops the current connection because the provider sent something the protocol does not
-    /// allow — a malformed identifier, say.
+    /// Drops the current connection because the provider sent something that the protocol does
+    /// not allow. An example is a malformed identifier.
     ///
-    /// The same path a transport failure takes: the connection is cancelled, ``onDisconnected``
-    /// reports `LinkError.providerDisconnected`, and the session redials. A provider that keeps
-    /// sending nonsense keeps losing its sessions, which is the loudest a client can be about
-    /// a fault it cannot repair. Does nothing when the session is stopped or has no connection.
+    /// The path is the same as for a transport failure. The session cancels the connection,
+    /// ``onDisconnected`` reports `LinkError.providerDisconnected`, and the session dials again.
+    /// A provider that keeps sending invalid data keeps losing its sessions. This is the loudest
+    /// reaction that a client can give to a fault that it cannot repair. If the session is
+    /// stopped or has no connection, the function does nothing.
     package func dropConnection() {
         let connection = state.withLock { state -> LinkConnection? in
             guard !state.stopped else { return nil }
@@ -197,7 +200,7 @@ package final class LinkClientSession: Sendable {
 
     // MARK: - Connecting
 
-    /// Creates, stores, and starts a connection. Called from ``start()`` and from the retry timer.
+    /// Creates, stores, and starts a connection. ``start()`` and the retry timer call it.
     private func dial() {
         let connection = LinkConnection.connect(to: endpoint, codec: codec, queue: queue)
         let outcome = state.withLock { state -> (Bool, (@Sendable (LinkConnection) -> Void)?) in
@@ -240,8 +243,9 @@ package final class LinkClientSession: Sendable {
         )))
     }
 
-    /// Ends the session's interest in `connection`, reporting a disconnect if the link had been
-    /// connected, and schedules the next dial unless the session is stopped or incompatible.
+    /// Ends the session's interest in `connection`. If the link was connected, the function
+    /// reports a disconnect. It schedules the next dial unless the session is stopped or
+    /// incompatible.
     private func handleTermination(of connection: LinkConnection) {
         let report = state.withLock { state -> (@Sendable (NSError?) -> Void)?? in
             guard !state.stopped, state.connection === connection else { return .none }
@@ -270,7 +274,7 @@ package final class LinkClientSession: Sendable {
         let delivery = state.withLock { state -> Delivery in
             guard !state.stopped, state.connection === connection else { return .ignore }
             guard state.handshakeComplete else {
-                // The provider's hello must come first; anything else makes the stream
+                // The provider's hello must come first. Anything else makes the stream
                 // uninterpretable, which is a transport failure like any other.
                 guard case .serverHello(let hello) = message else { return .protocolViolation }
                 return .handshake(hello)
@@ -305,7 +309,7 @@ package final class LinkClientSession: Sendable {
             }
             state.handshakeComplete = true
             state.isConnected = true
-            // A link that establishes and later drops earns a fresh burst.
+            // A link that establishes and later drops earns a new burst.
             state.retriesSinceConnected = 0
             return (.accepted, state.onConnected, nil)
         }
@@ -320,25 +324,26 @@ package final class LinkClientSession: Sendable {
             if let handler = outcome.2 {
                 dispatchCallback { handler(error) }
             }
-            // The termination this triggers sees a session that never connected, so it reports no
-            // second disconnect; it schedules the retry, unless the version mismatch bars one.
+            // The termination that this causes sees a session that never connected, so it
+            // reports no second disconnect. It schedules the retry unless the version mismatch
+            // bars one.
             connection.cancel()
         }
     }
 
     // MARK: - Retry
 
-    /// How many dials at the top of a burst are spaced ``fastRetryInterval`` apart rather
-    /// than `retryInterval`.
+    /// The number of dials at the start of a burst that are ``fastRetryInterval`` apart and not
+    /// `retryInterval` apart.
     private static let fastRetryAttempts = 20
 
-    /// The spacing of a burst dial: a tenth of a second, or `retryInterval` if that is
-    /// already shorter — the burst may never be slower than the configured schedule.
+    /// The spacing of a burst dial. It is 0.1 seconds, or `retryInterval` if that is already
+    /// shorter. The burst can never be slower than the configured schedule.
     private var fastRetryInterval: Duration {
         min(retryInterval, .milliseconds(100))
     }
 
-    /// Schedules the next dial, at most one at a time.
+    /// Schedules the next dial. The session has at most one scheduled dial at a time.
     private func scheduleRetry() {
         let delay = state.withLock { state -> DispatchTimeInterval? in
             guard !state.stopped, !state.versionMismatch, !state.retryScheduled else { return nil }
@@ -361,7 +366,7 @@ package final class LinkClientSession: Sendable {
         }
     }
 
-    /// `interval` as a `DispatchTimeInterval`, saturating rather than trapping.
+    /// `interval` as a `DispatchTimeInterval`. It saturates and does not trap.
     private static func dispatchInterval(for interval: Duration) -> DispatchTimeInterval {
         let components = interval.components
         let nanoseconds = components.seconds
@@ -373,10 +378,11 @@ package final class LinkClientSession: Sendable {
         return .nanoseconds(Int(clamping: total.partialValue))
     }
 
-    /// Delivers a callback on `queue`, dropping it if the session stopped in the meantime.
+    /// Delivers a callback on `queue`. It drops the callback if the session stopped in the
+    /// meantime.
     ///
-    /// Callers are already on `queue`; hopping again keeps every callback's ordering uniform and
-    /// keeps a handler from reentering the session from inside a transport callback.
+    /// Callers are already on `queue`. The extra hop keeps the order of every callback uniform
+    /// and keeps a handler from reentering the session from inside a transport callback.
     private func dispatchCallback(_ body: @escaping @Sendable () -> Void) {
         queue.async { [weak self] in
             guard let self, !self.state.withLock({ $0.stopped }) else { return }

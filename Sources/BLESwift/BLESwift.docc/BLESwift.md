@@ -1,50 +1,44 @@
 # ``BLESwift``
 
-Async/await-first Bluetooth Low Energy for Swift 6.2.
+Bluetooth Low Energy for Swift 6.2, built on async/await.
 
 ## Overview
 
-BLESwift ("BLE Interface") wraps CoreBluetooth in a single actor, ``Central``, whose isolation is
-tied directly to the serial `DispatchQueue` its underlying `CBCentralManager` delivers delegate
-callbacks on. There is no closure or callback compatibility layer: connecting, reading, writing,
-and scanning are all `async throws` or `AsyncSequence`-based, and every multi-consumer feed
-(Bluetooth state, connection lifecycle, notifications) is a proper multicast stream that every
-subscriber sees independently.
+BLESwift wraps CoreBluetooth in a single actor, ``Central``. The actor's isolation is the serial
+`DispatchQueue` on which its `CBCentralManager` delivers delegate callbacks. BLESwift has no
+closure or callback layer. Connecting, reading, writing, and scanning are `async throws` calls
+or `AsyncSequence` streams. Each multi-consumer feed is a multicast stream. The feeds are
+Bluetooth state, connection events, and notifications. Each subscriber sees every value.
 
-BLESwift targets every platform CoreBluetooth ships on — iOS 16, macOS 13, watchOS 9, tvOS 16,
-and visionOS 1 and later. Its source is written against the iOS 18-era standard library; two
-internal modules back-deploy the pieces older systems lack — see <doc:BackDeployment>. The
-central role is available everywhere; the peripheral role (``PeripheralHost``) is
-iOS/macOS-only because CoreBluetooth does not support it on the other platforms — see
-<doc:PeripheralRole>.
-
-BLESwift is built around Swift's structured concurrency from the ground up — see the articles
-below for the resulting flows.
+BLESwift supports every platform that has CoreBluetooth: iOS 16, macOS 13, watchOS 9, tvOS 16,
+and visionOS 1 and later. Two internal modules back-deploy the features that older systems do
+not have. See <doc:BackDeployment>. The central role is available on all platforms. The
+peripheral role (``PeripheralHost``) is available on iOS and macOS only. See <doc:PeripheralRole>.
 
 ### Modules
 
-BLESwift ships as several products. `import BLESwift` is all most apps need — it re-exports
-everything below, so every type on this page is available without a separate import:
+BLESwift ships as several products. `import BLESwift` also re-exports `BLESwiftCore`. Most apps
+need no other import.
 
-- **`BLESwiftCore`** — the backend-agnostic types and implementation seam underneath
-  `Central`, with no CoreBluetooth dependency. Most apps never import it directly.
-- **`BLESwift`** (this module) — `Central`, the CoreBluetooth-backed production
-  implementation of the backend seam, and every type re-exported from `BLESwiftCore`.
-- **`BLESwiftTestSupport`** — scriptable `FakeCentral`/`FakePeripheral` (central-role) and
-  `FakePeripheralManager` (peripheral-role) fakes for unit-testing your own BLE code without
-  hardware. See <doc:GettingStarted>'s "Testing" section.
+- **`BLESwiftCore`** has the backend-agnostic types and the backend seam under `Central`. It has
+  no CoreBluetooth dependency.
+- **`BLESwift`** (this module) has `Central`, `PeripheralHost`, and the CoreBluetooth backend.
+- **`BLESwiftTestSupport`** has scriptable fakes for tests without hardware. These are
+  `FakeCentral` and `FakePeripheral` for the central role, and `FakePeripheralManager` for the
+  peripheral role. See the "Testing" section of <doc:GettingStarted>.
+- **`BLESwiftProfiles`** has typed decoders for standard Bluetooth SIG characteristics.
 
-Three further modules make `Central` and `PeripheralHost` work in the iOS Simulator, where
-CoreBluetooth is non-functional — see <doc:SimulatorSupport>:
+Four more modules give `Central` and `PeripheralHost` a working radio where CoreBluetooth does
+not work. See <doc:SimulatorSupport>.
 
-- **`BLESwiftSimulatorLink`** — the simulator-side half: backends that forward the seam to a
-  host-side provider, and the `SimulatorLink.install()` that routes every `Central()` /
-  `PeripheralHost()` through them.
-- **`BLESwiftProvider`** — the host-side half: a `Provider` that serves link clients from the
-  Mac's real radio, from an in-process virtual radio, or both. Behind the `bleswift-provider`
-  executable, and importable directly to host virtual devices written in Swift.
-- **`BLESwiftLink`** — the framed, `Codable` wire protocol and the fixture format the two
-  halves share. Rarely imported directly.
+- **`BLESwiftVirtualRadio`** is an in-process radio that serves virtual devices to a `Central`
+  or `PeripheralHost`. It works on every platform.
+- **`BLESwiftSimulatorLink`** has the backends that forward calls to a provider on the host Mac.
+  Its `SimulatorLink.install()` routes every `Central()` and `PeripheralHost()` through them.
+- **`BLESwiftProvider`** is the host-side half. A `Provider` serves link clients from the Mac's
+  real radio, from a virtual radio, or from both. The `bleswift-provider` executable runs it.
+- **`BLESwiftLink`** has the wire protocol and the fixture format that the two halves share.
+  You rarely import it.
 
 ## Topics
 
@@ -75,8 +69,8 @@ CoreBluetooth is non-functional — see <doc:SimulatorSupport>:
 
 ### Connecting
 
-BLESwift supports any number of concurrent peripheral connections — see
-<doc:ConnectionsAndReconnection> for the full multi-peripheral model.
+BLESwift supports any number of concurrent peripheral connections. See
+<doc:ConnectionsAndReconnection>.
 
 - <doc:ConnectionsAndReconnection>
 - ``Peripheral``
@@ -90,9 +84,9 @@ BLESwift supports any number of concurrent peripheral connections — see
 
 ### System Connection Events & ANCS
 
-Platform-fenced exactly as CoreBluetooth is: connection-event registration exists
-everywhere but macOS; the ANCS members (`requiresANCS:` on `connect`,
-`Peripheral/ancsAuthorized`, `Peripheral/ancsAuthorizationEvents()`) are iOS-only.
+Connection-event registration is available on every platform except macOS. The ANCS members
+are available on iOS only. These are `requiresANCS:` on `connect`, `Peripheral/ancsAuthorized`,
+and `Peripheral/ancsAuthorizationEvents()`.
 
 - <doc:SystemEvents>
 - ``SystemConnectionEvent``
@@ -101,6 +95,7 @@ everywhere but macOS; the ANCS members (`requiresANCS:` on `connect`,
 ### Reading, Writing, and Notifications
 
 - <doc:ReadingWritingNotifications>
+- ``WriteType``
 - ``BufferingPolicy``
 - ``WriteProgress``
 
@@ -117,11 +112,13 @@ everywhere but macOS; the ANCS members (`requiresANCS:` on `connect`,
 - ``RestorationEvent``
 - ``PeripheralRestorationConfiguration``
 - ``PeripheralRestorationEvent``
+- ``RestoredState``
+- ``RestoredPeripheralState``
 
 ### Peripheral Role (GATT server)
 
-Host a GATT database and advertise it — the peripheral half of CoreBluetooth. See
-<doc:PeripheralRole>, and <doc:CrossRoleExample> to drive both roles at once over fakes.
+Host a GATT database and advertise it. See <doc:PeripheralRole>. To drive both roles in one
+process over fakes, see <doc:CrossRoleExample>.
 
 - <doc:PeripheralRole>
 - <doc:CrossRoleExample>

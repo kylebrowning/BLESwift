@@ -3,26 +3,28 @@
 //  BLESwiftCore
 //
 
-/// The seam over iOS's `UIApplication` background-task API protecting the startup
-/// restoration window (`Central.init` with restoration enabled until restoration completes
-/// or is ruled out) from the app being suspended mid-restoration.
+/// The seam over `UIApplication`'s background-task API on iOS. It keeps the app from suspending
+/// during the startup restoration window. The window starts at `Central.init` with restoration
+/// enabled. It ends when restoration completes or when BLESwift rules restoration out.
 ///
-/// A protocol rather than direct `UIApplication` calls inside `Central`, since SPM tests
-/// run on macOS with no UIKit, and `UIApplication` is MainActor-isolated while `Central` is
-/// its own actor — the UIKit conformance (`BLESwift`'s `UIKitStartupBackgroundTask`)
-/// contains the main-queue hop so `Central` itself never touches MainActor state.
+/// This is a protocol and not direct `UIApplication` calls inside `Central`, for two reasons:
+/// - SPM tests run on macOS with no UIKit.
+/// - `UIApplication` is MainActor-isolated, and `Central` is its own actor.
+///
+/// The UIKit conformance (`UIKitStartupBackgroundTask` in `BLESwift`) hops to the main queue, so
+/// `Central` itself never touches MainActor state.
 public protocol StartupBackgroundTaskRunning: Sendable {
 
-    /// Begins the platform background task. `onExpiration` fires if the system's
-    /// background time runs out before ``end()``. At most one begin per instance; later
-    /// calls are no-ops.
+    /// Begins the platform background task. `onExpiration` fires if the system's background time
+    /// ends before ``end()``. An instance can begin at most once. Later calls do nothing.
     func begin(onExpiration: @escaping @Sendable () -> Void)
 
     /// Ends the platform background task. Idempotent.
     func end()
 }
 
-/// The no-op conformance used whenever there is no platform background task to manage.
+/// The conformance that does nothing. BLESwift uses it when there is no platform background task to
+/// manage.
 package final class NoOpStartupBackgroundTask: StartupBackgroundTaskRunning {
     package init() {}
     package func begin(onExpiration: @escaping @Sendable () -> Void) {}

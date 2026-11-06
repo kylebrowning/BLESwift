@@ -9,9 +9,11 @@ import BLESwiftCore
 import BLESwiftTestSupport
 @testable import BLESwift
 
-/// Exercises ``GATTCompatibility`` — strict-by-default property enforcement on
-/// read/write/notify, the per-flag bypasses, `.all` discovery's once-per-connection
-/// `discoverServices(nil)`, and per-connection isolation of the setting.
+/// Tests ``GATTCompatibility``:
+/// - strict property enforcement by default on read, write, and notify
+/// - the bypass for each flag
+/// - `.all` discovery, which calls `discoverServices(nil)` once for each connection
+/// - isolation of the setting for each connection
 @Suite("GATT compatibility mode")
 struct CompatibilityTests {
 
@@ -22,7 +24,7 @@ struct CompatibilityTests {
     private static let batteryService = ServiceIdentifier(uuid: "180F")
     private static let batteryLevel = CharacteristicIdentifier(uuid: "2A19", service: batteryService)
 
-    /// `makeConnectedTestCentral()` with a caller-chosen ``GATTCompatibility``.
+    /// Calls `makeConnectedTestCentral()` with the ``GATTCompatibility`` that the caller chooses.
     private func makeConnectedTestCentral(
         compatibility: GATTCompatibility
     ) async throws -> (Central, FakeCentral, FakePeripheral, Peripheral) {
@@ -91,8 +93,8 @@ struct CompatibilityTests {
         #expect(heartRate == 60)
         #expect(await fakePeripheral.onQueue { fakePeripheral.discoverServicesAllCallCount } == 1)
 
-        // A second read — a different service entirely — triggers no further service
-        // discovery of any kind: the one unfiltered pass revealed everything.
+        // A second read for a different service causes no further service discovery. The one
+        // unfiltered pass found everything.
         let battery: UInt8 = try await peripheral.read(from: Self.batteryLevel)
         #expect(battery == 99)
         #expect(await fakePeripheral.onQueue { fakePeripheral.discoverServicesAllCallCount } == 1)
@@ -111,7 +113,7 @@ struct CompatibilityTests {
         }
         let fakePeripheralB = await addFakePeripheral(to: central, fakeCentral: fakeCentral)
 
-        // A is .lenient — .all discovery included, so its GATT table must genuinely exist.
+        // A is .lenient, which includes .all discovery, so its GATT table must exist.
         await fakeCentral.onQueue {
             fakePeripheralA.availableServices = [Self.heartRateService: [Self.heartRateMeasurement]]
             fakePeripheralA.scriptedProperties[Self.heartRateMeasurement] = [.read]
@@ -121,13 +123,13 @@ struct CompatibilityTests {
         let peripheralA = try await central.connect(fakePeripheralA.peripheralIdentifier, compatibility: .lenient)
         let peripheralB = try await central.connect(fakePeripheralB.peripheralIdentifier)
 
-        // B (strict) refuses the no-.notify subscription.
+        // B (strict) refuses the subscription without .notify.
         let streamB: AsyncThrowingStream<Data, Error> = peripheralB.notifications(for: Self.heartRateMeasurement)
         await #expect(throws: BLESwiftError.unsupportedCharacteristicOperation(Self.heartRateMeasurement, required: [.notify, .indicate])) {
             for try await _ in streamB {}
         }
 
-        // A (.lenient) proceeds and delivers on the same characteristic identifier.
+        // A (.lenient) continues and delivers on the same characteristic identifier.
         let streamA: AsyncThrowingStream<Data, Error> = peripheralA.notifications(for: Self.heartRateMeasurement)
         let collector = Task { try await collectData(streamA, count: 1) }
         await waitFor { await fakeCentral.onQueue { fakePeripheralA.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
@@ -180,7 +182,8 @@ struct CompatibilityTests {
         }
         #expect(await fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.heartRateMeasurement] } == nil)
 
-        // .write alone still refuses .withoutResponse — the required property is per type.
+        // The .write property alone still does not permit .withoutResponse. The required property
+        // depends on the type.
         await fakePeripheral.onQueue {
             fakePeripheral.scriptedProperties[Self.heartRateMeasurement] = [.write]
         }

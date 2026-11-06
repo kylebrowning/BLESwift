@@ -8,37 +8,39 @@ import Dispatch
 import Foundation
 import BLESwiftCompat17
 
-/// A scriptable stand-in for `CBPeripheralManager`, conforming to `PeripheralManaging` — the
-/// peripheral-role counterpart to ``FakeCentral``.
+/// A scriptable stand-in for `CBPeripheralManager` that conforms to `PeripheralManaging`. It is the
+/// peripheral-role counterpart of ``FakeCentral``.
 ///
-/// `CBPeripheralManager` cannot be instantiated or scripted in tests; `FakePeripheralManager`
-/// lets you drive the shim protocol's call sites and script the events a real manager would
-/// deliver via its delegate, with no hardware. Requests/responses are modeled as owned value
-/// types, so it imports no CoreBluetooth and compiles on every platform. Construct via
+/// You cannot instantiate or script `CBPeripheralManager` in tests. `FakePeripheralManager` lets
+/// you drive the shim protocol's call sites and script the events that a real manager delivers
+/// with its delegate, with no hardware. It models requests and responses as owned value types, so
+/// it imports no CoreBluetooth and compiles on every platform. Construct it with
 /// ``init(queue:state:)``.
 ///
-/// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
-/// ``FakeCentral``: every stored property is `nonisolated(unsafe)`, every accessor asserts
-/// `dispatchPrecondition(condition: .onQueue(queue))`, event delivery is always
-/// `queue.async`, and ``onQueue(_:)`` is the one sanctioned door for off-queue code.
-/// `static var bluetoothAuthorization` is the exception, backed by a `Mutex`.
+/// **Concurrency: a queue confines it and no lock protects it.** The rules match ``FakeCentral``:
+/// - Every stored property is `nonisolated(unsafe)`.
+/// - Every accessor asserts `dispatchPrecondition(condition: .onQueue(queue))`.
+/// - Event delivery is always `queue.async`.
+/// - ``onQueue(_:)`` is the one permitted door for off-queue code.
+///
+/// `static var bluetoothAuthorization` is the exception. A `Mutex` backs it.
 public final class FakePeripheralManager: PeripheralManaging, Sendable {
 
     /// A recorded call to ``respond(to:value:error:)``.
     public struct RespondCall: Sendable, Equatable {
-        /// The token the response targeted.
+        /// The token that the response targeted.
         public let token: RequestToken
-        /// The value supplied (a read result), or `nil`.
+        /// The value that the call supplied (a read result), or `nil`.
         public let value: Data?
-        /// The ATT failure supplied, or `nil` for success.
+        /// The ATT failure that the call supplied, or `nil` for success.
         public let error: ATTError?
     }
 
     /// A recorded call to ``updateValue(_:for:onSubscribed:)``.
     public struct UpdateValueCall: Sendable, Equatable {
-        /// The value pushed.
+        /// The value that the call pushed.
         public let value: Data
-        /// The characteristic notified.
+        /// The characteristic that the call notified.
         public let characteristic: CharacteristicIdentifier
         /// The targeted subscribers, or `nil` for all.
         public let centrals: [Subscriber]?
@@ -46,7 +48,7 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         public let returned: Bool
     }
 
-    /// The queue every CB-mirroring method and event delivery is confined to.
+    /// The queue that confines every method and event delivery that mirrors CoreBluetooth.
     public let queue: DispatchQueue
 
     nonisolated(unsafe) private var _radioState: CentralState
@@ -69,8 +71,8 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
 
     private static let authorizationBox = Mutex<BluetoothAuthorization>(.allowedAlways)
 
-    /// The `BluetoothAuthorization` this fake reports. `Mutex`-backed, so readable/writable
-    /// off-queue without ``onQueue(_:)``.
+    /// The `BluetoothAuthorization` that this fake reports. A `Mutex` backs it, so you can read and
+    /// write it off the queue without ``onQueue(_:)``.
     public static var bluetoothAuthorization: BluetoothAuthorization {
         get { authorizationBox.withLock { $0 } }
         set { authorizationBox.withLock { $0 = newValue } }
@@ -79,22 +81,21 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
     /// Creates a `FakePeripheralManager` confined to `queue`.
     ///
     /// - Parameters:
-    ///   - queue: The queue every CB-mirroring method and event delivery is confined to — the
-    ///     same queue the `PeripheralHost` actor's executor must be tied to. Must be
-    ///     serial (`DispatchQueue(label:)` is).
-    ///   - state: The initial `CentralState`. Defaults to `.unknown`.
+    ///   - queue: The queue that confines every method and event delivery. It must be the queue
+    ///     that the `PeripheralHost` actor's executor uses. It must be serial
+    ///     (`DispatchQueue(label:)` makes a serial queue).
+    ///   - state: The initial `CentralState`. The default is `.unknown`.
     public init(queue: DispatchQueue, state: CentralState = .unknown) {
         self.queue = queue
         self._radioState = state
     }
 
-    /// Hops onto ``queue`` to run `body` and returns its result — the one sanctioned way
-    /// for off-queue code to configure this fake or read its recorded calls for assertions.
-    /// Also flushes every previously-scheduled `.async` event delivery first. Never blocks
-    /// (see ``FakeCentral/onQueue(_:)``).
+    /// Runs `body` on ``queue`` and returns its result. Off-queue code must use this to configure
+    /// this fake or to read its recorded calls. It also flushes every `.async` event delivery that
+    /// is already scheduled. It never blocks (see ``FakeCentral/onQueue(_:)``).
     ///
-    /// - Warning: Never `await` from within an ``eventHandler`` callback or other on-queue
-    ///   code — a deadlock, like `CBPeripheralManager`'s own queue.
+    /// - Warning: Never `await` this function from an ``eventHandler`` callback or from other code
+    ///   that runs on the queue. That deadlocks, as it does with `CBPeripheralManager`'s queue.
     public func onQueue<T: Sendable>(_ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async {
@@ -105,7 +106,7 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
 
     // MARK: - Inspectable state (via onQueue)
 
-    /// Receives every `PeripheralHostEvent` this fake delivers, on ``queue``.
+    /// Receives every `PeripheralHostEvent` that this fake delivers, on ``queue``.
     public var eventHandler: ((PeripheralHostEvent) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -123,28 +124,28 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         return _radioState
     }
 
-    /// Whether this fake is currently "advertising" (flipped by the scripted advertising
-    /// lifecycle).
+    /// Whether this fake is advertising. ``startAdvertising(_:)`` and ``stopAdvertising()`` change
+    /// it.
     public var isAdvertising: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _isAdvertising
     }
 
-    /// The error the next ``startAdvertising(_:)`` should report (`nil` = success). Configure
-    /// via ``onQueue(_:)``.
+    /// The error that the next ``startAdvertising(_:)`` reports (`nil` = success). Configure it
+    /// with ``onQueue(_:)``.
     public var startAdvertisingError: NSError? {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _startAdvertisingError }
         set { dispatchPrecondition(condition: .onQueue(queue)); _startAdvertisingError = newValue }
     }
 
-    /// The error the next ``add(_:)`` should report (`nil` = success). Configure via
+    /// The error that the next ``add(_:)`` reports (`nil` = success). Configure it with
     /// ``onQueue(_:)``.
     public var addServiceError: NSError? {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _addServiceError }
         set { dispatchPrecondition(condition: .onQueue(queue)); _addServiceError = newValue }
     }
 
-    /// The advertisement passed to the most recent ``startAdvertising(_:)`` (`nil` before any).
+    /// The advertisement of the latest ``startAdvertising(_:)`` call (`nil` before any call).
     public var lastAdvertisement: PeripheralAdvertisement? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _lastAdvertisement
@@ -162,7 +163,7 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         return _stopAdvertisingCallCount
     }
 
-    /// Every service passed to ``add(_:)``, in order.
+    /// Every service that ``add(_:)`` received, in order.
     public var addedServices: [GATTService] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _addedServices
@@ -186,37 +187,35 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         return _updateValueCalls
     }
 
-    /// A FIFO queue of scripted return values for upcoming ``updateValue(_:for:onSubscribed:)``
-    /// calls — the back-pressure lever. Each call consumes the next entry; when empty, calls
-    /// return `true` (queued). Set `[false]` to make exactly the next `updateValue` report a
-    /// full transmit queue, then ``simulateReadyToUpdate()`` to unblock the retry. Configure
-    /// via ``onQueue(_:)``.
+    /// A first-in-first-out list of scripted return values for the next
+    /// ``updateValue(_:for:onSubscribed:)`` calls. It controls back-pressure. Each call takes the
+    /// next entry. When the list is empty, calls return `true` (queued). Set `[false]` to make
+    /// exactly the next `updateValue` report a full transmit queue. Then call
+    /// ``simulateReadyToUpdate()`` to unblock the retry. Configure it with ``onQueue(_:)``.
     public var scriptedUpdateValueReturns: [Bool] {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _scriptedUpdateValueReturns }
         set { dispatchPrecondition(condition: .onQueue(queue)); _scriptedUpdateValueReturns = newValue }
     }
 
-    /// Bridge hook fired synchronously, on ``queue``, from inside ``add(_:)`` with the
-    /// published service — used by ``FakeGATTBridge`` to mirror the host's database into a
-    /// central-side fake. `nil` (default) is unchanged behavior. Configure via ``onQueue(_:)``.
+    /// A bridge hook. ``add(_:)`` calls it synchronously, on ``queue``, with the published service.
+    /// ``FakeGATTBridge`` uses it to mirror the host's services into a central-side fake. The
+    /// default is `nil`. Configure it with ``onQueue(_:)``.
     public var onAddService: ((GATTService) -> Void)? {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _onAddService }
         set { dispatchPrecondition(condition: .onQueue(queue)); _onAddService = newValue }
     }
 
-    /// Bridge hook fired synchronously, on ``queue``, from inside
-    /// ``respond(to:value:error:)`` with the recorded ``RespondCall`` — used by
-    /// ``FakeGATTBridge`` to route the answer back to the central. `nil` (default) is
-    /// unchanged behavior. Configure via ``onQueue(_:)``.
+    /// A bridge hook. ``respond(to:value:error:)`` calls it synchronously, on ``queue``, with the
+    /// recorded ``RespondCall``. ``FakeGATTBridge`` uses it to route the answer back to the
+    /// central. The default is `nil`. Configure it with ``onQueue(_:)``.
     public var onRespond: ((RespondCall) -> Void)? {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _onRespond }
         set { dispatchPrecondition(condition: .onQueue(queue)); _onRespond = newValue }
     }
 
-    /// Bridge hook fired synchronously, on ``queue``, from inside
-    /// ``updateValue(_:for:onSubscribed:)`` with the recorded ``UpdateValueCall`` — used by
-    /// ``FakeGATTBridge`` to surface the notification to the central. `nil` (default) is
-    /// unchanged behavior. Configure via ``onQueue(_:)``.
+    /// A bridge hook. ``updateValue(_:for:onSubscribed:)`` calls it synchronously, on ``queue``,
+    /// with the recorded ``UpdateValueCall``. ``FakeGATTBridge`` uses it to deliver the
+    /// notification to the central. The default is `nil`. Configure it with ``onQueue(_:)``.
     public var onUpdateValue: ((UpdateValueCall) -> Void)? {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _onUpdateValue }
         set { dispatchPrecondition(condition: .onQueue(queue)); _onUpdateValue = newValue }
@@ -224,8 +223,8 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
 
     // MARK: - Simulation (off-queue safe; hop onto queue themselves)
 
-    /// Simulates the radio changing state and, asynchronously, delivers
-    /// `.didUpdateState(_:)` on ``queue``.
+    /// Simulates a radio state change. It then delivers `.didUpdateState(_:)` asynchronously on
+    /// ``queue``.
     public func simulateStateChange(_ newState: CentralState) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -234,9 +233,9 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
-    /// Simulates a remote central issuing a read request and, asynchronously, delivers
-    /// `.didReceiveRead(_:)`. Returns the freshly minted ``RequestToken`` (synchronously) so a
-    /// test can correlate the eventual ``respondCalls`` entry.
+    /// Simulates a remote central that sends a read request. It then delivers
+    /// `.didReceiveRead(_:)` asynchronously. It returns the new ``RequestToken`` synchronously, so
+    /// a test can correlate the later ``respondCalls`` entry.
     @discardableResult
     public func simulateReadRequest(
         central: Subscriber,
@@ -251,8 +250,8 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         return token
     }
 
-    /// Simulates a remote central issuing a single write and, asynchronously, delivers
-    /// `.didReceiveWrite(_:)`. Returns the minted ``RequestToken``.
+    /// Simulates a remote central that sends a single write. It then delivers
+    /// `.didReceiveWrite(_:)` asynchronously. It returns the new ``RequestToken``.
     @discardableResult
     public func simulateWriteRequest(
         central: Subscriber,
@@ -263,8 +262,8 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         simulateWriteRequests([WriteRequest.Entry(central: central, characteristic: characteristic, offset: offset, value: value)])
     }
 
-    /// Simulates a remote central issuing a batch of writes and, asynchronously, delivers
-    /// `.didReceiveWrite(_:)`. Returns the minted ``RequestToken``.
+    /// Simulates a remote central that sends a batch of writes. It then delivers
+    /// `.didReceiveWrite(_:)` asynchronously. It returns the new ``RequestToken``.
     @discardableResult
     public func simulateWriteRequests(_ entries: [WriteRequest.Entry]) -> RequestToken {
         let token = RequestToken()
@@ -275,8 +274,8 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         return token
     }
 
-    /// Simulates a remote central subscribing to `characteristic`'s notifications and,
-    /// asynchronously, delivers `.didSubscribe(central:characteristic:)`.
+    /// Simulates a remote central that subscribes to `characteristic`'s notifications. It then
+    /// delivers `.didSubscribe(central:characteristic:)` asynchronously.
     public func simulateSubscribe(central: Subscriber, to characteristic: CharacteristicIdentifier) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -284,8 +283,8 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
-    /// Simulates a remote central unsubscribing from `characteristic`'s notifications and,
-    /// asynchronously, delivers `.didUnsubscribe(central:characteristic:)`.
+    /// Simulates a remote central that unsubscribes from `characteristic`'s notifications. It then
+    /// delivers `.didUnsubscribe(central:characteristic:)` asynchronously.
     public func simulateUnsubscribe(central: Subscriber, from characteristic: CharacteristicIdentifier) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -293,9 +292,9 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
-    /// Simulates the transmit queue draining and, asynchronously, delivers
-    /// `.readyToUpdateSubscribers` — unblocks a ``PeripheralHost/updateValue(_:for:onSubscribed:)``
-    /// that is awaiting capacity after a scripted `false` return.
+    /// Simulates the transmit queue draining. It then delivers `.readyToUpdateSubscribers`
+    /// asynchronously. This unblocks a ``PeripheralHost/updateValue(_:for:onSubscribed:)`` that
+    /// waits for capacity after a scripted `false` return.
     public func simulateReadyToUpdate() {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -304,9 +303,9 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
     }
 
     #if os(iOS)
-    /// Simulates CoreBluetooth restoring preserved peripheral-role state and, asynchronously,
-    /// delivers `.willRestoreState(_:)`. Call **before** the `.poweredOn`
-    /// ``simulateStateChange(_:)``, mirroring CoreBluetooth's ordering.
+    /// Simulates CoreBluetooth restoring preserved peripheral-role state. It then delivers
+    /// `.willRestoreState(_:)` asynchronously. Call it **before** the `.poweredOn`
+    /// ``simulateStateChange(_:)``, which is the order CoreBluetooth uses.
     public func simulateRestoration(_ state: RestoredPeripheralState) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -314,8 +313,8 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         }
     }
     #else
-    /// `package` mirror of the iOS-only public `simulateRestoration(_:)` — see the dual-access
-    /// note on `RestoredState`. **Keep the two in sync.**
+    /// A `package` mirror of the public `simulateRestoration(_:)`, which exists on iOS only. See
+    /// the dual-access note on `RestoredState`. **Keep the two in sync.**
     package func simulateRestoration(_ state: RestoredPeripheralState) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
@@ -326,9 +325,9 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
 
     // MARK: - PeripheralManaging
 
-    /// Records the call and asynchronously delivers `.didStartAdvertising(error:)` on
-    /// ``queue`` (per ``startAdvertisingError``), flipping ``isAdvertising`` to `true` on
-    /// success.
+    /// Records the call and delivers `.didStartAdvertising(error:)` asynchronously on ``queue``,
+    /// with ``startAdvertisingError`` as the error. On success, it sets ``isAdvertising`` to
+    /// `true`.
     public func startAdvertising(_ advertisement: PeripheralAdvertisement) {
         dispatchPrecondition(condition: .onQueue(queue))
         _startAdvertisingCallCount += 1
@@ -341,15 +340,15 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
-    /// Records the call and flips ``isAdvertising`` to `false`.
+    /// Records the call and sets ``isAdvertising`` to `false`.
     public func stopAdvertising() {
         dispatchPrecondition(condition: .onQueue(queue))
         _stopAdvertisingCallCount += 1
         _isAdvertising = false
     }
 
-    /// Records the service and asynchronously delivers `.didAddService(_:error:)` on ``queue``
-    /// (per ``addServiceError``).
+    /// Records the service and delivers `.didAddService(_:error:)` asynchronously on ``queue``,
+    /// with ``addServiceError`` as the error.
     public func add(_ service: GATTService) {
         dispatchPrecondition(condition: .onQueue(queue))
         _addedServices.append(service)
@@ -377,7 +376,7 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
     }
 
     /// Records the call and returns the next scripted back-pressure value from
-    /// ``scriptedUpdateValueReturns`` (or `true` when none scripted).
+    /// ``scriptedUpdateValueReturns`` (or `true` when none is scripted).
     public func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         let returned = _scriptedUpdateValueReturns.isEmpty ? true : _scriptedUpdateValueReturns.removeFirst()
