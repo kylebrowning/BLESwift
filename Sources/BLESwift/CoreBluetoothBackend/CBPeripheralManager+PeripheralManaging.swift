@@ -3,9 +3,9 @@
 //  BLESwift
 //
 
-// iOS/macOS-only, like `PeripheralHost`: `CBMutableService`/`CBMutableCharacteristic`
-// construction (needed by `add(_:)` below) is unavailable on visionOS, and
-// `CBPeripheralManager` cannot be constructed on watchOS/tvOS (issue #22).
+// iOS and macOS only, like `PeripheralHost`. visionOS has no construction of
+// `CBMutableService` and `CBMutableCharacteristic`, which `add(_:)` below needs. watchOS
+// and tvOS cannot construct `CBPeripheralManager`.
 #if os(iOS) || os(macOS)
 
 import BLESwiftCore
@@ -13,43 +13,42 @@ import CoreBluetooth
 import Foundation
 import ObjectiveC
 
-/// The stable identity token for the associated ``PeripheralManagerDelegateProxy`` retained
-/// by `CBPeripheralManager` below. Its address, not its value, is what matters to
-/// `objc_(get|set)AssociatedObject`.
+/// The identity token for the associated ``PeripheralManagerDelegateProxy``, which the
+/// `CBPeripheralManager` below retains. `objc_(get|set)AssociatedObject` uses the token's
+/// address, not its value.
 private nonisolated(unsafe) var peripheralManagerProxyKey: UInt8 = 0
 
-/// `CBPeripheralManager` conforms to ``PeripheralManaging`` — the seam that lets
-/// `PeripheralHost` drive a real manager the same way it drives a `FakePeripheralManager`.
-/// The value-type GATT database is compiled to `CBMutableService`/`CBMutableCharacteristic`
-/// here, and `respond`/`updateValue` reach the shared ``PeripheralManagerDelegateProxy`` to
-/// recover the `CBATTRequest`/`CBCentral` objects the value-type API hides.
+/// `CBPeripheralManager` conforms to ``PeripheralManaging``. This seam lets `PeripheralHost`
+/// drive a real manager as it drives a `FakePeripheralManager`. The conformance compiles the
+/// value-type GATT database to `CBMutableService` and `CBMutableCharacteristic`. `respond` and
+/// `updateValue` use the shared ``PeripheralManagerDelegateProxy`` to recover the
+/// `CBATTRequest` and `CBCentral` objects that the value-type API hides.
 ///
-/// No `@retroactive` needed — package-scoped, same as the central conformance.
+/// No `@retroactive` is necessary. The conformance is package-scoped, as for the central.
 extension CBPeripheralManager: PeripheralManaging {
 
-    /// The associated ``PeripheralManagerDelegateProxy``, if one has been installed (via the
-    /// ``eventHandler`` setter, or registered by `PeripheralHost.init(configuration:)`).
+    /// The associated ``PeripheralManagerDelegateProxy``, if any. The ``eventHandler`` setter
+    /// or `PeripheralHost.init(configuration:)` installs it.
     var bleSwiftPeripheralProxy: PeripheralManagerDelegateProxy? {
         objc_getAssociatedObject(self, &peripheralManagerProxyKey) as? PeripheralManagerDelegateProxy
     }
 
-    /// Registers `proxy` as this manager's associated proxy, so `respond`/`updateValue` can
-    /// reach it. Called by `PeripheralHost.init(configuration:)`, which constructs its own
-    /// proxy and passes it directly to `CBPeripheralManager(delegate:queue:options:)` — the
-    /// ``eventHandler`` setter's fresh-proxy path is wrong for that case.
+    /// Registers `proxy` as this manager's associated proxy, so `respond` and `updateValue`
+    /// can reach it. `PeripheralHost.init(configuration:)` calls this method, because it
+    /// creates its own proxy and passes it directly to
+    /// `CBPeripheralManager(delegate:queue:options:)`. The ``eventHandler`` setter would create
+    /// a second proxy.
     func bleSwiftRegisterProxy(_ proxy: PeripheralManagerDelegateProxy) {
         objc_setAssociatedObject(self, &peripheralManagerProxyKey, proxy, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
-    /// Implements `eventHandler` with an associated-object-retained
-    /// ``PeripheralManagerDelegateProxy`` assigned to `.delegate` (which is `weak` — the
-    /// association keeps the proxy alive). Mirrors `CBCentralManager.eventHandler` exactly,
-    /// including the `nonisolated(unsafe)` bridge from the protocol's plain closure into the
-    /// proxy's `@Sendable` storage. See that property for the full rationale.
+    /// Implements `eventHandler` with a ``PeripheralManagerDelegateProxy``. An associated
+    /// object retains the proxy, because `.delegate` is `weak`. It mirrors
+    /// `CBCentralManager.eventHandler`, including the `nonisolated(unsafe)` bridge to the
+    /// proxy's `@Sendable` storage. See that property for the reason.
     ///
-    /// - Important: `PeripheralHost.init(configuration:)` does **not** go through this
-    ///   property — it creates its proxy and passes it to
-    ///   `CBPeripheralManager(delegate:queue:options:)` directly, then calls
+    /// - Important: `PeripheralHost.init(configuration:)` does **not** use this property. It
+    ///   passes its own proxy to `CBPeripheralManager(delegate:queue:options:)` and then calls
     ///   ``bleSwiftRegisterProxy(_:)``.
     public var eventHandler: ((PeripheralHostEvent) -> Void)? {
         get {
@@ -79,18 +78,18 @@ extension CBPeripheralManager: PeripheralManaging {
         }
     }
 
-    /// Maps the native `state` (`CBManagerState`) to ``CentralState``.
+    /// Maps `CBManager.state` to ``CentralState``.
     public var radioState: CentralState {
         CentralState(state)
     }
 
-    /// Maps the native `CBManager.authorization` class property to ``BluetoothAuthorization``.
+    /// Maps `CBManager.authorization` to ``BluetoothAuthorization``.
     public static var bluetoothAuthorization: BluetoothAuthorization {
         BluetoothAuthorization(authorization)
     }
 
-    /// Builds the advertisement `[String: Any]` CoreBluetooth expects (only the two honored
-    /// keys) and delegates to the real `startAdvertising(_:)`.
+    /// Builds the advertisement `[String: Any]` with only the two honored keys (local name and
+    /// service UUIDs) and calls `startAdvertising(_:)`.
     public func startAdvertising(_ advertisement: PeripheralAdvertisement) {
         var data: [String: Any] = [:]
         if let localName = advertisement.localName {
@@ -102,22 +101,20 @@ extension CBPeripheralManager: PeripheralManaging {
         startAdvertising(data)
     }
 
-    // `stopAdvertising()` already exists on `CBPeripheralManager` with an identical
-    // signature, so it satisfies the protocol with no extra code (like `stopScan()` on the
-    // central conformance).
+    // `stopAdvertising()` already exists on `CBPeripheralManager` with an identical signature,
+    // so it satisfies the protocol. `stopScan()` does the same for the central conformance.
 
-    /// Clears the proxy's characteristic-handle registry (so a stale handle can't be
-    /// resolved by `updateValue` after removal), then delegates to the native
-    /// `removeAllServices()`. Named distinctly from that method to avoid an
-    /// identical-signature redeclaration clash — see ``PeripheralManaging``.
+    /// Clears the proxy's characteristic-handle registry, so `updateValue` cannot resolve a
+    /// stale handle, and calls `removeAllServices()`. The name differs from the native method
+    /// to avoid a clash with an identical signature. See ``PeripheralManaging``.
     public func removeAllHostedServices() {
         bleSwiftPeripheralProxy?.removeAllCharacteristicHandles()
         removeAllServices()
     }
 
-    /// Compiles `service` (and its characteristics) into a `CBMutableService`/
+    /// Compiles `service` and its characteristics into a `CBMutableService` and
     /// `CBMutableCharacteristic` tree, records each characteristic handle on the proxy for
-    /// later `updateValue` resolution, and delegates to the real `add(_:)`.
+    /// `updateValue`, and calls `add(_:)`.
     public func add(_ service: GATTService) {
         let cbService = CBMutableService(type: service.identifier.cbuuid, primary: service.isPrimary)
         let proxy = bleSwiftPeripheralProxy
@@ -136,9 +133,9 @@ extension CBPeripheralManager: PeripheralManaging {
         add(cbService)
     }
 
-    /// Recovers the `CBATTRequest`(s) the proxy stored under `token`, applies `value` (for a
-    /// read) to the first request, and answers with the mapped `CBATTError.Code`
-    /// (`.success` when `error == nil`). A no-op if `token` is unknown.
+    /// Recovers the `CBATTRequest` objects that the proxy stored under `token`, sets `value`
+    /// on the first request, and responds with the mapped `CBATTError.Code` (`.success` when
+    /// `error == nil`). It does nothing if `token` is unknown.
     public func respond(to token: RequestToken, value: Data?, error: ATTError?) {
         guard let proxy = bleSwiftPeripheralProxy,
               let requests = proxy.takeRequests(for: token),
@@ -149,10 +146,10 @@ extension CBPeripheralManager: PeripheralManaging {
         respond(to: primary, withResult: error?.cbATTErrorCode ?? .success)
     }
 
-    /// Resolves the live `CBMutableCharacteristic` handle and (for a targeted push) the
-    /// `CBCentral`s, then delegates to the real `updateValue(_:for:onSubscribedCentrals:)`,
-    /// returning its back-pressure `Bool`. Returns `false` if the characteristic has no live
-    /// handle (never added, or removed).
+    /// Resolves the live `CBMutableCharacteristic` handle and, for a targeted push, the
+    /// `CBCentral` objects. It calls `updateValue(_:for:onSubscribedCentrals:)` and returns its
+    /// back-pressure `Bool`. It returns `false` if the characteristic has no live handle,
+    /// because it was never added or was removed.
     public func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool {
         guard let proxy = bleSwiftPeripheralProxy,
               let cbCharacteristic = proxy.characteristicHandle(for: characteristic) else { return false }

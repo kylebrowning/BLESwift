@@ -9,11 +9,13 @@ import BLESwiftVirtualRadio
 import Foundation
 import Testing
 
-/// Registering an identifier that is still registered — what a link client redialing under
-/// a stable `hostIdentifier` produces — retires the old registration as a removal would
-/// (#73): every connected central hears `didDisconnect` with `deviceRemovedError`, the old
-/// handler hears each unsubscribe, the new handler hears nothing, and the identifier never
-/// leaves the radio.
+/// Registering an identifier that is still registered retires the old registration as a removal
+/// does. A link client that dials again under a stable `hostIdentifier` produces such a
+/// registration. The results are:
+/// - Every connected central receives `didDisconnect` with `deviceRemovedError`.
+/// - The old handler receives each unsubscribe.
+/// - The new handler receives nothing.
+/// - The identifier never leaves the radio.
 @Suite("Re-registration")
 struct ReregistrationTests {
 
@@ -56,15 +58,16 @@ struct ReregistrationTests {
         #expect(observed?.willReconnect == false)
         #expect((await stream.value as NSError?)?.code == VirtualRadio.deviceRemovedError.code)
 
-        // The old handler heard its subscriber leave; the new one, which never saw it
-        // arrive, heard nothing.
+        // The old handler saw its subscriber leave. The new handler never saw the subscriber arrive
+        // and received nothing.
         #expect(await RecordingDevice.first(of: oldHandler.subscriptions) == false)
         #expect(await oldHandler.subscriptionLog.map(\.isSubscribed) == [true, false])
         #expect(await newHandler.subscriptionLog.isEmpty)
         #expect(await radio.subscriberCount(device: identifier, characteristic: RecordingDevice.control) == 0)
         #expect(await !radio.isConnected(session: backend.sessionID, device: identifier))
 
-        // The identifier never left the radio, and the Central and remote agree the link is gone.
+        // The identifier never left the radio. The Central and the remote agree that the link is
+        // gone.
         #expect(radio.knownDeviceIDs.withLock { $0.contains(identifier) })
         #expect(await RecordingDevice.isDisconnected(central, id))
         let remoteState = await RecordingDevice.onQueue(queue) {
@@ -79,12 +82,12 @@ struct ReregistrationTests {
         #expect(await newHandler.subscriptionLog.isEmpty)
     }
 
-    /// Every `CentralEvent` a backend delivered, read and written on the backend's queue only.
+    /// Every `CentralEvent` that a backend delivered. Only the backend's queue reads and writes it.
     private final class EventLog: @unchecked Sendable {
         var events: [CentralEvent] = []
     }
 
-    /// Runs every piece of radio work `remote` has queued, then flushes its deliveries.
+    /// Runs all radio work that `remote` has queued, then flushes its deliveries.
     private static func drain(_ remote: VirtualPeripheralRemote, on queue: DispatchQueue) async {
         await remote.waitForPendingWork()
         await RecordingDevice.onQueue(queue) {}
@@ -109,10 +112,9 @@ struct ReregistrationTests {
         await RecordingDevice.onQueue(queue) {}
         #expect(await RecordingDevice.onQueue(queue) { remote.connectionState } == .connected)
 
-        // Subscribed through the remote, the way a `Central` does it: discovery first, each
-        // step's answer landed before the next is asked for — the remote ignores a
-        // characteristic discovery for a service it has not discovered, and a subscribe for
-        // a characteristic it has not.
+        // Subscribe through the remote as a `Central` does, discovery first, with each answer
+        // before the next request. The remote ignores a characteristic discovery for an
+        // undiscovered service and a subscribe for an undiscovered characteristic.
         await RecordingDevice.onQueue(queue) { remote.discoverServices(nil) }
         await Self.drain(remote, on: queue)
         await RecordingDevice.onQueue(queue) { remote.discoverCharacteristics(nil, for: RecordingDevice.service) }

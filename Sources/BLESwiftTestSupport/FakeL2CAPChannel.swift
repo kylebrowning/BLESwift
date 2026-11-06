@@ -7,30 +7,30 @@ import BLESwiftCore
 import Dispatch
 import Foundation
 
-/// An in-memory `L2CAPChannelRemote` for tests — an open L2CAP channel as a pair of
-/// queue-confined pipes, with no CoreBluetooth streams or hardware involved.
+/// An in-memory `L2CAPChannelRemote` for tests. It models an open L2CAP channel with queue-confined
+/// pipes, and uses no CoreBluetooth streams and no hardware.
 ///
-/// Queue-confined, not lock-protected, like ``FakePeripheral``: every stored property is
-/// `nonisolated(unsafe)`, safe only because every entry point runs on `queue` and touches
-/// state inline; off-queue code goes through ``onQueue(_:)``.
+/// As with ``FakePeripheral``, a queue confines it and no lock protects it. Every stored property
+/// is `nonisolated(unsafe)`. This is safe because every entry point runs on `queue` and touches
+/// state inline. Off-queue code uses ``onQueue(_:)``.
 public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
 
+    /// The PSM that the channel is open on.
     public let psm: L2CAPPSM
 
-    /// The queue every method and delivery is confined to. A `FakePeripheral` hands its own
-    /// queue down when it vends a channel, so the channel shares the peripheral's serial
-    /// event ordering.
+    /// The queue that confines every method and delivery. A `FakePeripheral` passes its own queue
+    /// to the channel it creates, so the channel has the same serial event order as the peripheral.
     public let queue: DispatchQueue
 
     private let inboundStream: AsyncThrowingStream<Data, Error>
     private let inboundContinuation: AsyncThrowingStream<Data, Error>.Continuation
 
-    /// What ``write(_:)`` does with the data it is handed.
+    /// What ``write(_:)`` does with the data that it receives.
     public enum WriteBehavior: Sendable {
-        /// Records the data and completes at once.
+        /// Records the data and completes immediately.
         case complete
-        /// Records the data and never completes, until ``close(error:)`` fails every write
-        /// still held — the back-pressure a transport that has stopped draining applies.
+        /// Records the data and never completes. ``close(error:)`` then fails every held write.
+        /// This models the back-pressure of a transport that stops draining.
         case hold
     }
 
@@ -40,8 +40,8 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
     nonisolated(unsafe) private var _writeBehavior: WriteBehavior = .complete
     nonisolated(unsafe) private var _heldWrites: [CheckedContinuation<Void, Error>] = []
 
-    /// Creates a `FakeL2CAPChannel` for `psm`, confined to `queue`, which must be serial
-    /// (`DispatchQueue(label:)` is).
+    /// Creates a `FakeL2CAPChannel` for `psm`, confined to `queue`. The queue must be serial
+    /// (`DispatchQueue(label:)` makes a serial queue).
     public init(psm: L2CAPPSM, queue: DispatchQueue) {
         self.psm = psm
         self.queue = queue
@@ -50,13 +50,12 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
         self.inboundContinuation = continuation
     }
 
-    /// Hops onto ``queue`` to run `body` and returns its result — the only sanctioned way
-    /// for off-queue code to inspect this fake's state; also flushes previously-scheduled
-    /// `.async` deliveries since `queue` is serial. Never blocks (see
-    /// ``FakeCentral/onQueue(_:)``).
+    /// Runs `body` on ``queue`` and returns its result. Off-queue code must use this to inspect
+    /// this fake's state. Because `queue` is serial, it also flushes the `.async` deliveries that
+    /// are already scheduled. It never blocks (see ``FakeCentral/onQueue(_:)``).
     ///
-    /// - Warning: Never `await` from within code already on ``queue`` — deadlocks,
-    ///   including from the peripheral's event handler since a channel shares its queue.
+    /// - Warning: Never `await` this from code that already runs on ``queue``. That deadlocks. It
+    ///   includes the peripheral's event handler, because a channel shares its peripheral's queue.
     public func onQueue<T: Sendable>(_ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async {
@@ -67,10 +66,15 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
 
     // MARK: - L2CAPChannelRemote
 
+    /// The stream of data that ``simulateInbound(_:)`` delivers. ``close(error:)`` finishes it.
     public func inbound() -> AsyncThrowingStream<Data, Error> {
         inboundStream
     }
 
+    /// Records `data` in ``writtenData``. The completion depends on ``writeBehavior``.
+    ///
+    /// - Throws: `BLESwiftError.l2capChannelClosed` if the channel is closed, or when
+    ///   ``close(error:)`` runs while the write is held.
     public func write(_ data: Data) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
@@ -88,14 +92,15 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
         }
     }
 
+    /// Closes the channel and fails every held write. The first call finishes ``inbound()``, with
+    /// `error` if it is not `nil`. Later calls do nothing.
     public func close(error: Error?) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
             guard !_closed else { return }
             _closed = true
             _closeError = error
-            // Nothing may be stranded: a held write outlives the channel otherwise, and with
-            // it the task that is awaiting it.
+            // Resume every held write. Otherwise its awaiting task outlives the channel.
             let held = _heldWrites
             _heldWrites = []
             for continuation in held { continuation.resume(throwing: BLESwiftError.l2capChannelClosed) }
@@ -109,26 +114,25 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
 
     // MARK: - Scripting / inspection
 
-    /// Every `Data` written outbound via ``write(_:)``, in order. Read via ``onQueue(_:)``.
+    /// Every `Data` that ``write(_:)`` wrote outbound, in order. Read it with ``onQueue(_:)``.
     public var writtenData: [Data] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _writtenData
     }
 
-    /// Whether ``close(error:)`` has run. Read via ``onQueue(_:)``.
+    /// Whether ``close(error:)`` has run. Read it with ``onQueue(_:)``.
     public var isClosed: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _closed
     }
 
-    /// The error ``close(error:)`` was called with, if any. Read via ``onQueue(_:)``.
+    /// The error that ``close(error:)`` received, if any. Read it with ``onQueue(_:)``.
     public var closeError: Error? {
         dispatchPrecondition(condition: .onQueue(queue))
         return _closeError
     }
 
-    /// What ``write(_:)`` does with the data it is handed. Set — and read — via
-    /// ``onQueue(_:)``.
+    /// What ``write(_:)`` does with its data. Get and set it with ``onQueue(_:)``.
     public var writeBehavior: WriteBehavior {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -140,9 +144,9 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
         }
     }
 
-    /// Simulates the peer sending `data` inbound: asynchronously `yield`s it to the
-    /// ``inbound()`` stream on ``queue``. A no-op once closed. Flush with ``onQueue(_:)`` (or
-    /// simply consume the stream) before asserting.
+    /// Simulates the peer that sends `data`. It yields the data asynchronously to the ``inbound()``
+    /// stream on ``queue``. After the channel is closed, it does nothing. Flush with
+    /// ``onQueue(_:)`` (or consume the stream) before you assert.
     public func simulateInbound(_ data: Data) {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))

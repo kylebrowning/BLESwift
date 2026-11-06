@@ -9,8 +9,8 @@ import Foundation
 
 /// The Bluetooth SIG "Current Time" characteristic (GSS §3.62 Current Time, `0x2A2B`).
 ///
-/// Byte layout (10 bytes, little-endian): a 7-byte ``GATTDateTime`` (year, month, day,
-/// hours, minutes, seconds), then:
+/// Byte layout (10 bytes, little-endian): a 7-byte ``GATTDateTime`` (year, month, day, hours,
+/// minutes, seconds). Then:
 /// - `dayOfWeek` (`UInt8`, byte 7): 0 = unknown, 1 = Monday … 7 = Sunday.
 /// - `fractions256` (`UInt8`, byte 8): 1/256ths of a second.
 /// - `adjustReason` (`UInt8`, byte 9): an ``AdjustReason`` option set.
@@ -21,9 +21,13 @@ public struct CurrentTime: Receivable, Transmittable, Sendable, Equatable {
         public let rawValue: UInt8
         public init(rawValue: UInt8) { self.rawValue = rawValue }
 
+        /// A person set the time (bit 0).
         public static let manualTimeUpdate = AdjustReason(rawValue: 1 << 0)
+        /// An external reference clock set the time (bit 1).
         public static let externalReferenceTimeUpdate = AdjustReason(rawValue: 1 << 1)
+        /// The time zone changed (bit 2).
         public static let changeOfTimeZone = AdjustReason(rawValue: 1 << 2)
+        /// The daylight saving time (DST) offset changed (bit 3).
         public static let changeOfDST = AdjustReason(rawValue: 1 << 3)
     }
 
@@ -41,6 +45,8 @@ public struct CurrentTime: Receivable, Transmittable, Sendable, Equatable {
     /// Why the clock last changed.
     public let adjustReason: AdjustReason
 
+    /// Creates a Current Time from its fields. See the type's byte layout for the meaning and range
+    /// of each field.
     public init(dateTime: GATTDateTime, dayOfWeek: UInt8, fractions256: UInt8, adjustReason: AdjustReason) {
         self.dateTime = dateTime
         self.dayOfWeek = dayOfWeek
@@ -48,8 +54,8 @@ public struct CurrentTime: Receivable, Transmittable, Sendable, Equatable {
         self.adjustReason = adjustReason
     }
 
-    /// Builds a Current Time from a `Date`, deriving each field (including day of week and
-    /// 1/256-second fractions) from `calendar`.
+    /// Builds a Current Time from a `Date`. It derives each field from `calendar`, including the
+    /// day of week and the 1/256-second fraction.
     public init(date: Date, calendar: Calendar = .current, adjustReason: AdjustReason = []) {
         let components = calendar.dateComponents(
             [.year, .month, .day, .hour, .minute, .second, .weekday, .nanosecond],
@@ -63,7 +69,7 @@ public struct CurrentTime: Receivable, Transmittable, Sendable, Equatable {
             minutes: UInt8(components.minute ?? 0),
             seconds: UInt8(components.second ?? 0)
         )
-        // Calendar weekday is 1 = Sunday … 7 = Saturday; GATT is 1 = Monday … 7 = Sunday.
+        // In Calendar, weekday 1 = Sunday … 7 = Saturday. In GATT, 1 = Monday … 7 = Sunday.
         let calendarWeekday = components.weekday ?? 1
         let dayOfWeek = UInt8(((calendarWeekday + 5) % 7) + 1)
         let nanoseconds = components.nanosecond ?? 0
@@ -88,8 +94,8 @@ public struct CurrentTime: Receivable, Transmittable, Sendable, Equatable {
         return data
     }
 
-    /// Reconstructs a `Date` from the stored fields, or `nil` if the month or day is 0
-    /// ("unknown"), since those cannot form a calendar date.
+    /// Reconstructs a `Date` from the stored fields. Returns `nil` if the month or day is 0
+    /// ("unknown"), because those values cannot form a calendar date.
     public func date(in calendar: Calendar = .current) -> Date? {
         guard dateTime.month != 0, dateTime.day != 0 else { return nil }
         return calendar.date(from: dateTime.dateComponents)

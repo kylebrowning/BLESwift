@@ -3,30 +3,30 @@
 //  BLESwift
 //
 
-// NOTE — dual-access declaration: see the note in `RestorationConfiguration.swift`.
-// Public on iOS, internal mirror elsewhere. **Keep the two in sync.**
+// NOTE: This is a dual-access declaration. See the note in `RestorationConfiguration.swift`.
+// It is public on iOS and an internal mirror on other platforms. **Keep the two in sync.**
 
 import BLESwiftCore
 
 #if os(iOS)
 
-/// A peripheral-role background-restoration event, published by
-/// ``PeripheralHost/restorationEvents()``. Surfaced as a **buffered, replayed** event stream
-/// (see ``RestorationEvent``), so state restored during launch is never lost.
+/// A peripheral-role background-restoration event. ``PeripheralHost/restorationEvents()``
+/// publishes it on a **buffered, replayed** stream (see ``RestorationEvent``), so the state
+/// that the system restores during launch is not lost.
 ///
-/// A single event, because CoreBluetooth itself re-establishes the preserved GATT database
-/// and resumes advertising on the app's behalf — there is no connection to re-drive.
+/// There is a single event. CoreBluetooth itself restores the preserved GATT database and
+/// resumes advertising.
 public enum PeripheralRestorationEvent: Sendable {
 
-    /// CoreBluetooth restored preserved peripheral-role state. Carries the services
-    /// CoreBluetooth re-published and the advertisement it resumed (if any).
+    /// CoreBluetooth restored peripheral-role state. The event carries the services that it
+    /// published again and the advertisement that it resumed, if any.
     case willRestore(RestoredPeripheralState)
 }
 
 #else
 
-/// Internal mirror of the iOS-only public `PeripheralRestorationEvent` — see the dual-access
-/// note in `RestorationConfiguration.swift`.
+/// Internal mirror of the public `PeripheralRestorationEvent`, which is iOS-only. See the
+/// dual-access note in `RestorationConfiguration.swift`.
 enum PeripheralRestorationEvent: Sendable {
     case willRestore(RestoredPeripheralState)
 }

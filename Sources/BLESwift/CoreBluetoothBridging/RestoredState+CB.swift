@@ -12,8 +12,8 @@ import CoreBluetooth
 
 extension RestoredState {
 
-    /// Eagerly converts CoreBluetooth's raw `willRestoreState` dictionary into `Sendable`
-    /// BLESwift value types. Called only by `CentralDelegateProxy`.
+    /// Converts CoreBluetooth's raw `willRestoreState` dictionary into `Sendable` value types.
+    /// Only `CentralDelegateProxy` calls it.
     init(restorationDictionary dictionary: [String: Any]) {
         let cbPeripherals = dictionary[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
         let peripherals = cbPeripherals.map { peripheral in

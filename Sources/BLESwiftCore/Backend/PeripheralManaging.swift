@@ -5,58 +5,57 @@
 
 import Foundation
 
-/// A protocol seam over `CBPeripheralManager` — the peripheral-role counterpart to
-/// ``CentralManaging``. Conformances: CoreBluetooth (`BLESwift`) and a scriptable fake
-/// (`BLESwiftTestSupport`); conforming your own type is possible but unsupported.
+/// A protocol seam over `CBPeripheralManager`. It is the peripheral-role counterpart of
+/// ``CentralManaging``. The conformances are CoreBluetooth (`BLESwift`) and a scriptable fake
+/// (`BLESwiftTestSupport`). You can conform your own type, but this is not supported.
 ///
-/// - Important: Every ``eventHandler`` delivery must happen asynchronously, on the serial
-///   queue the owning `PeripheralHost` was constructed with — never deliver inline.
-/// - Note: ``radioState``/``bluetoothAuthorization`` are renamed to avoid clashing with
-///   `CBPeripheralManager`/`CBManager`'s identically-named members, exactly as on
-///   ``CentralManaging``.
+/// - Important: Every ``eventHandler`` delivery must happen asynchronously, on the serial queue
+///   that the owning `PeripheralHost` was created with. Never deliver inline.
+/// - Note: ``radioState`` and ``bluetoothAuthorization`` are renamed to avoid a clash with the
+///   same-named members of `CBPeripheralManager` and `CBManager`, as on ``CentralManaging``.
 public protocol PeripheralManaging: AnyObject {
 
-    /// Receives every `PeripheralHostEvent` this backend produces; `nil` detaches delivery.
+    /// Receives every `PeripheralHostEvent` that this backend produces. `nil` stops the delivery.
     var eventHandler: ((PeripheralHostEvent) -> Void)? { get set }
 
     /// The current state of the Bluetooth radio. Mirrors `CBPeripheralManager.state`.
     var radioState: CentralState { get }
 
-    /// Whether the peripheral is currently advertising. Mirrors
-    /// `CBPeripheralManager.isAdvertising`.
+    /// Whether the peripheral is advertising. Mirrors `CBPeripheralManager.isAdvertising`.
     var isAdvertising: Bool { get }
 
-    /// The app's Bluetooth authorization status. Mirrors the `CBManager.authorization`
-    /// class property.
+    /// The Bluetooth authorization status of the app. Mirrors the `CBManager.authorization` class
+    /// property.
     static var bluetoothAuthorization: BluetoothAuthorization { get }
 
-    /// Begins advertising. Mirrors `CBPeripheralManager.startAdvertising(_:)`; completion
+    /// Starts advertising. Mirrors `CBPeripheralManager.startAdvertising(_:)`. The completion
     /// arrives as `PeripheralHostEvent/didStartAdvertising(error:)`.
     func startAdvertising(_ advertisement: PeripheralAdvertisement)
 
     /// Stops advertising. Mirrors `CBPeripheralManager.stopAdvertising()`.
     func stopAdvertising()
 
-    /// Publishes a service (and its characteristics) into the local GATT database. Mirrors
-    /// `CBPeripheralManager.add(_:)`. Completion arrives as
+    /// Publishes a service (and its characteristics) in the local GATT database. Mirrors
+    /// `CBPeripheralManager.add(_:)`. The completion arrives as
     /// `PeripheralHostEvent/didAddService(_:error:)`.
     func add(_ service: GATTService)
 
-    /// Removes every published service from the local GATT database. Mirrors
-    /// `CBPeripheralManager.removeAllServices()` (named distinctly to avoid an
-    /// identical-signature clash with that native method in the retroactive conformance).
+    /// Removes each published service from the local GATT database. Mirrors
+    /// `CBPeripheralManager.removeAllServices()`. It has a different name so that it does not clash
+    /// with that native method, which has an identical signature, in the retroactive conformance.
     func removeAllHostedServices()
 
-    /// Answers a read or write request previously surfaced as ``ReadRequest``/
-    /// ``WriteRequest``, identified by its `token`. Mirrors
-    /// `CBPeripheralManager.respond(to:withResult:)`. A no-op if `token` is unknown.
+    /// Answers a request that the backend delivered earlier as a ``ReadRequest`` or
+    /// ``WriteRequest``. The `token` identifies the request. Mirrors
+    /// `CBPeripheralManager.respond(to:withResult:)`. If `token` is unknown, this function does
+    /// nothing.
     func respond(to token: RequestToken, value: Data?, error: ATTError?)
 
-    /// Pushes `value` as a notification/indication for `characteristic` to `centrals`
-    /// (or every subscribed central when `nil`). Mirrors
+    /// Pushes `value` as a notification or indication for `characteristic` to `centrals`. If
+    /// `centrals` is `nil`, it pushes to every subscribed central. Mirrors
     /// `CBPeripheralManager.updateValue(_:for:onSubscribedCentrals:)`.
     ///
-    /// - Returns: `true` if queued for transmission, `false` if the transmit queue was
-    ///   full — wait for `PeripheralHostEvent/readyToUpdateSubscribers` and retry.
+    /// - Returns: `true` if the value is queued for transmission. `false` if the transmit queue is
+    ///   full. In that case, wait for `PeripheralHostEvent/readyToUpdateSubscribers` and retry.
     func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool
 }

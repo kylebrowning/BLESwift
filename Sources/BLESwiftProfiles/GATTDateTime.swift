@@ -7,8 +7,8 @@ import BLESwift
 import BLESwiftCore
 import Foundation
 
-/// The Bluetooth SIG "Date Time" structure (GSS §3.70 Date Time) — the 7-byte building
-/// block shared by ``CurrentTime`` and the optional timestamp in ``TemperatureMeasurement``.
+/// The Bluetooth SIG "Date Time" structure (GSS §3.70 Date Time). It is the 7-byte building block
+/// of ``CurrentTime`` and of the optional timestamp in ``TemperatureMeasurement``.
 ///
 /// Byte layout (little-endian):
 /// - `year` (`UInt16`, bytes 0-1): 1582–9999, or 0 for "unknown".
@@ -19,13 +19,20 @@ import Foundation
 /// - `seconds` (`UInt8`, byte 6): 0–59.
 public struct GATTDateTime: Receivable, Transmittable, Sendable, Equatable {
 
+    /// The year, 1582–9999, or 0 for "unknown".
     public let year: UInt16
+    /// The month, 1–12, or 0 for "unknown".
     public let month: UInt8
+    /// The day of the month, 1–31, or 0 for "unknown".
     public let day: UInt8
+    /// The hours, 0–23.
     public let hours: UInt8
+    /// The minutes, 0–59.
     public let minutes: UInt8
+    /// The seconds, 0–59.
     public let seconds: UInt8
 
+    /// Creates a Date Time from its fields. The initializer does not check the ranges.
     public init(year: UInt16, month: UInt8, day: UInt8, hours: UInt8, minutes: UInt8, seconds: UInt8) {
         self.year = year
         self.month = month
@@ -39,8 +46,8 @@ public struct GATTDateTime: Receivable, Transmittable, Sendable, Equatable {
         try self.init(bluetoothData: bluetoothData, at: 0)
     }
 
-    /// Decodes a Date Time whose 7 bytes begin at `offset` within `data` — lets a larger
-    /// characteristic embed a Date Time without copying a subrange out first.
+    /// Decodes a Date Time from the 7 bytes at `offset` in `data`, so a larger characteristic can
+    /// embed a Date Time without copying a subrange first.
     init(bluetoothData data: Data, at offset: Int) throws {
         year = try data.extract(start: offset, length: 2)
         month = try data.extract(start: offset + 2, length: 1)

@@ -6,11 +6,8 @@
 import BLESwiftCore
 import CoreBluetooth
 
-/// `CBUUID` bridging for ``ServiceIdentifier``/``CharacteristicIdentifier`` — the only
-/// place in `BLESwift` these identifiers cross to/from CoreBluetooth's own UUID type.
-/// Built entirely on ``ServiceIdentifier``/``CharacteristicIdentifier``'s public members
-/// (`uuidString`, and the validating `init(uuid:)`), so no bridging-specific storage is
-/// needed on the Core types themselves.
+/// `CBUUID` bridging for the service, characteristic, and descriptor identifiers. It uses only
+/// their public members (`uuidString` and the validating `init(uuid:)`).
 extension ServiceIdentifier {
 
     /// Creates a `ServiceIdentifier` from a `CBUUID`.

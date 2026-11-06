@@ -10,9 +10,8 @@ import Dispatch
 import Foundation
 import BLESwiftCompat17
 
-/// The host-side half of the simulator link: it hosts virtual devices on a
-/// ``VirtualRadio``, listens on a TCP port, and serves each client that connects from a
-/// backend of its own.
+/// The host-side half of the simulator link. It hosts virtual devices on a ``VirtualRadio`` and
+/// listens on a TCP port. It serves each client that connects from a backend of its own.
 ///
 /// ```swift
 /// var configuration = ProviderConfiguration()
@@ -21,132 +20,132 @@ import BLESwiftCompat17
 /// try await provider.start()
 /// ```
 ///
-/// **One session per connection, one backend per session.** A client identifies its role in
-/// the handshake; a `.central` client gets a `CentralSession` driving a
-/// ``VirtualCentralBackend``, and a `.peripheral` client gets a `HostSession` driving a
-/// ``VirtualPeripheralManagerBackend`` — each optionally composed with the host's real
-/// CoreBluetooth, when ``ProviderConfiguration/passthrough`` is set — on a serial queue
-/// created for that session alone. Sessions share only the radio, which is exactly what makes
-/// sim-to-sim work: one simulator's `PeripheralHost` is hosted there as a device, and another
-/// simulator's `Central` scans and connects to it. Nothing else leaks between sessions.
+/// **One session for each connection, and one backend for each session.** A client states its
+/// role in the handshake.
+///
+/// - A `.central` client gets a `CentralSession`. The session drives a
+///   ``VirtualCentralBackend``.
+/// - A `.peripheral` client gets a `HostSession`. The session drives a
+///   ``VirtualPeripheralManagerBackend``.
+///
+/// If ``ProviderConfiguration/passthrough`` is set, the provider combines each backend with the
+/// host's real CoreBluetooth. Each session runs on a serial queue that the provider creates for
+/// that session alone. Sessions share only the radio. This is how sim-to-sim works: one
+/// simulator's `PeripheralHost` is hosted there as a device, and another simulator's `Central`
+/// scans for it and connects to it.
 public actor Provider {
 
-    /// The radio hosting every virtual device this provider serves. `nonisolated` because
-    /// the radio is an actor of its own: callers await it directly rather than through the
-    /// provider.
+    /// The radio that hosts every virtual device that this provider serves. It is `nonisolated`
+    /// because the radio is an actor of its own. Callers await the radio directly, not through
+    /// the provider.
     public nonisolated let radio = VirtualRadio()
 
-    /// What this provider was configured with.
+    /// The configuration of this provider.
     private let configuration: ProviderConfiguration
 
-    /// The queue the listener and every accepted connection deliver their callbacks on.
+    /// The queue on which the listener and each accepted connection deliver their callbacks.
     private let listenerQueue = DispatchQueue(label: "bleswift-provider.listener")
 
-    /// The listener, once ``start()`` has bound it.
+    /// The listener, after ``start()`` has bound it.
     private var listener: LinkListener?
 
-    /// Every accepted connection, and where each one's messages currently go.
+    /// Every accepted connection, and the destination of its messages.
     ///
-    /// Deliberately *not* actor-isolated. A connection's handlers fire on the listener queue
-    /// and reach the actor through unstructured `Task`s, between which Swift guarantees no
-    /// ordering — so a table only the actor could write would let a `clientHello` land before
-    /// its own connection was known (swallowing the handshake), or let a termination
-    /// resurrect a dead connection. This table is instead populated *synchronously*, on the
-    /// listener queue, before either handler is installed: by the time anything can fire, the
-    /// connection is already here. Entries are held strongly — the listener does not retain
-    /// what it accepts — and a terminated entry keeps its connection alive until the actor has
-    /// released it, so no `ObjectIdentifier` can be recycled underneath a pending key.
+    /// This table is not actor-isolated on purpose. Handlers fire on the listener queue and reach
+    /// the actor through `Task`s that have no fixed order. So the provider fills the table
+    /// synchronously on that queue, before it installs a handler. Otherwise a `clientHello` could
+    /// arrive before its connection is known, or a termination could resurrect a dead connection.
     ///
-    /// It is also the connection's *router*, which is what makes the handshake window safe:
-    /// the first message goes to ``handle(_:from:)``, everything behind it is held in the
-    /// entry until the session installs its handler — and is then replayed to it, in order,
-    /// while the entry keeps holding anything newer. A client that puts its first request in
-    /// the same write as its `ClientHello` is served rather than dropped.
+    /// The table holds entries strongly, because the listener does not retain connections. It also
+    /// routes messages. The first message goes to ``handle(_:from:)``. The entry holds later
+    /// messages until the session installs its handler, and then replays them in order.
     private nonisolated let pending = Mutex(PendingConnections())
 
     /// The live sessions of both roles, keyed by their connection.
     private var sessions: [ObjectIdentifier: any ProviderSession] = [:]
 
-    /// The handles of the fixture devices ``start()`` registered, keyed by device id.
+    /// The handles of the fixture devices that ``start()`` registered, keyed by device id.
     private var fixtures: [UUID: VirtualDeviceHandle] = [:]
 
-    /// The handles of the devices ``addVirtualDevice(_:advertising:)`` registered, keyed by
-    /// device id — kept for exactly one reason: ``stop()`` takes them off the radio too.
+    /// The handles of the devices that ``addVirtualDevice(_:advertising:)`` registered, keyed by
+    /// device id. The provider keeps them so that ``stop()`` also takes them off the radio.
     ///
-    /// Held apart from ``fixtures`` because ``handle(for:)`` vends a *fixture*'s handle, and
-    /// the caller of `addVirtualDevice` already has the one it returned.
+    /// This table is separate from ``fixtures``. ``handle(for:)`` gives out only a *fixture's*
+    /// handle, because the caller of `addVirtualDevice` already has the handle that the call
+    /// returned.
     private var addedDevices: [UUID: VirtualDeviceHandle] = [:]
 
-    /// The identifiers of the devices the *provider itself* put on the radio — its fixtures,
-    /// and everything ``addVirtualDevice(_:advertising:)`` registered.
+    /// The identifiers of the devices that the *provider itself* put on the radio: its fixtures
+    /// and all devices that ``addVirtualDevice(_:advertising:)`` registered.
     ///
-    /// The set ``hostedIdentifier(for:)`` refuses a client's chosen identity against. It is
-    /// deliberately not ``VirtualRadio/knownDeviceIDs``: that set also holds the devices
-    /// *clients* are hosted under, and a client redialing faster than its old session's
-    /// asynchronous removal completes would find its own identifier still in it and be
-    /// re-hosted under a fresh `UUID` — silently becoming a new device to every central that
-    /// had seen it. Only the provider's own devices are the provider's to defend; a
-    /// peripheral-role client re-registering *its own* identifier is exactly the reconnect the
-    /// stable `hostIdentifier` exists for, and ``VirtualDeviceHandle``'s generation guard is
-    /// what keeps the old session's teardown off the new registration.
+    /// ``hostedIdentifier(for:)`` refuses a client's chosen identity if it is in this set. The
+    /// set is deliberately not ``VirtualRadio/knownDeviceIDs``, which also holds the devices
+    /// hosted for *clients*. A client that redials faster than the asynchronous removal of its
+    /// old session completes would find its own identifier still in that set. The provider would
+    /// then host the client under a new `UUID`, and every central that had seen the client would
+    /// silently see a new device.
+    ///
+    /// The provider defends only its own devices. A peripheral-role client can register its
+    /// *own* identifier again. This is the reconnect for which the stable `hostIdentifier`
+    /// exists. The generation guard of ``VirtualDeviceHandle`` keeps the old session's teardown
+    /// off the new registration.
     private var providerOwnedIdentifiers: Set<UUID> = []
 
-    /// Numbers the per-session queue labels.
+    /// The number for the next session's queue label.
     private var sessionOrdinal = 0
 
-    /// Bumped by every ``stop()``, so work that suspended before one can tell on resuming
-    /// that the provider it was registering with has been torn down underneath it. See
+    /// Each ``stop()`` increases this value. Work that suspended before a stop can then see,
+    /// when it resumes, that a stop tore down the provider with which it was registering. See
     /// ``addVirtualDevice(_:advertising:)``.
     private var stopGeneration: UInt64 = 0
 
-    /// How many ``stop()`` calls are between their first line and their last — they suspend in
-    /// the radio several times, and this actor serves other calls while they do. A
-    /// registration that both began and finished inside that window would carry the *same*
-    /// ``stopGeneration`` on both sides of its own suspension and still be emptied out of the
-    /// tables behind it.
+    /// The number of ``stop()`` calls that are in progress. Each call suspends in the radio
+    /// several times, and this actor serves other calls meanwhile. A registration that begins and
+    /// finishes inside that window carries the *same* ``stopGeneration`` on both sides of its
+    /// own suspension, and a stop would still empty it out of the tables behind it.
     ///
-    /// A depth rather than a flag: two stops can overlap — and one stop's own `handle.remove()`
-    /// calls can return in any order — so the *inner* one's exit must not report the outer
-    /// one's window as closed.
+    /// This is a depth and not a flag, because two stops can overlap and the `handle.remove()`
+    /// calls of one stop can return in any order. The exit of the *inner* stop must not report
+    /// that the outer stop's window is closed.
     private var stopDepth = 0
 
-    /// Whether any ``stop()`` is currently in flight. See ``stopDepth``.
+    /// Whether any ``stop()`` is in progress. See ``stopDepth``.
     private var isStopping: Bool { stopDepth > 0 }
 
-    /// Creates a provider. Nothing is registered and no port is bound until ``start()``.
+    /// Creates a provider. The provider registers nothing and binds no port until ``start()``.
     ///
-    /// - Parameter configuration: Where to listen, what to host, and how to log.
+    /// - Parameter configuration: The settings that set where to listen, what to host, and how
+    ///   to log.
     public init(configuration: ProviderConfiguration) {
         self.configuration = configuration
     }
 
     /// Registers `device` on ``radio``.
     ///
-    /// The device is the provider's own from here on: its identifier is refused to any
-    /// peripheral-role client that asks to be hosted under it, and ``stop()`` takes it back off
-    /// the radio along with the configured fixtures.
+    /// From this point, the device belongs to the provider. The provider refuses its identifier
+    /// to any peripheral-role client that asks to be hosted under it. ``stop()`` takes the
+    /// device off the radio together with the configured fixtures.
     ///
     /// - Parameters:
     ///   - device: The device to host.
-    ///   - advertising: Whether it starts out advertising. Defaults to `true`.
-    /// - Returns: The handle for pushing notifications and mutating the device afterwards.
-    ///   Stale once ``stop()`` has removed the device, exactly as a fixture's handle is —
-    ///   including a ``stop()`` that ran *during* this call, which takes the device straight
-    ///   back off the radio rather than leaving it there for nothing to remove.
+    ///   - advertising: Whether the device starts to advertise. The default is `true`.
+    /// - Returns: The handle that you use to push notifications and to change the device later.
+    ///   The handle is stale after ``stop()`` removes the device, as for a fixture's handle. This
+    ///   includes a ``stop()`` that ran *during* this call, which takes the device off the radio
+    ///   immediately. Thus no device stays on the radio with nothing to remove it.
     @discardableResult
     public func addVirtualDevice(_ device: VirtualDevice, advertising: Bool = true) async -> VirtualDeviceHandle {
         let identifier = device.descriptor.identifier
-        // Registering suspends, and this actor serves a `stop()` while it does — a stop that
-        // began before this call, or one that is suspended in the radio itself. Either way it
-        // empties both tables and the identifier set, so recording the device on resuming
-        // would leave it on a shared radio with nothing holding its handle and nothing
-        // defending its identifier — the one thing `stop()` promises it does not do. It goes
-        // straight back off instead.
+        // Registration suspends, and this actor serves a `stop()` meanwhile. The stop can begin
+        // before this call, or it can be suspended in the radio itself. In either case it
+        // empties both tables and the identifier set. If this method then recorded the device
+        // after it resumed, the device would stay on a shared radio with nothing to hold its
+        // handle or defend its identifier. `stop()` promises that this does not happen, so the
+        // method takes the device off the radio instead.
         //
-        // Both sides of the suspension are read, and the *entry* side is what a second stop
-        // cannot take back: an add that began inside one stop's window and resumed after a
-        // shorter, overlapping stop had returned would otherwise find the depth back at zero
-        // and the generation unchanged since it looked, and record an orphan anyway.
+        // Read the state on both sides of the suspension. An add that began inside one stop's
+        // window and resumed after a shorter, overlapping stop had returned would see depth zero
+        // and an unchanged generation, and would still record an orphan.
         let generation = stopGeneration
         let wasStopping = isStopping
         providerOwnedIdentifiers.insert(identifier)
@@ -159,37 +158,37 @@ public actor Provider {
         return handle
     }
 
-    /// The handle of the fixture device registered under `identifier`, or `nil` if
+    /// The handle of the fixture device that is registered under `identifier`, or `nil` if
     /// ``ProviderConfiguration/fixtures`` declared no such device.
     ///
-    /// - Parameter identifier: The fixture device's `id`.
-    /// - Returns: Its handle, for pushing notifications and mutating it.
+    /// - Parameter identifier: The `id` of the fixture device.
+    /// - Returns: Its handle, which you use to push notifications and to change the device.
     public func handle(for identifier: UUID) -> VirtualDeviceHandle? {
         fixtures[identifier]
     }
 
     /// Registers every configured fixture on ``radio``, then binds the listener.
     ///
-    /// Returns once the port is bound, so ``port`` is valid on return.
+    /// This method returns after it binds the port, so ``port`` is valid on return.
     ///
-    /// **A start that throws leaves the radio as it found it.** The fixtures go on before the
-    /// listener binds — so no client can be served a radio that is still filling up — and come
-    /// straight back off if the bind fails. Left registered, a retry would register each
-    /// fixture a second time under a fresh generation and strand every handle
-    /// ``handle(for:)`` vended from the first attempt, all of them refused by the radio's
-    /// generation guard.
+    /// **A start that throws leaves the radio as it found the radio.** The fixtures go on the
+    /// radio before the listener binds, so no client can use a radio that is still filling up.
+    /// If the bind fails, the fixtures come straight off the radio. Otherwise a retry would
+    /// register each fixture a second time under a new generation, and the radio's generation
+    /// guard would refuse every handle that ``handle(for:)`` gave out for the first attempt.
     ///
-    /// - Throws: ``ProviderFixtureError/duplicateIdentifier(_:)`` if two configured fixtures
-    ///   declare the same `id`; the `NWError` the listener failed to bind with — a port already
-    ///   in use fails here rather than being retried — or
-    ///   `LinkListenerError.alreadyStarted` if the provider is already
-    ///   listening.
+    /// - Throws:
+    ///   - ``ProviderFixtureError/duplicateIdentifier(_:)`` if two configured fixtures declare
+    ///     the same `id`.
+    ///   - The `NWError` with which the listener failed to bind. A port that is in use fails
+    ///     here. The provider does not retry.
+    ///   - `LinkListenerError.alreadyStarted` if the provider is already listening.
     public func start() async throws {
         guard listener == nil else { throw LinkListenerError.alreadyStarted }
-        // Checked before anything is registered, so a document naming one device twice is a
-        // startup failure rather than a silent half-registration: the second registration
-        // replaces the first on the radio and strands the handle ``handle(for:)`` would have
-        // vended for it, leaving the provider hosting a device it can no longer drive.
+        // Check before registering anything, so a document that names one device twice is a
+        // startup failure and not a silent half-registration. Otherwise the second registration
+        // would replace the first on the radio and make stale the handle that
+        // ``handle(for:)`` would give out for the first.
         var declared: Set<UUID> = []
         for fixture in configuration.fixtures where !declared.insert(fixture.id).inserted {
             throw ProviderFixtureError.duplicateIdentifier(fixture.id)
@@ -217,23 +216,24 @@ public actor Provider {
                 connection.cancel()
                 return
             }
-            // Registered synchronously, before either handler is installed, so no handler can
-            // fire against an unknown connection. A refusal means the pending table is full of
-            // connections that have not handshaken: this one is dropped without ever entering
-            // it, so a peer opening sockets in a loop cannot crowd out a real client.
+            // Register synchronously, before installing either handler, so no handler can fire
+            // for an unknown connection. If the registration is refused, the pending table is
+            // full of connections that have not done the handshake. Drop this connection without
+            // putting it in the table, so a peer that opens sockets in a loop cannot crowd out a
+            // real client.
             guard self.register(connection) else {
                 self.configuration.log?("refusing a connection: too many are awaiting a handshake")
                 connection.cancel()
                 return
             }
             self.scheduleHandshakeDeadline(for: connection)
-            // Both captures are weak — a handler holding its own connection would be a cycle
-            // nothing breaks for a connection that never reaches a session.
+            // Both captures are weak. A handler that holds its own connection would be a cycle,
+            // and nothing breaks the cycle for a connection that never reaches a session.
             //
-            // This stays the connection's only message handler for its whole life: a session
-            // registers *its* handler in the table instead of replacing this one, so the
-            // routing decision is made synchronously, on the listener queue, in the order the
-            // messages were received. Only the very first message takes the actor hop.
+            // This stays the connection's only message handler for its whole life. A session
+            // registers *its* handler in the table and does not replace this one. Thus the
+            // routing decision is synchronous, on the listener queue, in message order. Only the
+            // first message takes the actor hop.
             connection.onMessage = { [weak self, weak connection] message in
                 guard let self, let connection else { return }
                 switch self.pending.withLock({ $0.route(message, from: connection) }) {
@@ -266,9 +266,9 @@ public actor Provider {
                     break
                 }
             }
-            // A connection that ended between being accepted and being wired up published its
-            // one terminal transition to a handler that did not exist yet; catch it here
-            // rather than leave the entry pending forever.
+            // A connection can end between its acceptance and its wiring, and then it published
+            // its one terminal transition to a handler that did not exist yet. Catch that
+            // transition here. Otherwise the entry stays pending forever.
             switch connection.state {
             case .failed, .cancelled:
                 self.terminate(connection)
@@ -285,10 +285,10 @@ public actor Provider {
         self.listener = listener
     }
 
-    /// Takes the fixtures this ``start()`` registered back off ``radio`` and stops defending
-    /// their identifiers — the rollback for a listener that never bound. Devices
-    /// ``addVirtualDevice(_:advertising:)`` registered are left alone: they are not this
-    /// start's to undo.
+    /// Takes the fixtures that this ``start()`` registered off ``radio``, and stops defending
+    /// their identifiers. This is the rollback for a listener that never bound. It leaves the
+    /// devices that ``addVirtualDevice(_:advertising:)`` registered, because this start did not
+    /// register them.
     private func unregisterFixtures() async {
         let registered = fixtures
         fixtures.removeAll()
@@ -298,44 +298,34 @@ public actor Provider {
         }
     }
 
-    /// The port the listener is bound to, or `0` before ``start()`` has returned.
+    /// The bound port. The value is `0` before ``start()`` returns.
     public var port: UInt16 {
         listener?.port ?? 0
     }
 
-    /// How many sessions — of either role — are live.
+    /// The number of live sessions of both roles.
     public var sessionCount: Int {
         sessions.count
     }
 
-    /// Every live session, in no particular order. Internal, and there for the tests that
-    /// drive one session's off-queue completions directly — nothing in the public surface
-    /// hands a session out.
+    /// Every live session, in no particular order. This property is internal, for the tests that
+    /// drive one session's off-queue completions directly.
     var liveSessions: [any ProviderSession] {
         Array(sessions.values)
     }
 
-    /// Stops listening, closes every live session — dropping each client's link — and takes
-    /// this provider's own devices, the configured fixtures and everything
-    /// ``addVirtualDevice(_:advertising:)`` registered alike, back off the radio. Idempotent.
+    /// Stops the listener, closes every live session, and takes the provider's devices off the
+    /// radio. Repeated calls are safe.
     ///
-    /// **The radio is left as this provider found it.** A `Provider` that stopped listening is
-    /// hosting nothing, and a device left registered would keep answering a `VirtualRadio`
-    /// shared with another provider, keep its identifier in
-    /// ``ProviderConfiguration/fixtures``' way, and keep a handle alive for a device nothing
-    /// drives any more. Every identifier stays protected up to that point: the removals happen
-    /// before the set of provider-owned identifiers is emptied, so no window exists in which a device is
-    /// still on the radio and its identifier no longer refused to a client claiming it.
+    /// The devices are the configured fixtures and all devices that
+    /// ``addVirtualDevice(_:advertising:)`` registered. A call to
+    /// ``addVirtualDevice(_:advertising:)`` that overlaps this method takes its device off the
+    /// radio when it resumes.
     ///
-    /// A ``addVirtualDevice(_:advertising:)`` that overlapped this — suspended in the radio
-    /// when it started, or begun while it was itself suspended there — takes its device back
-    /// off on resuming, for the same reason: this provider hosts nothing once it has stopped.
-    ///
-    /// - Note: ``start()`` after a ``stop()`` registers the configured fixtures again, from
-    ///   scratch: each one is a *new* registration under the same id, and ``handle(for:)``
-    ///   vends the fresh ``VirtualDeviceHandle`` for it. A handle taken before the stop is
-    ///   stale for good — every call on it is refused by the radio's generation guard rather
-    ///   than applied to the device that replaced the one it was minted for.
+    /// - Note: A ``start()`` after a ``stop()`` registers the fixtures again as new registrations
+    ///   under the same id. Use ``handle(for:)`` to get the new ``VirtualDeviceHandle``. A handle
+    ///   that you took before the stop is stale for good. The radio's generation guard refuses
+    ///   every call on it.
     public func stop() async {
         stopGeneration &+= 1
         stopDepth += 1
@@ -353,34 +343,35 @@ public actor Provider {
             await handle.remove()
         }
         fixtures.removeAll()
-        // Everything ``addVirtualDevice(_:advertising:)`` registered goes with them, and is
-        // gone from the radio before the set below stops defending its identifier.
+        // Everything that ``addVirtualDevice(_:advertising:)`` registered goes with them, off the
+        // radio before the set below stops defending its identifier.
         for handle in addedDevices.values {
             await handle.remove()
         }
         addedDevices.removeAll()
-        // This provider defends no identifier it is no longer hosting a device under.
+        // This provider defends no identifier for a device that it no longer hosts.
         providerOwnedIdentifiers.removeAll()
     }
 
     // MARK: - Pending connections
 
-    /// Takes ownership of a freshly accepted connection. Called on the listener queue.
+    /// Takes ownership of a connection that the listener just accepted. The caller runs on the
+    /// listener queue.
     ///
     /// - Returns: `false` when ``ProviderConfiguration/maximumPendingConnections`` connections
-    ///   are already awaiting a handshake, in which case nothing was recorded and the caller
-    ///   must cancel this one.
+    ///   already wait for a handshake. In that case the method recorded nothing, and the caller
+    ///   must cancel this connection.
     private nonisolated func register(_ connection: LinkConnection) -> Bool {
         pending.withLock { $0.register(connection, limit: configuration.maximumPendingConnections) }
     }
 
-    /// Cancels `connection` if it has still not handshaken
-    /// ``ProviderConfiguration/handshakeTimeout`` from now.
+    /// Cancels `connection` if it has not done the handshake after
+    /// ``ProviderConfiguration/handshakeTimeout``, counted from now.
     ///
-    /// The deadline lives out here rather than inside ``handle(_:from:)``, which must not
-    /// suspend: this is an independent task that only *reads* the connection's claim state
-    /// when it fires. A connection whose handshake completed is claimed by then, and one that
-    /// already ended is terminated, so either way the deadline finds nothing to do.
+    /// The deadline lives here and not inside ``handle(_:from:)``, because ``handle(_:from:)``
+    /// must not suspend. The deadline is an independent task that only *reads* the connection's
+    /// claim state when it fires. A connection with a completed handshake is claimed by then, and
+    /// a connection that already ended is terminated. In both cases the deadline does nothing.
     private nonisolated func scheduleHandshakeDeadline(for connection: LinkConnection) {
         let timeout = configuration.handshakeTimeout
         Task { [weak self, weak connection] in
@@ -392,9 +383,9 @@ public actor Provider {
         }
     }
 
-    /// Marks a connection as terminated — synchronously, on the listener queue, so a hello
-    /// still on its way to the actor can never claim it — and schedules the actor-side
-    /// cleanup of whatever session it had.
+    /// Marks a connection as terminated, synchronously on the listener queue. Thus a hello that
+    /// is still on its way to the actor can never claim the connection. The method also
+    /// schedules the cleanup of the connection's session on the actor, if it had one.
     private nonisolated func terminate(_ connection: LinkConnection) {
         pending.withLock { $0.markTerminated(connection) }
         Task { await self.handleTermination(of: connection) }
@@ -402,35 +393,35 @@ public actor Provider {
 
     // MARK: - Handshake
 
-    /// Handles the first message a connection sends: its ``BLESwiftLink/ClientHello``.
+    /// Handles the first message that a connection sends: its ``BLESwiftLink/ClientHello``.
     ///
-    /// Everything the client sent behind that hello is already held in the connection's
-    /// entry; constructing the session installs the session's own handler in that entry and
-    /// replays the backlog to it, and the session then writes the accepted `ServerHello` as
-    /// its first frame — so the hello still precedes every event on the wire without leaving
-    /// a window in which a request has nowhere to go.
+    /// The connection's entry already holds everything that the client sent behind that hello.
+    /// The method constructs the session. The construction installs the session's handler in
+    /// that entry and replays the backlog to it. The session then writes the accepted
+    /// `ServerHello` as its first frame. Thus the hello still comes before every event on the
+    /// wire, and no window exists in which a request has no destination.
     ///
-    /// - Important: This method must not suspend. Claiming the connection, installing its
-    ///   session and handing over its messages happen in one uninterrupted actor step, so a
-    ///   termination can only be observed entirely before the claim (which then fails) or
-    ///   entirely after the session exists (which it then closes).
+    /// - Important: This method must not suspend. It claims the connection, installs its
+    ///   session, and hands over its messages in one uninterrupted actor step. Thus a
+    ///   termination is seen in only two ways: entirely before the claim, which then fails, or
+    ///   entirely after the session exists, which the method then closes.
     private func handle(_ message: LinkMessage, from connection: LinkConnection) {
-        // A connection accepted while — or after — `stop()` ran must never open a session:
-        // `stop()` empties the connection table, so an acceptance racing it would otherwise
-        // leave a live session on a provider that is no longer listening.
+        // Do not open a session for a connection that the provider accepted while or after
+        // `stop()` ran. `stop()` empties the connection table, so an acceptance that raced it
+        // would leave a live session on a provider that no longer listens.
         guard listener != nil else {
             connection.cancel()
             return
         }
         let key = ObjectIdentifier(connection)
         guard pending.withLock({ $0.isClaimable(connection) }) else {
-            // Either the session installed by a completed handshake now owns this
-            // connection's messages, or the connection has already terminated.
+            // Either the session that a completed handshake installed now owns this connection's
+            // messages, or the connection has already terminated.
             return
         }
-        // Every rejection below leaves the entry in `pending`, so the connection stays retained
-        // until its terminal state releases it — long enough for the rejection to reach the
-        // socket, which a claim-then-cancel would have raced.
+        // Every rejection below leaves the entry in `pending`, so the provider retains the
+        // connection until its terminal state releases it. This gives the rejection time to
+        // reach the socket. A claim followed by a cancel would race with the rejection.
         guard case .clientHello(let hello) = message else {
             configuration.log?("rejecting a connection whose first message was not a client hello")
             connection.cancel()
@@ -448,8 +439,8 @@ public actor Provider {
             connection.cancel()
             return
         }
-        // Only an accepted handshake claims the connection: from here on its session owns the
-        // messages, and the entry routes them there rather than back to this method.
+        // Only an accepted handshake claims the connection. From here, its session owns the
+        // messages, and the entry routes them to the session, not back to this method.
         guard pending.withLock({ $0.claim(connection) }) else { return }
         let accepted = ServerHello(
             protocolVersion: LinkProtocol.version,
@@ -457,13 +448,13 @@ public actor Provider {
             reason: nil,
             providerName: configuration.providerName
         )
-        // Installs the session's handler in the connection's entry and replays whatever
-        // arrived behind the hello, in order, before any newer message can be delivered.
+        // Install the session's handler in the connection's entry. Replay what arrived behind
+        // the hello, in order, before delivering any newer message.
         //
-        // The replay runs *outside* the table's lock, one batch at a time: the entry holds
-        // anything that arrives meanwhile — the listener queue keeps routing into it — and the
-        // next turn of this loop picks it up, so ordering is kept without ever calling a
-        // session's handler under the lock. Suspension-free, as this method requires.
+        // The replay runs *outside* the table's lock, one batch at a time. The entry holds
+        // anything that arrives meanwhile, because the listener queue keeps routing into it, and
+        // the next turn of this loop takes it. Thus the order is kept, the code never calls a
+        // session's handler under the lock, and this method stays free of suspension.
         let install: (@escaping @Sendable (LinkMessage) -> Void) -> Void = { handler in
             var batch = self.pending.withLock { $0.beginReplay(handler, for: connection) }
             while let messages = batch {
@@ -489,8 +480,8 @@ public actor Provider {
         case .peripheral:
             sessionOrdinal += 1
             let queue = DispatchQueue(label: "bleswift-provider.host.\(sessionOrdinal)")
-            // Reported back in the hello: the client asked to be hosted under an identity, and
-            // only the provider knows whether it got it.
+            // Report the identity back in the hello. The client asked to be hosted under an
+            // identity, and only the provider knows whether it got it.
             let identifier = hostedIdentifier(for: hello)
             var hosted = accepted
             hosted.assignedHostIdentifier = identifier
@@ -511,26 +502,16 @@ public actor Provider {
         }
     }
 
-    /// The identity to host one peripheral client's device under: the one it asked for in its
-    /// ``BLESwiftLink/ClientHello``, so its reconnect is the same device to every central that
-    /// had seen it, or a fresh `UUID` when it asked for nothing.
+    /// The identity under which to host a peripheral client's device. It is the identity in the
+    /// client's ``BLESwiftLink/ClientHello``, or a new `UUID` if the client asked for none.
     ///
-    /// **An identifier one of the provider's *own* devices holds is refused.** A client picks
-    /// its own `hostIdentifier` and the provider cannot vouch for it: one that names a fixture
-    /// — by mistake, or on purpose — would otherwise re-register over that fixture, replacing
-    /// its database with the client's own and leaving the provider's own handle for it stale.
-    /// The collision is answered the way the missing case is, with a fresh identifier, so the
-    /// client is still hosted; only its choice of identity is refused.
+    /// The provider refuses an identifier that one of its own devices holds, such as a fixture.
+    /// Registering over it would replace the fixture's database and make the provider's handle
+    /// stale. The provider uses a new identifier, and the client is still hosted.
     ///
-    /// **Another client's identifier is not refused, and neither is this client's own.** The
-    /// test is ``providerOwnedIdentifiers``, not ``VirtualRadio/knownDeviceIDs``. A
-    /// peripheral-role client whose link drops and redials at once arrives while its previous
-    /// session's device removal — which is asynchronous, and behind the new registration in
-    /// the queue — has not run yet; refusing on the radio's whole membership made that race
-    /// decide whether a reconnect kept its identity, so a client could silently come back as a
-    /// new device to every central that had seen it. Re-registering an identifier a client
-    /// already owns is safe: the registration mints a newer generation, and the old session's
-    /// teardown is ignored by ``VirtualRadio``'s generation guard.
+    /// The test is ``providerOwnedIdentifiers``, not ``VirtualRadio/knownDeviceIDs``. A client that
+    /// redials before the removal of its old device has run must keep its identity. Registering
+    /// again is safe, because the radio's generation guard ignores the old session's teardown.
     private func hostedIdentifier(for hello: ClientHello) -> UUID {
         guard let requested = hello.hostIdentifier else { return UUID() }
         guard providerOwnedIdentifiers.contains(requested) else { return requested }
@@ -542,8 +523,8 @@ public actor Provider {
         return replacement
     }
 
-    /// Drops a connection that has reached a terminal state, closing its session if it had
-    /// one and releasing the strong reference the pending table was holding.
+    /// Drops a connection that reached a terminal state. It closes the connection's session, if
+    /// there was one, and releases the strong reference that the pending table held.
     private func handleTermination(of connection: LinkConnection) {
         let key = ObjectIdentifier(connection)
         pending.withLock { $0.release(connection) }
@@ -552,16 +533,16 @@ public actor Provider {
         configuration.log?("closed \(session.label)")
     }
 
-    /// Builds the backend for one central-role session, on that session's own queue.
+    /// Builds the backend for one central-role session, on the session's queue.
     private func makeCentralBackend(queue: DispatchQueue) -> any CentralManaging {
         guard configuration.passthrough else {
             return queue.sync { VirtualCentralBackend(radio: radio, queue: queue) }
         }
-        // The host's own CoreBluetooth by default; an injected factory overrides it.
+        // Use the host's CoreBluetooth by default. An injected factory overrides it.
         let factory = configuration.centralBackendFactory ?? CoreBluetoothBackends.makeCentral
-        // One hop, not three: a real `CBCentralManager` delivers its opening `didUpdateState`
-        // as soon as the queue yields, so the composite must be wired onto it before this
-        // block returns — see ``CoreBluetoothBackends``.
+        // Use one hop and not three. A real `CBCentralManager` delivers its first
+        // `didUpdateState` when the queue yields, so the composite must be wired onto it before
+        // this block returns. See ``CoreBluetoothBackends``.
         return queue.sync {
             let virtual = VirtualCentralBackend(radio: radio, queue: queue)
             let real = factory(queue)
@@ -569,18 +550,18 @@ public actor Provider {
         }
     }
 
-    /// Builds the backend for one peripheral-role session, on that session's own queue.
+    /// Builds the backend for one peripheral-role session, on the session's queue.
     ///
-    /// The virtual half registers a device on ``radio`` under `identifier`, named after the
-    /// client — so a central-role session's scan sees the remote `PeripheralHost` exactly as it
-    /// sees a fixture.
+    /// The virtual half registers a device on ``radio`` under `identifier`, with the client's
+    /// name. Thus a central-role session's scan sees the remote `PeripheralHost` as it sees a
+    /// fixture.
     ///
     /// - Parameters:
     ///   - queue: The session's own serial queue.
-    ///   - clientName: The name the hosted device advertises itself under.
-    ///   - identifier: The identity to host the device under — the one the client asked for in
-    ///     its ``BLESwiftLink/ClientHello``, so its reconnect is the same device to every
-    ///     central that had seen it.
+    ///   - clientName: The name under which the hosted device advertises itself.
+    ///   - identifier: The identity under which to host the device. It is the identity that the
+    ///     client asked for in its ``BLESwiftLink/ClientHello``, so its reconnect is the same
+    ///     device to every central that had seen it.
     private func makePeripheralBackend(
         queue: DispatchQueue,
         clientName: String,
@@ -591,9 +572,9 @@ public actor Provider {
                 VirtualPeripheralManagerBackend(radio: radio, queue: queue, identifier: identifier, name: clientName)
             }
         }
-        // The host's own CoreBluetooth by default; an injected factory overrides it.
+        // Use the host's CoreBluetooth by default. An injected factory overrides it.
         let factory = configuration.peripheralManagerBackendFactory ?? CoreBluetoothBackends.makePeripheralManager
-        // Built and attached in one hop, for the reason `makeCentralBackend` gives.
+        // Build and attach in one hop, for the reason that `makeCentralBackend` gives.
         return queue.sync {
             let virtual = VirtualPeripheralManagerBackend(
                 radio: radio, queue: queue, identifier: identifier, name: clientName
@@ -604,7 +585,7 @@ public actor Provider {
     }
 }
 
-/// What can go wrong with the fixtures ``Provider/start()`` was configured with.
+/// The errors for the fixtures with which ``Provider/start()`` was configured.
 public enum ProviderFixtureError: Error, Equatable, Sendable, CustomStringConvertible {
 
     /// Two configured fixtures declare the same `FixtureDevice/id`.
@@ -620,102 +601,105 @@ public enum ProviderFixtureError: Error, Equatable, Sendable, CustomStringConver
 
 /// The provider's table of accepted connections, and the router for their messages.
 ///
-/// Guarded by one `Mutex` on ``Provider``, and written from the listener queue *before* a
-/// connection's handlers exist, which is what makes the handshake independent of the order
-/// unstructured `Task`s happen to reach the actor in.
+/// One `Mutex` on ``Provider`` guards this table. The code writes to it from the listener queue
+/// *before* a connection's handlers exist, so the handshake does not depend on the order in
+/// which unstructured `Task`s reach the actor.
 ///
-/// An entry lives from the moment its connection is accepted until the link ends, and it is
-/// what every message is routed through: the first goes to the actor's handshake, the ones
-/// behind it are held until a session installs its handler and the replay has drained them,
-/// and everything after that is delivered straight to the session on the listener queue.
-/// Nothing between the hello and the session is dropped, and no message can overtake one that
-/// arrived before it.
+/// An entry lives from the time the provider accepts its connection until the link ends. Every
+/// message goes through the entry:
 ///
-/// **Nothing is called while the lock is held.** Routing and installing both only *decide*;
-/// the caller delivers afterwards, on its own. That is what lets a session's handler do
-/// whatever it likes — including reaching back into this table — without deadlocking against
-/// the one `Mutex` every connection shares.
+/// - The first message goes to the handshake on the actor.
+/// - The entry holds the messages behind it until a session installs its handler and the replay
+///   has drained them.
+/// - The entry delivers every later message straight to the session on the listener queue.
+///
+/// The provider drops nothing between the hello and the session, and no message can overtake an
+/// earlier one.
+///
+/// **Nothing is called while the lock is held.** Routing and installing only *decide*, and the
+/// caller delivers afterwards. Thus a session's handler can do anything, including a call back
+/// into this table, without a deadlock against the one `Mutex` that every connection shares.
 struct PendingConnections {
 
-    /// Where one message goes, decided synchronously on the listener queue.
+    /// Where one message goes. The decision is synchronous, on the listener queue.
     enum Routing {
-        /// Nowhere: the link has ended, the connection is unknown, or the message was held
+        /// Nowhere. The link has ended, the connection is unknown, or the table held the message
         /// for a session that has not installed its handler yet.
         case drop
-        /// Nowhere, and the connection goes with it: holding this message would put the
-        /// entry's backlog past ``PendingConnections/maximumQueuedBytes``.
+        /// Nowhere, and the connection goes with it. If the table held this message, the
+        /// backlog of the entry would exceed ``PendingConnections/maximumQueuedBytes``.
         case exceededBacklog
-        /// Nowhere, and the connection goes with it: holding this message would put the
-        /// entry's backlog past ``PendingConnections/maximumQueued`` messages.
+        /// Nowhere, and the connection goes with it. If the table held this message, the
+        /// backlog of the entry would exceed ``PendingConnections/maximumQueued`` messages.
         case exceededQueueDepth
-        /// To ``Provider/handle(_:from:)`` — the connection's first message, its hello.
+        /// To ``Provider/handle(_:from:)``. This is the connection's first message, its hello.
         case handshake
         /// To the session that owns this connection.
         case deliver(@Sendable (LinkMessage) -> Void)
     }
 
-    /// One accepted connection: whether its link has ended, how far its handshake has got,
-    /// and either its session's handler or the messages waiting for one.
+    /// One accepted connection. The entry records whether its link has ended and how far its
+    /// handshake has progressed. It holds either its session's handler or the messages that wait
+    /// for a handler.
     private struct Entry {
-        /// The connection, held strongly until ``release(_:)`` — which also keeps its
-        /// `ObjectIdentifier` from being recycled while the key is still in the table.
+        /// The connection. The entry holds it strongly until ``release(_:)``, which also keeps
+        /// its `ObjectIdentifier` from recycling while the key is in the table.
         let connection: LinkConnection
         /// Whether the link ended.
         var isTerminated = false
-        /// Whether the first message has already been routed to the handshake, so a second
+        /// Whether the code already routed the first message to the handshake. Thus a second
         /// hello cannot open a second session.
         var didRouteHello = false
         /// Whether an accepted handshake has claimed this connection.
         var isClaimed = false
-        /// The session's message handler, once it has one.
+        /// The session's message handler, once the session has one.
         var handler: (@Sendable (LinkMessage) -> Void)?
-        /// Whether the backlog is being replayed to ``handler`` right now. A message that
-        /// arrives during the replay joins ``queued`` instead of being delivered, so it
-        /// cannot overtake the backlog it arrived behind; the replaying caller picks it up.
+        /// Whether the code is replaying the backlog to ``handler``. A message that arrives
+        /// during the replay joins ``queued`` and is not delivered, so it cannot overtake the
+        /// backlog behind which it arrived. The caller that replays takes it.
         var isReplaying = false
-        /// Messages that arrived behind the hello — or during the replay — held in order
-        /// until ``handler`` has been given them.
+        /// Messages that arrived behind the hello or during the replay. The entry holds them in
+        /// order until the code has given them to ``handler``.
         var queued: [LinkMessage] = []
-        /// What ``queued`` costs, by ``BLESwiftLink/LinkMessage/heldByteCount``, so the
-        /// backlog is bounded by size and not only by count.
+        /// The cost of ``queued``, by ``BLESwiftLink/LinkMessage/heldByteCount``. Thus the
+        /// backlog has a size limit and not only a count limit.
         var queuedBytes = 0
     }
 
-    /// How many messages one entry holds before its connection is dropped. Only a connection
-    /// whose handshake is in flight — or one that was rejected and is about to be cancelled —
-    /// ever queues at all, so this is a ceiling on a misbehaving client, not a flow-control
-    /// window.
+    /// The number of messages that one entry holds before the provider drops its connection.
+    /// Only a connection with a handshake in progress, or one that the provider rejected and
+    /// will cancel, queues messages. Thus this number is a ceiling for a misbehaving client and
+    /// not a flow-control window.
     ///
-    /// Answered the way the byte cap is, and for the same reason: dropping the message
-    /// instead left the client believing a request it sent behind its own hello had been
-    /// accepted, and the session that opened a moment later served every neighbouring
-    /// message but that one — a silent hole in an ordered stream. A client that has put 256
-    /// messages behind a handshake that has not completed is not one whose session is merely
-    /// slow to open, so the connection goes.
+    /// The provider answers this limit as it answers the byte cap: it drops the connection and
+    /// not the message. A dropped message would leave a silent hole in an ordered stream. The
+    /// client would believe that the provider accepted a request that it sent behind its own
+    /// hello, and the session that opened a moment later would serve every neighboring message
+    /// but not that one. A client that has put 256 messages behind an incomplete handshake is
+    /// not a client whose session is only slow to open.
     static let maximumQueued = 256
 
-    /// How many bytes of held messages one entry accumulates before its connection is dropped.
+    /// The number of bytes of held messages that one entry collects before the provider drops
+    /// its connection.
     ///
-    /// A count alone does not bound this backlog: a frame carries up to
-    /// ``BLESwiftLink/LinkFraming/maximumPayloadLength`` (1 MiB), so a couple of hundred of
-    /// them is hundreds of megabytes — and this is per entry, on top of the one partial frame
-    /// each of ``ProviderConfiguration/maximumPendingConnections`` connections may be
-    /// buffering at the transport. A
-    /// client with a megabyte outstanding behind its own hello is not one whose session is
-    /// merely slow to open — it is filling the provider's memory before it has been served at
-    /// all — and unlike an over-count it is not answered by dropping the message: the
-    /// connection goes.
+    /// A count alone does not bound this backlog, because a frame carries up to
+    /// ``BLESwiftLink/LinkFraming/maximumPayloadLength`` (1 MiB). A few hundred frames are
+    /// hundreds of megabytes. This limit applies to each entry, in addition to the one partial
+    /// frame that each of the ``ProviderConfiguration/maximumPendingConnections`` connections
+    /// can buffer at the transport. A client with a megabyte outstanding behind its own hello
+    /// fills the provider's memory before the provider has served it at all. As for the count,
+    /// the provider drops the connection and not the message.
     static let maximumQueuedBytes = 1024 * 1024
 
     private var entries: [ObjectIdentifier: Entry] = [:]
 
-    /// Records a freshly accepted connection, unless `limit` connections are already awaiting
-    /// a handshake.
+    /// Records a connection that the provider just accepted, unless `limit` connections
+    /// already wait for a handshake.
     ///
-    /// Only unclaimed, unterminated entries count against `limit`: a connection a session owns
-    /// is no longer pending, and one whose link has ended is on its way out.
+    /// Only unclaimed and unterminated entries count against `limit`. A connection that a
+    /// session owns is no longer pending. A connection whose link has ended is on its way out.
     ///
-    /// - Returns: `true` if the connection was recorded.
+    /// - Returns: `true` if the method recorded the connection.
     mutating func register(_ connection: LinkConnection, limit: Int) -> Bool {
         let awaiting = entries.values.count { !$0.isClaimed && !$0.isTerminated }
         guard awaiting < limit else { return false }
@@ -723,10 +707,13 @@ struct PendingConnections {
         return true
     }
 
-    /// Decides where `message` goes, and holds it if the answer is "nowhere yet".
+    /// Decides where `message` goes. If the answer is "nowhere yet", the method holds the
+    /// message.
     ///
-    /// - Returns: The routing to apply, on the listener queue, before the next message is
-    ///   routed.
+    /// - Returns: The routing to apply, on the listener queue, before routing the next message.
+    ///
+    /// - Returns: The routing to apply, on the listener queue, before the code routes the next
+    ///   message.
     mutating func route(_ message: LinkMessage, from connection: LinkConnection) -> Routing {
         let key = ObjectIdentifier(connection)
         guard var entry = entries[key], !entry.isTerminated else { return .drop }
@@ -736,9 +723,9 @@ struct PendingConnections {
             entry.didRouteHello = true
             return .handshake
         }
-        // Both caps release the backlog here rather than at the termination that follows: the
-        // caller cancels the connection the moment either returns, and nothing is served from
-        // a backlog whose connection is on its way out.
+        // Both caps release the backlog here and not at the termination that follows. The
+        // caller cancels the connection when either cap returns, and nothing is served from a
+        // backlog whose connection is on its way out.
         guard entry.queued.count < Self.maximumQueued else {
             entry.queued = []
             entry.queuedBytes = 0
@@ -755,18 +742,19 @@ struct PendingConnections {
         return .drop
     }
 
-    /// Installs `handler` as `connection`'s destination and takes the backlog held for it.
+    /// Installs `handler` as the destination of `connection`, and takes the backlog that the
+    /// entry held for it.
     ///
-    /// The backlog is *returned*, not delivered: nothing is called while the table is locked,
-    /// which is what keeps a session's handler — and anything it in turn calls — off this
-    /// lock's critical section. Ordering is preserved by the entry's replaying flag instead of
-    /// by the lock's duration: from here until ``finishReplay(for:)`` says otherwise, a
-    /// message arriving on the listener queue joins the queue rather than being delivered, so
-    /// it cannot overtake the backlog it arrived behind. The caller must drain to completion —
-    /// see ``Provider/handle(_:from:)``'s installer.
+    /// The method *returns* the backlog and does not deliver it, because nothing is called while
+    /// the table is locked. Thus a session's handler, and anything that it calls, stays out of
+    /// the lock's critical section. The entry's replaying flag keeps the order, whatever the
+    /// lock hold time. From here until ``finishReplay(for:)`` says otherwise, a message that
+    /// arrives on the listener queue joins the queue and is not delivered, so it cannot overtake
+    /// the backlog behind which it arrived. The caller must drain the backlog to completion. See
+    /// the installer in ``Provider/handle(_:from:)``.
     ///
-    /// - Returns: The messages to replay, oldest first, or `nil` for a connection whose link
-    ///   has already ended — its session is about to be closed, and nothing is installed.
+    /// - Returns: The messages to replay, oldest first, or `nil` for a connection whose link has
+    ///   already ended. Its session will close soon, and the method installs nothing.
     mutating func beginReplay(_ handler: @escaping @Sendable (LinkMessage) -> Void, for connection: LinkConnection) -> [LinkMessage]? {
         let key = ObjectIdentifier(connection)
         guard var entry = entries[key], !entry.isTerminated else { return nil }
@@ -779,12 +767,12 @@ struct PendingConnections {
         return queued
     }
 
-    /// Takes whatever arrived while the previous batch was being replayed.
+    /// Takes what arrived while the code replayed the previous batch.
     ///
-    /// - Returns: The next batch to replay, oldest first, or `nil` when there is none left —
-    ///   at which point the entry stops holding messages and routes them to its handler
-    ///   directly. `nil` is also the answer for a connection whose link ended mid-replay:
-    ///   nothing more is delivered to a session that is about to be closed.
+    /// - Returns: The next batch to replay, oldest first. The value is `nil` when no batch is
+    ///   left. Then the entry stops holding messages and routes them to its handler directly.
+    ///   The value is also `nil` for a connection whose link ended during the replay, because
+    ///   the code delivers nothing more to a session that will close soon.
     mutating func finishReplay(for connection: LinkConnection) -> [LinkMessage]? {
         let key = ObjectIdentifier(connection)
         guard var entry = entries[key], !entry.isTerminated else { return nil }
@@ -800,12 +788,12 @@ struct PendingConnections {
         return queued
     }
 
-    /// Whether `connection` is still awaiting a handshake and has not terminated — so a hello
-    /// that lost the race to its own connection's teardown is ignored rather than
-    /// resurrecting it.
+    /// Whether `connection` still waits for a handshake and has not terminated. Thus the
+    /// provider ignores a hello that lost the race to its own connection's teardown, and the
+    /// hello does not resurrect the connection.
     ///
-    /// Non-mutating, so a handshake that is about to be *rejected* can be recognized without
-    /// releasing the connection the rejection still has to be written to.
+    /// This method does not mutate, so the code can recognize a handshake that it will *reject*
+    /// without releasing the connection. The rejection must still be written to that connection.
     func isClaimable(_ connection: LinkConnection) -> Bool {
         guard let entry = entries[ObjectIdentifier(connection)] else { return false }
         return !entry.isTerminated && !entry.isClaimed
@@ -813,9 +801,8 @@ struct PendingConnections {
 
     /// Claims `connection` for a completed handshake.
     ///
-    /// The entry stays in the table — it is what routes the connection's messages to the
-    /// session about to ``install(_:for:)`` its handler, and what holds the ones that arrive
-    /// in between.
+    /// The entry stays in the table. It routes the connection's messages to the session that
+    /// will ``install(_:for:)`` its handler, and it holds the messages that arrive in between.
     ///
     /// - Returns: `true` only if the connection was unclaimed and had not terminated, as
     ///   ``isClaimable(_:)`` reports.
@@ -826,8 +813,9 @@ struct PendingConnections {
         return true
     }
 
-    /// Marks `connection`'s link as ended, and drops both its handler and anything still
-    /// held for it: nothing is delivered to a session whose link is gone.
+    /// Marks the link of `connection` as ended. The method drops its handler and everything
+    /// that the entry still holds for it, because nothing is delivered to a session whose link
+    /// is gone.
     mutating func markTerminated(_ connection: LinkConnection) {
         let key = ObjectIdentifier(connection)
         entries[key]?.isTerminated = true
@@ -836,13 +824,14 @@ struct PendingConnections {
         entries[key]?.queuedBytes = 0
     }
 
-    /// Drops `connection` from the table, releasing the strong reference it was held by.
+    /// Drops `connection` from the table and releases the strong reference that held it.
     mutating func release(_ connection: LinkConnection) {
         entries.removeValue(forKey: ObjectIdentifier(connection))
     }
 
-    /// Empties the table, returning every connection that was in it — those still
-    /// handshaking and those a session already owns alike. `stop()` cancels them all.
+    /// Empties the table and returns every connection that was in it, including the connections
+    /// that are still in the handshake and the connections that a session already owns.
+    /// `stop()` cancels all of them.
     mutating func drain() -> [LinkConnection] {
         defer { entries.removeAll() }
         return entries.values.map(\.connection)

@@ -5,22 +5,22 @@
 
 import Foundation
 
-/// Errors thrown by BLESwift, covering connection, GATT, and scanning failures.
-/// ``duplicateConnect(_:)`` only fires for a second `connect` to the same already-tracked
-/// peripheral — connecting to a *different* peripheral never conflicts.
+/// Errors that BLESwift throws. They cover connection, GATT, and scanning failures.
+/// ``duplicateConnect(_:)`` fires only for a second `connect` to the same peripheral that is
+/// already tracked. A `connect` to a *different* peripheral never conflicts.
 public enum BLESwiftError: Error, Sendable, Equatable {
 
     // MARK: - Core Cases
 
-    /// Bluetooth is either turned off or unavailable.
+    /// Bluetooth is turned off or is not available.
     case bluetoothUnavailable
-    /// `connect` targeted a peripheral that already has a tracked entry — connecting,
-    /// connected, or disconnecting.
+    /// `connect` targeted a peripheral that is already tracked: it is connecting, connected, or
+    /// disconnecting.
     case duplicateConnect(PeripheralIdentifier)
-    /// BLESwift does not support another disconnection request for the same peripheral if
-    /// it is already disconnecting.
+    /// A second disconnection request arrived for a peripheral that is already disconnecting.
+    /// BLESwift does not support this.
     case multipleDisconnectNotSupported
-    /// A connection request has timed out.
+    /// A connection request timed out.
     case connectionTimedOut
     /// BLESwift is not connected to a peripheral.
     case notConnected
@@ -30,76 +30,71 @@ public enum BLESwiftError: Error, Sendable, Equatable {
     case missingCharacteristic(CharacteristicIdentifier)
     /// A Bluetooth characteristic descriptor was not found.
     case missingDescriptor(DescriptorIdentifier)
-    /// A Bluetooth operation was cancelled (e.g. via `cancelAllOperations`).
+    /// A Bluetooth operation was cancelled (for example, with `cancelAllOperations`).
     case cancelled
-    /// `disconnect()` was called explicitly.
+    /// The caller called `disconnect()` explicitly.
     case explicitDisconnect
     /// The peripheral disconnected unexpectedly.
     case unexpectedDisconnect
-    /// An attempt to listen on a characteristic has timed out.
+    /// An attempt to listen on a characteristic timed out.
     case listenTimedOut
-    /// An attempt to read a characteristic has failed.
+    /// An attempt to read a characteristic failed.
     case readFailed
-    /// An attempt to write a characteristic has failed.
+    /// An attempt to write a characteristic failed.
     case writeFailed
-    /// An attempt to read a value from a characteristic returned no data unexpectedly.
+    /// A read of a characteristic returned no data, which was not expected.
     case missingData
-    /// An attempt to extract a range of `Data` failed due to incorrect bounds or an
-    /// unexpected length.
+    /// Extracting a range of `Data` failed because the bounds or the length were not valid.
     case dataOutOfBounds(start: Int, length: Int, count: Int)
-    /// An unexpected peripheral was cached and retrieved from CoreBluetooth.
+    /// CoreBluetooth returned a cached peripheral that was not expected.
     case unexpectedPeripheral(PeripheralIdentifier)
-    /// iOS will not continue scanning in the background if `allowDuplicates` is `true`.
+    /// iOS does not continue a scan in the background if `allowDuplicates` is `true`.
     case allowDuplicatesInBackgroundNotSupported
-    /// iOS will not continue scanning in the background if no service identifiers are
-    /// specified.
+    /// iOS does not continue a scan in the background if the scan has no service identifiers.
     case missingServiceIdentifiersInBackground
-    /// BLESwift has stopped.
+    /// BLESwift stopped.
     case stopped
-    /// BLESwift cannot perform certain actions while background restoration is still in
-    /// progress.
+    /// BLESwift cannot do some actions while background restoration is in progress.
     case backgroundRestorationInProgress
     /// The startup background task expired during state restoration.
     case startupBackgroundTaskExpired
-    /// An operation expecting a certain amount of data received more than expected
-    /// (e.g. `writeAndAssemble`).
+    /// An operation received more data than it expected (for example, `writeAndAssemble`).
     case tooMuchData(expected: Int, received: Data)
 
     // MARK: - New in BLESwift
 
-    /// A BLESwift operation timed out (e.g. GATT read/write/RSSI), distinct from
-    /// ``connectionTimedOut``/``listenTimedOut``.
+    /// A BLESwift operation timed out (for example, a GATT read, write, or RSSI operation). It
+    /// differs from ``connectionTimedOut`` and ``listenTimedOut``.
     case timedOut
-    /// A BLESwift operation was cancelled via structured concurrency task cancellation.
-    /// Equivalent to a caught `CancellationError`.
+    /// Task cancellation cancelled a BLESwift operation. It is equivalent to a caught
+    /// `CancellationError`.
     case operationCancelled
-    /// Data received over Bluetooth could not be decoded using the expected string
-    /// encoding.
+    /// Data received over Bluetooth could not be decoded with the expected string encoding.
     case invalidStringEncoding
-    /// BLESwift does not support starting another scan while one is already active.
+    /// A scan started while another scan is active. BLESwift does not support this.
     case alreadyScanning
-    /// A read was requested on a characteristic that is currently notifying — CoreBluetooth
-    /// can't disambiguate a read completion from a notification delivery otherwise.
+    /// A read targeted a characteristic that is now notifying. CoreBluetooth cannot tell a read
+    /// completion from a notification delivery.
     case readConflictsWithNotification
-    /// A BLESwift API was called with an invalid argument; the payload describes which
-    /// argument and why (e.g. a non-positive flush timeout). BLESwift throws instead of
-    /// crashing on argument validation failures.
+    /// The caller passed an invalid argument to a BLESwift API. The payload says which argument and
+    /// why (for example, a flush timeout that is not positive). BLESwift throws this error and does
+    /// not trap.
     case invalidArgument(String)
-    /// An L2CAP channel-open completed reporting neither an opened channel nor an error — a
-    /// malformed `peripheral(_:didOpen:error:)` callback.
+    /// An L2CAP channel open completed with neither a channel nor an error, a malformed
+    /// `peripheral(_:didOpen:error:)` callback.
     case l2capOpenFailed
-    /// An operation on an L2CAP channel failed because the channel is closed (disconnect,
-    /// explicit `close()`, or a transport error).
+    /// An operation on an L2CAP channel failed because the channel is closed, by a disconnect, an
+    /// explicit `close()`, or a transport error.
     case l2capChannelClosed
-    /// A GATT operation was attempted on a characteristic whose advertised
-    /// `CharacteristicProperties` do not include the required capability (e.g. notifying a
-    /// characteristic without `.notify`/`.indicate`). Bypass per-connection with
-    /// `GATTCompatibility` if the peripheral misreports its properties.
+    /// A GATT operation targeted a characteristic whose advertised `CharacteristicProperties` lack
+    /// the required capability, such as notifying a characteristic without `.notify` or
+    /// `.indicate`. If the peripheral reports its properties incorrectly, use `GATTCompatibility`
+    /// to bypass this check for one connection.
     case unsupportedCharacteristicOperation(CharacteristicIdentifier, required: CharacteristicProperties)
 }
 
 extension BLESwiftError: LocalizedError {
-    /// A human-readable description of the error, suitable for logging or display.
+    /// A human-readable description of the error, suitable for logs or display.
     public var errorDescription: String? {
         switch self {
         case .bluetoothUnavailable:

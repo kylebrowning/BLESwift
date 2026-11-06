@@ -10,9 +10,8 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Exercises `Central`'s Phase 5 connection lifecycle surface: `connect`, `disconnect`,
-/// `cancelAllOperations`, `connectionEvents()`/`connectionState`, and auto-reconnect — all
-/// driven through `makeTestCentral()`'s `FakeCentral`/`FakePeripheral` pair.
+/// Tests the `Central` connection lifecycle, including auto-reconnect, with the fakes from
+/// `makeTestCentral()`.
 @Suite("Connection lifecycle")
 struct ConnectionTests {
 
@@ -78,7 +77,7 @@ struct ConnectionTests {
     @Test("connect() against an unknown identifier throws .unexpectedPeripheral")
     func connectUnknownPeripheralThrows() async throws {
         let (central, _, fakePeripheral) = makeTestCentral()
-        // Deliberately not registered as retrievable.
+        // The peripheral is deliberately not registered as retrievable.
 
         do {
             _ = try await central.connect(fakePeripheral.peripheralIdentifier)
@@ -111,7 +110,7 @@ struct ConnectionTests {
             Issue.record("expected a BLESwiftError, got \(error)")
         }
 
-        // Clean up the still-pending first attempt so it doesn't outlive the test.
+        // Cancel the pending first attempt so it does not outlive the test.
         firstAttempt.cancel()
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
         _ = await firstAttempt.value
@@ -148,14 +147,13 @@ struct ConnectionTests {
             try await central.connect(fakePeripheral.peripheralIdentifier, timeout: .milliseconds(30))
         }
 
-        // Wait for the timeout to fire and trigger the two-phase cancel.
+        // Wait for the timeout to fire and start the two-phase cancel.
         await waitUntil { await fakeCentral.onQueue { fakeCentral.cancelCallCount } == 1 }
 
-        // The task shouldn't have resolved yet: the two-phase cancel is still awaiting
-        // CoreBluetooth's confirmation.
+        // The task stays unresolved until CoreBluetooth confirms the cancel.
         #expect(connectTask.isCancelled == false)
 
-        // Simulate CoreBluetooth confirming the cancellation.
+        // Simulate the CoreBluetooth cancel confirmation.
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
 
         let result = await connectTask.result
@@ -237,10 +235,9 @@ struct ConnectionTests {
         await fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
         _ = try await central.connect(fakePeripheral.peripheralIdentifier)
 
-        // Radio must be `.poweredOn` for `disconnect()` to actually wait on CoreBluetooth's
-        // confirmation (via `cancelPeripheralConnection`) rather than resolving
-        // synchronously — otherwise the first `disconnect()` would finish before the
-        // second one has a chance to observe `.disconnecting`.
+        // The radio must be `.poweredOn`, so `disconnect()` waits for the CoreBluetooth
+        // confirmation. Otherwise the first `disconnect()` finishes before the second can observe
+        // `.disconnecting`.
         fakeCentral.simulateStateChange(.poweredOn)
         await fakeCentral.onQueue {}
 
@@ -339,15 +336,14 @@ struct ConnectionTests {
             reconnect: .always(maxAttempts: 3, backoff: .milliseconds(10))
         )
 
-        // Unexpected disconnect — not via `disconnect()`.
+        // Unexpected disconnect, not through `disconnect()`.
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
 
         let collected = await collector.value
         #expect(collected.count == 6)
-        // [0] connecting, [1] connected, [2] disconnected(willReconnect: true),
-        // [3] reconnecting(attempt: 1), [4] connecting (the reconnect attempt's own
-        // `awaitConnect` yields `.connecting` too, same as any other attempt), [5] connected
-        // (the reconnect attempt succeeds since connectBehavior is still `.succeed`).
+        // In order: connecting, connected, disconnected(willReconnect: true), reconnecting(1),
+        // connecting, connected. The reconnect attempt succeeds because connectBehavior is still
+        // `.succeed`.
         if case .disconnected(_, _, let willReconnect) = collected[2] {
             #expect(willReconnect)
         } else {
@@ -383,14 +379,14 @@ struct ConnectionTests {
         )
         try await central.disconnect(fakePeripheral.peripheralIdentifier)
 
-        // Give any (incorrect) reconnect loop a chance to fire.
+        // Wait to show that no reconnect loop fires.
         try await Task.sleep(for: .milliseconds(100))
 
         guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected with no reconnect attempted")
             return
         }
-        // Exactly one connect() call was made — no reconnect attempt issued a second one.
+        // Exactly one connect() call: no reconnect attempt.
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCount } == 1)
     }
 
@@ -429,9 +425,9 @@ struct ConnectionTests {
         await fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
 
         let stream = await central.connectionEvents()
-        // connecting, connected, disconnected(1), reconnecting(1), connecting, disconnected(2),
-        // reconnecting(2), connecting, disconnected(3) — maxAttempts: 2 means exactly two
-        // .reconnecting events, each followed by a failed retry.
+        // In order: connecting, connected, disconnected(1), reconnecting(1), connecting,
+        // disconnected(2), reconnecting(2), connecting, disconnected(3). `maxAttempts: 2` gives
+        // exactly two `.reconnecting` events.
         let collector = Task { () -> [ConnectionEvent] in
             await collect(9, from: stream)
         }
@@ -454,8 +450,7 @@ struct ConnectionTests {
         }
         #expect(reconnectingEvents == [1, 2])
 
-        // Give the (exhausted) loop a moment to fully wind down, then confirm no third
-        // .reconnecting ever arrives.
+        // Wait to confirm that no third `.reconnecting` arrives.
         try await Task.sleep(for: .milliseconds(80))
         guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .disconnected after reconnect attempts are exhausted")
@@ -476,18 +471,15 @@ struct ConnectionTests {
 
         let connectCountBeforeReconnectAttempt = await fakeCentral.onQueue { fakeCentral.connectCallCount }
 
-        // Unexpected disconnect starts the reconnect loop's backoff sleep — `phase` becomes
-        // `.idle` here, well before any reconnect attempt actually fires.
+        // The backoff sleep starts. `phase` is `.idle` well before any reconnect attempt fires.
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
-        await fakeCentral.onQueue {} // flush: didDisconnect handled, reconnectTask now scheduled
+        await fakeCentral.onQueue {} // Flush. The code handled didDisconnect and scheduled reconnectTask.
 
-        // `disconnect()` while `phase == .idle` must cancel the pending reconnect rather
-        // than throw `.notConnected` — regression test for the "zombie reconnect loop"
-        // defect (an explicit disconnect during backoff previously left the loop running,
-        // producing a second connect attempt and a surprise reconnection afterward).
+        // Regression test for the zombie reconnect loop: `disconnect()` while `phase == .idle` must
+        // cancel the pending reconnect and must not throw `.notConnected`.
         try await central.disconnect(fakePeripheral.peripheralIdentifier)
 
-        // Wait past the original backoff window to prove no reconnect attempt ever fires.
+        // Wait past the backoff window to show that no reconnect attempt fires.
         try await Task.sleep(for: .milliseconds(450))
 
         guard case .disconnected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
@@ -511,10 +503,9 @@ struct ConnectionTests {
         let connectCountBeforeReconnectAttempt = await fakeCentral.onQueue { fakeCentral.connectCallCount }
 
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
-        await fakeCentral.onQueue {} // flush: didDisconnect handled, reconnectTask now scheduled
+        await fakeCentral.onQueue {} // Flush. The code handled didDisconnect and scheduled reconnectTask.
 
-        // Regression test for the same "zombie reconnect loop" defect, via
-        // `cancelAllOperations()` instead of `disconnect()`.
+        // Same regression, with `cancelAllOperations()`.
         await central.cancelAllOperations()
 
         try await Task.sleep(for: .milliseconds(450))
@@ -553,10 +544,8 @@ struct ConnectionTests {
         let collected = await collector.value
         #expect(collected.count == 4)
 
-        // Wait for the second attempt to actually happen rather than sleeping a margin: on a
-        // loaded machine the policy's 5 ms backoff plus the hop that follows it can outlast
-        // any fixed sleep. The assertion below is unchanged — exactly two attempts, in order,
-        // and no third one, since the policy returns `nil` for attempt 2.
+        // Wait for the second attempt instead of sleeping a fixed time, which can be too short on a
+        // loaded machine. There is no third attempt because the policy returns `nil` for attempt 2.
         await waitFor(timeout: .seconds(10)) { attemptLog.attempts.count >= 2 }
         #expect(attemptLog.attempts == [1, 2])
     }
@@ -573,11 +562,8 @@ struct ConnectionTests {
 
         _ = try await central.connect(fakePeripheral.peripheralIdentifier)
 
-        // In production this is the `CBPeripheral.delegate = proxy` assignment real
-        // CoreBluetooth requires for any GATT callback to arrive; the fake's `eventHandler`
-        // is now both the protocol witness and the actual delivery path (replacing the old
-        // decoupled `eventSink` + `attachEventTarget` call-counter split), so this also
-        // proves events are actually delivered, not just that a wiring call happened.
+        // Production assigns `CBPeripheral.delegate = proxy`. The fake's `eventHandler` is the real
+        // delivery path, so this also proves that the fake delivers events.
         #expect(await fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount } >= 1)
     }
 
@@ -600,14 +586,12 @@ struct ConnectionTests {
         let callsAfterFirstConnect = await fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount }
         #expect(callsAfterFirstConnect >= 1)
 
-        // Unexpected disconnect → teardown clears the target (attach(nil)), then the
-        // reconnect attempt's own initiation re-attaches it.
+        // The teardown clears the target (attach(nil)). The reconnect attempt attaches it again.
         fakeCentral.simulateDisconnect(fakePeripheral.peripheralIdentifier, error: nil)
         let collected = await collector.value
-        #expect(collected.count == 6) // ... .disconnected, .reconnecting, .connecting, .connected
+        #expect(collected.count == 6) // The last events are .disconnected, .reconnecting, .connecting, .connected.
 
-        // At least two more calls since the first connect: the teardown clear and the
-        // reconnect attempt's re-attach.
+        // At least two more calls: the teardown clear and the reconnect attach.
         let callsAfterReconnect = await fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount }
         #expect(callsAfterReconnect >= callsAfterFirstConnect + 2)
     }
@@ -616,8 +600,7 @@ struct ConnectionTests {
     func disconnectClearsEventTarget() async throws {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         await register(fakePeripheral, on: fakeCentral)
-        // Powered on so disconnect() goes through the real cancelPeripheralConnection
-        // confirmation path rather than resolving synchronously.
+        // The radio is powered on, so disconnect() waits for the real cancel confirmation.
         fakeCentral.simulateStateChange(.poweredOn)
         await fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
 
@@ -631,7 +614,7 @@ struct ConnectionTests {
 
         let callsAfterDisconnect = await fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount }
         #expect(callsAfterDisconnect >= callsAfterConnect + 1)
-        // The final call is the teardown's clear.
+        // The final call is the clear in the teardown.
         #expect(await fakePeripheral.onQueue { fakePeripheral.eventHandler == nil })
     }
 
@@ -639,10 +622,9 @@ struct ConnectionTests {
 
     @Test("adopting an already-connected peripheral at init yields a live session: .connected state, event target attached, GATT works")
     func adoptedConnectedPeripheralSessionIsLive() async throws {
-        // Exercises `init(adopting:connectedPeripheral:...)`'s adoption STRUCTURE via the
-        // test init's mirrored path (`Session.adopted` + attach + `.connected` emission)
-        // — the production initializer itself requires real CoreBluetooth objects and is
-        // unreachable in SPM tests (Phase 10 audits that both paths share the shape).
+        // Tests the structure of `init(adopting:connectedPeripheral:...)` through the mirrored test
+        // init (`Session.adopted`, attach, `.connected` emission). SPM tests cannot reach the
+        // production initializer, so keep both paths in step.
         let service = ServiceIdentifier(uuid: "180F")
         let characteristic = CharacteristicIdentifier(uuid: "2A19", service: service)
         let (central, _, fakePeripheral) = makeTestCentral(adoptPeripheral: true)
@@ -650,14 +632,14 @@ struct ConnectionTests {
         // The adoption attached the peripheral's event target during init.
         #expect(await fakePeripheral.onQueue { fakePeripheral.eventHandlerSetCount } >= 1)
 
-        // The session is live immediately — no connect() call was ever made.
+        // The session is live immediately. The test never made a connect() call.
         guard case .connected(let peripheral) = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected .connected immediately after an adopting init")
             return
         }
         #expect(peripheral.id == fakePeripheral.peripheralIdentifier)
 
-        // GATT operations route through the normal machinery against the adopted session.
+        // GATT operations use the normal machinery against the adopted session.
         let scripted = Data([0x64])
         await fakePeripheral.onQueue { fakePeripheral.scriptedReadValues[characteristic] = scripted }
         let value: Data = try await peripheral.read(from: characteristic)
@@ -665,11 +647,9 @@ struct ConnectionTests {
     }
 }
 
-/// Exercises Phase 1's multi-peripheral connection support: N independent
-/// connect/disconnect/reconnect/cancel lifecycles tracked simultaneously, keyed by
-/// `PeripheralIdentifier` — the `connections`/`reconnectLoops` dictionaries replacing the
-/// old single `Phase`/`reconnectTask`. Driven through `makeTestCentral()`'s primary fake
-/// peripheral plus `addFakePeripheral(to:fakeCentral:)` for every additional one.
+/// Tests multiple peripherals in the connection lifecycle. Independent lifecycles, keyed by
+/// `PeripheralIdentifier`, run at the same time. Tests use the primary peripheral of
+/// `makeTestCentral()` and `addFakePeripheral(to:fakeCentral:)`.
 @Suite("Multi-peripheral connection lifecycle")
 struct MultiPeripheralConnectionTests {
 
@@ -804,9 +784,8 @@ struct MultiPeripheralConnectionTests {
         await register(fakePeripheralA, on: fakeCentral)
         await fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
 
-        // A's backoff is held open by the test rather than timed (#42): with a 300 ms timer, a
-        // starved runner let the backoff expire, and A reconnect, before `disconnect(A)` below
-        // ran, so the test failed with nothing wrong. The gate makes "mid-backoff" certain.
+        // Hold A's backoff open with a gate instead of a timer. A timer let a starved runner expire
+        // the backoff before `disconnect(A)` ran.
         let backoff = BackoffGate()
         _ = try await central.connect(
             fakePeripheralA.peripheralIdentifier,
@@ -829,7 +808,7 @@ struct MultiPeripheralConnectionTests {
         }
         await Task.yield()
 
-        // Unexpected disconnect of BOTH.
+        // Unexpected disconnect of BOTH peripherals.
         fakeCentral.simulateDisconnect(fakePeripheralA.peripheralIdentifier, error: nil)
         fakeCentral.simulateDisconnect(fakePeripheralB.peripheralIdentifier, error: nil)
 
@@ -847,12 +826,12 @@ struct MultiPeripheralConnectionTests {
             }
         }
 
-        // B never reconnects — give any (incorrect) attempt a chance to fire.
+        // B never reconnects. Wait to show that no attempt fires.
         try await Task.sleep(for: .milliseconds(100))
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCounts[fakePeripheralB.identifier] } == 1)
 
-        // A's reconnect loop is mid-backoff, parked on the gate; cancel it via disconnect(A),
-        // then open the gate. A loop that survived the cancellation would reconnect at once.
+        // A's reconnect loop is parked on the gate in the backoff. Cancel it with disconnect(A),
+        // then open the gate. A surviving loop would reconnect at once.
         await waitFor { backoff.entered }
         #expect(backoff.entered)
         try await central.disconnect(fakePeripheralA.peripheralIdentifier)
@@ -886,12 +865,9 @@ struct MultiPeripheralConnectionTests {
         }
         await waitUntil { await fakeCentral.onQueue { fakeCentral.connectCallCounts[fakePeripheralB.identifier] } == 1 }
 
-        // `disconnectAll()` processes every tracked peripheral sequentially in an
-        // unspecified (dictionary) order, fully awaiting each one's own CoreBluetooth
-        // `cancelPeripheralConnection` confirmation before moving to the next (both A,
-        // connected, and B, connecting, need one — the radio is powered on). Confirming
-        // both concurrently, independently of which is processed first, avoids assuming an
-        // order this test must not depend on.
+        // `disconnectAll()` follows dictionary order, which is unspecified. Each peripheral needs a
+        // cancel confirmation because the radio is powered on. Confirm both in any order so the
+        // test does not depend on order.
         let disconnectAllTask = Task { await central.disconnectAll() }
 
         let confirmA = Task {
@@ -900,8 +876,8 @@ struct MultiPeripheralConnectionTests {
         }
         let confirmB = Task {
             await waitUntil { await fakeCentral.onQueue { fakeCentral.cancelCallCounts[fakePeripheralB.identifier] } == 1 }
-            // The still-connecting B attempt is two-phase-cancelled: confirming its cancel
-            // resolves it throwing .explicitDisconnect.
+            // The two-phase cancel stops B's connecting attempt. Its confirmation throws
+            // .explicitDisconnect.
             fakeCentral.simulateDisconnect(fakePeripheralB.peripheralIdentifier, error: nil)
         }
         _ = await (confirmA.value, confirmB.value)
@@ -926,8 +902,8 @@ struct MultiPeripheralConnectionTests {
             return
         }
 
-        // No reconnect for A despite its .always policy — disconnectAll() is explicit
-        // disconnection of every tracked peripheral, which never reconnects.
+        // A does not reconnect despite its .always policy: disconnectAll() is an explicit
+        // disconnect.
         try await Task.sleep(for: .milliseconds(60))
         #expect(await fakeCentral.onQueue { fakeCentral.connectCallCounts[fakePeripheralA.identifier] } == 1)
     }
@@ -999,7 +975,7 @@ struct MultiPeripheralConnectionTests {
         fakeCentral.simulateDisconnect(fakePeripheralA.peripheralIdentifier, error: nil)
         try await disconnectTask.value
 
-        // The identifier is free again once the disconnect has fully resolved.
+        // The identifier is free after the disconnect resolves.
         let reconnected = try await central.connect(fakePeripheralA.peripheralIdentifier)
         #expect(reconnected.id == fakePeripheralA.peripheralIdentifier)
     }
@@ -1046,17 +1022,15 @@ struct MultiPeripheralConnectionTests {
 
 // MARK: - Test helpers
 
-/// Registers `peripheral` as retrievable by `central`, so `Central.connect(_:)` can resolve
-/// it via `retrievePeripherals(withIdentifiers:)`.
+/// Registers `peripheral` as retrievable by `central`, so `Central.connect(_:)` can resolve it.
 private func register(_ peripheral: FakePeripheral, on central: FakeCentral) async {
     await central.onQueue {
         central.retrievablePeripherals[peripheral.identifier] = peripheral
     }
 }
 
-/// Polls `condition` until it's `true`, or a generous timeout elapses (at which point
-/// whatever assertion depends on `condition` having become `true` will simply fail with a
-/// clear "expected X, got Y" message rather than hanging the test suite).
+/// Polls `condition` until it is `true` or the timeout ends. After a timeout the dependent
+/// assertion fails instead of the suite hanging.
 private func waitUntil(timeout: Duration = .seconds(2), _ condition: () async -> Bool) async {
     let deadline = ContinuousClock.now + timeout
     while await !condition() {
@@ -1065,7 +1039,7 @@ private func waitUntil(timeout: Duration = .seconds(2), _ condition: () async ->
     }
 }
 
-/// Collects the next `count` elements from `stream`, or fewer if it finishes early.
+/// Collects the next `count` elements from `stream`, or fewer if the stream finishes early.
 private func collect(_ count: Int, from stream: AsyncStream<ConnectionEvent>) async -> [ConnectionEvent] {
     var collected: [ConnectionEvent] = []
     var iterator = stream.makeAsyncIterator()
@@ -1076,7 +1050,7 @@ private func collect(_ count: Int, from stream: AsyncStream<ConnectionEvent>) as
     return collected
 }
 
-/// Records an `Issue` with `message` if `value` is `nil` or fails `predicate`.
+/// Records an `Issue` with `message` if `value` is `nil` or does not satisfy `predicate`.
 private func assertCase<T>(_ value: T?, is predicate: (T) -> Bool, _ message: String) {
     guard let value, predicate(value) else {
         Issue.record("\(message), got \(String(describing: value))")
@@ -1091,9 +1065,9 @@ extension ConnectionState {
     }
 }
 
-/// Holds a `ReconnectPolicy.custom` backoff open until the test calls ``release()``, so a test
-/// can act mid-backoff without racing a timer. ``entered`` turns true once the reconnect loop
-/// is waiting on it.
+/// Holds a `ReconnectPolicy.custom` backoff open until the test calls ``release()``, so a test can
+/// act mid-backoff without racing a timer. ``entered`` becomes true when the reconnect loop waits
+/// on the gate.
 private final class BackoffGate: Sendable {
     private struct State {
         var entered = false
@@ -1127,8 +1101,7 @@ private final class BackoffGate: Sendable {
     }
 }
 
-/// A tiny `Mutex`-backed box for collecting reconnect attempt numbers from a `@Sendable`
-/// closure (`ReconnectPolicy.custom`'s closure) in tests.
+/// A `Mutex`-backed box that collects attempt numbers from a `ReconnectPolicy.custom` closure.
 private final class AttemptLog: Sendable {
     private let box = Mutex<[Int]>([])
 

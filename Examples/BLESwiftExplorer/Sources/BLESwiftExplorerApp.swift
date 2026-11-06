@@ -2,11 +2,11 @@
 //  BLESwiftExplorerApp.swift
 //  BLESwiftExplorer
 //
-//  A SwiftUI sample app (iOS + macOS) that exercises the full BLESwift public surface —
-//  scanning, filtering, connecting, GATT browsing, reads/writes (single and chunked),
-//  notifications, RSSI polling, connection logging, saved-device reconnect, system
-//  connection events, ANCS, and background restoration. It depends on the local package
-//  by path; it is not part of the SPM package.
+//  A SwiftUI sample app (iOS and macOS) that uses the full public surface of BLESwift: scanning,
+//  filtering, connecting, GATT browsing, reads and writes (single and chunked), notifications, RSSI
+//  polling, connection logging, reconnect of saved devices, system connection events, ANCS, and
+//  background restoration. It depends on the local package by path and is not part of the SPM
+//  package.
 //
 
 import BLESwiftProfiles
@@ -16,17 +16,17 @@ import SwiftUI
 @main
 struct BLESwiftExplorerApp: App {
 
-    // Created synchronously in the App initializer so `Central` exists before CoreBluetooth
-    // can deliver a background-restoration callback — see `BackgroundRestoration.md`'s
-    // launch-time discipline. `ExplorerModel`'s initializer builds the `Central` and starts
-    // consuming `restorationEvents()` immediately, in this same launch path.
+    // Created synchronously in the App initializer, so `Central` exists before CoreBluetooth can
+    // deliver a background-restoration callback. See the launch-time discipline in
+    // `BackgroundRestoration.md`. The `ExplorerModel` initializer builds the `Central` and starts
+    // to consume `restorationEvents()` immediately, in this same launch path.
     @State private var model = ExplorerModel()
 
     // The peripheral-role counterpart. Its `PeripheralHost` resolves a backend from
-    // `BackendRegistry` at construction, and gets the link's because `AdvertiserModel`
-    // creates it lazily on the first `start()` — long after `ExplorerModel.init()` has
-    // installed the link. Declaration order here is not what makes that safe: SwiftUI
-    // guarantees no ordering between two `@State` initial values.
+    // `BackendRegistry` at construction. It gets the link's backend because `AdvertiserModel`
+    // creates the host lazily on the first `start()`, long after `ExplorerModel.init()` has
+    // installed the link. The order of the declarations here does not make this safe, because
+    // SwiftUI does not guarantee an order between two `@State` initial values.
     @State private var advertiser = AdvertiserModel()
 
     var body: some Scene {
@@ -44,7 +44,7 @@ struct BLESwiftExplorerApp: App {
         #endif
     }
 
-    /// Launch arguments used by the end-to-end test to drive the app without UI taps.
+    /// Launch arguments that the end-to-end test uses to drive the app without UI taps.
     @MainActor
     private func applyLaunchArguments() {
         let arguments = ProcessInfo.processInfo.arguments

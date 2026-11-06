@@ -7,19 +7,19 @@ import BLESwift
 import BLESwiftCore
 import Foundation
 
-/// The Bluetooth SIG "Heart Rate Measurement" characteristic (GSS §3.113 Heart Rate
-/// Measurement, `0x2A37`).
+/// The Bluetooth SIG "Heart Rate Measurement" characteristic (GSS §3.113 Heart Rate Measurement,
+/// `0x2A37`).
 ///
-/// Byte layout (little-endian): a one-byte `Flags` field, then the flag-driven fields in
-/// order:
-/// - Flags bit 0 — heart-rate value format: 0 = `UInt8`, 1 = `UInt16`.
-/// - Flags bits 1-2 — sensor contact status: bit 2 = supported, bit 1 = contact detected.
-/// - Flags bit 3 — Energy Expended present (`UInt16`, kilojoules).
-/// - Flags bit 4 — one or more RR-Interval values present (`UInt16` each, units of
-///   1/1024 s), filling the remainder of the payload.
+/// Byte layout (little-endian): a one-byte `Flags` field. Then the fields that the flags select, in
+/// this order:
+/// - Flags bit 0: heart-rate value format. 0 = `UInt8`, 1 = `UInt16`.
+/// - Flags bits 1-2: sensor contact status. Bit 2 = supported, bit 1 = contact detected.
+/// - Flags bit 3: Energy Expended present (`UInt16`, kilojoules).
+/// - Flags bit 4: one or more RR-Interval values present (`UInt16` each, units of 1/1024 s). They
+///   fill the remainder of the payload.
 public struct HeartRateMeasurement: Receivable, Sendable, Equatable {
 
-    /// The peripheral's skin-contact status, from Flags bits 1-2.
+    /// The skin-contact status of the peripheral, from Flags bits 1-2.
     public enum SensorContact: Sendable, Equatable {
         /// The sensor does not report a contact status (bit 2 clear).
         case notSupported
@@ -36,7 +36,7 @@ public struct HeartRateMeasurement: Receivable, Sendable, Equatable {
 
     /// The heart rate, in beats per minute.
     public let beatsPerMinute: Int
-    /// The sensor's skin-contact status.
+    /// The skin-contact status of the sensor.
     public let sensorContact: SensorContact
     /// Cumulative energy expended, in kilojoules, if reported.
     public let energyExpended: UInt16?

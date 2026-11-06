@@ -3,15 +3,15 @@
 //  BLESwiftCore
 //
 
-/// The set of operations a GATT characteristic advertises support for — read, write,
-/// notify, and so on. A `Sendable` `OptionSet` mirroring `CBCharacteristicProperties`.
+/// The operations that a GATT characteristic supports, such as read, write, and notify. A
+/// `Sendable` `OptionSet` that mirrors `CBCharacteristicProperties`.
 ///
-/// Its bit layout is BLESwift's own and is not guaranteed to match
-/// `CBCharacteristicProperties`'s raw values; always construct it from named members.
+/// The bit layout is BLESwift's own and can differ from `CBCharacteristicProperties`' raw values.
+/// Always construct this type from named members.
 public struct CharacteristicProperties: OptionSet, Sendable, Hashable {
 
-    /// The raw bitmask backing this option set. BLESwift-owned — not
-    /// `CBCharacteristicProperties`'s raw value.
+    /// The raw bitmask of this option set. It is BLESwift's own, not `CBCharacteristicProperties`'
+    /// raw value.
     public let rawValue: UInt
 
     /// Creates a `CharacteristicProperties` from a raw bitmask of its own members.
@@ -19,23 +19,24 @@ public struct CharacteristicProperties: OptionSet, Sendable, Hashable {
         self.rawValue = rawValue
     }
 
-    /// The characteristic's value can be read. Mirrors `CBCharacteristicProperties.read`.
+    /// A client can read the characteristic's value. Mirrors
+    /// `CBCharacteristicProperties.read`.
     public static let read = CharacteristicProperties(rawValue: 1 << 0)
 
-    /// The characteristic's value can be written with a response. Mirrors
+    /// A client can write the characteristic's value with a response. Mirrors
     /// `CBCharacteristicProperties.write`.
     public static let write = CharacteristicProperties(rawValue: 1 << 1)
 
-    /// The characteristic's value can be written without a response. Mirrors
+    /// A client can write the characteristic's value without a response. Mirrors
     /// `CBCharacteristicProperties.writeWithoutResponse`.
     public static let writeWithoutResponse = CharacteristicProperties(rawValue: 1 << 2)
 
-    /// The characteristic supports notifications (value updates without acknowledgement).
-    /// Mirrors `CBCharacteristicProperties.notify`.
+    /// The characteristic supports notifications (value updates without acknowledgement). Mirrors
+    /// `CBCharacteristicProperties.notify`.
     public static let notify = CharacteristicProperties(rawValue: 1 << 3)
 
-    /// The characteristic supports indications (value updates *with* acknowledgement).
-    /// Mirrors `CBCharacteristicProperties.indicate`.
+    /// The characteristic supports indications (value updates *with* acknowledgement). Mirrors
+    /// `CBCharacteristicProperties.indicate`.
     public static let indicate = CharacteristicProperties(rawValue: 1 << 4)
 
     /// The characteristic supports signed writes without a response. Mirrors
@@ -46,7 +47,7 @@ public struct CharacteristicProperties: OptionSet, Sendable, Hashable {
     /// `CBCharacteristicProperties.extendedProperties`.
     public static let extendedProperties = CharacteristicProperties(rawValue: 1 << 6)
 
-    /// The characteristic's value can be broadcast using a Server Characteristic
+    /// A server can broadcast the characteristic's value, using a Server Characteristic
     /// Configuration descriptor. Mirrors `CBCharacteristicProperties.broadcast`.
     public static let broadcast = CharacteristicProperties(rawValue: 1 << 7)
 }

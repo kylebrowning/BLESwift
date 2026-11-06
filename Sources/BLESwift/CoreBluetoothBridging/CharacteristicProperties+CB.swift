@@ -8,14 +8,11 @@ import CoreBluetooth
 
 extension CharacteristicProperties {
 
-    /// Maps a native `CBCharacteristicProperties` bitmask into BLESwift's own
-    /// ``CharacteristicProperties``, the sanctioned CoreBluetooth seam for this type.
+    /// Maps a `CBCharacteristicProperties` bitmask to ``CharacteristicProperties``.
     ///
-    /// BLESwift's raw-value layout intentionally does *not* match
-    /// `CBCharacteristicProperties`, so this maps bit-by-bit rather than by raw value.
-    /// Only the eight properties BLESwift models are mapped; `CBCharacteristicProperties`'s
-    /// `notifyEncryptionRequired`/`indicateEncryptionRequired` have no BLESwift equivalent
-    /// and are intentionally dropped.
+    /// The raw-value layouts differ, so the code maps bit by bit. It maps only the eight
+    /// properties that BLESwift models. It drops `notifyEncryptionRequired` and
+    /// `indicateEncryptionRequired`.
     init(_ cbProperties: CBCharacteristicProperties) {
         var properties: CharacteristicProperties = []
         if cbProperties.contains(.read) { properties.insert(.read) }
@@ -29,9 +26,8 @@ extension CharacteristicProperties {
         self = properties
     }
 
-    /// The `CBCharacteristicProperties` representation of this option set, for building a
-    /// `CBMutableCharacteristic` in the peripheral role. Maps bit-by-bit — the exact
-    /// inverse of ``init(_:)``.
+    /// The `CBCharacteristicProperties` for this option set, for a `CBMutableCharacteristic` in
+    /// the peripheral role. It is the exact inverse of ``init(_:)``.
     var cbProperties: CBCharacteristicProperties {
         var properties: CBCharacteristicProperties = []
         if contains(.read) { properties.insert(.read) }

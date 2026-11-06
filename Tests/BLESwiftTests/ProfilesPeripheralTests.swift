@@ -10,9 +10,8 @@ import BLESwiftTestSupport
 import BLESwift
 import BLESwiftProfiles
 
-/// Exercises the `Peripheral` conveniences in `BLESwiftProfiles` —
-/// `readDeviceInformation()` and `readBatteryLevel()` — against the scriptable
-/// `FakeCentral`/`FakePeripheral` rig.
+/// Tests the `Peripheral` conveniences in `BLESwiftProfiles`: `readDeviceInformation()` and
+/// `readBatteryLevel()`. The tests use the scriptable `FakeCentral` and `FakePeripheral` rig.
 @Suite("BLESwiftProfiles Peripheral extensions")
 struct ProfilesPeripheralTests {
 
@@ -21,7 +20,7 @@ struct ProfilesPeripheralTests {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
 
         // The Device Information service exposes only 4 of its 6 String characteristics:
-        // manufacturer, model, firmware, software present; serial and hardware absent.
+        // manufacturer, model, firmware, and software. Serial and hardware are absent.
         let present: Set<CharacteristicIdentifier> = [
             DeviceInformation.manufacturerNameCharacteristic,
             DeviceInformation.modelNumberCharacteristic,
@@ -41,7 +40,7 @@ struct ProfilesPeripheralTests {
         #expect(info.modelNumber == "Model-X")
         #expect(info.firmwareRevision == "1.2.3")
         #expect(info.softwareRevision == "9.9")
-        // Absent characteristics decode to nil without throwing.
+        // Absent characteristics decode to nil and do not throw.
         #expect(info.serialNumber == nil)
         #expect(info.hardwareRevision == nil)
     }

@@ -5,32 +5,32 @@
 
 import BLESwiftCore
 
-/// A handle to a connected peripheral, returned by `Central.connect(_:timeout:reconnect:warningOptions:compatibility:)`
-/// and carried by ``ConnectionState/connected(_:)``.
+/// A handle to a connected peripheral.
+/// `Central.connect(_:timeout:reconnect:warningOptions:compatibility:)` returns it, and
+/// ``ConnectionState/connected(_:)`` carries it.
 ///
-/// `Peripheral` is a lightweight, `Sendable` façade: it holds only ``id`` and an internal
-/// **weak** reference back to the ``Central`` actor that vended it — never a strong one, so
-/// holding onto a `Peripheral` after its `Central` deallocates does not keep that actor
-/// alive. Once the connection is torn down, any further call through a stale `Peripheral`
-/// throws ``BLESwiftError/notConnected``.
+/// `Peripheral` is a lightweight, `Sendable` facade. It holds only ``id`` and a **weak**
+/// reference to the ``Central`` that created it, so it does not keep that actor alive. After
+/// the connection is torn down, each call through a stale `Peripheral` throws
+/// ``BLESwiftError/notConnected``.
 public struct Peripheral: Sendable {
 
-    /// This peripheral's identifier.
+    /// The identifier of this peripheral.
     public let id: PeripheralIdentifier
 
-    /// A weak handle to the ``Central`` actor that vended this `Peripheral`. See
+    /// A weak handle to the ``Central`` actor that created this `Peripheral`. See
     /// ``WeakCentralBox``.
     let centralBox: WeakCentralBox
 
-    /// Creates a `Peripheral` bound to `central`, held only weakly.
+    /// Creates a `Peripheral` bound to `central`. It holds `central` only weakly.
     init(id: PeripheralIdentifier, central: Central) {
         self.id = id
         self.centralBox = WeakCentralBox(central)
     }
 
-    /// Resolves the ``Central`` actor this peripheral belongs to.
+    /// Resolves the ``Central`` actor to which this peripheral belongs.
     ///
-    /// - Throws: ``BLESwiftError/notConnected`` if the owning `Central` has already been
+    /// - Throws: ``BLESwiftError/notConnected`` if the owning `Central` is already
     ///   deallocated.
     func resolveCentral() throws -> Central {
         guard let central = centralBox.central else {
@@ -39,24 +39,24 @@ public struct Peripheral: Sendable {
         return central
     }
 
-    /// Disconnects this peripheral — the ergonomic call-site for `Central.disconnect(_:)`.
+    /// Disconnects this peripheral. It calls `Central.disconnect(_:)`.
     ///
-    /// Pending operations are failed with ``BLESwiftError/explicitDisconnect``.
+    /// Pending operations fail with ``BLESwiftError/explicitDisconnect``.
     ///
-    /// - Throws: ``BLESwiftError/notConnected`` if the owning `Central` has already been
-    ///   deallocated, or as documented on `Central.disconnect(_:)`.
+    /// - Throws: ``BLESwiftError/notConnected`` if the owning `Central` is already
+    ///   deallocated. It also throws the errors that `Central.disconnect(_:)` documents.
     public func disconnect() async throws {
         let central = try resolveCentral()
         try await central.disconnect(id)
     }
 }
 
-/// Holds a `weak` reference to a ``Central``, letting ``Peripheral`` refer to the actor that
-/// created it without retaining it.
+/// Holds a `weak` reference to a ``Central``. It lets ``Peripheral`` refer to the actor that
+/// created it, without a retain.
 ///
-/// `central` is `nonisolated(unsafe)` rather than `@unchecked Sendable` on the whole type:
-/// it's written once at init, and weak's runtime zeroing is safe to observe concurrently by
-/// the language's own guarantee — a narrower escape hatch than an unaudited, type-wide one.
+/// `central` is `nonisolated(unsafe)` and the type is not `@unchecked Sendable`. The type
+/// writes `central` once, at init, and the runtime makes it safe to observe a weak reference
+/// become `nil` from concurrent code. So this escape hatch is narrower than a type-wide one.
 final class WeakCentralBox: Sendable {
     nonisolated(unsafe) weak var central: Central?
 

@@ -10,11 +10,15 @@ import Testing
 
 @testable import BLESwift
 
-/// Exercises `Peripheral.notifications(for:policy:survivesReconnect:)` — opt-in
-/// notification-stream survival across an automatic reconnect: same-stream delivery after
-/// the gap, the `.notificationsRestored` event, the shared refcount's single re-arm CCCD
-/// write, and every way a gap can end without a restored stream (policy exhausted, GATT
-/// change, explicit disconnect, consumer gone) — driven through `makeTestCentral()`'s fakes.
+/// Tests `Peripheral.notifications(for:policy:survivesReconnect:)`, which lets a notification
+/// stream survive an automatic reconnect. The tests cover:
+/// - delivery on the same stream after the gap
+/// - the `.notificationsRestored` event
+/// - the single CCCD write that the shared reference count makes to re-arm
+/// - every way a gap can end without a restored stream: policy exhausted, GATT change, explicit
+///   disconnect, and consumer gone
+///
+/// The tests use the fakes of `makeTestCentral()`.
 @Suite("Notification survival across reconnect")
 struct NotificationReconnectTests {
 
@@ -24,8 +28,8 @@ struct NotificationReconnectTests {
     private static let heartRateMeasurement = CharacteristicIdentifier(uuid: "2A37", service: heartRateService)
     private static let bodySensorLocation = CharacteristicIdentifier(uuid: "2A38", service: heartRateService)
 
-    /// `makeTestCentral()` plus a completed connection carrying `reconnect` — the starting
-    /// point for every test here (the standard helper connects with `.never`).
+    /// `makeTestCentral()` plus a completed connection that uses `reconnect`. The standard helper
+    /// connects with `.never`.
     private func makeReconnectingRig(
         reconnect: ReconnectPolicy
     ) async throws -> (Central, FakeCentral, FakePeripheral, Peripheral) {
@@ -39,7 +43,7 @@ struct NotificationReconnectTests {
         return (central, fakeCentral, fakePeripheral, peripheral)
     }
 
-    /// Awaits `events`' first `.notificationsRestored` and returns its payload.
+    /// Awaits the first `.notificationsRestored` of `events` and returns its payload.
     private func firstRestored(
         _ events: AsyncStream<ConnectionEvent>
     ) async -> (restored: [CharacteristicIdentifier], failed: [CharacteristicIdentifier: any Error])? {
@@ -51,8 +55,8 @@ struct NotificationReconnectTests {
         return nil
     }
 
-    /// `waitFor` on `central.connectionState(of:)` matching `state` (`.connected` /
-    /// `.disconnected`, matched structurally).
+    /// Calls `waitFor` on `central.connectionState(of:)` until it matches `state` (`.connected` or
+    /// `.disconnected`, matched by structure).
     private func waitForConnectionState(_ central: Central, _ id: PeripheralIdentifier, connected: Bool) async {
         await waitFor {
             switch await central.connectionState(of: id) {
@@ -84,15 +88,15 @@ struct NotificationReconnectTests {
         #expect(try await iterator.next() == Data([1]))
 
         fakeCentral.simulateDisconnect(pid, error: nil)
-        // The pump's park is asynchronous relative to the disconnect — wait for it inside
-        // the backoff window so the re-arm deterministically finds it waiting.
+        // The pump parks asynchronously relative to the disconnect. Wait for it inside the backoff
+        // window so that the re-arm deterministically finds the pump waiting.
         await waitFor { await central.dormantNotificationWaiterCount(for: Self.heartRateMeasurement, on: pid) == 1 }
 
         let outcome = await restoredTask.value
         #expect(outcome?.restored == [Self.heartRateMeasurement])
         #expect(outcome?.failed.isEmpty == true)
 
-        // The SAME stream (same iterator) keeps delivering after the reconnect.
+        // The SAME stream (the same iterator) keeps delivering after the reconnect.
         fakePeripheral.simulateNotification(for: Self.heartRateMeasurement, value: Data([2]))
         #expect(try await iterator.next() == Data([2]))
     }
@@ -128,8 +132,8 @@ struct NotificationReconnectTests {
         let error = await task.value
         #expect(error as? BLESwiftError == .unexpectedDisconnect)
 
-        // Let the reconnect complete, plus a settle window in which a (buggy) restored
-        // event would have had time to appear.
+        // Let the reconnect complete, then wait for a settle window in which a restored event (a
+        // bug) would have time to appear.
         await waitForConnectionState(central, pid, connected: true)
         try await Task.sleep(for: .milliseconds(100))
         collector.cancel()
@@ -164,8 +168,8 @@ struct NotificationReconnectTests {
         await waitFor { await central.dormantNotificationWaiterCount(for: Self.heartRateMeasurement, on: pid) == 3 }
         _ = await restoredTask.value
 
-        // Exactly TWO enables ever: the initial subscribe and the single re-arm — three
-        // survivors share one CCCD write.
+        // Exactly TWO enables: the initial subscribe and the single re-arm. Three survivors share
+        // one CCCD write.
         let enableCalls = await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.filter(\.enabled).count }
         #expect(enableCalls == 2)
         #expect(await central.notificationSubscriberCount(for: Self.heartRateMeasurement, on: pid) == 3)
@@ -230,8 +234,8 @@ struct NotificationReconnectTests {
         await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
         await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.bodySensorLocation) } }
 
-        // The peripheral's GATT table changes across the gap: B is gone, and the cached
-        // discovery state drops as it does on a real disconnect.
+        // The peripheral's GATT table changes across the gap. B is gone. The cached discovery state
+        // drops, as on a real disconnect.
         await fakePeripheral.onQueue {
             fakePeripheral.availableServices = [Self.heartRateService: [Self.heartRateMeasurement]]
             fakePeripheral.simulateGATTCacheReset()
@@ -248,7 +252,7 @@ struct NotificationReconnectTests {
         let errorB = await taskB.value
         #expect(errorB as? BLESwiftError == .missingCharacteristic(Self.bodySensorLocation))
 
-        // A's stream is unaffected by B's failure.
+        // A's stream is not affected by B's failure.
         fakePeripheral.simulateNotification(for: Self.heartRateMeasurement, value: Data([9]))
         #expect(try await iteratorA.next() == Data([9]))
     }
@@ -275,8 +279,8 @@ struct NotificationReconnectTests {
 
         fakeCentral.simulateDisconnect(pid, error: nil)
         await waitForConnectionState(central, pid, connected: false)
-        // Wait for the surviving pump to park before ending the gap, so the explicit
-        // disconnect deterministically resolves the parked waiter with `.explicitDisconnect`.
+        // Wait for the surviving pump to park before the gap ends, so that the explicit disconnect
+        // deterministically resolves the parked waiter with `.explicitDisconnect`.
         await waitFor { await central.dormantNotificationWaiterCount(for: Self.heartRateMeasurement, on: pid) == 1 }
         try await central.disconnect(pid)
 
@@ -308,8 +312,8 @@ struct NotificationReconnectTests {
         fakeCentral.simulateDisconnect(pid, error: nil)
         await waitForConnectionState(central, pid, connected: false)
 
-        // The (sole) surviving consumer leaves mid-gap; flush the queue so its stream's
-        // termination bookkeeping lands before the reconnect fires.
+        // The only surviving consumer leaves in the middle of the gap. Flush the queue so that its
+        // stream's termination bookkeeping completes before the reconnect fires.
         consumer.cancel()
         _ = try? await consumer.value
         await fakeCentral.onQueue {}
@@ -317,8 +321,8 @@ struct NotificationReconnectTests {
         await waitForConnectionState(central, pid, connected: true)
         try await Task.sleep(for: .milliseconds(100))
 
-        // No re-arm: the initial enable stays the only setNotifyValue call, and no
-        // restored event fired.
+        // No re-arm: the initial enable stays the only setNotifyValue call, and no restored event
+        // fired.
         #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.filter(\.enabled).count } == 1)
         collector.cancel()
         let collected = await collector.value
@@ -338,8 +342,8 @@ struct NotificationReconnectTests {
         let events = await central.connectionEvents()
         let restoredTask = Task { await firstRestored(events) }
 
-        // Two survivors: A holds the re-arm loop (sorted first, its re-discovery withheld)
-        // while B is the merge target.
+        // Two survivors. A holds the re-arm loop (sorted first, with its re-discovery withheld). B
+        // is the merge target.
         let survivorA: AsyncThrowingStream<Data, Error> = peripheral.notifications(
             for: Self.heartRateMeasurement, survivesReconnect: true
         )
@@ -351,8 +355,8 @@ struct NotificationReconnectTests {
         var iteratorB = survivorB.makeAsyncIterator()
         await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.bodySensorLocation) } }
 
-        // The re-arm must genuinely re-discover, and A's service discovery is withheld so
-        // the loop parks on A before it can register anything for B.
+        // The re-arm must discover again. Withhold A's service discovery so that the loop parks on
+        // A before it can register anything for B.
         await fakePeripheral.onQueue {
             fakePeripheral.simulateGATTCacheReset()
             fakePeripheral.holdServiceDiscoveryCompletions = true
@@ -363,19 +367,19 @@ struct NotificationReconnectTests {
         await waitFor { await central.dormantNotificationWaiterCount(for: Self.heartRateMeasurement, on: pid) == 1 }
         await waitFor { await central.dormantNotificationWaiterCount(for: Self.bodySensorLocation, on: pid) == 1 }
 
-        // Reconnect fires; the re-arm loop issues A's (held) service discovery and parks.
+        // The reconnect fires. The re-arm loop issues A's held service discovery and parks.
         await waitForConnectionState(central, pid, connected: true)
         await waitFor { await fakePeripheral.onQueue { fakePeripheral.discoverServicesCallCount } == discoveryCallsBeforeGap + 1 }
 
-        // The app reacts to `.connected` with a fresh DEFAULT subscriber on B — it registers
-        // its own subscription (and issues B's one post-reconnect enable) before the re-arm
-        // loop can reach B.
+        // The app reacts to `.connected` with a new DEFAULT subscriber on B. It registers its own
+        // subscription and issues B's one enable after the reconnect, before the re-arm loop can
+        // reach B.
         let defaultB: AsyncThrowingStream<Data, Error> = peripheral.notifications(for: Self.bodySensorLocation)
         let defaultTask = Task { try await collectData(defaultB, count: 1) }
         await waitFor { await central.notificationSubscriberCount(for: Self.bodySensorLocation, on: pid) == 1 }
 
-        // Release A's discovery; the re-arm finishes A, then MERGES B's survivor into the
-        // default subscriber's live subscription.
+        // Release A's discovery. The re-arm finishes A, then MERGES B's survivor into the default
+        // subscriber's live subscription.
         await fakePeripheral.onQueue { fakePeripheral.holdServiceDiscoveryCompletions = false }
         fakePeripheral.simulateNextHeldServiceDiscoveryCompletion()
 
@@ -383,14 +387,14 @@ struct NotificationReconnectTests {
         #expect(outcome?.restored == [Self.heartRateMeasurement, Self.bodySensorLocation])
         #expect(outcome?.failed.isEmpty == true)
 
-        // Both B streams — the merged survivor and the racing default subscriber — deliver
-        // the same subsequent value.
+        // Both B streams deliver the same next value: the merged survivor and the racing default
+        // subscriber.
         fakePeripheral.simulateNotification(for: Self.bodySensorLocation, value: Data([5]))
         #expect(try await iteratorB.next() == Data([5]))
         #expect(try await defaultTask.value == [Data([5])])
 
-        // Exactly ONE post-reconnect enable for B (the default subscriber's); the merge
-        // issued none. Two enables for B ever: initial subscribe + that one.
+        // Exactly ONE enable for B after the reconnect, from the default subscriber. The merge
+        // issued none. B has two enables in total, including the initial subscribe.
         let enableCallsForB = await fakePeripheral.onQueue {
             fakePeripheral.setNotifyValueCalls.filter { $0.enabled && $0.characteristic == Self.bodySensorLocation }.count
         }
@@ -419,8 +423,8 @@ struct NotificationReconnectTests {
                 return error
             }
         }
-        // The composite subscribes first and then writes; once the notify state is on and
-        // the write landed, it is parked awaiting the (never-sent) response.
+        // The composite subscribes, then writes. When notify is on and the write has landed, the
+        // composite is parked waiting for a response that the device never sends.
         await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.heartRateMeasurement) } }
         await waitFor { await fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.bodySensorLocation] ?? 0 } == 1 }
 

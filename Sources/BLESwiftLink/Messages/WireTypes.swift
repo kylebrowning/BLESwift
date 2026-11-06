@@ -6,11 +6,11 @@
 import BLESwiftCore
 import Foundation
 
-/// A `Codable`, wire-safe mirror of `NSError`, carrying only the fields that survive
-/// serialization: `domain`, `code`, and a rendered `description`.
+/// A `Codable` mirror of `NSError` that is safe to send on the wire. It has only the fields
+/// that survive serialization: `domain`, `code`, and a rendered `description`.
 ///
-/// `BLESwiftCore` types never gain `Codable` conformance; `WireError` is the DTO that
-/// crosses the wire in their place wherever an `Error` would otherwise appear.
+/// `BLESwiftCore` types never conform to `Codable`. `WireError` is the DTO that crosses the wire
+/// in their place, wherever an `Error` would otherwise appear.
 public struct WireError: Codable, Sendable, Equatable {
 
     /// Mirrors `NSError.domain`.
@@ -29,15 +29,15 @@ public struct WireError: Codable, Sendable, Equatable {
         self.description = description
     }
 
-    /// Creates a `WireError` from an `NSError`, copying its domain, code, and localized
-    /// description.
+    /// Creates a `WireError` from an `NSError`. The initializer copies the domain, the code, and
+    /// the localized description.
     public init(_ error: NSError) {
         self.domain = error.domain
         self.code = error.code
         self.description = error.localizedDescription
     }
 
-    /// Rebuilds an `NSError` from this `WireError`, with `description` restored as
+    /// Rebuilds an `NSError` from this `WireError`. The `description` becomes
     /// `NSLocalizedDescriptionKey`.
     public var nsError: NSError {
         NSError(domain: domain, code: code, userInfo: [NSLocalizedDescriptionKey: description])
@@ -45,7 +45,7 @@ public struct WireError: Codable, Sendable, Equatable {
 }
 
 extension Optional where Wrapped == NSError {
-    /// Converts an optional `NSError` to an optional `WireError`, preserving `nil`.
+    /// Converts an optional `NSError` to an optional `WireError`. A `nil` stays `nil`.
     public var wire: WireError? {
         map(WireError.init)
     }
@@ -115,14 +115,14 @@ public enum WireWriteType: String, Codable, Sendable, Equatable, CaseIterable {
     }
 }
 
-/// A `Codable` mirror of `CharacteristicIdentifier` — its UUID and owning service's UUID,
-/// each as a canonical string.
+/// A `Codable` mirror of `CharacteristicIdentifier`. It has the characteristic's UUID and the
+/// owning service's UUID. Each UUID is a canonical string.
 public struct WireCharacteristicRef: Codable, Sendable, Equatable {
 
-    /// The owning service's UUID string.
+    /// The UUID string of the owning service.
     public var service: String
 
-    /// The characteristic's UUID string.
+    /// The UUID string of the characteristic.
     public var uuid: String
 
     /// Creates a `WireCharacteristicRef` directly from its two UUID strings.
@@ -137,10 +137,9 @@ public struct WireCharacteristicRef: Codable, Sendable, Equatable {
         self.uuid = id.uuidString
     }
 
-    /// Converts back to a `CharacteristicIdentifier`, rejecting either UUID string that a
-    /// `CharacteristicIdentifier` could not represent.
+    /// Converts back to a `CharacteristicIdentifier`.
     ///
-    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` — see
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)``. See
     ///   ``WireIdentifierValidation``.
     public var identifier: CharacteristicIdentifier {
         get throws {
@@ -151,17 +150,17 @@ public struct WireCharacteristicRef: Codable, Sendable, Equatable {
     }
 }
 
-/// A `Codable` mirror of `DescriptorIdentifier` — its UUID and its owning characteristic's
-/// and service's UUIDs, each as a canonical string.
+/// A `Codable` mirror of `DescriptorIdentifier`. It has the descriptor's UUID, the owning
+/// characteristic's UUID, and the owning service's UUID. Each UUID is a canonical string.
 public struct WireDescriptorRef: Codable, Sendable, Equatable {
 
-    /// The owning service's UUID string.
+    /// The UUID string of the owning service.
     public var service: String
 
-    /// The owning characteristic's UUID string.
+    /// The UUID string of the owning characteristic.
     public var characteristic: String
 
-    /// The descriptor's UUID string.
+    /// The UUID string of the descriptor.
     public var uuid: String
 
     /// Creates a `WireDescriptorRef` directly from its three UUID strings.
@@ -178,10 +177,9 @@ public struct WireDescriptorRef: Codable, Sendable, Equatable {
         self.uuid = id.uuidString
     }
 
-    /// Converts back to a `DescriptorIdentifier`, rejecting any of the three UUID strings
-    /// that a `DescriptorIdentifier` could not represent.
+    /// Converts back to a `DescriptorIdentifier`.
     ///
-    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` — see
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)``. See
     ///   ``WireIdentifierValidation``.
     public var identifier: DescriptorIdentifier {
         get throws {
@@ -196,7 +194,7 @@ public struct WireDescriptorRef: Codable, Sendable, Equatable {
     }
 }
 
-/// A `Codable` mirror of `AdvertisementData`, with service UUIDs rendered as strings.
+/// A `Codable` mirror of `AdvertisementData`. The service UUIDs are strings.
 public struct WireAdvertisement: Codable, Sendable, Equatable {
 
     /// Mirrors `AdvertisementData.localName`.
@@ -258,17 +256,17 @@ public struct WireAdvertisement: Codable, Sendable, Equatable {
         self.solicitedServiceUUIDs = data.solicitedServiceUUIDs?.map(\.uuidString)
     }
 
-    /// Converts back to `AdvertisementData`, rejecting any service UUID string a
-    /// `ServiceIdentifier` could not represent — and any pair of ``serviceData`` keys that
-    /// name the same service once normalized.
+    /// Converts back to `AdvertisementData`. The function rejects these two kinds of input:
     ///
-    /// ``serviceData`` arrives keyed by string but becomes a dictionary keyed by
-    /// `ServiceIdentifier`, which normalizes case: `"180d"` and `"180D"` are two keys on the
-    /// wire and one key here. Building that dictionary from colliding keys would trap, so a
-    /// collision is refused as the protocol violation it is.
+    /// - A service UUID string that a `ServiceIdentifier` cannot represent.
+    /// - Two ``serviceData`` keys that name the same service after normalization.
     ///
-    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` — see
-    ///   ``WireIdentifierValidation`` — or ``WireDecodingError/duplicateIdentifier(_:)``.
+    /// `ServiceIdentifier` normalizes case, so `"180d"` and `"180D"` are two keys on the wire and
+    /// one key here. A dictionary that is built from colliding keys would trap, so the function
+    /// refuses a collision as a protocol violation.
+    ///
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` (see ``WireIdentifierValidation``),
+    ///   or ``WireDecodingError/duplicateIdentifier(_:)``.
     public var advertisementData: AdvertisementData {
         get throws {
             try serviceUUIDs?.forEach { try WireIdentifierValidation.validated($0) }
@@ -300,11 +298,11 @@ public struct WireAdvertisement: Codable, Sendable, Equatable {
     }
 }
 
-/// A `Codable` summary of one characteristic found by a `discoverCharacteristics` request —
-/// its UUID and raw `CharacteristicProperties` bitmask.
+/// A `Codable` summary of one characteristic that a `discoverCharacteristics` request found.
+/// It has the UUID and the raw `CharacteristicProperties` bitmask.
 public struct WireDiscoveredCharacteristic: Codable, Sendable, Equatable {
 
-    /// The characteristic's UUID string.
+    /// The UUID string of the characteristic.
     public var uuid: String
 
     /// The raw `CharacteristicProperties.rawValue` bitmask.
@@ -317,11 +315,11 @@ public struct WireDiscoveredCharacteristic: Codable, Sendable, Equatable {
     }
 }
 
-/// A `Codable` mirror of `GATTCharacteristic`, with properties and permissions carried as
-/// raw bitmasks.
+/// A `Codable` mirror of `GATTCharacteristic`. The properties and permissions are raw
+/// bitmasks.
 public struct WireGATTCharacteristic: Codable, Sendable, Equatable {
 
-    /// The characteristic's UUID string.
+    /// The UUID string of the characteristic.
     public var uuid: String
 
     /// The raw `CharacteristicProperties.rawValue` bitmask.
@@ -341,8 +339,7 @@ public struct WireGATTCharacteristic: Codable, Sendable, Equatable {
         self.value = value
     }
 
-    /// Creates a `WireGATTCharacteristic` from a `GATTCharacteristic`, scoped to its
-    /// owning service.
+    /// Creates a `WireGATTCharacteristic` from a `GATTCharacteristic`.
     public init(_ characteristic: GATTCharacteristic) {
         self.uuid = characteristic.identifier.uuidString
         self.properties = characteristic.properties.rawValue
@@ -352,8 +349,8 @@ public struct WireGATTCharacteristic: Codable, Sendable, Equatable {
 
     /// Converts back to a `GATTCharacteristic`, scoped to `service`.
     ///
-    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if ``uuid`` is not one a
-    ///   `CharacteristicIdentifier` could represent.
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if a `CharacteristicIdentifier`
+    ///   cannot represent ``uuid``.
     public func gattCharacteristic(service: ServiceIdentifier) throws -> GATTCharacteristic {
         try WireIdentifierValidation.validated(uuid)
         return GATTCharacteristic(
@@ -368,7 +365,7 @@ public struct WireGATTCharacteristic: Codable, Sendable, Equatable {
 /// A `Codable` mirror of `GATTService`.
 public struct WireGATTService: Codable, Sendable, Equatable {
 
-    /// The service's UUID string.
+    /// The UUID string of the service.
     public var uuid: String
 
     /// Mirrors `GATTService.isPrimary`.
@@ -391,10 +388,9 @@ public struct WireGATTService: Codable, Sendable, Equatable {
         self.characteristics = service.characteristics.map(WireGATTCharacteristic.init)
     }
 
-    /// Converts back to a `GATTService`, rejecting its own UUID string — or any of its
-    /// characteristics' — that BLESwift's identifiers could not represent.
+    /// Converts back to a `GATTService`.
     ///
-    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` — see
+    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)``. See
     ///   ``WireIdentifierValidation``.
     public var gattService: GATTService {
         get throws {
@@ -432,9 +428,8 @@ public struct WireSubscriber: Codable, Sendable, Equatable {
 
     /// Converts back to a `Subscriber`.
     ///
-    /// - Throws: ``WireDecodingError/invalidMaximumLength(_:)`` if
-    ///   ``maximumUpdateValueLength`` is one no caller could divide a payload by — see
-    ///   ``WireLengthValidation``.
+    /// - Throws: ``WireDecodingError/invalidMaximumLength(_:)`` if ``maximumUpdateValueLength`` is
+    ///   zero or negative. See ``WireLengthValidation``.
     public var subscriber: Subscriber {
         get throws {
             Subscriber(
@@ -448,13 +443,13 @@ public struct WireSubscriber: Codable, Sendable, Equatable {
 /// A `Codable` mirror of `ReadRequest`.
 public struct WireReadRequest: Codable, Sendable, Equatable {
 
-    /// The `RequestToken.rawValue` identifying this request.
+    /// The `RequestToken.rawValue` that identifies this request.
     public var token: UUID
 
-    /// The remote central that issued the request.
+    /// The remote central that sent the request.
     public var central: WireSubscriber
 
-    /// The characteristic being read.
+    /// The characteristic that the central reads.
     public var characteristic: WireCharacteristicRef
 
     /// Mirrors `ReadRequest.offset`.
@@ -478,10 +473,12 @@ public struct WireReadRequest: Codable, Sendable, Equatable {
 
     /// Converts back to a `ReadRequest`.
     ///
-    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if the characteristic it names
-    ///   is not one BLESwift's identifiers could represent, or
-    ///   ``WireDecodingError/invalidMaximumLength(_:)`` if the central's update length is
-    ///   unusable, or ``WireDecodingError/invalidOffset(_:)`` if ``offset`` is negative.
+    /// - Throws:
+    ///   - ``WireDecodingError/invalidIdentifier(_:)`` if BLESwift identifiers cannot represent
+    ///     the request's characteristic.
+    ///   - ``WireDecodingError/invalidMaximumLength(_:)`` if the central's update length is
+    ///     unusable.
+    ///   - ``WireDecodingError/invalidOffset(_:)`` if ``offset`` is negative.
     public var readRequest: ReadRequest {
         get throws {
             ReadRequest(
@@ -497,10 +494,10 @@ public struct WireReadRequest: Codable, Sendable, Equatable {
 /// A `Codable` mirror of one `WriteRequest.Entry`.
 public struct WireWriteEntry: Codable, Sendable, Equatable {
 
-    /// The remote central that issued the write.
+    /// The remote central that sent the write.
     public var central: WireSubscriber
 
-    /// The characteristic being written.
+    /// The characteristic that the central writes.
     public var characteristic: WireCharacteristicRef
 
     /// Mirrors `WriteRequest.Entry.offset`.
@@ -527,10 +524,12 @@ public struct WireWriteEntry: Codable, Sendable, Equatable {
 
     /// Converts back to a `WriteRequest.Entry`.
     ///
-    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if the characteristic it names
-    ///   is not one BLESwift's identifiers could represent, or
-    ///   ``WireDecodingError/invalidMaximumLength(_:)`` if the central's update length is
-    ///   unusable, or ``WireDecodingError/invalidOffset(_:)`` if ``offset`` is negative.
+    /// - Throws:
+    ///   - ``WireDecodingError/invalidIdentifier(_:)`` if BLESwift identifiers cannot represent
+    ///     the entry's characteristic.
+    ///   - ``WireDecodingError/invalidMaximumLength(_:)`` if the central's update length is
+    ///     unusable.
+    ///   - ``WireDecodingError/invalidOffset(_:)`` if ``offset`` is negative.
     public var entry: WriteRequest.Entry {
         get throws {
             WriteRequest.Entry(
@@ -546,7 +545,7 @@ public struct WireWriteEntry: Codable, Sendable, Equatable {
 /// A `Codable` mirror of `WriteRequest`.
 public struct WireWriteRequest: Codable, Sendable, Equatable {
 
-    /// The `RequestToken.rawValue` identifying this batch.
+    /// The `RequestToken.rawValue` that identifies this batch.
     public var token: UUID
 
     /// The writes in this batch.
@@ -566,11 +565,12 @@ public struct WireWriteRequest: Codable, Sendable, Equatable {
 
     /// Converts back to a `WriteRequest`.
     ///
-    /// - Throws: ``WireDecodingError/invalidIdentifier(_:)`` if any entry names a
-    ///   characteristic BLESwift's identifiers could not represent, or
-    ///   ``WireDecodingError/invalidMaximumLength(_:)`` if an entry's central reports an
-    ///   unusable update length, or ``WireDecodingError/invalidOffset(_:)`` if an entry's
-    ///   offset is negative.
+    /// - Throws:
+    ///   - ``WireDecodingError/invalidIdentifier(_:)`` if an entry's characteristic is not
+    ///     representable by BLESwift identifiers.
+    ///   - ``WireDecodingError/invalidMaximumLength(_:)`` if an entry's central reports an
+    ///     unusable update length.
+    ///   - ``WireDecodingError/invalidOffset(_:)`` if an entry's offset is negative.
     public var writeRequest: WriteRequest {
         get throws {
             WriteRequest(token: RequestToken(rawValue: token), entries: try entries.map { try $0.entry })

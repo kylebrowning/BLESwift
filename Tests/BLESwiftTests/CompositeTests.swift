@@ -10,10 +10,13 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Exercises Phase 7's composite helpers — `writeAndAwaitNotification`,
-/// `writeAndAssemble`, and `flush(_:quietPeriod:)` — covering listen-before-write ordering,
-/// exact/overshoot assembly, the partial-data-timeout regression (a partially-assembled
-/// reply must not defeat the overall timeout), and the flush window-reset loop.
+/// Tests the composite helpers `writeAndAwaitNotification`, `writeAndAssemble`, and
+/// `flush(_:quietPeriod:)`. The tests cover:
+/// - the listen-before-write order
+/// - exact assembly and overshoot assembly
+/// - the regression for the partial-data timeout: a partly assembled reply must not defeat the
+///   overall timeout
+/// - the loop that resets the flush window
 @Suite("Composite helpers")
 struct CompositeTests {
 
@@ -29,11 +32,10 @@ struct CompositeTests {
     func writeAndAwaitNotificationHasNoLossWindow() async throws {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
 
-        // Device scripted to respond INSTANTLY: the response notification is enqueued from
-        // inside `writeValue` itself, before even the write's own completion event — the
-        // hardest ordering for the no-loss guarantee. Also records whether the listen was
-        // installed (notify enabled) by the time the write arrived, to verify
-        // listen-before-write ordering.
+        // The device responds INSTANTLY. The response notification is queued from inside
+        // `writeValue`, before the write's completion event. This is the hardest order for the
+        // no-loss guarantee. The device also records whether the listen was installed (notify
+        // enabled) when the write arrived, which verifies the listen-before-write order.
         let notifyingAtWrite = Mutex<Bool?>(nil)
         await fakePeripheral.onQueue {
             fakePeripheral.onWrite = { _, _ in
@@ -52,7 +54,7 @@ struct CompositeTests {
         #expect(notifyingAtWrite.withLock { $0 } == true, "the listen must be installed before the write is issued")
         #expect(await fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.txCharacteristic] } == 1)
 
-        // The one-shot subscription is released afterward: notify disabled again.
+        // The code then releases the one-shot subscription. Notify is disabled again.
         await waitFor { await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
         #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.last?.enabled } == false)
     }
@@ -107,8 +109,8 @@ struct CompositeTests {
     @Test("writeAndAssemble times out even after PARTIAL data was received (partial-data-timeout regression)")
     func assembleTimeoutWithPartialData() async throws {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
-        // The device sends 2 of the expected 4 bytes, then goes silent forever. A
-        // partially-assembled reply must not defeat the overall timeout.
+        // The device sends 2 of the expected 4 bytes, then stays silent forever. A partly assembled
+        // reply must not defeat the overall timeout.
         await fakePeripheral.onQueue {
             fakePeripheral.onWrite = { _, _ in
                 fakePeripheral.simulateNotification(for: Self.rxCharacteristic, value: Data([1, 2]))
@@ -135,12 +137,12 @@ struct CompositeTests {
 
     @Test("flush completes only after a full quiet period: a mid-window packet resets the window")
     func flushWindowResetsOnPacket() async throws {
-        // Timed, so built to fail only on a real regression (#42). With a 1 s window and the
-        // packet ~300 ms in, a flush that resets ends a full second after the packet, and one
-        // that does not ends ~700 ms after it; the 950 ms bound sits between the two and a
-        // busy machine can only lengthen the first. What a busy machine *can* break is the
-        // setup: if the test oversleeps past the window, the flush is already over and the
-        // packet tests nothing. Such an attempt is detected and retried, not misreported.
+        // This test uses time and is built to fail only on a real regression. The window is 1 s and
+        // the packet arrives about 300 ms into it. A flush that resets ends 1 s after the packet. A
+        // flush that does not reset ends about 700 ms after it. The bound of 950 ms is between the
+        // two. A busy machine can only lengthen the first time, but it can break the setup: if the
+        // test oversleeps past the window, the flush is already over and the packet tests nothing.
+        // The test detects this and retries instead of reporting a false failure.
         let quietPeriod: Duration = .seconds(1)
         let clock = ContinuousClock()
 
@@ -152,7 +154,8 @@ struct CompositeTests {
                 flushReturned.withLock { $0 = true }
             }
 
-            // Wait until the flush's subscription is live, then land a packet mid-window.
+            // Wait until the flush's subscription is live, then send a packet in the middle of the
+            // window.
             await waitFor { await fakePeripheral.onQueue { fakePeripheral.notifyingCharacteristics.contains(Self.rxCharacteristic) } }
             let subscribedTime = clock.now
             try await Task.sleep(for: .milliseconds(300))
@@ -166,7 +169,7 @@ struct CompositeTests {
 
             #expect(elapsedSincePacket >= .milliseconds(950), "a packet mid-window must restart the quiet period")
 
-            // The flush's one-shot subscription is released afterward.
+            // The code then releases the flush's one-shot subscription.
             await waitFor { await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.count } == 2 }
             #expect(await fakePeripheral.onQueue { fakePeripheral.setNotifyValueCalls.last?.enabled } == false)
             return
@@ -204,9 +207,9 @@ struct CompositeTests {
     }
 }
 
-/// Exercises Phase 2's multi-peripheral isolation for the composite helpers: a
-/// `writeAndAwaitNotification` round-trip on one peripheral running concurrently with an
-/// independent notification stream on another must not cross-talk in either direction.
+/// Tests composite helper isolation for multiple peripherals. A `writeAndAwaitNotification` round
+/// trip on one peripheral runs at the same time as an independent notification stream on another.
+/// There must be no cross-talk in either direction.
 @Suite("Multi-peripheral composite helper isolation")
 struct MultiPeripheralCompositeTests {
 
@@ -232,8 +235,8 @@ struct MultiPeripheralCompositeTests {
             }
         }
 
-        // B's own, independent notification stream on the SAME characteristic UUID as A's
-        // composite round-trip — started before A's write, so it's live throughout.
+        // B's independent notification stream uses the SAME characteristic UUID as A's composite
+        // round trip. It starts before A's write, so it is live for the whole test.
         let streamB: AsyncThrowingStream<Data, Error> = peripheralB.notifications(for: Self.rxCharacteristic)
         let collectorB = Task { try await collectData(streamB, count: 1) }
         await waitFor { await fakePeripheralB.onQueue { fakePeripheralB.notifyingCharacteristics.contains(Self.rxCharacteristic) } }
@@ -245,13 +248,13 @@ struct MultiPeripheralCompositeTests {
         )
         #expect(response == Data([0xAB, 0xCD]))
 
-        // B must not have observed A's response notification — it never fired on B's fake.
+        // B must not observe A's response notification. It never fired on B's fake.
         fakePeripheralB.simulateNotification(for: Self.rxCharacteristic, value: Data([0x01]))
         let receivedB = try await collectorB.value
         #expect(receivedB == [Data([0x01])], "B's stream must see only its own peripheral's notification, not A's")
 
-        // A's one-shot subscription must have released cleanly, independent of B's
-        // still-live one.
+        // A's one-shot subscription must release cleanly, independent of B's subscription, which is
+        // still live.
         await waitFor { await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.count } == 2 }
         #expect(await fakePeripheralA.onQueue { fakePeripheralA.setNotifyValueCalls.last?.enabled } == false)
         #expect(await fakePeripheralB.onQueue { fakePeripheralB.setNotifyValueCalls.count } == 1)

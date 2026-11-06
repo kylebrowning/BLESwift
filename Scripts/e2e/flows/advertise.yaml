@@ -1,9 +1,8 @@
 # Advertiser side of the two-simulator end-to-end test.
 #
-# The actual advertising is driven by the app's `--auto-advertise` launch
-# argument, so this flow only has to prove the app launched and reached the
-# Advertise tab with the peripheral host live. The Explorer has seven tabs, so on
-# iPhone the Advertise tab lives inside the system "More" tab.
+# The app's `--auto-advertise` launch argument starts the advertising, so this flow only proves two
+# things: the app launched, and it reached the Advertise tab with the peripheral host live. The
+# Explorer has seven tabs. On an iPhone, the Advertise tab is in the system "More" tab.
 appId: com.bleswift.explorer
 ---
 - launchApp:
@@ -11,8 +10,8 @@ appId: com.bleswift.explorer
       "--auto-advertise": true
 - tapOn: "More"
 - tapOn: "Advertise"
-# `id` + `text` are ANDed, and `exact: true` anchors the text, so this can only be
-# satisfied by the status label in its positive state.
+# `id` and `text` are combined with AND, and `exact: true` anchors the text, so only the status
+# label in its positive state can satisfy this step.
 - extendedWaitUntil:
     visible:
       id: "advertise.status"

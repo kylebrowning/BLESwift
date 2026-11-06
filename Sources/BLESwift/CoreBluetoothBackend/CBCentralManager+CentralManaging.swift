@@ -7,39 +7,36 @@ import BLESwiftCore
 import CoreBluetooth
 import ObjectiveC
 
-/// The stable identity token for the associated `CentralDelegateProxy` retained by
-/// `CBCentralManager.eventHandler` below. Its address, not its value, is what matters to
-/// `objc_(get|set)AssociatedObject` — the value is never read or written.
+/// The identity token for the associated `CentralDelegateProxy`, which the
+/// `CBCentralManager.eventHandler` below retains. `objc_(get|set)AssociatedObject` uses the
+/// token's address. The code never reads or writes its value.
 private nonisolated(unsafe) var centralManagerProxyKey: UInt8 = 0
 
-/// Bridges `CentralManaging` to the real `CBCentralManager` API: mismatched `PeripheralRemote`
-/// downcasts are a no-op, never a trap (mixing shim families is a programmer error, not a
-/// runtime condition to crash on).
+/// Bridges `CentralManaging` to the real `CBCentralManager` API. A downcast of a mismatched
+/// `PeripheralRemote` does nothing and never traps, because mixing shim families is a
+/// programmer error.
 ///
-/// No `@retroactive` needed: `CentralManaging` and this conformance are different modules
-/// but the same SPM package — SE-0364's retroactive-conformance check is package-scoped.
+/// No `@retroactive` is necessary. `CentralManaging` and this conformance are in different
+/// modules of the same SPM package, and the SE-0364 check is package-scoped.
 extension CBCentralManager: CentralManaging {
 
-    /// Implements `eventHandler` with an associated-object-retained `CentralDelegateProxy`
-    /// assigned to `.delegate` (which is `weak` — the association is what keeps the proxy
-    /// alive). Setting a non-`nil` handler creates the proxy on first use and reuses it on
-    /// subsequent sets; setting `nil` clears both the proxy's handler and `.delegate`.
+    /// Implements `eventHandler` with a `CentralDelegateProxy`. An associated object retains
+    /// the proxy, because `.delegate` is `weak`. A non-`nil` handler creates the proxy on first
+    /// use and reuses it later. Setting `nil` clears the proxy's handler and `.delegate`.
     ///
-    /// - Important: `Central.init(configuration:)` does **not** go through this property —
-    ///   this setter always creates a *fresh* proxy, which would be a second, disconnected
-    ///   instance if used at construction time. `init` passes its own proxy directly to
-    ///   `CBCentralManager(delegate:queue:options:)` instead.
+    /// - Important: `Central.init(configuration:)` does **not** use this property. At
+    ///   construction, this setter would create a second, disconnected proxy. `init` passes its
+    ///   own proxy directly to `CBCentralManager(delegate:queue:options:)`.
     public var eventHandler: ((CentralEvent) -> Void)? {
         get {
             (objc_getAssociatedObject(self, &centralManagerProxyKey) as? CentralDelegateProxy)?.handler
         }
         set {
-            // Bridges the protocol's plain (non-`@Sendable`) closure type into
-            // `CentralDelegateProxy.handler`'s `@Sendable` storage. Sound: `Central` is the
-            // only caller, and every closure it passes here captures only `[weak self]` and
-            // the (`Sendable`) event payload — the compiler just can't see that through the
-            // protocol's fixed non-`@Sendable` signature, so `nonisolated(unsafe)` asserts
-            // it explicitly.
+            // Bridges the protocol's non-`@Sendable` closure to the `@Sendable` storage of
+            // `CentralDelegateProxy.handler`. This is safe: `Central` is the only caller, and its
+            // closures capture only `[weak self]` and the `Sendable` event payload. The compiler
+            // cannot see this through the protocol's signature, so `nonisolated(unsafe)` asserts
+            // it.
             let sendableValue: (@Sendable (CentralEvent) -> Void)?
             if let newValue {
                 nonisolated(unsafe) let captured = newValue
@@ -68,14 +65,13 @@ extension CBCentralManager: CentralManaging {
         CentralState(state)
     }
 
-    /// Maps the native `CBManager.authorization` class property (`CBManagerAuthorization`)
-    /// to ``BluetoothAuthorization``.
+    /// Maps `CBManager.authorization` to ``BluetoothAuthorization``.
     public static var bluetoothAuthorization: BluetoothAuthorization {
         BluetoothAuthorization(authorization)
     }
 
-    /// Builds the `[CBUUID]?`/options dictionary CoreBluetooth's real
-    /// `scanForPeripherals(withServices:options:)` expects, and delegates to it.
+    /// Builds the `[CBUUID]?` and options dictionary and calls CoreBluetooth's
+    /// `scanForPeripherals(withServices:options:)`.
     public func scanForPeripherals(withServices services: [ServiceIdentifier]?, options: ScanOptions) {
         let cbOptions: [String: Any] = [
             CBCentralManagerScanOptionAllowDuplicatesKey: options.allowDuplicates
@@ -84,9 +80,8 @@ extension CBCentralManager: CentralManaging {
     }
 
     /// Downcasts `peripheral` to `CBPeripheral`, merges `requiresANCS` into the options
-    /// dictionary (`CBConnectPeripheralOptionRequiresANCS`, iOS only — ignored elsewhere),
-    /// and delegates to `connect(_:options:)`. A no-op if `peripheral` is not a
-    /// `CBPeripheral`.
+    /// (`CBConnectPeripheralOptionRequiresANCS`, iOS only), and calls `connect(_:options:)`. It
+    /// does nothing if `peripheral` is not a `CBPeripheral`.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         guard let cbPeripheral = peripheral as? CBPeripheral else { return }
         var cbOptions: [String: Any] = options?.cbConnectOptions ?? [:]
@@ -98,33 +93,29 @@ extension CBCentralManager: CentralManaging {
         connect(cbPeripheral, options: cbOptions.isEmpty ? nil : cbOptions)
     }
 
-    /// Downcasts `peripheral` to `CBPeripheral` and delegates to
-    /// `cancelPeripheralConnection(_:)`. A no-op if `peripheral` is not a `CBPeripheral`.
+    /// Downcasts `peripheral` to `CBPeripheral` and calls `cancelPeripheralConnection(_:)`.
+    /// It does nothing if `peripheral` is not a `CBPeripheral`.
     public func cancelPeripheralConnection(_ peripheral: any PeripheralRemote) {
         guard let cbPeripheral = peripheral as? CBPeripheral else { return }
         cancelPeripheralConnection(cbPeripheral)
     }
 
-    /// Delegates to the real `retrievePeripherals(withIdentifiers:)` (disambiguated from
-    /// this method by its `[CBPeripheral]` return type) and upcasts the result to
+    /// Calls CoreBluetooth's `retrievePeripherals(withIdentifiers:)` and upcasts the result to
     /// `[any PeripheralRemote]`.
     public func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote] {
         let cbPeripherals: [CBPeripheral] = retrievePeripherals(withIdentifiers: identifiers)
         return cbPeripherals
     }
 
-    /// Builds the `[CBUUID]` CoreBluetooth's real
-    /// `retrieveConnectedPeripherals(withServices:)` expects, delegates to it (disambiguated
-    /// from this method by its `[CBPeripheral]` return type), and upcasts the result to
-    /// `[any PeripheralRemote]`.
+    /// Builds the `[CBUUID]`, calls CoreBluetooth's `retrieveConnectedPeripherals(withServices:)`,
+    /// and upcasts the result to `[any PeripheralRemote]`.
     public func retrieveConnectedPeripherals(withServices services: [ServiceIdentifier]) -> [any PeripheralRemote] {
         let cbPeripherals: [CBPeripheral] = retrieveConnectedPeripherals(withServices: services.map(\.cbuuid))
         return cbPeripherals
     }
 
-    /// Builds the `[CBConnectionEventMatchingOption: Any]` CoreBluetooth's real
-    /// `registerForConnectionEvents(options:)` expects and delegates to it. A no-op on
-    /// macOS, where the underlying API does not exist.
+    /// Builds the `[CBConnectionEventMatchingOption: Any]` and calls CoreBluetooth's
+    /// `registerForConnectionEvents(options:)`. It does nothing on macOS, which lacks the API.
     public func registerForConnectionEvents(services: [ServiceIdentifier]?, peripherals: [UUID]?) {
         #if !os(macOS)
         var options: [CBConnectionEventMatchingOption: Any] = [:]
@@ -138,8 +129,8 @@ extension CBCentralManager: CentralManaging {
         #endif
     }
 
-    /// Delegates to the real `registerForConnectionEvents(options:)` with `nil` — how
-    /// CoreBluetooth expresses deregistration. A no-op on macOS.
+    /// Calls `registerForConnectionEvents(options:)` with `nil`, which deregisters. It does
+    /// nothing on macOS.
     public func unregisterForConnectionEvents() {
         #if !os(macOS)
         registerForConnectionEvents(options: nil)

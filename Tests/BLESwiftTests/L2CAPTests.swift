@@ -66,7 +66,7 @@ struct L2CAPTests {
         await fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .hold }
 
         let openTask = Task { try await peripheral.openL2CAPChannel(psm: Self.psm) }
-        // Wait until the open has actually been issued to the fake before cancelling.
+        // Wait until the code has issued the open to the fake, then cancel.
         await waitFor { await fakePeripheral.onQueue { !fakePeripheral.openL2CAPChannelCalls.isEmpty } }
         openTask.cancel()
 
@@ -77,7 +77,7 @@ struct L2CAPTests {
             #expect(error as? BLESwiftError == .operationCancelled)
         }
 
-        // Still connected, and a fresh open now succeeds — the session was left healthy.
+        // The peripheral is still connected and a new open succeeds: the session stayed healthy.
         guard case .connected = await central.connectionState(of: fakePeripheral.peripheralIdentifier) else {
             Issue.record("expected the peripheral to remain .connected after a cancelled open")
             return

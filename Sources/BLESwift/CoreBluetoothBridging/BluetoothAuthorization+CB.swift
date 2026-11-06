@@ -8,7 +8,7 @@ import CoreBluetooth
 
 extension BluetoothAuthorization {
 
-    /// Maps a `CBManagerAuthorization` to its ``BluetoothAuthorization`` equivalent.
+    /// Maps a `CBManagerAuthorization` to its equivalent ``BluetoothAuthorization``.
     init(_ cbManagerAuthorization: CBManagerAuthorization) {
         switch cbManagerAuthorization {
         case .notDetermined:

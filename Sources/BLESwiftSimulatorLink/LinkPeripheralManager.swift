@@ -9,65 +9,48 @@ import Dispatch
 import Foundation
 import Logging
 
-/// A `PeripheralManaging` backed by a provider process rather than a local
-/// `CBPeripheralManager`: every call is encoded as a `HostRequest` and sent
-/// over one `LinkClientSession`, and every `HostWireEvent` the provider
-/// sends back is translated into a `PeripheralHostEvent`.
+/// A `PeripheralManaging` that a provider process backs, not a local `CBPeripheralManager`. It
+/// sends each call to the provider as a `HostRequest` over one `LinkClientSession`. It turns each
+/// `HostWireEvent` that comes back into a `PeripheralHostEvent`.
 ///
-/// Hand one to `PeripheralHost(backend:queue:)`, passing the *same* `DispatchQueue`:
+/// Give one to `PeripheralHost(backend:queue:)`. Pass the *same* `DispatchQueue`:
 ///
 /// ```swift
 /// let queue = DispatchQueue(label: "ble")
-/// let host = PeripheralHost(backend: LinkPeripheralManager(endpoint: endpoint, queue: queue), queue: queue)
+/// let backend = LinkPeripheralManager(endpoint: endpoint, queue: queue)
+/// let host = PeripheralHost(backend: backend, queue: queue)
 /// ```
 ///
-/// The provider hosts this peripheral on its `VirtualRadio`, so a `Central` in *another*
-/// simulator, dialing the same provider through a `LinkCentral`, can scan for it, connect,
-/// and hold a full GATT conversation with it.
+/// The provider hosts the peripheral on its `VirtualRadio`. A `Central` in another simulator can
+/// connect to it through a ``LinkCentral``.
 ///
-/// **Radio state.** ``radioState`` starts `.unsupported` — a provider that has not answered
-/// is indistinguishable from a machine without Bluetooth — and that first `.unsupported` is
-/// delivered as soon as an ``eventHandler`` is attached. The provider's own `didUpdateState`
-/// replaces it; if the link then drops, the state falls back to `.unsupported`,
-/// ``isAdvertising`` becomes `false`, and every subscriber the host had is reported gone with
-/// a synthesized `didUnsubscribe`. The subscribers really are gone — they belonged to the
-/// provider session that just died, and a reconnect mints fresh `Subscriber`
-/// ids — so a host left holding them would be pushing at centrals that no longer exist.
+/// - ``radioState`` is `.unsupported` until the provider reports its state.
+/// - If an established link drops, the state returns to `.unsupported` and ``isAdvertising``
+///   becomes `false`. The manager reports each subscriber as gone with `didUnsubscribe`.
+/// - ``updateValue(_:for:onSubscribed:)`` returns `false` when `LinkFlowControl.updateValueWindow`
+///   pushes wait for an acknowledgement. `readyToUpdateSubscribers` reopens the window.
+/// - Call every member on ``queue``.
 ///
-/// **Notification back-pressure.** ``updateValue(_:for:onSubscribed:)`` returns `false` once
-/// `LinkFlowControl.updateValueWindow` pushes are in flight unacknowledged,
-/// exactly as a full CoreBluetooth transmit queue does; the provider acknowledges each push
-/// as its own backend accepts it, and the acknowledgement that reopens the window is
-/// reported as `readyToUpdateSubscribers`. A dropped link empties the window — the
-/// acknowledgements died with the session that owed them, and pushes made while it is down
-/// are dropped unsent, so neither can ever be acknowledged — and the window is emptied again
-/// at the reconnect. A host blocked on the window when the link drops is released by the drop
-/// itself, with `bluetoothUnavailable`: a drop from any state but `.unsupported`
-/// delivers `didUpdateState(.unsupported)`, and `PeripheralHost` fails every parked readiness
-/// waiter on any state but `.poweredOn`. The single `readyToUpdateSubscribers` at the
-/// reconnect is the backstop for a waiter that parked while the radio was already
-/// `.unsupported` — a drop from that state delivers no state change — not the release path
-/// for the drop.
-///
-/// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
-/// ``LinkCentral``: every stored property is `nonisolated(unsafe)`, safe only because every
-/// `PeripheralManaging` member asserts `dispatchPrecondition(condition: .onQueue(queue))`
-/// and touches state inline, and every event delivery is `queue.async`, never inline.
+/// For the full rules, see <doc:BLESwiftSimulatorLink#Radio-state-and-dropped-links> and
+/// <doc:BLESwiftSimulatorLink#Notification-back-pressure>.
 public final class LinkPeripheralManager: PeripheralManaging, Sendable {
 
-    /// The queue every request, state update, and event delivery is confined to — the same
-    /// queue the owning `PeripheralHost` must be constructed with.
+    /// The queue to which the code confines every request, state update, and event delivery.
+    /// The owning `PeripheralHost` must be constructed with the same queue.
     public let queue: DispatchQueue
 
-    /// The client session this manager owns; held strongly for its whole lifetime.
+    /// The client session that this manager owns. The manager holds it strongly for its whole
+    /// lifetime.
     private let session: LinkClientSession
 
-    /// The identity this manager asks every provider to host its device under. Minted once,
-    /// per instance, and sent on every hello — the opening one and every reconnect's.
+    /// The identity under which this manager asks every provider to host its device. The manager
+    /// creates it once for each instance and sends it in every hello, including each
+    /// reconnect's hello.
     private let hostIdentifier: UUID
 
-    /// Where a provider that refused ``hostIdentifier`` is reported. The only thing worth
-    /// saying here: nothing else in this manager has an outcome the caller cannot already see.
+    /// Where the manager reports a provider that refused ``hostIdentifier``. It is the only such
+    /// place, because nothing else in this manager has an outcome that the caller cannot already
+    /// see.
     private static let logger = Logger(label: "BLESwiftSimulatorLink.LinkPeripheralManager")
 
     nonisolated(unsafe) private var _eventHandler: ((PeripheralHostEvent) -> Void)?
@@ -75,74 +58,84 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     nonisolated(unsafe) private var _didDeliverInitialState = false
     nonisolated(unsafe) private var _isAdvertising = false
 
-    /// How many ``startAdvertising(_:)`` requests are still outstanding: sent, not yet
-    /// answered by a `didStartAdvertising`, and not cancelled by a ``stopAdvertising()``
-    /// behind them.
+    /// The number of ``startAdvertising(_:)`` requests that are still outstanding. Each of them
+    /// was sent, has no `didStartAdvertising` answer yet, and was not cancelled by a later
+    /// ``stopAdvertising()``.
     ///
-    /// It exists because the provider answers a start it has already stopped again. A start
-    /// and a stop sent on one queue turn are applied in that order over there — leaving the
-    /// hosted device silent — but the start's completion is minted from inside the start and
-    /// arrives here *after* the stop was sent. Latching ``isAdvertising`` on for that
-    /// completion left this manager claiming a radio the provider had already quieted, and
-    /// `PeripheralHost.startAdvertising(_:)` early-returns on the flag, so the host could
-    /// never advertise again for the life of the session. A stop zeroes the count instead,
-    /// and a completion with no start behind it is delivered — a host awaiting one must not
-    /// hang — without claiming the radio. `VirtualPeripheralManagerBackend` answers the same
-    /// race by making both writes from its serial chain; a client that owns neither the radio
-    /// nor the ordering counts the starts it has outstanding.
+    /// The count exists because the provider answers a start that it has already stopped again.
+    /// The provider applies a start and a stop that were sent in one queue turn in that order,
+    /// which leaves the hosted device silent. But the provider creates the start's completion
+    /// inside the start, so the completion arrives here *after* the code sent the stop.
+    ///
+    /// If the code latched ``isAdvertising`` on for that completion, this manager would claim a
+    /// radio that the provider already quieted, and `PeripheralHost.startAdvertising(_:)` would
+    /// return early on the flag. The host could then never advertise again for the life of the
+    /// session.
+    ///
+    /// Thus a stop sets the count to zero. The manager still delivers a completion that has no
+    /// start behind it, because a host that awaits one must not hang, but it does not claim the
+    /// radio.
+    ///
+    /// `VirtualPeripheralManagerBackend` answers the same race by making both writes from its
+    /// serial chain. A client owns neither the radio nor the ordering, so it counts the starts
+    /// that it has outstanding.
     nonisolated(unsafe) private var _outstandingStarts = 0
 
-    /// The subscribers this manager has delivered a `didSubscribe` for and not yet a
-    /// `didUnsubscribe`, per characteristic — the host's subscriber table, mirrored.
+    /// The subscribers for which this manager delivered a `didSubscribe` and not yet a
+    /// `didUnsubscribe`, for each characteristic. This is a mirror of the host's subscriber
+    /// table.
     ///
-    /// It exists only so a dropped link can be answered with the `didUnsubscribe` the dead
-    /// provider will never send. Keyed by ``BLESwiftCore/Subscriber`` id so a repeat
-    /// `didSubscribe` for the same central refreshes rather than duplicates it.
+    /// It exists only so the manager can answer a dropped link with the `didUnsubscribe` that the
+    /// dead provider never sends. The key is the ``BLESwiftCore/Subscriber`` id, so a repeat
+    /// `didSubscribe` for the same central refreshes the entry and does not duplicate it.
     nonisolated(unsafe) private var _subscribers: [CharacteristicIdentifier: [UUID: Subscriber]] = [:]
 
-    /// The sequence number the next ``updateValue(_:for:onSubscribed:)`` is tagged with.
+    /// The sequence number with which the next ``updateValue(_:for:onSubscribed:)`` is tagged.
     nonisolated(unsafe) private var _nextSequence: UInt64 = 0
 
-    /// The sequences of the pushes this manager has sent and not yet been acknowledged for,
-    /// oldest first — the occupied part of the window. An array rather than a `Set`, for
-    /// `LinkPeripheral`'s reasons: it never holds more than a window's worth, order makes a
-    /// stale acknowledgement obvious in a debugger, and a linear scan of that many elements is
-    /// cheaper than hashing.
+    /// The sequences of the pushes that this manager sent and that have no acknowledgement yet,
+    /// oldest first. They are the occupied part of the window. This is an array and not a
+    /// `Set`, for the same reasons as in `LinkPeripheral`:
+    ///
+    /// - It never holds more than the size of one window.
+    /// - The order makes a stale acknowledgement easy to see in a debugger.
+    /// - A linear scan of that many elements is cheaper than hashing.
     nonisolated(unsafe) private var _outstandingUpdates: [UInt64] = []
 
-    /// Whether the window was full when the link dropped. A host blocked on it at a drop from
-    /// any state but `.unsupported` has already been failed with `bluetoothUnavailable` by the `.unsupported`
-    /// state change; this flag arms the reconnect to emit one `readyToUpdateSubscribers` for
-    /// the waiter that case cannot reach — one parked before a drop taken from an
-    /// already-`.unsupported` radio, which delivers no state change to fail it, and whose
-    /// window is emptied here with the waiter still parked. Cleared by the reconnect that
-    /// emits it.
+    /// Whether the window was full when the link dropped.
+    ///
+    /// A host that was blocked on the window at a drop from any state but `.unsupported` is
+    /// already failed: the `.unsupported` state change failed it with `bluetoothUnavailable`.
+    ///
+    /// This flag arms the reconnect to emit one `readyToUpdateSubscribers`, for a waiter that the
+    /// state change cannot reach. That waiter parked before a drop from a radio that was already
+    /// `.unsupported`, and that drop delivers no state change to fail it. The code empties the
+    /// window here, and the waiter is still parked. The reconnect that emits the signal clears
+    /// the flag.
     nonisolated(unsafe) private var _wasBlockedAtDrop = false
 
-    /// Whether the next provider state is a *reconnect* and must clear the window rather than
-    /// trust it.
+    /// Whether the next provider state is a *reconnect*. In that case the code must clear the
+    /// window and must not trust it.
     ///
-    /// Starts `true`, so the *first* provider connection is treated as a reconnect too: a host
-    /// that filled the window before the link ever came up parked its pushes against no
-    /// provider at all, and nothing will ever acknowledge them. That is the same
-    /// unacknowledgeable state a drop leaves behind, and it is cleared the same way — by the
-    /// connection that answers it.
+    /// The value starts as `true`, so the code treats the *first* provider connection as a
+    /// reconnect too. A host can fill the window before the link ever comes up. Its pushes then
+    /// parked against no provider at all, and nothing will ever acknowledge them. This is the
+    /// same unacknowledgeable state that a drop leaves, and the connection that answers it
+    /// clears it in the same way.
     nonisolated(unsafe) private var _isAwaitingReconnect = true
 
-    /// Creates a peripheral manager that drives the provider at `endpoint`, and starts
-    /// dialing it immediately. Reconnection is automatic, at `retryInterval`.
+    /// Creates a peripheral manager that controls the provider at `endpoint`, and starts dialing
+    /// it at once. Reconnection is automatic, at `retryInterval`.
     ///
     /// - Parameters:
-    ///   - endpoint: The provider's host and port.
-    ///   - queue: The serial queue this manager is confined to — the same instance the
-    ///     owning `PeripheralHost` is constructed with. Must be serial
-    ///     (`DispatchQueue(label:)` is).
-    ///   - clientName: A human-readable name sent in the handshake. The provider both logs
-    ///     it and gives it to the hosted device, so it is the name remote centrals see.
-    ///     Defaults to the current process's name.
-    ///   - codec: The codec used to encode messages. Defaults to
-    ///     `LinkCodec.binaryPropertyList`.
-    ///   - retryInterval: How long to wait before redialing after a failure. Defaults to two
+    ///   - endpoint: The host and port of the provider.
+    ///   - queue: The serial queue to which this manager is confined. It is the instance with
+    ///     which the owning `PeripheralHost` is constructed.
+    ///   - clientName: A name that people can read, sent in the handshake. The provider logs it
+    ///     and gives it to the hosted device, so it is the name that remote centrals see. The
+    ///     default is the name of the current process.
+    ///   - codec: The codec that encodes messages. The default is `LinkCodec.binaryPropertyList`.
+    ///   - retryInterval: How long to wait before a new dial after a failure. The default is two
     ///     seconds.
     public init(
         endpoint: LinkEndpoint,
@@ -152,9 +145,10 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         retryInterval: Duration = .seconds(2)
     ) {
         self.queue = queue
-        // One identity per manager, sent on every hello this session makes: the provider hosts
-        // the device under it, so a link drop and its reconnect leave the same device on the
-        // radio rather than a fresh one every central would have to rediscover.
+        // One identity for each manager, sent in every hello that this session makes. The
+        // provider hosts the device under it, so a link drop and its reconnect leave the same
+        // device on the radio and not a new device that every central would have to discover
+        // again.
         let hostIdentifier = UUID()
         self.hostIdentifier = hostIdentifier
         self.session = LinkClientSession(
@@ -166,14 +160,14 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
             queue: queue,
             retryInterval: retryInterval
         )
-        // Weak captures: the session is owned by this manager, so a strong capture would be a
-        // cycle and `deinit` — which stops the session — would never run.
+        // The captures are weak. This manager owns the session, so a strong capture would make a
+        // cycle, and `deinit`, which stops the session, would never run.
         session.onConnected = { hello in
-            // A provider that hosted this device under something other than what was asked for
-            // has refused the identity — because one of its own devices holds it — and every
-            // reconnect will ask again and be refused again. The client cannot repair that, so
-            // it says so: to every central this host looks like a device that keeps changing
-            // its identifier, and this line is the only place that is explained.
+            // A provider hosted this device under an identity other than the one that the client
+            // asked for, because one of its own devices holds that identity. Every reconnect will
+            // ask again and the provider will refuse again. The client cannot repair this, so it
+            // reports the problem. To every central, this host looks like a device that keeps
+            // changing its identifier. This line is the only place that explains it.
             guard let assigned = hello.assignedHostIdentifier, assigned != hostIdentifier else { return }
             Self.logger.warning(
                 """
@@ -191,20 +185,20 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         session.stop()
     }
 
-    /// Whether the provider has accepted the handshake and the link is live.
+    /// Whether the provider accepted the handshake and the link is live.
     public var isProviderConnected: Bool {
         session.isConnected
     }
 
-    /// Stops the session, then runs the teardown a dropped link runs — every subscriber
-    /// reported as departing and the state dropped to `.unsupported` — and detaches the event
-    /// handler a turn behind it. Idempotent, and safe to call from any thread. Nothing calls it in production;
-    /// `deinit` stops the session on its own.
+    /// Stops the session, then runs the teardown that a dropped link runs. The teardown reports
+    /// every subscriber as departing and drops the state to `.unsupported`. The function detaches
+    /// the event handler one turn later. Repeated calls are safe, and it is safe to call from any
+    /// thread. Nothing calls it in production, because `deinit` stops the session on its own.
     ///
-    /// **The teardown runs before the handler goes, and the handler goes a turn behind it**,
-    /// for the reason ``LinkCentral/shutdown()`` gives: the session is marked stopped before
-    /// its connection reaches a terminal state, so `onDisconnected` never fires, and a host
-    /// awaiting `add(_:)` or `startAdvertising(_:)` was stranded rather than failed.
+    /// **The teardown runs before the handler goes. The handler goes one turn later.** The reason
+    /// is the same as in ``LinkCentral/shutdown()``. The session is marked stopped before its
+    /// connection reaches a terminal state, so `onDisconnected` never fires. A host that awaited
+    /// `add(_:)` or `startAdvertising(_:)` was stranded and not failed.
     public func shutdown() {
         session.stop()
         queue.async { [self] in
@@ -215,46 +209,48 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
-    /// Drops the live link, exactly as a transport failure does, and lets the session redial
-    /// under the same `hostIdentifier`.
+    /// Drops the live link, as a transport failure does, and lets the session dial again under
+    /// the same `hostIdentifier`.
     ///
-    /// Test-only: production code has no reason to drop a healthy link. It exists so a test
-    /// can produce the reconnect that races a provider session's teardown against its
-    /// successor's registration — the one thing a provider restart cannot reproduce, since
-    /// that takes the whole radio with it.
+    /// This is for tests only, because production code has no reason to drop a healthy link. It
+    /// lets a test produce the reconnect that races the teardown of a provider session against
+    /// the registration of its successor. A provider restart cannot reproduce this race,
+    /// because the restart takes the whole radio with it.
     package func dropLinkForTesting() {
         session.dropConnection()
     }
 
     // MARK: - PeripheralManaging
 
-    /// The app's Bluetooth authorization status. Always `.allowedAlways`: authorization is
-    /// the provider process's concern, and it would have refused the handshake otherwise.
+    /// The Bluetooth authorization status of the app. It is always `.allowedAlways`, because the
+    /// provider process is responsible for authorization and would have refused the handshake
+    /// otherwise.
     public static var bluetoothAuthorization: BluetoothAuthorization { .allowedAlways }
 
-    /// The provider's last reported radio state, or `.unsupported` while no provider is
-    /// connected.
+    /// The last radio state that the provider reported. The value is `.unsupported` while no
+    /// provider is connected.
     public var radioState: CentralState {
         dispatchPrecondition(condition: .onQueue(queue))
         return _radioState
     }
 
-    /// Whether the provider's host is currently advertising. `true` from a successful
-    /// `didStartAdvertising` for a start that is still outstanding, `false` from
-    /// ``stopAdvertising()`` and from a dropped link — both of which cancel every outstanding
-    /// start, so the completion of one the provider has already stopped again cannot latch
-    /// this back on. See `_outstandingStarts`.
+    /// Whether the provider's host is advertising now. The value is `true` after a successful
+    /// `didStartAdvertising` for a start that is still outstanding. The value is `false` after
+    /// ``stopAdvertising()`` and after a dropped link, which both cancel every outstanding
+    /// start. Thus the completion of a start that the provider already stopped again cannot
+    /// latch this value back on. See `_outstandingStarts`.
     public var isAdvertising: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _isAdvertising
     }
 
-    /// Receives every `PeripheralHostEvent` translated from the provider's wire events.
+    /// Receives every `PeripheralHostEvent` that the code translated from the provider's wire
+    /// events.
     ///
-    /// Attaching a handler schedules delivery of the current ``radioState`` — mirroring
-    /// CoreBluetooth's `peripheralManagerDidUpdateState(_:)` after a delegate is set, and
-    /// making the initial `.unsupported` observable even when the provider is never
-    /// reachable.
+    /// When an app attaches a handler, the manager schedules the delivery of the current
+    /// ``radioState``. This mirrors the `peripheralManagerDidUpdateState(_:)` that CoreBluetooth
+    /// sends after an app sets a delegate. It also makes the first `.unsupported` observable when
+    /// the provider is never reachable.
     public var eventHandler: ((PeripheralHostEvent) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -269,7 +265,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
-    /// Asks the provider's host to start advertising. Completion arrives as
+    /// Asks the provider's host to start advertising. The completion arrives as
     /// `didStartAdvertising(error:)`.
     public func startAdvertising(_ advertisement: PeripheralAdvertisement) {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -280,12 +276,12 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         ))
     }
 
-    /// Asks the provider's host to stop advertising. Reports no completion of its own, so
-    /// ``isAdvertising`` drops here rather than on an acknowledgement.
+    /// Asks the provider's host to stop the advertisement. It reports no completion of its own,
+    /// so ``isAdvertising`` drops here and not on an acknowledgement.
     ///
-    /// It also cancels every start still outstanding: the provider applies this stop behind
-    /// them, so the completion any of them still owes describes a radio this call has since
-    /// quieted. See `_outstandingStarts`.
+    /// It also cancels every start that is still outstanding. The provider applies this stop
+    /// after them, so the completion that any of them still owes describes a radio that this
+    /// call has since quieted. See `_outstandingStarts`.
     public func stopAdvertising() {
         dispatchPrecondition(condition: .onQueue(queue))
         _isAdvertising = false
@@ -293,7 +289,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         send(.stopAdvertising)
     }
 
-    /// Asks the provider's host to publish `service`. Completion arrives as
+    /// Asks the provider's host to publish `service`. The completion arrives as
     /// `didAddService(_:error:)`.
     public func add(_ service: GATTService) {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -306,18 +302,18 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         send(.removeAllServices)
     }
 
-    /// Answers the read or write request `token` identifies, on the provider's host.
+    /// Answers the read or write request that `token` identifies, on the provider's host.
     public func respond(to token: RequestToken, value: Data?, error: ATTError?) {
         dispatchPrecondition(condition: .onQueue(queue))
         send(.respond(token: token.rawValue, value: value, attError: error?.rawValue))
     }
 
-    /// Pushes `value` for `characteristic` to `centrals` (or every subscriber, when `nil`)
-    /// through the provider's host.
+    /// Pushes `value` for `characteristic` to `centrals` through the provider's host. If
+    /// `centrals` is `nil`, it pushes to every subscriber.
     ///
-    /// - Returns: `false` — without sending anything — once
-    ///   `LinkFlowControl.updateValueWindow` pushes are unacknowledged;
-    ///   `true` otherwise, having sent the push and claimed a slot in the window.
+    /// - Returns: `false`, and sends nothing, if `LinkFlowControl.updateValueWindow` pushes are
+    ///   unacknowledged. Otherwise `true`, and the function sent the push and claimed a slot in
+    ///   the window.
     public func updateValue(
         _ value: Data,
         for characteristic: CharacteristicIdentifier,
@@ -339,7 +335,7 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
 
     // MARK: - Sending
 
-    /// Sends `request` over the link. Must be called on ``queue``.
+    /// Sends `request` over the link. Call it on ``queue``.
     private func send(_ request: HostRequest) {
         dispatchPrecondition(condition: .onQueue(queue))
         session.send(.hostRequest(request))
@@ -347,36 +343,27 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
 
     // MARK: - Link lifecycle
 
-    /// Handles the link dropping after having been established: nothing is advertising any
-    /// more, every central that had subscribed is reported unsubscribed, and the radio state
-    /// is unknowable again.
+    /// Handles a link that dropped after it was established. Nothing advertises, and the radio
+    /// state is unknown again.
     ///
-    /// The subscribers are synthesized rather than left standing because nothing else will
-    /// ever retract them: the provider that owed the `didUnsubscribe` is gone, and the one
-    /// that replaces it mints new ``BLESwiftCore/Subscriber`` ids for whoever resubscribes. A
-    /// host that kept the old ones would push at centrals that cannot receive.
-    ///
-    /// The notification window is emptied here: every unacknowledged push belonged to a
-    /// session that no longer exists, so no `updateValueDelivered` can ever arrive for it and
-    /// a surviving count would wedge the window shut. Emptying it here also keeps
-    /// ``updateValue(_:for:onSubscribed:)`` answering `true` while the link is down, so a host
-    /// pushing into the dark is not wedged either — those pushes are dropped unsent and are
-    /// cleared again at the reconnect. No `readyToUpdateSubscribers` is emitted here — a
-    /// readiness signal against a dead radio would only invite a push that goes nowhere. A
-    /// host that was *blocked* at that moment is released all the same, by the
-    /// `didUpdateState(.unsupported)` delivered below when the radio was not already `.unsupported`:
-    /// `PeripheralHost` fails every parked readiness waiter with `bluetoothUnavailable` on any
-    /// state but `.poweredOn`. When the radio was already `.unsupported` no state change is
-    /// delivered, and `_wasBlockedAtDrop` arms the reconnect's readiness instead.
+    /// - The manager synthesizes `didUnsubscribe` for each subscriber. The old provider session
+    ///   owed it, and a new session creates new ``BLESwiftCore/Subscriber`` ids.
+    /// - The code empties the notification window. No `updateValueDelivered` can arrive for a push
+    ///   of the old session. A surviving count would hold the window shut. While the link is down,
+    ///   ``updateValue(_:for:onSubscribed:)`` returns `true` and drops the push.
+    /// - The code emits no `readyToUpdateSubscribers`, because the radio is dead.
+    /// - If the radio was not `.unsupported`, `didUpdateState(.unsupported)` releases a blocked
+    ///   host. `PeripheralHost` fails each parked waiter in any state but `.poweredOn`. If it was
+    ///   already `.unsupported`, `_wasBlockedAtDrop` arms the readiness signal at the reconnect.
     private func handleLinkDropped() {
         dispatchPrecondition(condition: .onQueue(queue))
         _isAdvertising = false
-        // The provider that owed those completions is gone, and one still on the wire from it
-        // may yet be decoded — it describes a radio that no longer exists either way.
+        // The provider that owed those completions is gone. The code can still decode one that
+        // is on the wire from it. In either case it describes a radio that no longer exists.
         _outstandingStarts = 0
         _isAwaitingReconnect = true
-        // Before the state change, so a host draining its events sees its subscribers leave
-        // and only then hears the radio is gone.
+        // This happens before the state change, so a host that drains its events sees its
+        // subscribers leave and only then hears that the radio is gone.
         let departing = _subscribers
         _subscribers.removeAll()
         for (characteristic, subscribers) in departing {
@@ -391,42 +378,45 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         deliver(.didUpdateState(.unsupported))
     }
 
-    /// Routes an inbound message; anything that is not a `PeripheralHost`-role event is not
-    /// this client's business.
+    /// Routes an inbound message. A message that is not a `PeripheralHost`-role event is not a
+    /// concern of this client.
     private func handle(_ message: LinkMessage) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard case .hostEvent(let event) = message else { return }
         do {
             try handle(event)
         } catch {
-            // See `LinkCentral.handle(_:)`: a malformed identifier from the provider is a
-            // provider fault, answered by dropping the session and redialing.
+            // See `LinkCentral.handle(_:)`. A malformed identifier from the provider is the
+            // provider's fault. The answer is to drop the session and dial again.
             session.dropConnection()
         }
     }
 
     // MARK: - Wire events
 
-    /// Translates one ``BLESwiftLink/HostWireEvent`` into the state updates it implies
-    /// (applied inline) and the `PeripheralHostEvent` it stands for (delivered on the next
-    /// queue tick).
+    /// Translates one ``BLESwiftLink/HostWireEvent`` into the state updates that it implies and
+    /// the `PeripheralHostEvent` that it stands for. The code applies the updates inline and
+    /// delivers the event on the next queue tick.
     private func handle(_ event: HostWireEvent) throws {
         dispatchPrecondition(condition: .onQueue(queue))
         switch event {
 
         case .didUpdateState(let state):
-            // Deliberately does NOT set `_didDeliverInitialState`; see `LinkCentral` for why
-            // a provider state landing before a handler exists must not suppress the attach.
+            // Do NOT set `_didDeliverInitialState` here, on purpose. See `LinkCentral` for the
+            // reason. A provider state that lands before a handler exists must not suppress the
+            // attach.
             _radioState = state.state
             deliver(.didUpdateState(state.state))
             if _isAwaitingReconnect {
-                // The provider is back, with a session — and a queue — of its own. Nothing this
-                // client sent to the old one will ever be acknowledged, whether it was in
-                // flight at the drop or dropped unsent afterwards, so the window is emptied
-                // here too. A host blocked at the drop was already failed by the `.unsupported`
-                // state change; one still parked — it parked while the radio was already
-                // `.unsupported`, so no state change failed it — is told it can push again
-                // only by this `readyToUpdateSubscribers`.
+                // The provider is back, with a session and a queue of its own. Nothing that this
+                // client sent to the old provider will ever get an acknowledgement, whether the
+                // push was in flight at the drop or the manager dropped it unsent after the drop.
+                // Thus the code empties the window here too.
+                //
+                // The `.unsupported` state change already failed a host that was blocked at the
+                // drop. A host can still be parked if it parked while the radio was already
+                // `.unsupported`, so no state change failed it. Only this
+                // `readyToUpdateSubscribers` tells that host that it can push again.
                 _isAwaitingReconnect = false
                 let wasBlocked = _outstandingUpdates.count >= LinkFlowControl.updateValueWindow || _wasBlockedAtDrop
                 _wasBlockedAtDrop = false
@@ -435,9 +425,9 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
             }
 
         case .didStartAdvertising(let error):
-            // Only a start no `stopAdvertising()` (or link drop) has cancelled may claim the
-            // radio; the completion itself is always reported, cancelled or not, so a host
-            // awaiting one is never left hanging. See `_outstandingStarts`.
+            // Only a start that no `stopAdvertising()` and no link drop cancelled can claim the
+            // radio. The code always reports the completion itself, cancelled or not, so a host
+            // that awaits one is never left to hang. See `_outstandingStarts`.
             if _outstandingStarts > 0 {
                 _outstandingStarts -= 1
                 if error == nil { _isAdvertising = true }
@@ -467,16 +457,19 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
             deliver(.didUnsubscribe(central: subscriber, characteristic: identifier))
 
         case .updateValueDelivered(let sequence):
-            // Consumed, never forwarded: `readyToUpdateSubscribers` is synthesized here from
-            // the acknowledgement that reopens a full window, exactly as `LinkCentral`
-            // synthesizes write-without-response readiness.
+            // The code consumes this event and never forwards it. It synthesizes
+            // `readyToUpdateSubscribers` here from the acknowledgement that reopens a full window.
+            // `LinkCentral` synthesizes write-without-response readiness in the same way.
             //
-            // Matched against the sequences still outstanding, exactly as `LinkPeripheral`
-            // matches a write acknowledgement. A sequence this manager never sent, one it has
-            // already been acknowledged for, or one from before a drop — the drop and the
-            // reconnect both empty the set, and the dead session's acknowledgements may still
-            // be on the wire when they do — is ignored, rather than crediting the window the
-            // *next* session is filling.
+            // The code matches the event against the sequences that are still outstanding, as
+            // `LinkPeripheral` does for a write acknowledgement. It ignores these sequences:
+            //
+            // - A sequence that this manager never sent.
+            // - A sequence that it already got an acknowledgement for.
+            // - A sequence from before a drop. The drop and the reconnect both empty the set, and
+            //   the dead session's acknowledgements can still be on the wire when they do.
+            //
+            // Thus the code does not credit the window that the *next* session is filling.
             guard let index = _outstandingUpdates.firstIndex(of: sequence) else { return }
             let wasFull = _outstandingUpdates.count >= LinkFlowControl.updateValueWindow
             _outstandingUpdates.remove(at: index)
@@ -486,8 +479,8 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
-    /// Delivers `event` to ``eventHandler`` asynchronously on ``queue``, honoring the seam's
-    /// never-inline delivery contract.
+    /// Delivers `event` to ``eventHandler`` asynchronously on ``queue``, as the seam's
+    /// never-inline delivery contract requires.
     private func deliver(_ event: PeripheralHostEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
         queue.async { [self] in

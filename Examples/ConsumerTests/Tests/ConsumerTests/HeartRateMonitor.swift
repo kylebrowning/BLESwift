@@ -2,12 +2,12 @@
 //  HeartRateMonitor.swift
 //  ConsumerTests
 //
-//  A small consumer-style domain type, mirroring `Examples/HeartRateMonitor` in the root
-//  package: the Bluetooth SIG-assigned Heart Rate service/characteristic identifiers, and a
-//  `Receivable` decoder for the characteristic's wire format. Exists here (rather than being
-//  imported from the root example) because this package builds against BLESwift only via
-//  its published products — it has no access to the root package's `Examples/` sources,
-//  same as any real consumer wouldn't.
+//  A small domain type in the style of a consumer. It mirrors `Examples/HeartRateMonitor` in the
+//  root package, with the Bluetooth SIG-assigned Heart Rate service and characteristic identifiers
+//  and a `Receivable` decoder for the characteristic's wire format. The type lives here and is not
+//  imported from the root example, because this package builds against BLESwift only through its
+//  published products and, like a real consumer, cannot access the root package's `Examples/`
+//  sources.
 //
 
 import BLESwift
@@ -21,9 +21,9 @@ enum HeartRateGATT {
     static let bodySensorLocation = CharacteristicIdentifier(uuid: "2A38", service: service)
 }
 
-/// Decodes the Bluetooth SIG "Heart Rate Measurement" characteristic (`2A37`) wire
-/// format: a one-byte flags field, followed by either an 8-bit or 16-bit heart-rate
-/// value depending on flags bit 0 (0 = `UInt8`, 1 = `UInt16`, little-endian).
+/// Decodes the Bluetooth SIG "Heart Rate Measurement" characteristic (`2A37`) wire format: a
+/// one-byte flags field followed by a heart-rate value. Bit 0 of the flags selects the size of the
+/// value (0 = 8-bit `UInt8`, 1 = 16-bit `UInt16`, little-endian).
 struct HeartRateMeasurement: Receivable, Equatable {
     let beatsPerMinute: Int
 
@@ -40,7 +40,7 @@ struct HeartRateMeasurement: Receivable, Equatable {
         }
     }
 
-    /// Encodes back to the same wire format, always using the 8-bit form — lets tests
+    /// Encodes the value back to the same wire format, always in the 8-bit form. Tests use this to
     /// script a `scriptedReadValues` entry from a typed value instead of raw bytes.
     static func wireData(beatsPerMinute: UInt8) -> Data {
         Data([0x00, beatsPerMinute])

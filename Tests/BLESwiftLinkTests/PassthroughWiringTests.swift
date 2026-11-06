@@ -15,17 +15,15 @@ import Foundation
 import BLESwiftCompat17
 import Testing
 
-/// What a passthrough ``BLESwiftProvider/Provider`` owes its clients: every call a linked
-/// client makes reaches *both* the virtual radio and the host's real backend, and events
-/// from either reach the client.
+/// What a passthrough ``BLESwiftProvider/Provider`` owes its clients. Every call that a linked
+/// client makes reaches *both* the virtual radio and the host's real backend, and events from
+/// either reach the client.
 ///
-/// The real half is stood in for by `BLESwiftTestSupport`'s fakes, injected through
+/// `BLESwiftTestSupport` fakes stand in for the real half. The tests inject them through
 /// ``BLESwiftProvider/ProviderConfiguration/centralBackendFactory`` and
-/// ``BLESwiftProvider/ProviderConfiguration/peripheralManagerBackendFactory`` — the very
-/// seam ``BLESwiftProvider/CoreBluetoothBackends`` fills when no factory is given. So the
-/// composition these tests exercise is the shipped one, minus the Bluetooth hardware. The
-/// two smoke tests at the end cover what a fake cannot: that `CoreBluetoothBackends` really
-/// does vend a live, queue-confined CoreBluetooth object.
+/// ``BLESwiftProvider/ProviderConfiguration/peripheralManagerBackendFactory``, the seam that
+/// ``BLESwiftProvider/CoreBluetoothBackends`` fills by default. The two smoke tests at the end show
+/// that `CoreBluetoothBackends` vends a live CoreBluetooth object that the queue confines.
 @Suite("Provider passthrough wiring")
 struct PassthroughWiringTests {
 
@@ -36,8 +34,8 @@ struct PassthroughWiringTests {
 
     private static let realDeviceID = UUID(uuidString: "3F2A1C4E-77B5-4D6A-9E10-2C8B4F5A6D7E")!
 
-    /// One fixture device on the provider's virtual radio, so a scan has something virtual
-    /// to find alongside whatever the real backend reports.
+    /// One fixture device on the provider's virtual radio, so a scan has something virtual to find,
+    /// together with whatever the real backend reports.
     private static let fixtureJSON = """
     { "devices": [ { "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8", "name": "Fixture HRM",
       "advertisedServices": ["180D"],
@@ -45,7 +43,7 @@ struct PassthroughWiringTests {
         { "uuid": "2A37", "properties": ["read", "notify"], "value": "AEg=" } ] } ] } ] }
     """
 
-    /// The service a peripheral-role client hosts in the host-side tests.
+    /// The service that a peripheral-role client hosts in the host-side tests.
     private static var service: GATTService {
         GATTService(identifier: heartRate, characteristics: [
             GATTCharacteristic(identifier: measurement, properties: [.read, .notify], permissions: [.readable])
@@ -54,9 +52,8 @@ struct PassthroughWiringTests {
 
     // MARK: - Rig
 
-    /// A `Sendable` hand-off for a fake the backend factory builds on the session's own
-    /// queue — `Mutex` is non-copyable, so it cannot live in a struct alongside the rest of
-    /// a rig.
+    /// A `Sendable` hand-off for a fake that the backend factory builds on the session's queue.
+    /// `Mutex` is non-copyable, so it cannot live in a struct together with the rest of a rig.
     private final class FakeBox<Fake: Sendable>: Sendable {
         private let storage = Mutex<Fake?>(nil)
 
@@ -67,9 +64,8 @@ struct PassthroughWiringTests {
 
     /// A started passthrough provider on a system-assigned loopback port.
     ///
-    /// Both factories are called once per session, on that session's own serial queue —
-    /// which is exactly why the fakes are constructed and scripted *inside* the closure:
-    /// their scripting setters are queue-confined.
+    /// The provider calls both factories once for each session, on that session's queue, so the
+    /// test constructs and scripts the fakes *inside* the closure.
     private func makeProvider(
         fixtures: [FixtureDevice] = [],
         centralFactory: (@Sendable (DispatchQueue) -> any CentralManaging)? = nil,
@@ -86,7 +82,7 @@ struct PassthroughWiringTests {
         return provider
     }
 
-    /// A `LinkCentral` dialing `port` on a queue of its own.
+    /// A `LinkCentral` that dials `port` on its own queue.
     private func makeLink(port: UInt16, label: String) -> (LinkCentral, DispatchQueue) {
         let queue = DispatchQueue(label: label)
         let link = LinkCentral(
@@ -98,7 +94,7 @@ struct PassthroughWiringTests {
         return (link, queue)
     }
 
-    /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.
+    /// Runs `body` on `queue` and returns its result. It does not block a cooperative thread.
     private static func onQueue<T: Sendable>(
         _ queue: DispatchQueue,
         _ body: @escaping @Sendable () -> T
@@ -108,7 +104,7 @@ struct PassthroughWiringTests {
         }
     }
 
-    /// Drops the client's link, waits for the provider to notice, then stops it.
+    /// Drops the client's link, waits for the provider to notice, then stops the provider.
     private func tearDown(link: LinkCentral, provider: Provider) async {
         link.shutdown()
         await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 0 }
@@ -132,7 +128,6 @@ struct PassthroughWiringTests {
         let central = Central(backend: link, queue: queue)
         await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
 
-        // The virtual half: the fixture is found through this one scan.
         var found: Discovery?
         for try await event in await central.scan(services: [Self.heartRate], timeout: .seconds(5)) {
             if case .discovered(let discovery) = event {
@@ -142,7 +137,6 @@ struct PassthroughWiringTests {
         }
         #expect(found?.peripheral.name == "Fixture HRM")
 
-        // The real half: the same scan reached the injected backend, once, with the filter.
         let fake = try #require(box.value)
         #expect(await fake.onQueue { fake.scanCallCount } == 1)
         let services = await fake.onQueue { fake.lastScanServices }
@@ -155,8 +149,8 @@ struct PassthroughWiringTests {
     func realBackendPeripheralIsConnectable() async throws {
         let centralBox = FakeBox<FakeCentral>()
         let provider = try await makeProvider(centralFactory: { queue in
-            // On the session's own queue, so the fakes' queue-confined scripting setters
-            // may be driven inline.
+            // The code runs on the session's queue, so the test can drive the fakes' queue-confined
+            // scripting setters inline.
             let fake = FakeCentral(queue: queue, state: .poweredOn)
             let peripheral = FakePeripheral(identifier: Self.realDeviceID, name: "Real HRM", queue: queue)
             peripheral.availableServices = [Self.heartRate: [Self.measurement]]
@@ -172,8 +166,8 @@ struct PassthroughWiringTests {
         await waitFor(timeout: .seconds(5)) { central.state == .poweredOn }
         let fake = try #require(centralBox.value)
 
-        // The fake only advertises when told to, and a discovery delivered before the scan
-        // request has crossed the socket would be dropped — so sight it repeatedly until
+        // The fake advertises only when told to. A discovery delivered before the scan request
+        // crosses the socket would be dropped, so the test sights the peripheral repeatedly until
         // the client's stream yields.
         let identifier = PeripheralIdentifier(uuid: Self.realDeviceID, name: "Real HRM")
         let advertisement = AdvertisementData(localName: "Real HRM", serviceUUIDs: [Self.heartRate])
@@ -193,16 +187,16 @@ struct PassthroughWiringTests {
         sightings.cancel()
         let discovery = try #require(found)
 
-        // Connecting to it must resolve to the fake's remote, not a virtual placeholder —
-        // a placeholder would connect but have nothing to read.
+        // A connect to it must resolve to the fake's remote, not to a virtual placeholder. A
+        // placeholder would connect but have nothing to read.
         let peripheral = try await central.connect(discovery.peripheral)
         let value: Data = try await peripheral.read(from: Self.measurement)
         #expect(value == Data([0, 0x5B]))
         #expect(await fake.onQueue { fake.connectCallCount } == 1)
 
-        // No explicit disconnect: `FakeCentral.cancelPeripheralConnection` only records the
-        // call — it never delivers `didDisconnect` — so dropping the link is how this rig
-        // ends a connection, exactly as the L2CAP link tests do.
+        // There is no explicit disconnect: `FakeCentral.cancelPeripheralConnection` never delivers
+        // `didDisconnect`, so this rig ends a connection by dropping the link, as the L2CAP link
+        // tests do.
         await tearDown(link: link, provider: provider)
     }
 
@@ -221,12 +215,10 @@ struct PassthroughWiringTests {
         await waitFor(timeout: .seconds(5)) { link.isProviderConnected }
         await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
 
-        // `Central`'s connection-event and ANCS APIs are iOS-only (`#if !os(macOS)` and
-        // `#if os(iOS)` respectively) and this suite is macOS-only, so the requests are
-        // issued through `LinkCentral`'s own queue-confined `CentralManaging` witnesses —
-        // the exact calls `Central` forwards on iOS. What is under test is the
-        // wire → `CentralSession` → `CompositeCentral` → real backend path, which is
-        // identical either way.
+        // `Central`'s connection-event and ANCS APIs are iOS-only and this suite is macOS-only, so
+        // the test issues the requests through `LinkCentral`'s queue-confined `CentralManaging`
+        // witnesses, which are the calls that `Central` forwards on iOS. The path from wire to
+        // `CentralSession` to `CompositeCentral` to the real backend is identical.
         await Self.onQueue(queue) {
             link.registerForConnectionEvents(services: [Self.heartRate], peripherals: nil)
             guard let remote = link.retrievePeripherals(withIdentifiers: [Self.realDeviceID]).first else { return }
@@ -250,8 +242,8 @@ struct PassthroughWiringTests {
         let provider = try await makeProvider(centralFactory: { queue in
             let fake = FakeCentral(queue: queue, state: .poweredOn)
             let peripheral = FakePeripheral(identifier: Self.realDeviceID, name: "Real HRM", queue: queue)
-            // A maximum no caller could divide a payload by. The client refuses it outright,
-            // so an unclamped one here would cost the whole session.
+            // This is a maximum that no caller could divide a payload by. The client refuses it
+            // outright, so an unclamped maximum here would cost the whole session.
             peripheral.scriptedMaximumWriteValueLength = 0
             fake.retrievablePeripherals[Self.realDeviceID] = peripheral
             fake.connectBehavior = .succeed
@@ -266,11 +258,10 @@ struct PassthroughWiringTests {
             try await central.connect(PeripheralIdentifier(uuid: Self.realDeviceID, name: "Real HRM"))
         }
 
-        // `CentralSession`'s own defaults — 182 for `.withResponse`, the conservative 20 for
-        // `.withoutResponse` — stood in for the unusable pair.
+        // `CentralSession`'s own defaults stood in for the unusable pair: 182 for `.withResponse`
+        // and the conservative 20 for `.withoutResponse`.
         #expect(await peripheral.maximumWriteValueLength(for: .withResponse) == 182)
         #expect(await peripheral.maximumWriteValueLength(for: .withoutResponse) == 20)
-        // The connection cost nothing: the session is the one the client dialed.
         #expect(await provider.sessionCount == 1)
         #expect(link.isProviderConnected)
 
@@ -279,7 +270,7 @@ struct PassthroughWiringTests {
 
     // MARK: - Peripheral role
 
-    /// A `PeripheralHost` linked to `provider`, plus its link.
+    /// A `PeripheralHost` that is linked to `provider`, with its link.
     private func makeHost(port: UInt16, label: String) -> (PeripheralHost, LinkPeripheralManager) {
         let queue = DispatchQueue(label: label)
         let link = LinkPeripheralManager(
@@ -307,13 +298,11 @@ struct PassthroughWiringTests {
             PeripheralAdvertisement(localName: "Passthrough Host", serviceUUIDs: [Self.heartRate])
         )
 
-        // The real half: the service and the advertisement both landed on the fake.
         let fake = try #require(box.value)
         #expect(await fake.onQueue { fake.addedServices.map(\.identifier) } == [Self.heartRate])
         #expect(await fake.onQueue { fake.startAdvertisingCallCount } == 1)
         #expect(await fake.onQueue { fake.lastAdvertisement?.localName } == "Passthrough Host")
 
-        // The virtual half: a `Central` on the provider's own radio finds the same host.
         let virtualQueue = DispatchQueue(label: "passthrough.host.virtual")
         let virtualCentral = Central(
             backend: VirtualCentralBackend(radio: provider.radio, queue: virtualQueue),
@@ -346,8 +335,8 @@ struct PassthroughWiringTests {
         await waitFor(timeout: .seconds(5)) { host.state == .poweredOn }
         try await host.add(Self.service)
 
-        // The stream is created before the request is simulated — `readRequests()` does not
-        // replay, so subscribing inside the responder task would be a race.
+        // The test creates the stream before it simulates the request. `readRequests()` does not
+        // replay, so a subscription inside the responder task would be a race.
         let requests = await host.readRequests()
         let responder = Task {
             for await request in requests {
@@ -384,10 +373,9 @@ struct PassthroughWiringTests {
         await waitFor(timeout: .seconds(5)) { host.state == .poweredOn }
         try await host.add(Self.service)
 
-        // Streams before the simulation: neither replays.
         let events = await host.subscriptionEvents()
         let requests = await host.readRequests()
-        // One mutex per task: a `Mutex` is non-copyable, so two concurrent closures cannot
+        // One mutex for each task. A `Mutex` is non-copyable, so two concurrent closures cannot
         // share one.
         let subscribeMaxima = Mutex<[Int]>([])
         let readMaxima = Mutex<[Int]>([])
@@ -406,8 +394,8 @@ struct PassthroughWiringTests {
         }
 
         let fake = try #require(box.value)
-        // A maximum no caller could fragment a value by. The client refuses it outright, so
-        // an unclamped one here would cost the whole session.
+        // This is a maximum that no caller could fragment a value by. The client refuses it
+        // outright, so an unclamped maximum here would cost the whole session.
         let subscriber = Subscriber(id: UUID(), maximumUpdateValueLength: 0)
         fake.simulateSubscribe(central: subscriber, to: Self.measurement)
         _ = fake.simulateReadRequest(central: subscriber, characteristic: Self.measurement)
@@ -415,10 +403,8 @@ struct PassthroughWiringTests {
         await waitFor(timeout: .seconds(5)) {
             subscribeMaxima.withLock { !$0.isEmpty } && readMaxima.withLock { !$0.isEmpty }
         }
-        // The conservative ATT default stood in for the unusable maximum, on both events.
         #expect(subscribeMaxima.withLock { $0 } == [20])
         #expect(readMaxima.withLock { $0 } == [20])
-        // The link cost nothing: the session is the one the client dialed.
         #expect(await provider.sessionCount == 1)
         #expect(hostLink.isProviderConnected)
 
@@ -434,9 +420,9 @@ struct PassthroughWiringTests {
     @Test("CoreBluetoothBackends vends a live, queue-confined real central")
     func realCentralBackendSmokeTest() async {
         let queue = DispatchQueue(label: "passthrough.corebluetooth.central")
-        // No hardware assumption: whatever `radioState` answers is a pass. What is asserted
-        // is that the object exists, answers on `queue`, and takes an `eventHandler` — the
-        // set that installs the delegate proxy — and gives it back.
+        // No assumption about hardware: whatever `radioState` answers is a pass. The test asserts
+        // that the object exists, answers on `queue`, and takes an `eventHandler` back, which
+        // installs the delegate proxy.
         let probe = await Self.onQueue(queue) { () -> [Bool] in
             let backend = CoreBluetoothBackends.makeCentral(queue: queue)
             _ = backend.radioState

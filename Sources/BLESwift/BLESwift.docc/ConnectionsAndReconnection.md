@@ -1,21 +1,12 @@
 # Connections & Reconnection
 
-Connect to any number of peripherals at once, react to per-peripheral connection lifecycle
-events, and configure automatic reconnection independently for each one with
-``ReconnectPolicy``.
+Connect to any number of peripherals, observe connection events, and set automatic reconnection for each peripheral with ``ReconnectPolicy``.
 
 ## Overview
 
-``Central`` tracks any number of peripherals concurrently — there is no connection cap and no
-"only one at a time" restriction. Each peripheral you connect gets its own independent entry:
-its own connection/disconnection lifecycle, its own auto-reconnect loop and
-``ReconnectPolicy``, and its own GATT/notification state. Connecting to peripheral B while
-peripheral A is connecting (or connected, or disconnecting) never conflicts.
+``Central`` tracks any number of peripherals at the same time. There is no connection limit. Each connected peripheral has its own connection lifecycle, its own reconnect loop and ``ReconnectPolicy``, and its own GATT and notification state. A connect to peripheral B never conflicts with peripheral A.
 
-``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` only ever throws
-``BLESwiftError/duplicateConnect(_:)`` when the *same* `PeripheralIdentifier` is targeted while
-it already has a tracked entry (connecting, connected, or disconnecting) — connecting to a
-different peripheral concurrently is always fine.
+``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` throws ``BLESwiftError/duplicateConnect(_:)`` in one case only. This is when the same `PeripheralIdentifier` already has a tracked entry (connecting, connected, or disconnecting).
 
 ### Connecting with a timeout
 
@@ -27,16 +18,11 @@ let peripheral = try await central.connect(
 )
 ```
 
-`timeout` defaults to 15 seconds; pass `nil` to wait indefinitely. On timeout, `Central` cancels
-the pending CoreBluetooth connection attempt and waits for confirmation before throwing
-``BLESwiftError/connectionTimedOut`` — the underlying attempt is genuinely torn down, not just
-abandoned client-side.
+`timeout` defaults to 15 seconds. Pass `nil` to wait without a limit. When the timeout elapses, `Central` cancels the CoreBluetooth connection attempt and waits for the confirmation. Then it throws ``BLESwiftError/connectionTimedOut``.
 
-### Connecting to multiple peripherals at once
+### Connecting to multiple peripherals
 
-Every `connect` call is independent, so connecting to several peripherals concurrently is just
-calling `connect` more than once — typically from a `TaskGroup` if you want them to proceed in
-parallel rather than one after another:
+Every `connect` call is independent. To connect to several peripherals in parallel, call `connect` from a `TaskGroup`:
 
 ```swift
 let identifiers: [PeripheralIdentifier] = [heartRateMonitor, cyclingSensor, tempProbe]
@@ -55,16 +41,11 @@ let peripherals = try await withThrowingTaskGroup(of: Peripheral.self) { group i
 }
 ```
 
-At any point, `await central.connectedPeripherals` gives you a snapshot of every
-currently-connected peripheral's handle (sorted by identifier for determinism), and
-``Central/connectionState(of:)`` reports one specific peripheral's state.
+`await central.connectedPeripherals` returns a snapshot of every connected peripheral, sorted by identifier. ``Central/connectionState(of:)`` returns the state of one peripheral.
 
 ### Reconnect policies
 
-``ReconnectPolicy`` declares reconnection behavior up front as a single value set per
-`connect` call, rather than a mutable flag toggled at runtime. Each peripheral's policy is
-independent — connecting to A with `.always()` and B with `.never` means only A auto-reconnects
-if it drops:
+A ``ReconnectPolicy`` is one value that you set in each `connect` call. Each peripheral has its own policy. If A uses `.always()` and B uses `.never`, only A reconnects after a drop.
 
 ```swift
 // Never retry (the default).
@@ -83,23 +64,17 @@ try await central.connect(identifier, reconnect: .custom { attempt, error in
 })
 ```
 
-A ``ReconnectPolicy`` only ever triggers after a connection is lost (or fails, times out, or is
-cancelled) some way *other than* an explicit ``Central/disconnect(_:)``/
-``Central/disconnectAll()``/
-``Central/cancelAllOperations(error:)`` call — those are always treated as intentional and
-never trigger a retry for the peripheral(s) they affect, regardless of the policy in effect. A
-new `connect` call to a given identifier also cancels any reconnect loop already in flight for
-that same identifier and adopts the new call's policy going forward — every other peripheral's
-loop is untouched.
+A policy applies only when a connection is lost, fails, times out, or is cancelled by some other cause than an explicit call. These calls are always intentional and never cause a retry:
 
-### Connection lifecycle events
+- ``Central/disconnect(_:)``
+- ``Central/disconnectAll()``
+- ``Central/cancelAllOperations(error:)``
 
-``Central/connectionEvents()`` is a multicast stream of every ``ConnectionEvent``, across every
-peripheral — no replay, since (unlike Bluetooth state) there's no single "current value" that
-makes sense to replay to a late subscriber; use ``Central/connectionState(of:)``/
-``Central/connectedPeripherals`` for a synchronous snapshot instead. Every case carries the
-`PeripheralIdentifier` it's about, so a consumer tracking several peripherals filters by
-identifier:
+A new `connect` call for an identifier cancels the reconnect loop that is in progress for that identifier. It then uses the new policy. The loops of other peripherals do not change.
+
+### Connection events
+
+``Central/connectionEvents()`` is a multicast stream of ``ConnectionEvent`` values for all peripherals. It does not replay. For a snapshot, use ``Central/connectionState(of:)`` or ``Central/connectedPeripherals``. Each event has the `PeripheralIdentifier` that it is about. To track one peripheral, filter by identifier.
 
 ```swift
 Task {
@@ -118,16 +93,9 @@ Task {
 }
 ```
 
-### Notification streams end on disconnect — resubscribe on `.connected`
+### Notification streams end on disconnect
 
-By default, every ``Peripheral/notifications(for:policy:survivesReconnect:)`` stream (see
-<doc:ReadingWritingNotifications>) finishes — by throwing — the moment its connection ends,
-for any reason. Reconnection, whether manual or via a ``ReconnectPolicy``, then **does not**
-re-arm the previously active stream: BLESwift does not silently re-establish subscriptions
-you didn't ask it to keep.
-
-With the default, resubscribe explicitly in response to ``ConnectionEvent/connected(_:)``,
-using the identifier it carries to look up that peripheral's handle:
+By default, a ``Peripheral/notifications(for:policy:survivesReconnect:)`` stream finishes by throwing when its connection ends. See <doc:ReadingWritingNotifications>. A reconnect does not restart the stream. To subscribe again, respond to ``ConnectionEvent/connected(_:)``. Use the identifier in the event to find the peripheral:
 
 ```swift
 for await event in await central.connectionEvents() {
@@ -142,71 +110,42 @@ for await event in await central.connectionEvents() {
 
 ### Notification streams across reconnects
 
-Subscribing with `survivesReconnect: true` opts one stream out of the finish-at-disconnect
-default, for exactly the disconnects an active ``ReconnectPolicy`` will retry:
+To keep a stream through the disconnects that a ``ReconnectPolicy`` will retry, subscribe with `survivesReconnect: true`:
 
 ```swift
 let readings: AsyncThrowingStream<HeartRateMeasurement, Error> =
     peripheral.notifications(for: heartRateMeasurement, survivesReconnect: true)
 ```
 
-On an unexpected disconnect the stream emits nothing (values buffered before the disconnect
-are retained per its ``BufferingPolicy``); once the reconnect succeeds, BLESwift re-runs
-service and characteristic discovery for each surviving characteristic, re-enables
-notifications — one CCCD write per characteristic, however many surviving subscribers share
-it — and resumes delivering on the **same** stream. One
-``ConnectionEvent/notificationsRestored(_:restored:failed:)`` event then reports the outcome:
-`restored` lists the characteristics notifying again, and `failed` maps each characteristic
-that could not be re-armed to the error its streams finished with.
+After an unexpected disconnect, the stream emits no values. It keeps the values that it buffered before the disconnect, as its ``BufferingPolicy`` allows. When the reconnect succeeds, BLESwift does these steps:
 
-A surviving stream still finishes — with the same error the default mode would have thrown —
-whenever the gap ends without a restored subscription:
+1. It discovers the services and characteristics again for each surviving characteristic.
+2. It enables notifications again with one CCCD write for each characteristic.
+3. It continues to deliver values on the **same** stream.
 
-- **Reconnect policy exhausted** (or the loop cancelled): the stream throws the original
-  disconnect error, typically ``BLESwiftError/unexpectedDisconnect``.
-- **Explicit teardown** — ``Central/disconnect(_:)`` (including mid-backoff),
-  ``Central/disconnectAll()``, a new ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)``
-  call superseding the reconnect loop, ``Central/cancelAllOperations(error:)``, or
-  ``Central/stopAndExtractState()``: the stream throws
-  ``BLESwiftError/explicitDisconnect`` (or the cancel call's own error).
-- **Re-arm failure** — the characteristic vanished from the GATT table across the gap, or
-  the enable itself failed: only the affected characteristic's streams finish, with that
-  failure (e.g. ``BLESwiftError/missingCharacteristic(_:)``); every other surviving stream
-  is unaffected, and the event's `failed` names the casualty.
+BLESwift then sends one ``ConnectionEvent/notificationsRestored(_:restored:failed:)`` event. `restored` lists the characteristics that notify again. `failed` maps each characteristic that BLESwift could not re-arm to the error that finished its streams.
 
-The composite helpers
-(``Peripheral/writeAndAwaitNotification(write:to:awaitOn:timeout:)``,
-``Peripheral/writeAndAssemble(write:to:assembleFrom:expectedLength:timeout:)``,
-``Peripheral/flush(_:quietPeriod:)``) never survive: an in-flight helper fails at the
-disconnect exactly as before, regardless of any reconnect policy.
+A surviving stream finishes with an error in these cases:
+
+- **The reconnect policy ends** or the loop is cancelled. The stream throws the original disconnect error, usually ``BLESwiftError/unexpectedDisconnect``.
+- **Explicit teardown.** This is ``Central/disconnect(_:)`` (also during a backoff), ``Central/disconnectAll()``, a new ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` that replaces the loop, ``Central/cancelAllOperations(error:)``, or ``Central/stopAndExtractState()``. The stream throws ``BLESwiftError/explicitDisconnect``, or the error of the cancel call.
+- **Re-arm failure.** The characteristic is no longer in the GATT table, or the enable call failed. Only the streams of that characteristic finish, for example with ``BLESwiftError/missingCharacteristic(_:)``. Other streams continue. The `failed` value of the event names the characteristic.
+
+The composite helpers never survive a reconnect. These are ``Peripheral/writeAndAwaitNotification(write:to:awaitOn:timeout:)``, ``Peripheral/writeAndAssemble(write:to:assembleFrom:expectedLength:timeout:)``, and ``Peripheral/flush(_:quietPeriod:)``. A helper in progress fails at the disconnect, whatever the reconnect policy is.
 
 ### Disconnecting
 
-Every disconnect verb is per-peripheral except ``Central/disconnectAll()``:
+Each disconnect call affects one peripheral, except ``Central/disconnectAll()``:
 
-- ``Peripheral/disconnect()`` — the ergonomic call-site: disconnects the peripheral
-  the handle refers to. Prefer this when you already have a `Peripheral`.
-- ``Central/disconnect(_:)`` — disconnects one peripheral by identifier, failing any pending
-  operations with ``BLESwiftError/explicitDisconnect``.
-- ``Central/disconnectAll()`` — best-effort teardown of every tracked peripheral at once: cancels
-  every reconnect loop, then disconnects every tracked entry. Never throws — individual outcomes
-  are observable on ``Central/connectionEvents()``. Idempotent, and a no-op with nothing tracked.
+- ``Peripheral/disconnect()`` disconnects the peripheral of the handle. Use it when you have a `Peripheral`.
+- ``Central/disconnect(_:)`` disconnects one peripheral by identifier. It fails pending operations with ``BLESwiftError/explicitDisconnect``.
+- ``Central/disconnectAll()`` cancels every reconnect loop and disconnects every tracked peripheral. It never throws. Read the results on ``Central/connectionEvents()``. It does nothing if no peripheral is tracked.
 
-None of these ever trigger a ``ReconnectPolicy`` retry for the peripheral(s) they affect — an
-explicit disconnect is always treated as intentional.
+No disconnect call causes a ``ReconnectPolicy`` retry.
 
-### Disconnecting mid-backoff
+### Disconnecting during a backoff
 
-An auto-reconnect loop spends most of its time asleep between attempts — during that backoff
-window, ``Central/connectionState(of:)`` reports ``ConnectionState/disconnected`` for that
-peripheral, even though a reconnect attempt is still pending. Calling
-``Central/disconnect(_:)`` for that identifier during that
-window is honored as "stop trying to reconnect": it cancels the pending reconnect attempt and
-returns normally, rather than throwing ``BLESwiftError/notConnected`` as it would if there were
-truly nothing in flight for that peripheral. ``Central/cancelAllOperations(error:)`` does the
-same, across every peripheral's pending reconnect loop. A `disconnect(id)` call for a peripheral
-with no connection, connection attempt, *or* pending reconnect loop still throws
-``BLESwiftError/notConnected``.
+A reconnect loop sleeps between attempts. During this backoff, ``Central/connectionState(of:)`` returns ``ConnectionState/disconnected`` although a reconnect is pending. In this state, ``Central/disconnect(_:)`` cancels the pending reconnect and returns normally. ``Central/cancelAllOperations(error:)`` does the same for all peripherals. A `disconnect` call for a peripheral with no connection, no attempt, and no pending reconnect throws ``BLESwiftError/notConnected``.
 
 ## See Also
 

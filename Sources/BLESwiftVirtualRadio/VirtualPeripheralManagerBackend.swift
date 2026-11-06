@@ -8,31 +8,26 @@ import Dispatch
 import Foundation
 import BLESwiftCompat17
 
-/// A peripheral-role backend hosting a device of its own on a ``VirtualRadio``, which can be
-/// taken back off it on demand.
+/// A peripheral-role backend that hosts its own device on a ``VirtualRadio`` and can take the
+/// device back off the radio on demand.
 ///
-/// Detaching a backend's event handler is reversible — the composites document a `nil`
-/// handler as a detach every child is re-installed from — so the teardown that really is
-/// final asks for the removal outright, through whichever backend a session was given.
+/// Setting a backend's event handler to `nil` is a detach that a later attach can reverse. The
+/// composites document it so and re-install every child from it. Thus the final teardown asks for
+/// the removal outright, through whichever backend a session received.
 package protocol HostedDeviceRemoving {
 
-    /// Takes the hosted device off the radio. Must be called on the backend's own queue.
+    /// Takes the hosted device off the radio. Call this method on the queue of the backend.
     func removeHostedDevice()
 }
 
 
-/// A `PeripheralManaging` served by a ``VirtualRadio`` instead of
-/// CoreBluetooth — hand one to `PeripheralHost(backend:queue:)` and the resulting host
-/// becomes a virtual device on that radio, reachable from any ``VirtualCentralBackend``
-/// sharing it. A real `PeripheralHost` and a real `Central`, talking to each other in one
-/// process, with no hardware involved.
+/// A `PeripheralManaging` that a ``VirtualRadio`` serves instead of CoreBluetooth. Give one to
+/// `PeripheralHost(backend:queue:)`. The host becomes a virtual device on that radio, and any
+/// ``VirtualCentralBackend`` on the radio can reach it. No hardware is needed.
 ///
-/// The backend registers exactly one device on the radio, whose
-/// ``VirtualDeviceHandler`` forwards every read, write, and subscription change to the
-/// host as a `PeripheralHostEvent`; the host's
-/// `PeripheralManaging.respond(to:value:error:)` resolves the parked
-/// request. Publishing a service, advertising, and notifying are applied to the device
-/// through its ``VirtualDeviceHandle``.
+/// The backend registers exactly one device. The device's ``VirtualDeviceHandler`` forwards every
+/// read, write, and subscription change to the host as a `PeripheralHostEvent`. The host's
+/// `PeripheralManaging.respond(to:value:error:)` resolves the parked request.
 ///
 /// ```swift
 /// let radio = VirtualRadio()
@@ -42,29 +37,32 @@ package protocol HostedDeviceRemoving {
 /// try await host.startAdvertising(PeripheralAdvertisement(localName: "Virtual HRM", serviceUUIDs: [service.identifier]))
 /// ```
 ///
-/// **Concurrency — queue-confined, not lock-protected.** Identical discipline to
-/// ``VirtualCentralBackend``: every stored property is `nonisolated(unsafe)` and touched
-/// only on ``queue``, which every `PeripheralManaging` member asserts at entry, and every
-/// event is delivered with `queue.async`, never inline. Registration on the radio is
-/// asynchronous, so every operation needing the device handle is appended to a serial
-/// `Task` chain that begins with that registration — nothing is lost or reordered when a
-/// call lands before the device exists.
+/// **Concurrency:** ``queue`` confines the state. A lock does not protect it, as in
+/// ``VirtualCentralBackend``.
+///
+/// - Every stored property is `nonisolated(unsafe)`. Code touches it only on ``queue``.
+/// - Every `PeripheralManaging` member asserts this at entry.
+/// - The backend delivers every event with `queue.async`, never inline.
+///
+/// Registration on the radio is asynchronous. The backend runs every operation that needs the
+/// device handle on a serial `Task` chain that begins with the registration. A call before the
+/// device exists is neither lost nor reordered.
 public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDeviceRemoving, Sendable {
 
-    /// The queue every method and event delivery is confined to.
+    /// The queue that confines every method and every event delivery.
     public let queue: DispatchQueue
 
-    /// The identifier the registered device is reachable at — the peripheral identifier
-    /// every ``VirtualCentralBackend`` reports for this host.
+    /// The registered device's identifier. Every ``VirtualCentralBackend`` reports it as the
+    /// peripheral identifier for this host.
     public let identifier: UUID
 
     private let radio: VirtualRadio
 
-    /// The device handler parking this host's in-flight requests.
+    /// The device handler that parks the in-flight requests of this host.
     private let handler: VirtualHostedDeviceHandler
 
-    /// The serial chain of radio work, rooted in the device's registration and carrying the
-    /// resulting handle forward. `nil` once the device has been removed.
+    /// The serial chain of radio work, rooted in the device's registration. It carries the
+    /// resulting handle forward. The value is `nil` after the device is removed.
     nonisolated(unsafe) private var _work: Task<VirtualDeviceHandle?, Never>!
 
     nonisolated(unsafe) private var _eventHandler: ((PeripheralHostEvent) -> Void)?
@@ -72,57 +70,52 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
     nonisolated(unsafe) private var _isAdvertising = false
     nonisolated(unsafe) private var _services: [GATTService] = []
 
-    /// An off-queue-readable mirror of `_eventHandler != nil`. The device handler consults it
-    /// before parking a request: with no handler attached, nothing would ever answer, so the
-    /// request is refused with ``BLESwiftCore/ATTError/unlikelyError`` instead of hanging.
+    /// A mirror of `_eventHandler != nil` that code can read off-queue. The device handler reads it
+    /// before it parks a request. If no handler is attached, nothing would answer the request, so
+    /// the handler refuses it with ``BLESwiftCore/ATTError/unlikelyError``.
     private let handlerAttached = Mutex<Bool>(false)
 
-    /// Whether an ``eventHandler`` is currently attached. Readable from any context.
+    /// Whether an ``eventHandler`` is attached. Readable from any context.
     private var isHandlerAttached: Bool {
         handlerAttached.withLock { $0 }
     }
 
-    /// The authorization status this backend reports: always `.allowedAlways`.
+    /// The authorization status that this backend reports. It is always `.allowedAlways`.
     ///
-    /// Constant, not settable — a virtual radio is never gated by the system's Bluetooth
-    /// permission, and a `static` setter would be process-wide state no one backend owns.
-    /// A test that needs a denied backend uses `BLESwiftTestSupport`'s fakes, whose
-    /// `bluetoothAuthorization` is scripted for exactly that.
+    /// The value is constant and not settable, because the system's Bluetooth permission never
+    /// gates a virtual radio. A test that needs a denied backend uses the fakes of
+    /// `BLESwiftTestSupport`, whose `bluetoothAuthorization` is scripted.
     public static var bluetoothAuthorization: BluetoothAuthorization { .allowedAlways }
 
-    /// Creates a backend that hosts one device on `radio`, confined to `queue`.
+    /// Creates a backend that hosts one device on `radio` and that `queue` confines.
     ///
-    /// The device is registered *not* advertising, with an empty GATT database — exactly
-    /// the state a freshly created `CBPeripheralManager` is in. ``radioState`` is
-    /// `CentralState.poweredOn` from construction; the matching
-    /// `didUpdateState` is delivered once, when a non-`nil` ``eventHandler`` is first
-    /// attached, mirroring CoreBluetooth's delegate-only state reporting.
+    /// The backend registers the device as *not* advertising, with an empty GATT database, like a
+    /// new `CBPeripheralManager`. ``radioState`` is `CentralState.poweredOn` from construction. The
+    /// matching `didUpdateState` arrives once, when code first attaches a non-`nil`
+    /// ``eventHandler``.
     ///
     /// - Parameters:
     ///   - radio: The radio to host this peripheral on.
-    ///   - queue: The queue every method and event delivery is confined to — the same queue
-    ///     the owning `PeripheralHost` is constructed with. Must be serial
-    ///     (`DispatchQueue(label:)` is).
-    ///   - identifier: The identifier to register the device under. Defaults to a fresh
-    ///     `UUID`.
-    ///   - name: The device name centrals see on discovery and connection. Defaults to
-    ///     `nil`; ``startAdvertising(_:)`` supplies the advertised local name separately.
+    ///   - queue: The queue that confines every method and event delivery. It must be serial and be
+    ///     the queue that the owning `PeripheralHost` uses.
+    ///   - identifier: The identifier to register the device under. The default is a new `UUID`.
+    ///   - name: The device name that centrals see on discovery and connection. The default is
+    ///     `nil`. ``startAdvertising(_:)`` supplies the advertised local name separately.
     public convenience init(radio: VirtualRadio, queue: DispatchQueue, identifier: UUID = UUID(), name: String? = nil) {
         self.init(radio: radio, queue: queue, identifier: identifier, name: name, attTimeout: VirtualRadio.attTimeout, clock: radio.clock)
     }
 
-    /// Creates a backend whose parked requests time out after `attTimeout` on `clock` — the
-    /// designated initializer, for tests that cannot wait ``VirtualRadio/attTimeout`` for a
-    /// host that never answers.
+    /// Creates a backend whose parked requests time out after `attTimeout` on `clock`. This is the
+    /// designated initializer. Tests use it to avoid waiting ``VirtualRadio/attTimeout``.
     ///
     /// - Parameters:
     ///   - radio: The radio to host this peripheral on.
-    ///   - queue: The queue every method and event delivery is confined to.
+    ///   - queue: The queue that confines every method and event delivery.
     ///   - identifier: The identifier to register the device under.
-    ///   - name: The device name centrals see on discovery and connection.
-    ///   - attTimeout: How long a request parked for the host waits for its answer before it
-    ///     is refused with ``BLESwiftCore/ATTError/unlikelyError``.
-    ///   - clock: The clock that wait runs on. The public initializer passes the radio's.
+    ///   - name: The device name that centrals see on discovery and connection.
+    ///   - attTimeout: How long a parked request waits for the host's answer. After that time, the
+    ///     backend refuses it with ``BLESwiftCore/ATTError/unlikelyError``.
+    ///   - clock: The clock that the wait runs on. The public initializer passes the radio's clock.
     package init(
         radio: VirtualRadio,
         queue: DispatchQueue,
@@ -145,27 +138,27 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
             ),
             handler: handler
         )
-        // Weak, so the radio's registration never keeps this backend alive; the strong
-        // reference the hop takes lasts only as long as the delivery itself. The `Bool`
-        // reports whether the event reached an attached handler — a request nobody is
-        // listening for is refused rather than parked forever.
+        // The reference is weak, so the radio's registration never keeps this backend alive. The
+        // hop's strong reference lasts only as long as the delivery. The `Bool` reports whether the
+        // event reached an attached handler, so the handler refuses a request that nobody listens
+        // for.
         let sink: @Sendable (PeripheralHostEvent) -> Bool = { [weak self] event in
             guard let self, self.isHandlerAttached else { return false }
             self.queue.async { self.deliver(event) }
             return true
         }
-        // Attaching the sink *before* registering is what guarantees no request can reach
-        // the handler before it knows where to forward it.
+        // Attach the sink *before* registering the device, so no request reaches the handler before
+        // it knows where to forward it.
         _work = Task { [radio, handler] in
             await handler.attach(sink)
             return await radio.register(device, advertising: false)
         }
     }
 
-    /// Removes the hosted device, disconnecting any central still attached to it.
+    /// Removes the hosted device. It disconnects any central still attached to it.
     ///
-    /// Reading `_work` off-queue is safe here: `deinit` runs only once every reference is
-    /// gone, and every queued delivery holds one.
+    /// It is safe to read `_work` off-queue here. `deinit` runs only after every reference is gone,
+    /// and every queued delivery holds one.
     deinit {
         let work = _work
         let handler = self.handler
@@ -177,7 +170,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
 
     // MARK: - Internals
 
-    /// Delivers `event` to ``eventHandler``. Must be called on ``queue``.
+    /// Delivers `event` to ``eventHandler``. Call this method on ``queue``.
     private func deliver(_ event: PeripheralHostEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
         _eventHandler?(event)
@@ -188,13 +181,13 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
         queue.async { [self] in deliver(event) }
     }
 
-    /// Appends `body` to the serial chain of radio work, so it runs after the device's
-    /// registration and after every operation queued before it. Must be called on ``queue``.
+    /// Appends `body` to the serial chain of radio work, so it runs after the device's registration
+    /// and every earlier operation. Call this method on ``queue``.
     ///
     /// - Parameters:
-    ///   - body: The radio work to run, given the registered device's handle.
-    ///   - ifRemoved: Run instead of `body` when the hosted device is already gone, so an
-    ///     operation awaiting a completion event is failed rather than left waiting forever.
+    ///   - body: The radio work to run. It receives the registered device's handle.
+    ///   - ifRemoved: Runs instead of `body` when the hosted device is already gone, so an
+    ///     operation that waits for a completion event fails and does not wait forever.
     private func enqueue(
         _ body: @escaping @Sendable (VirtualDeviceHandle) async -> Void,
         ifRemoved: (@Sendable () -> Void)? = nil
@@ -211,8 +204,8 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
         }
     }
 
-    /// Removes the hosted device and ends the chain, so later operations are no-ops. Must be
-    /// called on ``queue``.
+    /// Removes the hosted device and ends the chain. Later operations do nothing. Call this method
+    /// on ``queue``.
     private func removeDevice() {
         dispatchPrecondition(condition: .onQueue(queue))
         let previous = _work
@@ -225,16 +218,14 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
 
     // MARK: - PeripheralManaging
 
-    /// Receives every `PeripheralHostEvent` this backend produces, on
-    /// ``queue``. The first non-`nil` attachment also triggers the one-shot
-    /// `didUpdateState(.poweredOn)`.
+    /// Receives every `PeripheralHostEvent` that this backend produces, on ``queue``. The first
+    /// non-`nil` attachment also triggers the one-shot `didUpdateState(.poweredOn)`.
     ///
-    /// Setting it back to `nil` *detaches* and nothing more: the hosted device stays on the
-    /// radio, and a request arriving with nobody listening is refused rather than parked.
-    /// Re-attaching re-installs a working backend — which is what
-    /// `BLESwiftProvider`'s `CompositePeripheralManager.eventHandler` documents for every child it clears and
-    /// re-installs, and what a detach through it could not have honored while this one was
-    /// terminal. Removing the device is `removeHostedDevice()`'s job, and `deinit`'s.
+    /// Setting it back to `nil` only *detaches*. The hosted device stays on the radio, and the
+    /// backend refuses a request that arrives when nobody listens. If you attach a handler again,
+    /// the backend works again. `BLESwiftProvider`'s `CompositePeripheralManager.eventHandler`
+    /// relies on this for every child that it clears and re-installs. `removeHostedDevice()` and
+    /// `deinit` remove the device.
     public var eventHandler: ((PeripheralHostEvent) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -251,38 +242,38 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
         }
     }
 
-    /// Takes the hosted device off the radio, disconnecting any central attached to it with
-    /// ``VirtualRadio/deviceRemovedError`` and turning every later operation into a no-op
-    /// that fails its completion rather than parking it.
+    /// Takes the hosted device off the radio. It disconnects any attached central with
+    /// ``VirtualRadio/deviceRemovedError``. Every later operation does nothing and fails its
+    /// completion.
     ///
-    /// The explicit teardown a session ending calls; `deinit` does the same work on its own
-    /// for a backend that is simply dropped. Must be called on ``queue``.
+    /// A session calls this method for an explicit teardown. `deinit` does the same work for a
+    /// backend that the code drops. Call this method on ``queue``.
     package func removeHostedDevice() {
         dispatchPrecondition(condition: .onQueue(queue))
         removeDevice()
     }
 
-    /// Always `CentralState.poweredOn` — a virtual radio is never off.
+    /// Always `CentralState.poweredOn`. A virtual radio is never off.
     public var radioState: CentralState {
         dispatchPrecondition(condition: .onQueue(queue))
         return .poweredOn
     }
 
-    /// Whether the hosted device is currently advertising on the radio.
+    /// Whether the hosted device is advertising on the radio now.
     ///
-    /// Reported from the radio's own chain: it turns `true` once ``startAdvertising(_:)`` has
-    /// been applied — the same moment `didStartAdvertising` is delivered — and `false` once
-    /// ``stopAdvertising()`` has, never from a write that could land out of order behind
-    /// either.
+    /// The value comes from the radio chain. It becomes `true` after the radio applies
+    /// ``startAdvertising(_:)``, when the backend delivers `didStartAdvertising`. It becomes
+    /// `false` after the radio applies ``stopAdvertising()``. No write that could land out of order
+    /// behind either call sets it.
     public var isAdvertising: Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return _isAdvertising
     }
 
-    /// Starts advertising: the device's advertisement becomes `advertisement`'s local name
-    /// and service UUIDs (always connectable), and it begins matching scans.
-    /// `didStartAdvertising(error:)` — always successful, a virtual radio having nothing to
-    /// refuse — is delivered once the radio has applied the change.
+    /// Starts advertising. The device's advertisement becomes the local name and the service UUIDs
+    /// of `advertisement`. It is always connectable, and the device then matches scans. The backend
+    /// delivers `didStartAdvertising(error:)` after the radio applies the change. It always
+    /// succeeds, because a virtual radio has nothing to refuse.
     public func startAdvertising(_ advertisement: PeripheralAdvertisement) {
         dispatchPrecondition(condition: .onQueue(queue))
         let data = AdvertisementData(
@@ -303,15 +294,14 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
         })
     }
 
-    /// Stops advertising. Idempotent, and reports no completion of its own — exactly like
-    /// `CBPeripheralManager.stopAdvertising()`.
+    /// Stops advertising. It is idempotent. It reports no completion, as
+    /// `CBPeripheralManager.stopAdvertising()` does not.
     ///
-    /// **``isAdvertising`` is cleared from the chain, not here.** Written synchronously, it
-    /// raced ``startAdvertising(_:)``, which sets the flag from a queue hop taken *inside* its
-    /// own enqueued body: a `start()` and the `stop()` behind it on the same turn left the
-    /// radio correctly silent and this backend reporting `isAdvertising == true` for good,
-    /// with `PeripheralHost.isAdvertising` reading straight through it. Both writes are made
-    /// from the same serial chain instead, so the last call made is the one that decides.
+    /// **The chain clears ``isAdvertising``, not this method.** A synchronous write would race
+    /// ``startAdvertising(_:)``, which sets the flag from a queue hop *inside* its enqueued body. A
+    /// `start()` and a `stop()` on the same turn would leave the radio silent but this backend
+    /// reporting `isAdvertising == true` for good. Both writes now come from the same serial chain,
+    /// so the last call decides.
     public func stopAdvertising() {
         dispatchPrecondition(condition: .onQueue(queue))
         enqueue({ [weak self] handle in
@@ -319,16 +309,15 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
             guard let self else { return }
             self.queue.async { self._isAdvertising = false }
         }, ifRemoved: { [weak self] in
-            // A device that is gone advertises nothing, and no later call will say so.
+            // A device that is gone does not advertise, and no later call will say so.
             guard let self else { return }
             self.queue.async { self._isAdvertising = false }
         })
     }
 
-    /// Publishes `service` into the hosted device's GATT database, delivering
-    /// `didAddService(_:error:)` once the radio has applied it. Re-adding a service already
-    /// published fails with `BLESwiftProvider` code 4, mirroring CoreBluetooth's refusal to
-    /// publish the same service twice.
+    /// Publishes `service` into the hosted device's GATT database. The backend delivers
+    /// `didAddService(_:error:)` after the radio applies it. A service that is already published
+    /// fails with `BLESwiftProvider` code 4, as CoreBluetooth also refuses a repeat.
     public func add(_ service: GATTService) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !_services.contains(where: { $0.identifier == service.identifier }) else {
@@ -354,9 +343,10 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
         }
     }
 
-    /// Resolves the parked read or write request `token` identifies: `error` fails it with
-    /// that ATT error, otherwise it succeeds — with `value` (or empty `Data`) for a read.
-    /// A no-op if `token` is unknown, already answered, or belongs to a removed device.
+    /// Resolves the parked read or write request that `token` identifies. If `error` is set, the
+    /// request fails with that ATT error. Otherwise it succeeds, with `value` (or empty `Data`) for
+    /// a read. The method does nothing if `token` is unknown, already answered, or from a removed
+    /// device.
     public func respond(to token: RequestToken, value: Data?, error: ATTError?) {
         dispatchPrecondition(condition: .onQueue(queue))
         Task { [handler] in
@@ -364,10 +354,11 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
         }
     }
 
-    /// Pushes `value` to every central subscribed to `characteristic` (or just `centrals`).
+    /// Pushes `value` to every central that is subscribed to `characteristic`, or only to
+    /// `centrals`.
     ///
-    /// - Returns: Always `true` — the virtual radio has no transmit queue to fill, so it
-    ///   never applies back-pressure.
+    /// - Returns: Always `true`. The virtual radio has no transmit queue, so it applies no
+    ///   back-pressure.
     public func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         enqueue { handle in
@@ -376,9 +367,8 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
         return true
     }
 
-    /// Detaches ``eventHandler`` from off ``queue``, hopping onto it — what the public
-    /// setter does, for a test that is not already on the queue. The hosted device stays on
-    /// the radio either way; a request arriving in this state is refused rather than parked.
+    /// Detaches ``eventHandler`` from off ``queue``, by hopping onto the queue. The hosted device
+    /// stays on the radio, and the backend refuses a request that arrives in this state.
     package func detachEventHandlerForTesting() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async { [self] in
@@ -389,8 +379,8 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
         }
     }
 
-    /// The error an operation queued after the hosted device was removed reports, instead of
-    /// leaving its caller waiting for a completion that can never arrive.
+    /// The error that an operation reports when it was queued after the hosted device was removed.
+    /// Without it, the caller would wait for a completion that can never arrive.
     private static var removedError: NSError {
         NSError(
             domain: "BLESwiftProvider",
@@ -399,7 +389,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
         )
     }
 
-    /// The error a repeat ``add(_:)`` of an already-published service reports.
+    /// The error that ``add(_:)`` reports for an already-published service.
     private static var duplicateServiceError: NSError {
         NSError(
             domain: "BLESwiftProvider",
@@ -409,57 +399,56 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
     }
 }
 
-/// The ``VirtualDeviceHandler`` behind a ``VirtualPeripheralManagerBackend``: it turns each
-/// piece of GATT traffic the radio hands it into a ``BLESwiftCore/PeripheralHostEvent`` for
-/// the `PeripheralHost`, and parks a continuation until the host answers.
+/// The ``VirtualDeviceHandler`` behind a ``VirtualPeripheralManagerBackend``. It turns each piece
+/// of GATT traffic from the radio into a ``BLESwiftCore/PeripheralHostEvent`` for the
+/// `PeripheralHost`, and parks a continuation until the host answers.
 ///
-/// One continuation per ``BLESwiftCore/RequestToken``, in two maps — a read and a write
-/// success are both answered as `value: nil, error: nil`, so the request's kind is
-/// recovered from which map the token is in, never from the response's shape.
+/// There is one continuation for each ``BLESwiftCore/RequestToken``, in two maps. A read and a
+/// write both succeed with `value: nil, error: nil`, so the code finds the request's kind from the
+/// map that holds the token, never from the response's shape.
 ///
-/// **No request parks forever.** Each one is bounded by ``VirtualRadio/attTimeout``: a host
-/// that never answers has its request refused with
-/// ``BLESwiftCore/ATTError/unlikelyError``, which releases the central's call and every
-/// operation queued behind it on that remote. A response arriving after that is a no-op,
-/// exactly as one for any other unknown token is.
+/// **No request parks forever.** ``VirtualRadio/attTimeout`` bounds each request. If a host never
+/// answers, the handler refuses the request with ``BLESwiftCore/ATTError/unlikelyError``. This
+/// releases the central's call and every operation queued behind it on that remote. A later
+/// response does nothing, as for any unknown token.
 actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
 
-    /// Delivers events to the owning backend's `eventHandler`, hopping onto its queue, and
+    /// Delivers events to the owning backend's `eventHandler`, hopping onto the backend's queue. It
     /// reports whether a handler was attached to receive them.
     private var sink: (@Sendable (PeripheralHostEvent) -> Bool)?
 
     private var pendingReads: [RequestToken: CheckedContinuation<Result<Data, ATTError>, Never>] = [:]
     private var pendingWrites: [RequestToken: CheckedContinuation<Result<Void, ATTError>, Never>] = [:]
 
-    /// How long a parked request waits for the host's answer before it is refused.
+    /// How long a parked request waits for the host's answer before the handler refuses it.
     private let attTimeout: Duration
 
-    /// The clock that wait runs on — the radio's, so a test driving a `ManualClock` can run
-    /// the ATT timeout out like any other delay.
+    /// The clock that the wait runs on. It is the radio's clock, so a test that drives a
+    /// `ManualClock` can run the ATT timeout out like any other delay.
     private let clock: any Clock<Duration>
 
-    /// The countdown running against each parked request, cancelled the moment that request
-    /// is settled by any other route.
+    /// The countdown for each parked request. The handler cancels it when any other route settles
+    /// the request.
     private var timeouts: [RequestToken: Task<Void, Never>] = [:]
 
     /// Creates a handler whose parked requests time out after `attTimeout`.
     ///
     /// - Parameters:
-    ///   - attTimeout: The ATT transaction timeout. Defaults to ``VirtualRadio/attTimeout``;
-    ///     tests shorten it.
-    ///   - clock: The clock the timeout sleeps on — the radio's.
+    ///   - attTimeout: The ATT transaction timeout. The default is ``VirtualRadio/attTimeout``.
+    ///     Tests shorten it.
+    ///   - clock: The clock that the timeout sleeps on. It is the radio's clock.
     init(attTimeout: Duration = VirtualRadio.attTimeout, clock: any Clock<Duration>) {
         self.attTimeout = attTimeout
         self.clock = clock
     }
 
-    /// Attaches the event sink, before the device is registered.
+    /// Attaches the event sink before the radio registers the device.
     func attach(_ sink: @escaping @Sendable (PeripheralHostEvent) -> Bool) {
         self.sink = sink
     }
 
     /// Detaches the sink and fails every parked request with
-    /// ``BLESwiftCore/ATTError/unlikelyError`` — nothing is left to answer them once the
+    /// ``BLESwiftCore/ATTError/unlikelyError``, because nothing is left to answer them after the
     /// host is gone.
     func failPendingRequests() {
         sink = nil
@@ -473,9 +462,8 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         for continuation in writes.values { continuation.resume(returning: .failure(.unlikelyError)) }
     }
 
-    /// Answers the request `token` identifies, if it is still parked. A response that arrives
-    /// after the request timed out is a no-op, as the seam's contract for an unknown token
-    /// already says.
+    /// Answers the request that `token` identifies, if it is still parked. A response after the
+    /// request timed out does nothing, as for any unknown token.
     func respond(to token: RequestToken, value: Data?, error: ATTError?) {
         timeouts.removeValue(forKey: token)?.cancel()
         if let continuation = pendingReads.removeValue(forKey: token) {
@@ -485,7 +473,7 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         }
     }
 
-    /// Surfaces the read to the host as `didReceiveRead` and suspends until it responds.
+    /// Surfaces the read to the host as `didReceiveRead` and suspends until the host responds.
     func read(
         _ characteristic: CharacteristicIdentifier,
         offset: Int,
@@ -503,8 +491,8 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         }
     }
 
-    /// Surfaces the batch to the host as `didReceiveWrite` and suspends until it responds.
-    /// One response settles the whole batch, exactly as CoreBluetooth requires.
+    /// Surfaces the batch to the host as `didReceiveWrite` and suspends until the host responds.
+    /// One response settles the whole batch, as CoreBluetooth requires.
     func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> {
         guard let sink else { return .failure(.unlikelyError) }
         let token = RequestToken()
@@ -515,9 +503,9 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         }
     }
 
-    /// Starts the ATT transaction countdown for a freshly parked request: a host that never
-    /// answers refuses it after ``attTimeout`` rather than leaving its caller — and every
-    /// operation queued behind it on that remote — suspended forever.
+    /// Starts the ATT transaction countdown for a request that was just parked. If the host never
+    /// answers, the countdown refuses the request after ``attTimeout``, so the caller and every
+    /// operation queued behind it on that remote do not stay suspended forever.
     private func startTimeout(for token: RequestToken) {
         timeouts[token] = Task { [attTimeout, clock] in
             try? await clock.sleep(for: attTimeout)
@@ -526,9 +514,9 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         }
     }
 
-    /// Refuses the parked request `token` identifies with
-    /// ``BLESwiftCore/ATTError/unlikelyError`` — the answer for a request no attached handler
-    /// ever saw, and for one the host let time out.
+    /// Refuses the parked request that `token` identifies with
+    /// ``BLESwiftCore/ATTError/unlikelyError``. It answers a request that no attached handler saw,
+    /// and one that the host let time out.
     private func fail(_ token: RequestToken) {
         timeouts.removeValue(forKey: token)?.cancel()
         if let continuation = pendingReads.removeValue(forKey: token) {
@@ -538,8 +526,8 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         }
     }
 
-    /// Reports the change to the host as `didSubscribe`/`didUnsubscribe`. Nothing is parked:
-    /// a subscription change needs no answer.
+    /// Reports the change to the host as `didSubscribe` or `didUnsubscribe`. It parks nothing,
+    /// because a subscription change needs no answer.
     func subscriptionChanged(
         _ characteristic: CharacteristicIdentifier,
         central: Subscriber,

@@ -5,13 +5,13 @@
 
 import Foundation
 
-/// How a frame's payload is encoded. The codec byte travels on every frame, so each side
-/// encodes with its own preference and decodes whatever arrives.
+/// The encoding of a frame's payload. Every frame carries a codec byte.
+/// Each side encodes with its own preference and decodes any codec that arrives.
 public enum LinkCodec: UInt8, Sendable, CaseIterable {
-    /// `PropertyListEncoder` in binary format — compact, and `Data` is stored raw rather
-    /// than base64-expanded. The default.
+    /// `PropertyListEncoder` in binary format. This codec is compact. It stores `Data` as raw
+    /// bytes and does not expand it to base64. This codec is the default.
     case binaryPropertyList = 1
-    /// `JSONEncoder` — human-readable, for debugging with `--json`.
+    /// `JSONEncoder`. People can read this format. Use it to debug with `--json`.
     case json = 2
 
     /// Encodes `value` in this codec.

@@ -3,22 +3,22 @@
 //  BLESwift
 //
 
-/// Declares whether, and how, ``Central`` should automatically retry connecting to a
-/// peripheral after an unexpected disconnect (or a failed/timed-out/cancelled attempt).
+/// Declares whether and how ``Central`` tries again to connect to a peripheral after an
+/// unexpected disconnect, or after a failed, timed-out, or cancelled attempt.
 ///
-/// Set per `connect(_:timeout:reconnect:warningOptions:compatibility:)` call, independently for each
-/// peripheral. Observe retry progress via ``ConnectionEvent/reconnecting(_:attempt:)``.
+/// You set it for each call to `connect(_:timeout:reconnect:warningOptions:compatibility:)`.
+/// To observe the retries, use ``ConnectionEvent/reconnecting(_:attempt:)``.
 ///
-/// - Note: By default, reconnection does not re-arm previously-active notification streams —
-///   those finish (with an error) at disconnect time; re-subscribe in response to a
-///   ``ConnectionEvent/connected(_:)`` event. Subscribers that opted into
-///   ``Peripheral/notifications(for:policy:survivesReconnect:)``'s `survivesReconnect: true`
-///   are the exception: their streams park across the gap and resume once the reconnect
-///   succeeds (see ``ConnectionEvent/notificationsRestored(_:restored:failed:)``).
+/// - Note: A reconnect does not enable again the notification streams that were active. They
+///   finish with an error at the disconnect. To subscribe again, respond to
+///   ``ConnectionEvent/connected(_:)``. The exception is a stream whose subscriber selected
+///   `survivesReconnect: true` in ``Peripheral/notifications(for:policy:survivesReconnect:)``.
+///   It waits during the gap and continues after the reconnect succeeds (see
+///   ``ConnectionEvent/notificationsRestored(_:restored:failed:)``).
 public struct ReconnectPolicy: Sendable {
 
-    /// The concrete retry behavior this policy encodes. `internal` — callers only ever see
-    /// this through the `Sendable` `ReconnectPolicy` value and its static factories.
+    /// The retry behavior that this policy encodes. Callers see it only through the static
+    /// factories.
     enum Kind: Sendable {
         case never
         case always(maxAttempts: Int?, backoff: Duration)
@@ -31,37 +31,37 @@ public struct ReconnectPolicy: Sendable {
         self.kind = kind
     }
 
-    /// Never automatically reconnect. The default for every `connect(_:timeout:reconnect:warningOptions:compatibility:)`
-    /// call.
+    /// Never reconnect automatically. This is the default for
+    /// `connect(_:timeout:reconnect:warningOptions:compatibility:)`.
     public static let never = ReconnectPolicy(kind: .never)
 
-    /// Automatically reconnect with a fixed delay between attempts.
+    /// Reconnects automatically with a fixed delay between attempts.
     ///
     /// - Parameters:
-    ///   - maxAttempts: The maximum number of reconnect attempts to make before giving up.
-    ///     `nil` (the default) retries indefinitely.
-    ///   - backoff: The fixed delay to wait before each reconnect attempt. Defaults to 2
+    ///   - maxAttempts: The maximum number of reconnect attempts before the policy gives up.
+    ///     The default `nil` retries without a limit.
+    ///   - backoff: The fixed delay to wait before each reconnect attempt. The default is 2
     ///     seconds.
     public static func always(maxAttempts: Int? = nil, backoff: Duration = .seconds(2)) -> ReconnectPolicy {
         ReconnectPolicy(kind: .always(maxAttempts: maxAttempts, backoff: backoff))
     }
 
-    /// Automatically reconnect using caller-defined logic to decide the delay (or whether to
-    /// stop) before each attempt.
+    /// Reconnects automatically. Your closure decides the delay before each attempt, or decides
+    /// to stop.
     ///
-    /// - Parameter nextDelay: Called before every reconnect attempt with the 1-indexed
-    ///   attempt number and the error from the most recent failure (`nil` before the first
-    ///   attempt only in the unusual case there was no triggering error). Return the delay to
-    ///   wait before that attempt, or `nil` to stop retrying.
+    /// - Parameter nextDelay: BLESwift calls it before each reconnect attempt. It receives the
+    ///   attempt number (from 1) and the error from the most recent failure. The error is
+    ///   `nil` if no error triggered the reconnect. Return the delay to wait before that
+    ///   attempt, or `nil` to stop the retries.
     public static func custom(
         _ nextDelay: @escaping @Sendable (_ attempt: Int, _ error: Error?) async -> Duration?
     ) -> ReconnectPolicy {
         ReconnectPolicy(kind: .custom(nextDelay))
     }
 
-    /// Whether this policy ever reconnects. Used for `willReconnect` and whether to start a
-    /// reconnect loop at all — a synchronous approximation, since `.custom` policies can
-    /// only truly decide once asked for their first delay.
+    /// Whether this policy never reconnects. `Central` uses it for `willReconnect` and to
+    /// decide whether to start a reconnect loop. It is a synchronous approximation, because a
+    /// `.custom` policy decides only when `Central` asks for its first delay.
     var isNever: Bool {
         if case .never = kind {
             return true
@@ -69,8 +69,7 @@ public struct ReconnectPolicy: Sendable {
         return false
     }
 
-    /// Returns the delay to wait before reconnect `attempt` (1-indexed), or `nil` to stop
-    /// retrying.
+    /// Returns the delay before reconnect `attempt` (from 1), or `nil` to stop the retries.
     func nextDelay(attempt: Int, error: Error?) async -> Duration? {
         switch kind {
         case .never:

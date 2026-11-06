@@ -3,10 +3,9 @@
 //  BLESwiftLinkTests
 //
 
-// Sockets in a CI simulator are unreliable — a runner's simulator network can wedge outright,
-// leaving a loopback connect stuck in `.connecting` for tens of seconds — so every suite that
-// opens one is compiled out there. The simulator-side path is covered by the two-simulator
-// E2E, which runs on real simulators.
+// Sockets in a CI simulator are not reliable: a wedged simulator network leaves a loopback connect
+// in `.connecting` for tens of seconds. So the compiler removes every socket suite from the
+// simulator build. The two-simulator E2E covers that path.
 #if !targetEnvironment(simulator)
 import BLESwiftLink
 import BLESwiftSimulatorLink
@@ -15,12 +14,11 @@ import Foundation
 import BLESwiftCompat17
 import Testing
 
-/// What a stand-in provider recorded, carried out of the helpers by reference.
+/// What a stand-in provider recorded. The helpers carry it out by reference.
 ///
-/// A `Mutex` is noncopyable and so cannot be a tuple element, hence the box; it exposes the same
-/// `withLock` shape the tests use for the hellos everywhere else. It also keeps the accepted
-/// server-side connection, because cancelling a `LinkListener` deliberately leaves accepted
-/// connections alone — closing that connection is what a provider going away actually looks like.
+/// A `Mutex` is noncopyable, so it cannot be a tuple element. This box also keeps the accepted
+/// server-side connection, because cancelling a `LinkListener` leaves accepted connections alone,
+/// while a provider that goes away really closes that connection.
 private final class ServerLog: Sendable {
     private let hellos = Mutex<[ClientHello]>([])
     private let connection = Mutex<LinkConnection?>(nil)
@@ -29,7 +27,8 @@ private final class ServerLog: Sendable {
         hellos.withLock { hellos in body(&hellos) }
     }
 
-    /// The most recently accepted connection, so a test can drop it the way a provider would.
+    /// The connection that the provider accepted most recently, so a test can drop it the way a
+    /// provider would.
     var acceptedConnection: LinkConnection? { connection.withLock { $0 } }
 
     func record(_ connection: LinkConnection) {
@@ -40,7 +39,8 @@ private final class ServerLog: Sendable {
 @Suite("LinkClientSession")
 struct LinkClientSessionTests {
 
-    /// A minimal provider stand-in: accepts or rejects the hello, echoes everything else.
+    /// A minimal stand-in for a provider. It accepts or rejects the hello and echoes everything
+    /// else.
     private func makeServer(accept: Bool, version: Int = LinkProtocol.version) async throws -> (LinkListener, ServerLog) {
         let hellos = ServerLog()
         let listener = try LinkListener(endpoint: LinkEndpoint(host: "127.0.0.1", port: 0), codec: .json, queue: DispatchQueue(label: "srv"))
@@ -80,16 +80,15 @@ struct LinkClientSessionTests {
 
     @Test("Retries until a provider appears")
     func retries() async throws {
-        // A port below the ephemeral range, so no parallel test's `port: 0` listener can be
-        // handed it and answer the dial that is supposed to be refused. An unrelated process
-        // taking it between the probe and the bind is all that is left, hence the attempts.
+        // Use a port below the ephemeral range, so a parallel test's `port: 0` listener cannot
+        // receive it and answer the dial that must be refused. An unrelated process can still take
+        // the port between the probe and the bind, so the test makes several attempts.
         for _ in 0..<5 {
             let port = try closedPort()
             let queue = DispatchQueue(label: "client")
             let session = LinkClientSession(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), role: .central, clientName: "unit", queue: queue, retryInterval: .milliseconds(50))
             session.start()
             try await Task.sleep(for: .milliseconds(200))
-            // Nothing is listening on that port, so every dial so far must have been refused.
             #expect(!session.isConnected)
             guard let listener = try? LinkListener(endpoint: LinkEndpoint(host: "127.0.0.1", port: port), codec: .json, queue: DispatchQueue(label: "srv")) else {
                 session.stop()
@@ -116,8 +115,8 @@ struct LinkClientSessionTests {
 
     @Test("The opening burst reaches a provider that appears late, at the default interval")
     func fastRetryFindsALateProvider() async throws {
-        // The DEFAULT retry interval — two seconds — is the point: without the opening burst
-        // a provider that appears half a second in would not be found for another 1.5 s.
+        // The DEFAULT two-second retry interval is under test. Without the opening burst, a client
+        // would not find a provider that appears half a second in until 1.5 s later.
         for _ in 0..<5 {
             let port = try closedPort()
             let queue = DispatchQueue(label: "client")
@@ -156,15 +155,15 @@ struct LinkClientSessionTests {
         Issue.record("could not hold on to a free port for the fast-retry test")
     }
 
-    /// A weak handle on one of the connections a session dialled.
+    /// A weak handle on one of the connections that a session dialed.
     private struct WeakConnection: Sendable {
         weak var connection: LinkConnection?
     }
 
     @Test("A session retrying against a closed port releases every connection it creates", .timeLimit(.minutes(1)))
     func retryingReleasesItsConnections() async throws {
-        // Below the ephemeral range: the dials must keep being refused, which they would not
-        // be if a parallel test were handed this port and bound a listener on it.
+        // Use a port below the ephemeral range. The dials must keep failing, and they would not if
+        // a parallel test received this port and bound a listener on it.
         let port = try closedPort()
         let queue = DispatchQueue(label: "client")
         let session = LinkClientSession(
@@ -174,8 +173,8 @@ struct LinkClientSessionTests {
             queue: queue,
             retryInterval: .milliseconds(50)
         )
-        // `dial()` stores handlers that capture their own connection strongly, so a connection
-        // whose handlers survive its terminal state can never be released.
+        // `dial()` stores handlers that capture their own connection strongly, so the system can
+        // never release a connection whose handlers survive its terminal state.
         let dialled = Mutex<[WeakConnection]>([])
         let (dials, dialSignal) = AsyncStream<Void>.makeStream()
         session.onDial = { connection in
@@ -183,10 +182,9 @@ struct LinkClientSessionTests {
             dialSignal.yield()
         }
         session.start()
-        // Waits for the retry itself rather than a fixed window (#88): a refused dial's
-        // turnaround is not free, and under a loaded bundle a 700 ms window could close before
-        // the second dial. What matters is that it retried, and that every connection it made
-        // was released.
+        // The test waits for the retry itself (#88), not for a fixed window, because under a loaded
+        // bundle 700 ms could close before the second dial. It checks that the client retried and
+        // that the test released every connection the client made.
         var nextDial = dials.makeAsyncIterator()
         await nextDial.next()
         await nextDial.next()
@@ -196,8 +194,8 @@ struct LinkClientSessionTests {
 
         let observed = dialled.withLock { $0 }
         #expect(observed.count >= 2, "only \(observed.count) dials observed")
-        // Released once each connection's terminal state has been processed on the session's
-        // queue; waited for, with an upper bound, rather than slept on.
+        // The system releases each connection after the session's queue has processed its terminal
+        // state. The test waits for this with an upper bound and does not sleep.
         await waitFor(timeout: .seconds(10)) { observed.allSatisfy { $0.connection == nil } }
         let alive = observed.filter { $0.connection != nil }.count
         #expect(alive == 0, "\(alive) of \(observed.count) connections still alive")
@@ -213,8 +211,8 @@ struct LinkClientSessionTests {
         session.onDisconnected = { _ in disconnects.withLock { $0 += 1 } }
         session.start()
         await waitFor { connects.withLock { $0 } == 1 }
-        // A provider going away closes its sessions' connections and then stops listening;
-        // cancelling the listener alone leaves the accepted connection open, by design.
+        // A provider that goes away closes its sessions' connections and then stops listening.
+        // Cancelling the listener alone leaves the accepted connection open, by design.
         server.acceptedConnection?.cancel()
         listener.cancel()
         await waitFor(timeout: .seconds(3)) { disconnects.withLock { $0 } == 1 }

@@ -8,27 +8,25 @@ import CoreBluetooth
 import Foundation
 import BLESwiftCompat17
 
-/// Bridges real `CBPeripheralDelegate` callbacks into a `PeripheralEvent` handler closure
-/// — the `PeripheralRemote` conformance's implementation of `eventHandler` for
-/// `CBPeripheral`.
+/// Bridges `CBPeripheralDelegate` callbacks into a `PeripheralEvent` handler closure. It
+/// implements `eventHandler` for `CBPeripheral` in the `PeripheralRemote` conformance.
 ///
-/// One instance per `CBPeripheral`, created lazily and retained via an associated object
-/// by `CBPeripheral`'s `eventHandler` setter — `CBPeripheral.delegate` is `weak`, so
-/// something must keep this instance alive.
+/// There is one instance for each `CBPeripheral`. The `CBPeripheral.eventHandler` setter creates
+/// it lazily and retains it through an associated object, because `CBPeripheral.delegate` is
+/// `weak`.
 ///
-/// Holds its handler `Mutex`-guarded, matching ``CentralDelegateProxy``'s pattern.
-/// Forwarding stays synchronous — no `Task {` — since by the time a callback lands here it
-/// is already running on `Central`'s own executor queue.
+/// A `Mutex` guards the handler, as in ``CentralDelegateProxy``. Forwarding is synchronous,
+/// with no `Task {`, because callbacks already run on `Central`'s executor queue.
 final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate {
 
-    /// Typed `@Sendable`, and wrapped in a struct rather than stored as the `Mutex`'s `Value`
-    /// directly, for the reasons documented on `CentralDelegateProxy.handlerBox` (#53).
+    /// Wraps the `@Sendable` handler in a struct and not directly in the `Mutex`. See
+    /// `CentralDelegateProxy.handlerBox` for the reasons.
     private struct HandlerStorage: Sendable {
         var handler: (@Sendable (PeripheralEvent) -> Void)?
     }
     private let handlerBox = Mutex(HandlerStorage())
 
-    /// The `PeripheralEvent` handler this proxy forwards to.
+    /// The `PeripheralEvent` handler to which this proxy forwards.
     var handler: (@Sendable (PeripheralEvent) -> Void)? {
         get { handlerBox.withLock { $0.handler } }
         set { handlerBox.withLock { $0.handler = newValue } }
@@ -70,8 +68,8 @@ final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor descriptor: CBDescriptor, error: Error?) {
         guard let identifier = descriptorIdentifier(for: descriptor) else { return }
-        // Convert CoreBluetooth's untyped `Any?` descriptor value to `Data` EAGERLY, right
-        // here at the proxy boundary — the raw CB payload never crosses into the actor.
+        // Convert CoreBluetooth's untyped `Any?` descriptor value to `Data` eagerly, so the raw
+        // payload never crosses into the actor.
         forward(.didUpdateValueForDescriptor(descriptor: identifier, value: Self.descriptorData(from: descriptor.value), error: error as NSError?))
     }
 
@@ -93,9 +91,9 @@ final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didOpen channel: CBL2CAPChannel?, error: Error?) {
-        // Wrap the raw `CBL2CAPChannel` in a BLESwift-owned transport at this seam (which
-        // also starts its dedicated stream pump off the actor) so nothing downstream ever
-        // sees a CoreBluetooth type. On failure there is no channel to wrap.
+        // Wrap the raw `CBL2CAPChannel` in BLESwift's transport at this seam. The transport also
+        // starts its stream pump off the actor, so nothing downstream sees a CoreBluetooth type.
+        // On a failure, there is no channel to wrap.
         if let channel {
             forward(.didOpenL2CAPChannel(channel: CBL2CAPChannelTransport(channel: channel), error: nil))
         } else {
@@ -105,35 +103,32 @@ final class PeripheralDelegateProxy: NSObject, CBPeripheralDelegate {
 
     // MARK: - Forwarding
 
-    /// Resolves `characteristic`'s owning service, or `nil` if CoreBluetooth ever hands
-    /// back a characteristic with no `service` set (not expected in practice, but
-    /// `CBCharacteristic.service` is optional).
+    /// Resolves the owning service of `characteristic`. It returns `nil` if the characteristic
+    /// has no `service`. This is unexpected, but `CBCharacteristic.service` is optional.
     private func characteristicIdentifier(for characteristic: CBCharacteristic) -> CharacteristicIdentifier? {
         guard let service = characteristic.service else { return nil }
         return CharacteristicIdentifier(cbuuid: characteristic.uuid, service: ServiceIdentifier(cbuuid: service.uuid))
     }
 
-    /// Resolves `descriptor`'s owning characteristic (and, transitively, its service), or
-    /// `nil` if CoreBluetooth ever hands back a descriptor whose `characteristic` (or that
-    /// characteristic's `service`) is unset — both are optional in CoreBluetooth, though
-    /// neither is expected in practice.
+    /// Resolves the owning characteristic of `descriptor`, and through it the service. It
+    /// returns `nil` if the descriptor has no `characteristic`, or that characteristic has no
+    /// `service`. Both are optional in CoreBluetooth but unexpected.
     private func descriptorIdentifier(for descriptor: CBDescriptor) -> DescriptorIdentifier? {
         guard let characteristic = descriptor.characteristic,
               let identifier = characteristicIdentifier(for: characteristic) else { return nil }
         return DescriptorIdentifier(cbuuid: descriptor.uuid, characteristic: identifier)
     }
 
-    /// Converts a `CBDescriptor.value` (typed `Any?` by CoreBluetooth) to `Data`, eagerly,
-    /// at the proxy boundary. CoreBluetooth documents the concrete class per descriptor UUID:
+    /// Converts a `CBDescriptor.value` (`Any?`) to `Data`. CoreBluetooth documents the class
+    /// for each descriptor UUID:
     ///
-    /// - `NSData` (Characteristic Format, Characteristic Aggregate Format) → the bytes
-    ///   verbatim.
-    /// - `NSString` (Characteristic User Description) → its UTF-8 bytes.
+    /// - `NSData` (Characteristic Format, Characteristic Aggregate Format): the bytes as they
+    ///   are.
+    /// - `NSString` (Characteristic User Description): its UTF-8 bytes.
     /// - `NSNumber` (Characteristic Extended Properties, Client/Server Characteristic
-    ///   Configuration, L2CAP PSM) → its 16-bit value as two little-endian bytes, the GATT
-    ///   wire encoding for every one of these numeric descriptors.
-    /// - `nil` (value not yet read) → `nil`.
-    /// - Any other/unknown shape → `nil`, rather than guessing at a byte layout.
+    ///   Configuration, L2CAP PSM): its 16-bit value as two little-endian bytes, the GATT wire
+    ///   encoding.
+    /// - `nil` (not read yet), or any other shape: `nil`. The code does not guess a layout.
     private static func descriptorData(from value: Any?) -> Data? {
         switch value {
         case nil:

@@ -1,12 +1,10 @@
 # Scanning
 
-Discover nearby peripherals with ``Central/scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``,
-a single `AsyncThrowingStream` of ``ScanEvent``.
+Find nearby peripherals with ``Central/scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``. It returns one `AsyncThrowingStream` of ``ScanEvent``.
 
 ## Overview
 
-BLESwift steers an ongoing scan with ordinary `AsyncSequence` composition over one stream, rather
-than a closure returning a scan-control action:
+You control a scan with normal `AsyncSequence` code on one stream. There is no callback that returns a scan action.
 
 ```swift
 for try await event in await central.scan(services: [heartRateService]) {
@@ -14,13 +12,11 @@ for try await event in await central.scan(services: [heartRateService]) {
 }
 ```
 
-Only one scan can be active at a time (CoreBluetooth exposes a single physical scanner):
-starting a second `scan(...)` while one is already running immediately fails the *new* stream
-with ``BLESwiftError/alreadyScanning`` — the original scan is unaffected.
+CoreBluetooth has one physical scanner, so only one scan can run at a time. If you start a second `scan(...)` while one runs, the *new* stream fails immediately with ``BLESwiftError/alreadyScanning``. The first scan does not change.
 
 ### Stopping a scan
 
-There is no `stopScan()` method. Instead, the scan stops when its stream stops being consumed:
+There is no `stopScan()` method. The scan stops when nothing consumes its stream:
 
 ```swift
 for try await event in await central.scan(services: [heartRateService]) {
@@ -31,15 +27,11 @@ for try await event in await central.scan(services: [heartRateService]) {
 }
 ```
 
-`break`ing out of the loop, cancelling the `Task` iterating it, or letting a `timeout:` elapse
-all end the scan. A `timeout:` that elapses finishes the stream cleanly (no error); the radio
-leaving ``CentralState/poweredOn`` while scanning finishes it by throwing
-``BLESwiftError/bluetoothUnavailable``.
+These actions stop a scan: a `break` out of the loop, a cancelled `Task`, and an elapsed `timeout:`. An elapsed `timeout:` finishes the stream without an error. If the radio leaves ``CentralState/poweredOn`` during the scan, the stream finishes by throwing ``BLESwiftError/bluetoothUnavailable``.
 
 ### Blacklisting a peripheral
 
-Blacklisting a peripheral is just filtering the stream yourself, using the standard
-library's `AsyncSequence.filter`:
+To ignore a peripheral, filter the stream with the standard library's `AsyncSequence.filter`:
 
 ```swift
 let blacklisted: Set<UUID> = loadBlacklist()
@@ -58,8 +50,7 @@ for try await event in filtered {
 
 ### Connecting from a scan
 
-BLESwift has no dedicated "connect" scan action — just call
-``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` with a sighted peripheral's identifier:
+To connect to a peripheral that a scan found, call ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` with its identifier. Connecting does not stop the scan:
 
 ```swift
 for try await event in await central.scan(services: [heartRateService]) {
@@ -71,16 +62,9 @@ for try await event in await central.scan(services: [heartRateService]) {
 }
 ```
 
-Connecting while a scan is live does not stop or otherwise affect that scan.
-
 ### Declarative filtering
 
-Instead of filtering the stream by hand, pass a ``ScanFilter`` to
-``Central/scan(filter:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``. Only
-``ScanFilter/services`` reaches the radio; every other field is applied per sighting before
-anything is reported — a non-matching sighting is dropped entirely (not recorded, not
-loss-tracked, no event). All set fields must hold, and ``ScanFilter/custom`` is an arbitrary
-escape hatch:
+To filter in the library, pass a ``ScanFilter`` to ``Central/scan(filter:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``. Only ``ScanFilter/services`` goes to the radio. BLESwift applies each other field to each sighting before it reports the sighting. A sighting that does not match is dropped. BLESwift does not record it, track its loss, or send an event. All set fields must match. ``ScanFilter/custom`` accepts any predicate.
 
 ```swift
 let filter = ScanFilter(
@@ -95,23 +79,20 @@ for try await event in await central.scan(filter: filter) {
 }
 ```
 
-When all you want is one device, ``Central/findFirst(matching:timeout:)`` runs the scan for
-you, returns the first matching ``Discovery``, and stops the scan — on every exit path,
-including timeout and cancellation. `timeout` defaults to `nil` (wait indefinitely), but
-passing one is recommended:
+To find one device, use ``Central/findFirst(matching:timeout:)``. It runs the scan, returns the first matching ``Discovery``, and stops the scan on every exit path, even on timeout and cancellation. `timeout` defaults to `nil`, which waits without a limit. Set a timeout:
 
 ```swift
 let discovery = try await central.findFirst(matching: filter, timeout: .seconds(10))
 let peripheral = try await central.connect(discovery.peripheral)
 ```
 
-### The saved-device pattern
+#### Names in filters
 
-If you persist a peripheral's ``PeripheralIdentifier/uuid`` across launches,
-``Central/connect(identifier:fallbackScan:reconnect:timeout:compatibility:)`` reconnects to it in one
-call: it tries ``Central/knownPeripherals(withIdentifiers:)`` first (no radio), and only if
-CoreBluetooth no longer knows the identifier does it run the `fallbackScan` and connect to
-whatever that finds:
+``PeripheralIdentifier/cachedName`` is the name exactly as CoreBluetooth reported it, or `nil`. ``PeripheralIdentifier/name`` still returns `"No Name"` when the peripheral has no name. A name filter (``ScanFilter/namePrefix`` or ``ScanFilter/nameExact``) compares the advertised local name. If the advertisement has no local name, it compares `cachedName`. A peripheral with neither name never matches a name filter.
+
+### Saved devices
+
+If you save the ``PeripheralIdentifier/uuid`` of a peripheral, ``Central/connect(identifier:fallbackScan:reconnect:timeout:compatibility:)`` reconnects in one call. It first tries ``Central/knownPeripherals(withIdentifiers:)``, which does not use the radio. If CoreBluetooth no longer knows the identifier, it runs `fallbackScan` and connects to the result:
 
 ```swift
 let peripheral = try await central.connect(
@@ -121,18 +102,13 @@ let peripheral = try await central.connect(
 savedUUID = peripheral.id.uuid // re-persist: the fallback may find a NEW uuid
 ```
 
-Two things to know: a fallback-found peripheral may have a *different* UUID than the saved
-one (CoreBluetooth reassigns UUIDs; rescuing a stale UUID by name/service is the point), so
-re-persist ``Peripheral/id`` after connecting — and `timeout` applies to each phase
-separately (the fallback scan gets `timeout`, then the connect attempt gets `timeout`
-again); it is not a shared budget. Without a `fallbackScan`, an unknown identifier throws
-``BLESwiftError/unexpectedPeripheral(_:)``.
+CoreBluetooth can assign a new UUID to a peripheral. The fallback peripheral can have a *different* UUID than the saved UUID. After you connect, save ``Peripheral/id`` again.
+
+`timeout` applies to each phase separately. The fallback scan gets `timeout`, and then the connect gets `timeout` again. Without a `fallbackScan`, an unknown identifier throws ``BLESwiftError/unexpectedPeripheral(_:)``.
 
 ### Duplicate sightings and loss tracking
 
-By default (`allowDuplicates: false`), CoreBluetooth reports each peripheral only once per scan
-session, as ``ScanEvent/discovered(_:)``. Pass `allowDuplicates: true` to also see repeat
-sightings as ``ScanEvent/updated(_:)``, and to track when a peripheral goes quiet:
+By default (`allowDuplicates: false`), CoreBluetooth reports each peripheral once in a scan session, as ``ScanEvent/discovered(_:)``. To also receive repeat sightings as ``ScanEvent/updated(_:)`` and to detect a peripheral that goes quiet, pass `allowDuplicates: true`:
 
 ```swift
 for try await event in await central.scan(
@@ -152,40 +128,23 @@ for try await event in await central.scan(
 }
 ```
 
-`rssiThreshold` suppresses an ``ScanEvent/updated(_:)``
-when the RSSI hasn't moved by at least that many dBm since the last *reported* sighting — it
-does not affect loss tracking, and does not apply to ``ScanEvent/discovered(_:)``.
-`lossTimeout` is the loss deadline (configurable), refreshed on every sighting, after which an
-unseen peripheral is reported as
-``ScanEvent/lost(_:)`` and forgotten; a later re-sighting is reported as a fresh
-``ScanEvent/discovered(_:)``, not ``ScanEvent/updated(_:)``. Both only matter when
-`allowDuplicates` is `true` — otherwise ``ScanEvent/updated(_:)`` and ``ScanEvent/lost(_:)`` are
-never emitted.
+- `rssiThreshold` suppresses an ``ScanEvent/updated(_:)`` when the RSSI changed by less than that many dBm since the last *reported* sighting. It does not change loss tracking. It does not apply to ``ScanEvent/discovered(_:)``.
+- `lossTimeout` is the time without a sighting after which BLESwift reports ``ScanEvent/lost(_:)`` and forgets the peripheral. Each sighting resets it. The default is 15 seconds. A later sighting is a new ``ScanEvent/discovered(_:)``.
 
-### Background caveats (iOS)
+``ScanEvent/updated(_:)`` and ``ScanEvent/lost(_:)`` occur only when `allowDuplicates` is `true`.
 
-Apple discourages `allowDuplicates: true` and unscoped scanning (`services: nil`) while
-backgrounded — both increase battery/CPU cost, and `allowDuplicates` scanning doesn't work in
-the background at all. If either applies, BLESwift automatically fails the scan the moment the app
-enters the background:
+### Background limits (iOS)
 
-- `allowDuplicates: true` → ``BLESwiftError/allowDuplicatesInBackgroundNotSupported``
-- `services: nil` (or empty) → ``BLESwiftError/missingServiceIdentifiersInBackground``
+Apple does not recommend `allowDuplicates: true` or an unscoped scan (`services: nil`) in the background, and `allowDuplicates` does not work in the background. If your scan uses either, BLESwift fails the scan when the app enters the background:
 
-Passing `nil`/empty `services` also logs a warning at scan start regardless of platform, per
-Apple's general guidance against unscoped scanning — prefer always specifying the services
-you're interested in.
+- `allowDuplicates: true` fails with ``BLESwiftError/allowDuplicatesInBackgroundNotSupported``.
+- `services: nil` (or an empty list) fails with ``BLESwiftError/missingServiceIdentifiersInBackground``.
 
-### You may not need to scan
+On every platform, a scan with `nil` or empty `services` also logs a warning at the start. Always specify the services that you need.
 
-If you already know a peripheral's identifier — from a previous session, or because you
-persist it yourself — ``Central/knownPeripherals(withIdentifiers:)`` resolves it without a
-scan at all, synchronously against CoreBluetooth's local cache. And
-``Central/systemConnectedPeripherals(withServices:)`` finds peripherals the *system* is
-already holding a connection to (by any app on the device, not just yours), by service —
-useful when a peripheral never actually disconnected and re-scanning for it would be wasted
-radio time. Both hand back a ``PeripheralIdentifier`` you feed straight to
-``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)``, the same as a scan result.
+### When you do not need a scan
+
+If you know the identifier of a peripheral, ``Central/knownPeripherals(withIdentifiers:)`` finds it without a scan. It reads the local CoreBluetooth cache. ``Central/systemConnectedPeripherals(withServices:)`` finds peripherals that the system is already connected to, for any app. Use it when a peripheral never disconnected. Both return a ``PeripheralIdentifier`` that you can pass to ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)``.
 
 ## See Also
 

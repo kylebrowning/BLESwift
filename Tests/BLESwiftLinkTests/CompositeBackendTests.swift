@@ -14,16 +14,15 @@ import Foundation
 import BLESwiftCompat17
 import Testing
 
-/// ``CompositeCentral``/``CompositePeripheralManager``: one backend made of several, with
-/// every call fanned out and every event fanned in on the single shared queue.
+/// Tests for ``CompositeCentral`` and ``CompositePeripheralManager``. Each is one backend made of
+/// several backends. It fans out every call and fans in every event on the single shared queue.
 @Suite("Composite backends")
 struct CompositeBackendTests {
 
     // MARK: - Helpers
 
-    /// Hops onto `queue` to run `body` and returns its result — the sanctioned door for
-    /// off-queue test code to touch queue-confined state, and (because `queue` is serial)
-    /// a flush of every previously-scheduled `.async` delivery.
+    /// Hops onto `queue` to run `body` and returns its result. Because `queue` is serial, it also
+    /// flushes every `.async` delivery that was scheduled before it.
     private func onQueue<T: Sendable>(_ queue: DispatchQueue, _ body: @Sendable @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async { continuation.resume(returning: body()) }
@@ -76,7 +75,6 @@ struct CompositeBackendTests {
         }
         await waitFor { states.withLock { $0 == [.poweredOn] } }
 
-        // One child off is not enough — the composite is still served by the other.
         first.simulateStateChange(.poweredOff)
         _ = await onQueue(queue) { true }
         #expect(states.withLock { $0 } == [.poweredOn])
@@ -85,7 +83,6 @@ struct CompositeBackendTests {
         await waitFor { states.withLock { $0.count == 2 } }
         #expect(states.withLock { $0 } == [.poweredOn, .poweredOff])
 
-        // A redundant child update does not re-emit.
         second.simulateStateChange(.poweredOff)
         _ = await onQueue(queue) { true }
         #expect(states.withLock { $0 } == [.poweredOn, .poweredOff])
@@ -139,7 +136,6 @@ struct CompositeBackendTests {
         #expect(retrieved.count == 2)
         #expect(Set(retrieved) == Set([onlyOnSecond.identifier, shared.identifier]))
 
-        // First backend wins the duplicate.
         let winner = await onQueue(queue) {
             composite.retrievePeripherals(withIdentifiers: [shared.identifier]).first.map { $0 === shared } ?? false
         }
@@ -182,8 +178,8 @@ struct CompositeBackendTests {
             }
         }
 
-        // Retrieve and connect in one hop — `any PeripheralRemote` is not `Sendable`, so
-        // the remote never leaves the queue it is confined to.
+        // Retrieve and connect in one hop. `any PeripheralRemote` is not `Sendable`, so the remote
+        // never leaves the queue that confines it.
         let retrievedCount = await onQueue(queue) {
             let retrieved = composite.retrievePeripherals(withIdentifiers: [peripheral.identifier])
             for remote in retrieved { composite.connect(remote, options: nil, requiresANCS: false) }
@@ -193,7 +189,6 @@ struct CompositeBackendTests {
 
         await waitFor { connected.withLock { !$0.isEmpty } }
         #expect(connected.withLock { $0 }.contains(peripheral.identifier))
-        // Fanned out to every child; mismatched families would have been silent no-ops.
         #expect(await onQueue(queue) { first.connectCallCount } == 1)
         #expect(await onQueue(queue) { second.connectCallCount } == 1)
 
@@ -258,8 +253,8 @@ struct CompositeBackendTests {
             composite.registerForConnectionEvents(services: [Self.heartRate], peripherals: nil)
         }
 
-        // CoreBluetooth would have dropped both on a child that is not powered on, so the
-        // composite does not issue them at all — it holds them.
+        // CoreBluetooth would drop both calls on a child that is not powered on, so the composite
+        // does not issue them at all. It holds them.
         #expect(await onQueue(queue) { first.scanCallCount } == 1)
         #expect(await onQueue(queue) { second.scanCallCount } == 0)
         #expect(await onQueue(queue) { second.connectionEventRegistrationCount } == 0)
@@ -271,9 +266,7 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { second.lastScanServices } == [Self.heartRate])
         #expect(await onQueue(queue) { second.lastScanOptions } == options)
         #expect(await onQueue(queue) { second.connectionEventRegistrationCount } == 1)
-        // The child that was on all along was issued the scan exactly once.
         #expect(await onQueue(queue) { first.scanCallCount } == 1)
-        // Logged once for the child, not once per operation it was skipped for.
         #expect(skipped.withLock { $0.count } == 1)
         #expect(skipped.withLock { $0.first }?.contains("composite child 1") == true)
     }
@@ -294,8 +287,8 @@ struct CompositeBackendTests {
         }
 
         second.simulateStateChange(.poweredOn)
-        // Two flushes: the state change hops onto the queue, and the composite's reconciliation
-        // runs inline on the delivery it schedules.
+        // Two flushes are necessary. The state change hops onto the queue. The composite's
+        // reconciliation runs inline on the delivery that it schedules.
         _ = await onQueue(queue) { true }
         _ = await onQueue(queue) { true }
 
@@ -405,13 +398,12 @@ struct CompositeBackendTests {
         await waitFor { started.withLock { !$0.isEmpty } }
         _ = await onQueue(queue) { true }
 
-        // The powered-off child was skipped, never asked to advertise, and could not report —
-        // so the composite is advertising exactly as much as it can be.
+        // The composite skipped the powered-off child. It never asked this child to advertise, and
+        // the child could not report, so the composite advertises exactly as much as it can.
         #expect(await onQueue(queue) { offline.isAdvertising } == false)
         #expect(await onQueue(queue) { online.isAdvertising })
         #expect(await onQueue(queue) { composite.isAdvertising })
 
-        // And a stop still takes it back down: nothing online is advertising any more.
         await onQueue(queue) { composite.stopAdvertising() }
         #expect(await onQueue(queue) { composite.isAdvertising } == false)
     }
@@ -427,15 +419,13 @@ struct CompositeBackendTests {
             composite.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil)
         })
 
-        // The second child refuses. The composite queues the value for it — one child being
-        // busy is not the whole composite's window closing — and still answers `true`.
+        // The second child refuses. The composite queues the value for it. One busy child does not
+        // close the whole composite's window, so the composite still answers `true`.
         await onQueue(queue) { second.scriptedUpdateValueReturns = [false] }
         #expect(await onQueue(queue) {
             composite.updateValue(Data([2]), for: Self.measurement, onSubscribed: nil)
         })
 
-        // Both children were offered both pushes: the refusal never short-circuits the
-        // fan-out, and the first child is not held back by the second.
         #expect(await onQueue(queue) { first.updateValueCalls.count } == 2)
         #expect(await onQueue(queue) { second.updateValueCalls.count } == 2)
         #expect(await onQueue(queue) { first.updateValueCalls.map(\.value) } == [Data([1]), Data([2])])
@@ -456,9 +446,8 @@ struct CompositeBackendTests {
         }
 
         let value = Data([0xA5])
-        // The second child's transmit queue is full, so it refuses; the value goes into that
-        // child's FIFO and the composite still answers `true` — nothing is lost, and the
-        // caller is not asked to re-offer a value one child already has.
+        // The second child's transmit queue is full, so it refuses and the value goes into its
+        // FIFO. The composite still answers `true`, because nothing is lost.
         await onQueue(queue) { refusing.scriptedUpdateValueReturns = [false] }
         #expect(await onQueue(queue) {
             composite.updateValue(value, for: Self.measurement, onSubscribed: nil)
@@ -466,18 +455,16 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
         #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 1)
 
-        // That child's window reopens: its FIFO drains, and the value reaches it — once. The
-        // child that already took it is not pushed to a second time, or its subscribers would
-        // see a duplicate.
+        // That child's window reopens. Its FIFO drains and the value reaches it once. A second push
+        // to the child that already took the value would duplicate it for its subscribers.
         refusing.simulateReadyToUpdate()
         await waitFor { ready.withLock { $0 } == 1 }
         #expect(await onQueue(queue) { accepting.updateValueCalls.count } == 1)
         #expect(await onQueue(queue) { refusing.updateValueCalls.count } == 2)
         #expect(await onQueue(queue) { refusing.updateValueCalls.map(\.value) } == [value, value])
-        // Both offers carried the value; only the second was accepted, so exactly one
-        // notification reached that child's subscribers.
+        // Both offers carried the value, and only the second was accepted. Exactly one notification
+        // reached that child's subscribers.
 
-        // And the next push fans out to every child again, from an empty FIFO.
         #expect(await onQueue(queue) {
             composite.updateValue(Data([0x5A]), for: Self.measurement, onSubscribed: nil)
         })
@@ -492,10 +479,10 @@ struct CompositeBackendTests {
         let refusing = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [accepting, refusing], queue: queue)
 
-        // A live child with a real transmit queue: it raises a readiness of its own before it
-        // ever refuses, which is what tells the composite its later refusals are back-pressure
-        // and not a dead handle. Done before the counter below is installed, so the host hears
-        // only the readiness the window's reopening owes it.
+        // A live child with a real transmit queue. It raises a readiness before it ever refuses,
+        // which tells the composite that later refusals are back-pressure and not a dead handle.
+        // The test does this before it installs the counter, so the host hears only the readiness
+        // that the reopening owes it.
         refusing.simulateReadyToUpdate()
         await onQueue(queue) {}
 
@@ -506,7 +493,6 @@ struct CompositeBackendTests {
             }
         }
 
-        // The second child refuses everything, so its FIFO fills to the window.
         let window = LinkFlowControl.updateValueWindow
         await onQueue(queue) { refusing.scriptedUpdateValueReturns = Array(repeating: false, count: window + 4) }
         for index in 0..<window {
@@ -515,8 +501,8 @@ struct CompositeBackendTests {
             }, "push \(index) should have been queued")
         }
 
-        // Full: the composite's window closes, and the refused push reaches nobody — so the
-        // caller's re-offer of it is still that value's first delivery.
+        // The FIFO is full, so the composite's window closes. The refused push reaches nobody, so
+        // the caller's repeat offer is still the first delivery of that value.
         let acceptedByFirst = await onQueue(queue) { accepting.updateValueCalls.count }
         #expect(acceptedByFirst == window)
         #expect(await onQueue(queue) {
@@ -524,7 +510,6 @@ struct CompositeBackendTests {
         } == false)
         #expect(await onQueue(queue) { accepting.updateValueCalls.count } == window)
 
-        // The refusing child comes back: its FIFO drains, and one readiness reaches the host.
         await onQueue(queue) { refusing.scriptedUpdateValueReturns = [] }
         refusing.simulateReadyToUpdate()
         await waitFor { ready.withLock { $0 } >= 1 }
@@ -546,12 +531,11 @@ struct CompositeBackendTests {
             log: { line in lines.withLock { $0.append(line) } }
         )
 
-        // A live child, as above: it raises a readiness of its own, so the composite counts
-        // its FIFO against the window.
+        // A live child, as above. It raises a readiness of its own, so the composite counts its
+        // FIFO against the window.
         refusing.simulateReadyToUpdate()
         await onQueue(queue) {}
 
-        // The second child refuses everything, permanently: nothing drains its FIFO.
         let window = LinkFlowControl.updateValueWindow
         await onQueue(queue) { refusing.scriptedUpdateValueReturns = Array(repeating: false, count: window + 8) }
         for index in 0..<window {
@@ -559,7 +543,6 @@ struct CompositeBackendTests {
                 composite.updateValue(Data([UInt8(index % 256)]), for: Self.measurement, onSubscribed: nil)
             }, "push \(index) should have been queued")
         }
-        // Pushes past the full FIFO are refused, and earn no further lines.
         for _ in 0..<3 {
             #expect(await onQueue(queue) {
                 composite.updateValue(Data([0xFF]), for: Self.measurement, onSubscribed: nil)
@@ -591,8 +574,8 @@ struct CompositeBackendTests {
             }
         }
 
-        // The real `CBPeripheralManager`'s dead-handle behavior: every push refused without
-        // reaching the radio, and no `readyToUpdateSubscribers` ever raised.
+        // This is the dead-handle behavior of the real `CBPeripheralManager`. Every push is refused
+        // without reaching the radio, and the radio never raises `readyToUpdateSubscribers`.
         let window = LinkFlowControl.updateValueWindow
         let pushes = window + 8
         #expect(pushes >= 40)
@@ -603,17 +586,15 @@ struct CompositeBackendTests {
             }, "push \(index) must not be refused on a child that has taken nothing")
         }
 
-        // The healthy child got every one of them, and the window never closed.
         #expect(await onQueue(queue) { healthy.updateValueCalls.count } == pushes)
         #expect(await onQueue(queue) { healthy.updateValueCalls.map(\.value) } == (0..<pushes).map { Data([UInt8($0 % 256)]) })
         #expect(ready.withLock { $0 } == 0)
-        // And the dead child's FIFO stayed bounded, holding the newest window of pushes.
         #expect(await onQueue(queue) { composite.queuedCountForTesting(child: 1) } == window)
         #expect(lines.withLock { $0.count } == 1)
         #expect(lines.withLock { $0.first ?? "" }.contains("child 1"))
 
-        // It comes to life: the readiness proves it, its FIFO drains in order, and from here
-        // it is a child the composite will close its window for again.
+        // The child comes to life, as the readiness proves, and its FIFO drains in order. From here
+        // the composite closes its window for this child again.
         await onQueue(queue) { dead.scriptedUpdateValueReturns = [] }
         let before = await onQueue(queue) { dead.updateValueCalls.count }
         dead.simulateReadyToUpdate()
@@ -630,9 +611,8 @@ struct CompositeBackendTests {
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
 
-        // Two tasks pushing at once. Every push still lands on `queue`, so the composite sees
-        // some interleaving of the two sequences — whichever it is, each value must reach
-        // each child exactly once, and each task's own values must stay in order.
+        // Two tasks push at the same time. In every interleaving on `queue`, each value must reach
+        // each child exactly once, and each task's values must stay in order.
         let left = (0..<20).map { Data([0x00, UInt8($0)]) }
         let right = (0..<20).map { Data([0x01, UInt8($0)]) }
         async let leftPushes: Void = {
@@ -663,8 +643,8 @@ struct CompositeBackendTests {
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second], queue: queue)
 
-        // Same value, same characteristic, same (absent) subscriber list — two separate
-        // pushes all the same. Neither may be mistaken for a retry of the other.
+        // The value, the characteristic, and the subscriber list (absent) are the same. The two
+        // pushes are still separate. Neither may be mistaken for a retry of the other.
         let value = Data([0xA5])
         for _ in 0..<2 {
             #expect(await onQueue(queue) {
@@ -745,8 +725,8 @@ struct CompositeBackendTests {
             }
         }
 
-        // The powered-off child can never report a completion, so the composite must not wait
-        // on it: the aggregate arrives from the powered-on child alone.
+        // The powered-off child can never report a completion, so the composite must not wait for
+        // it. The aggregate arrives from the powered-on child alone.
         await onQueue(queue) {
             composite.add(Self.service)
             composite.startAdvertising(PeripheralAdvertisement(localName: "Composite", serviceUUIDs: [Self.heartRate]))
@@ -758,7 +738,6 @@ struct CompositeBackendTests {
         #expect(started.withLock { $0 } == [nil])
         #expect(await onQueue(queue) { virtual.addedServices.count } == 1)
         #expect(await onQueue(queue) { virtual.startAdvertisingCallCount } == 1)
-        // Nothing was even offered to the radio that is off.
         #expect(await onQueue(queue) { real.addedServices.isEmpty })
         #expect(await onQueue(queue) { real.startAdvertisingCallCount } == 0)
     }
@@ -789,7 +768,6 @@ struct CompositeBackendTests {
         await waitFor { added.withLock { !$0.isEmpty } && started.withLock { !$0.isEmpty } }
         _ = await onQueue(queue) { true }
 
-        // Nothing carried either operation, so neither may be reported as having succeeded.
         let expected = CompositePeripheralManager.noPoweredOnBackendError
         #expect(added.withLock { $0.count } == 1)
         #expect(added.withLock { $0.first ?? nil } == expected)
@@ -800,11 +778,9 @@ struct CompositeBackendTests {
         #expect(expected.localizedDescription == "no powered-on backend")
         #expect(await onQueue(queue) { !composite.isAdvertising })
 
-        // Both are still remembered: the first child to power on publishes and advertises.
         first.simulateStateChange(.poweredOn)
         await waitFor { await self.onQueue(queue) { first.startAdvertisingCallCount } == 1 }
         #expect(await onQueue(queue) { first.addedServices.count } == 1)
-        // The catch-up is the composite's business, not the host's: no second completion.
         #expect(added.withLock { $0.count } == 1)
         #expect(started.withLock { $0.count } == 1)
     }
@@ -816,8 +792,8 @@ struct CompositeBackendTests {
         let real = FakePeripheralManager(queue: queue, state: .poweredOff)
         let composite = CompositePeripheralManager(backends: [virtual, real], queue: queue)
 
-        // Far past the window: the powered-off child is skipped outright rather than queued
-        // for, so no FIFO ever fills and the composite keeps accepting pushes.
+        // The count is far past the window. The composite skips the powered-off child outright and
+        // does not queue for it, so no FIFO ever fills and the composite keeps accepting pushes.
         let pushes = LinkFlowControl.updateValueWindow * 2
         for index in 0..<pushes {
             #expect(await onQueue(queue) {
@@ -843,23 +819,21 @@ struct CompositeBackendTests {
             }
         }
 
-        // No radio could carry it, so reporting it as delivered or queued would be a lie —
-        // the same one `add` and `startAdvertising` refuse to tell with no powered-on child.
+        // No radio could carry the value, so a report that it was delivered or queued would be a
+        // lie. `add` and `startAdvertising` refuse the same way when no child is powered on.
         #expect(await onQueue(queue) {
             composite.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil)
         } == false)
-        // And a refused push reaches nothing: the caller's re-offer is its only delivery.
         #expect(await onQueue(queue) { first.updateValueCalls.isEmpty })
         #expect(await onQueue(queue) { second.updateValueCalls.isEmpty })
         #expect(ready.withLock { $0 } == 0)
 
-        // The first child to power on is what reopens the window: nothing was ever queued for
-        // it, so no child of its own accord would ever say it is ready.
+        // The first child to power on reopens the window. The composite queued nothing for this
+        // child, so no child would ever say by itself that it is ready.
         first.simulateStateChange(.poweredOn)
         await waitFor { ready.withLock { $0 } == 1 }
         #expect(ready.withLock { $0 } == 1)
 
-        // The re-offer now goes through, exactly once.
         #expect(await onQueue(queue) {
             composite.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil)
         })
@@ -893,7 +867,8 @@ struct CompositeBackendTests {
         }
         await waitFor { added.withLock { !$0.isEmpty } && started.withLock { !$0.isEmpty } }
 
-        // The Mac's radio comes on mid-session: the composite republishes what it is hosting.
+        // The Mac's radio comes on in the middle of the session. The composite publishes again what
+        // it hosts.
         real.simulateStateChange(.poweredOn)
         await waitFor {
             await onQueue(queue) { real.addedServices.count == 1 && real.startAdvertisingCallCount == 1 }
@@ -901,12 +876,10 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { real.addedServices.first?.identifier } == Self.heartRate)
         #expect(await onQueue(queue) { real.lastAdvertisement?.localName } == "Composite")
 
-        // The catch-up is the composite's own business: the host hears no second completion.
         _ = await onQueue(queue) { true }
         #expect(added.withLock { $0 } == [nil])
         #expect(started.withLock { $0 } == [nil])
 
-        // And it now takes its share of the pushes.
         #expect(await onQueue(queue) {
             composite.updateValue(Data([1]), for: Self.measurement, onSubscribed: nil)
         })
@@ -923,9 +896,9 @@ struct CompositeBackendTests {
         let added = Mutex<[NSError?]>([])
         let failure = NSError(domain: "CompositeBackendTests", code: 13)
         await onQueue(queue) {
-            // The radio drops out from inside the fan-out, after the composite has issued the
-            // add to it but before its completion is delivered — and that completion carries
-            // an error, so a settlement that carried it would be visible here.
+            // The radio drops out from inside the fan-out, after the add was issued but before its
+            // completion is delivered. That completion carries an error, so a settlement that used
+            // it would be visible here.
             real.addServiceError = failure
             real.onAddService = { _ in real.simulateStateChange(.poweredOff) }
             composite.eventHandler = { event in
@@ -938,8 +911,8 @@ struct CompositeBackendTests {
         _ = await onQueue(queue) { true }
         _ = await onQueue(queue) { true }
 
-        // Settled by the power-off, not by the child's own late completion — which is
-        // swallowed, so the host never hears the aggregate twice.
+        // The power-off settles the batch. The child's late completion does not settle it. The
+        // composite swallows that completion, so the host never hears the aggregate twice.
         #expect(added.withLock { $0 } == [nil])
         #expect(await onQueue(queue) { composite.radioState } == .poweredOn)
     }
@@ -949,13 +922,13 @@ struct CompositeBackendTests {
         let queue = DispatchQueue(label: "CompositeBackendTests.reentrantAdd")
         let first = FakePeripheralManager(queue: queue, state: .poweredOn)
         let second = FakePeripheralManager(queue: queue, state: .poweredOn)
-        // Abandons what it had in flight, so every batch is settled by its power-down rather
-        // than by a completion of its own.
+        // The child abandons what it had in flight, so its power-down settles every batch. A
+        // completion of its own does not settle any batch.
         let leaving = AbandoningPeripheralManager(queue: queue, state: .poweredOn)
         let composite = CompositePeripheralManager(backends: [first, second, leaving], queue: queue)
 
-        // Several services, so the power-down's walk settles one while others are still ahead
-        // of it in the snapshot — the batches a re-entrant `add()` used to lose.
+        // There are several services, so the power-down walk settles one batch while others are
+        // still ahead in the snapshot. A re-entrant `add()` used to lose these batches.
         let services = (1...8).map { index in
             GATTService(
                 identifier: ServiceIdentifier(uuid: "18\(String(format: "%02X", index))"),
@@ -965,16 +938,15 @@ struct CompositeBackendTests {
         let added = Mutex<[ServiceIdentifier]>([])
         let reentries = Mutex<Int>(0)
         await onQueue(queue) {
-            // Publishes, but never reports it: every batch is left owing this child alone, so
-            // the power-down below settles all of them in one walk.
+            // The child publishes but never reports it. Every batch stays owed to this child alone,
+            // so the power-down below settles all of them in one walk.
             leaving.completesAdds = false
             composite.eventHandler = { event in
                 guard case .didAddService(let identifier, _) = event else { return }
                 added.withLock { $0.append(identifier) }
-                // Straight back into the composite, from the callout the power-down makes —
-                // which is exactly what the two in-tree consumers do not do, and what any
-                // other caller's handler may. Bounded to the power-down's own completions,
-                // one per service, so the re-adds those trigger do not recurse.
+                // The handler goes straight back into the composite from the power-down callout.
+                // The count is bounded to the power-down's completions, so the re-adds do not
+                // recurse.
                 let round = reentries.withLock { count -> Int in
                     count += 1
                     return count
@@ -987,8 +959,8 @@ struct CompositeBackendTests {
         await onQueue(queue) {
             for service in services { composite.add(service) }
         }
-        // Both powered-on children have reported, so nothing is owing but the child that is
-        // about to go — and nothing has reached the host yet.
+        // Both powered-on children have reported, so only the child that is about to go still owes
+        // a report. Nothing has reached the host yet.
         await waitFor {
             await self.onQueue(queue) {
                 first.addedServices.count == services.count && second.addedServices.count == services.count
@@ -999,8 +971,8 @@ struct CompositeBackendTests {
 
         leaving.simulateStateChange(.poweredOff)
 
-        // One completion per service for the power-down, then one per re-add — never one per
-        // child, which is what a batch destroyed by the walk's write-back would have produced.
+        // One completion for each service for the power-down, then one for each re-add. There is
+        // never one for each child.
         let expected = services.count + services.count * services.count
         await waitFor { added.withLock { $0.count } >= expected }
         _ = await onQueue(queue) { true }
@@ -1040,10 +1012,10 @@ struct CompositeBackendTests {
         let added = Mutex<[ServiceIdentifier]>([])
         let started = Mutex<Int>(0)
         await onQueue(queue) {
-            // The radio drops out from inside the fan-out — after the composite has issued the
-            // add to it, and before either completion could be delivered. Both are then
-            // abandoned, which is what a real `CBPeripheralManager` leaving `.poweredOn` does
-            // and what `FakePeripheralManager` (which always answers) cannot model.
+            // The radio drops out from inside the fan-out, after the add was issued and before
+            // either completion could be delivered. The child abandons both, as a real
+            // `CBPeripheralManager` does when it leaves `.poweredOn`. `FakePeripheralManager`
+            // always answers, so it cannot model this.
             real.onAdd = { _ in real.simulateStateChange(.poweredOff) }
             composite.eventHandler = { event in
                 switch event {
@@ -1061,13 +1033,11 @@ struct CompositeBackendTests {
         await waitFor { added.withLock { $0.count } == 1 && started.withLock { $0 } == 1 }
         _ = await onQueue(queue) { true }
         _ = await onQueue(queue) { true }
-        // Settled by the power-down over the powered-on child alone, exactly once each.
         #expect(added.withLock { $0 } == [Self.heartRate])
         #expect(started.withLock { $0 } == 1)
 
-        // Back on — and this time the radio stays on, so the catch-up completes. That
-        // republish is the composite's own business, so its two completions are swallowed and
-        // the host hears nothing more.
+        // The radio is back on and stays on, so the catch-up completes. The composite swallows its
+        // two completions, and the host hears nothing more.
         await onQueue(queue) { real.onAdd = nil }
         real.simulateStateChange(.poweredOn)
         await waitFor { await self.onQueue(queue) { real.addedServices.count == 2 && real.startAdvertisingCallCount == 2 } }
@@ -1075,9 +1045,9 @@ struct CompositeBackendTests {
         #expect(added.withLock { $0 } == [Self.heartRate])
         #expect(started.withLock { $0 } == 1)
 
-        // And now the child publishes and advertises for itself — completions this composite
-        // never issued, which it must forward. Counting the abandoned pair at power-down time
-        // left both counters a full operation too high, and these were eaten in their place.
+        // Now the child publishes and advertises by itself. The composite never issued these
+        // completions, so it must forward them. If it had counted the abandoned pair at power-down
+        // time, both counters would be one operation too high and it would swallow them.
         real.publishOnItsOwn(Self.battery)
         real.advertiseOnItsOwn()
         await waitFor { added.withLock { $0.count } == 2 && started.withLock { $0 } == 2 }
@@ -1099,9 +1069,9 @@ struct CompositeBackendTests {
         await onQueue(queue) { composite.scanForPeripherals(withServices: [Self.heartRate], options: options) }
         #expect(await onQueue(queue) { second.scanCallCount } == 1)
 
-        // The child power-cycles, and both transitions land before the composite drains
-        // either — so its *live* `radioState` reads `.poweredOn` at both deliveries, and the
-        // payloads are the only record that it was ever off.
+        // The child power-cycles. Both transitions land before the composite drains either one, so
+        // its live `radioState` reads `.poweredOn` at both deliveries. Only the payloads record
+        // that the child was off.
         await onQueue(queue) {
             let deliver = second.eventHandler
             deliver?(.didUpdateState(.poweredOff))
@@ -1110,7 +1080,6 @@ struct CompositeBackendTests {
 
         #expect(await onQueue(queue) { second.scanCallCount } == 2)
         #expect(await onQueue(queue) { second.lastScanServices } == [Self.heartRate])
-        // The child that never cycled was issued the scan exactly once.
         #expect(await onQueue(queue) { first.scanCallCount } == 1)
     }
 
@@ -1138,8 +1107,8 @@ struct CompositeBackendTests {
         #expect(await onQueue(queue) { second.addedServices.count } == 1)
         #expect(await onQueue(queue) { second.startAdvertisingCallCount } == 1)
 
-        // As above: two transitions coalesce, so only the payloads say the child went away
-        // and came back — and coming back is what the composite must catch up on.
+        // As above, two transitions coalesce, so only the payloads say that the child went away and
+        // came back. The composite must catch up when the child comes back.
         await onQueue(queue) {
             let deliver = second.eventHandler
             deliver?(.didUpdateState(.poweredOff))
@@ -1149,21 +1118,19 @@ struct CompositeBackendTests {
 
         #expect(await onQueue(queue) { second.addedServices.count } == 2)
         #expect(await onQueue(queue) { second.startAdvertisingCallCount } == 2)
-        // The catch-up is the composite's own business: the host hears one of each, still.
         #expect(added.withLock { $0 } == [nil])
         #expect(started.withLock { $0 } == [nil])
     }
 }
 
-/// A peripheral-role child that answers only while its radio is on: whatever it had in flight
-/// when it left `.poweredOn` is *abandoned*, and no completion for it ever arrives.
+/// A peripheral-role child that answers only while its radio is on. It abandons in-flight work when
+/// it leaves `.poweredOn`, and no completion for that work arrives.
 ///
-/// `FakePeripheralManager` always answers an `add(_:)`, which is precisely the case
-/// ``CompositePeripheralManager``'s swallow counters must not be sized for — so the one child
-/// that models a `CBPeripheralManager` losing its radio mid-operation lives here.
+/// `FakePeripheralManager` always answers an `add(_:)`, which is the case that
+/// ``CompositePeripheralManager``'s swallow counters must not assume.
 private final class AbandoningPeripheralManager: PeripheralManaging, Sendable {
 
-    /// The queue every method and every event delivery is confined to.
+    /// The queue that confines every method and every event delivery.
     let queue: DispatchQueue
 
     nonisolated(unsafe) private var _radioState: CentralState
@@ -1195,27 +1162,27 @@ private final class AbandoningPeripheralManager: PeripheralManaging, Sendable {
         return _startAdvertisingCallCount > 0 && _radioState == .poweredOn
     }
 
-    /// The services this child was asked to publish, in order.
+    /// The services that this child received a request to publish, in order.
     var addedServices: [ServiceIdentifier] {
         dispatchPrecondition(condition: .onQueue(queue))
         return _addedServices
     }
 
-    /// How many times this child was asked to advertise.
+    /// The number of times that this child received a request to advertise.
     var startAdvertisingCallCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _startAdvertisingCallCount
     }
 
-    /// Called synchronously from ``add(_:)``, before its completion is scheduled — the hook a
-    /// test uses to make the radio go away mid-operation.
+    /// Called synchronously from ``add(_:)``, before its completion is scheduled. A test uses this
+    /// hook to make the radio go away in the middle of an operation.
     var onAdd: ((GATTService) -> Void)? {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _onAdd }
         set { dispatchPrecondition(condition: .onQueue(queue)); _onAdd = newValue }
     }
 
-    /// Whether ``add(_:)`` reports a completion at all — a radio still publishing when its
-    /// power goes, so the composite is left holding a batch that only a power-down can settle.
+    /// Whether ``add(_:)`` reports a completion at all. The radio is still publishing when its
+    /// power goes, so the composite holds a batch that only a power-down can settle.
     var completesAdds: Bool {
         get { dispatchPrecondition(condition: .onQueue(queue)); return _completesAdds }
         set { dispatchPrecondition(condition: .onQueue(queue)); _completesAdds = newValue }
@@ -1258,7 +1225,7 @@ private final class AbandoningPeripheralManager: PeripheralManaging, Sendable {
         return true
     }
 
-    /// Simulates the radio changing state, delivering `didUpdateState` on ``queue``.
+    /// Simulates a radio state change. Delivers `didUpdateState` on ``queue``.
     func simulateStateChange(_ newState: CentralState) {
         queue.async { [self] in
             _radioState = newState
@@ -1266,8 +1233,8 @@ private final class AbandoningPeripheralManager: PeripheralManaging, Sendable {
         }
     }
 
-    /// Simulates the child publishing a service of its own — a completion the composite never
-    /// issued and therefore has to forward.
+    /// Simulates the child publishing a service of its own. The composite never issued this
+    /// completion, so it must forward it.
     func publishOnItsOwn(_ identifier: ServiceIdentifier) {
         queue.async { [self] in _eventHandler?(.didAddService(identifier, error: nil)) }
     }

@@ -1,52 +1,36 @@
 # Background Restoration
 
-Recover an in-progress connection or scan after iOS relaunches your app in the background,
-surfaced as buffered event replay.
+Recover a connection or scan after iOS relaunches your app in the background.
 
 ## Overview
 
-iOS can terminate a backgrounded app and later relaunch it in the background to handle a
-Bluetooth event (e.g. a peripheral reconnecting) on its behalf. CoreBluetooth's state
-restoration is how your app recovers what it was doing before termination. BLESwift surfaces this
-as a single buffered stream of `RestorationEvent`s, rather than a pair of delegate protocols.
+iOS can terminate a backgrounded app. Later, it can relaunch the app in the background to handle a Bluetooth event, for example a peripheral that reconnects. CoreBluetooth state restoration lets your app recover what it was doing before termination. BLESwift delivers restoration as one buffered stream of ``RestorationEvent`` values.
 
-- iOS only. Restoration is enabled by setting `Configuration`'s
-  `restoration: RestorationConfiguration?` field (iOS-only API), supplying a stable
-  restoration identifier:
+Restoration is available on iOS only. To enable it, set the `restoration` field of ``Configuration`` to a ``RestorationConfiguration`` with a stable identifier:
 
-  ```swift
-  let configuration = Configuration(
-      restoration: RestorationConfiguration(identifier: "com.example.myapp.central")
-  )
-  let central = Central(configuration: configuration)
-  ```
+```swift
+let configuration = Configuration(
+    restoration: RestorationConfiguration(identifier: "com.example.myapp.central")
+)
+let central = Central(configuration: configuration)
+```
 
-- `central.restorationEvents()` returns an `AsyncStream<RestorationEvent>` that **replays every
-  event buffered since `Central` was created** to its first subscriber — not just the latest
-  one. CoreBluetooth can deliver `willRestoreState` synchronously during `CBCentralManager`
-  initialization, potentially before your code has had a chance to start consuming anything, so
-  nothing is lost to that race.
-- Restoration is genuinely plural: `RestoredState.peripherals` carries every peripheral
-  CoreBluetooth preserved, and `Central` routes **all of them**, not just one. Each
-  already-*connected* peripheral is adopted as a live session; each restored-*connecting*
-  peripheral gets its own manual re-connect attempt; each produces its own
-  `.restoredConnection`/`.failedToRestoreConnection` event, carrying that peripheral's
-  `PeripheralIdentifier`. A consumer that expects more than one restored peripheral must loop
-  over these events rather than handling only the first.
+`central.restorationEvents()` returns an `AsyncStream<RestorationEvent>`. It replays **every event buffered since `Central` was created** to its first subscriber. CoreBluetooth can deliver `willRestoreState` during `CBCentralManager` initialization, before your code consumes anything. The buffer prevents loss of that event.
 
-### Launch-time discipline
+Restoration can include more than one peripheral. `RestoredState.peripherals` has every peripheral that CoreBluetooth preserved, and `Central` handles all of them:
 
-State restoration only works if `Central` exists *before* CoreBluetooth needs to deliver a
-restoration callback — which can happen extremely early in a background relaunch. This means:
+- `Central` adopts each restored peripheral that is *connected* as a live session.
+- `Central` makes a manual reconnect attempt for each restored peripheral that is *connecting*.
+- Each peripheral produces its own `.restoredConnection` or `.failedToRestoreConnection` event with its `PeripheralIdentifier`.
 
-- Create your `Central` **synchronously**, as early as possible — in your `App`'s
-  initializer (SwiftUI) or `application(_:didFinishLaunchingWithOptions:)` (UIKit app delegate).
-  Do not defer creation behind a view appearing, a user action, or any other lazy trigger: by
-  the time those fire, the restoration window may already have closed.
-- Start consuming `central.restorationEvents()` immediately after creating `Central`, in the
-  same launch path. Because the stream replays everything buffered since `init`, it's safe to
-  start that consumer a little later than `Central` itself — but do it as part of the same
-  synchronous launch sequence, not lazily.
+Loop over these events. Do not handle only the first one.
+
+### Launch-time rules
+
+Restoration works only if `Central` exists before CoreBluetooth delivers the restoration callback. This can happen early in a background relaunch.
+
+1. Create `Central` synchronously and as early as possible. Use your `App` initializer (SwiftUI) or `application(_:didFinishLaunchingWithOptions:)` (UIKit). Do not wait for a view, a user action, or any lazy trigger.
+2. Start to consume `central.restorationEvents()` in the same launch path. The stream replays buffered events, so the consumer can start after `Central`. Do not start it lazily.
 
 ```swift
 @main
@@ -82,18 +66,9 @@ struct MyApp: App {
 }
 ```
 
-### Force-quit caveat
-
-State restoration **never fires if the user force-quits your app** (swiping it away from the
-app switcher) — this is an iOS system policy, not something any library can work around. Design
-around it: don't rely on restoration alone to guarantee reconnection; treat it as a best-effort
-recovery for ordinary background termination (memory pressure, expiry), not a substitute for
-your own reconnection logic (see <doc:ConnectionsAndReconnection>) for the force-quit case.
-
 ### Required capability
 
-Restoration (and any Bluetooth work while backgrounded at all) requires the `bluetooth-central`
-background mode. Add it to your app's `Info.plist`:
+Add the `bluetooth-central` background mode to your app's `Info.plist`:
 
 ```xml
 <key>UIBackgroundModes</key>
@@ -102,28 +77,21 @@ background mode. Add it to your app's `Info.plist`:
 </array>
 ```
 
-Without it, iOS does not relaunch your app for Bluetooth events in the background, and no
-restoration events will ever arrive regardless of how `Central` is configured.
+Without this mode, iOS does not relaunch your app for Bluetooth events. No restoration event arrives, whatever the `Central` configuration is.
 
-### Fallback: reconnecting without restoration
+### Force-quit limit
 
-If you'd rather not depend on state restoration — or you're on a platform/configuration where
-it isn't available — you can get most of the same practical benefit with
-``Central/knownPeripherals(withIdentifiers:)``: persist the `uuid`s of the peripherals you
-care about yourself (e.g. in `UserDefaults` or your own storage), then on your next ordinary
-launch re-resolve them with `knownPeripherals(withIdentifiers:)` and call
-``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` on each result. CoreBluetooth can
-still resolve a previously-seen peripheral's identifier back to a connectable object without a
-fresh scan, so this works even though it isn't triggered by a background relaunch the way
-restoration is — it simply requires your app to actually be launched (by the user, or some
-other mechanism) rather than iOS launching it for you. This is the deliberate fallback for
-force-quit specifically: as above, restoration never fires there, but the app's ordinary launch
-path still runs, and that's exactly where this call belongs.
+State restoration does not run if the user force-quits your app from the app switcher. This is an iOS rule. No library can change it. Use restoration as best-effort recovery after ordinary background termination, for example memory pressure. Do not use it as your only reconnection logic. For the force-quit case, use the fallback below.
 
-If the system might still be holding the link (the peripheral never actually disconnected),
-``Central/systemConnectedPeripherals(withServices:)`` is worth trying first — it only returns
-peripherals the OS is *currently* connected to (by any app), and connecting one of those
-typically completes faster than connecting a merely-known one.
+### Fallback: reconnect without restoration
+
+A force-quit app still runs your ordinary launch path. In that path, you can reconnect to saved peripherals without restoration.
+
+1. Save the `uuid` of each peripheral that you care about in your own storage, for example `UserDefaults`.
+2. On the next launch, call ``Central/knownPeripherals(withIdentifiers:)`` with the saved values.
+3. Call ``Central/connect(_:timeout:reconnect:warningOptions:compatibility:)`` on each result.
+
+CoreBluetooth can resolve a known identifier to a connectable peripheral without a scan.
 
 ```swift
 let saved = loadSavedPeripheralUUIDs() // your own persistence
@@ -132,6 +100,8 @@ for identifier in known {
     _ = try await central.connect(identifier)
 }
 ```
+
+If the system can still hold the connection, try ``Central/systemConnectedPeripherals(withServices:)`` first. It returns only the peripherals that the OS is connected to now, for any app. A connect to one of these is usually faster.
 
 ## See Also
 

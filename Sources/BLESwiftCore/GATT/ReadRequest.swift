@@ -5,28 +5,27 @@
 
 import Foundation
 
-/// A read request from a remote central for a characteristic your `PeripheralHost` hosts,
-/// surfaced on `PeripheralHost/readRequests()`.
+/// A read request from a remote central for a characteristic that your `PeripheralHost` hosts. It
+/// appears on `PeripheralHost/readRequests()`.
 ///
-/// Answer it by passing this value back to
-/// `PeripheralHost/respond(to:with:)-(ReadRequest,_)` with either the requested `Data`
-/// (`.success`) or an ``ATTError`` (`.failure`). Every read request must be answered exactly
-/// once. A `Sendable` value type — the underlying `CBATTRequest` is held on the
-/// CoreBluetooth side, keyed by ``token``.
+/// To answer it, pass this value back to `PeripheralHost/respond(to:with:)-(ReadRequest,_)` with
+/// the requested `Data` (`.success`) or an ``ATTError`` (`.failure`). You must answer every read
+/// request exactly once. This is a `Sendable` value type. The CoreBluetooth side holds the
+/// underlying `CBATTRequest`, keyed by ``token``.
 public struct ReadRequest: Sendable, Hashable {
 
-    /// The opaque token mapping this request back to its underlying `CBATTRequest` at the
-    /// CoreBluetooth seam. Carried through to `PeripheralHost/respond(to:with:)-(ReadRequest,_)`.
+    /// The opaque token that maps this request back to its `CBATTRequest` at the CoreBluetooth
+    /// seam. `PeripheralHost/respond(to:with:)-(ReadRequest,_)` passes it through.
     public let token: RequestToken
 
-    /// The remote central that issued the request.
+    /// The remote central that sent the request.
     public let central: Subscriber
 
-    /// The characteristic being read.
+    /// The characteristic that the central reads.
     public let characteristic: CharacteristicIdentifier
 
-    /// The byte offset into the characteristic's value at which the read should begin
-    /// (non-zero for a Read Blob request). Mirrors `CBATTRequest.offset`.
+    /// The byte offset in the characteristic's value where the read begins. It is not zero for a
+    /// Read Blob request. Mirrors `CBATTRequest.offset`.
     public let offset: Int
 
     /// Creates a `ReadRequest`.

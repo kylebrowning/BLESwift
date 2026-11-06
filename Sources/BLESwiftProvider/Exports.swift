@@ -3,7 +3,6 @@
 //  BLESwiftProvider
 //
 
-/// Re-exports `BLESwiftVirtualRadio` from `BLESwiftProvider`, so the virtual radio types
-/// (`VirtualRadio`, `VirtualDevice`, `VirtualCentralBackend`, …) stay visible through a plain
-/// `import BLESwiftProvider` after moving into their own module.
+/// Re-exports `BLESwiftVirtualRadio`, which holds the virtual radio types (`VirtualRadio`,
+/// `VirtualDevice`, `VirtualCentralBackend`, …). A plain `import BLESwiftProvider` shows them.
 @_exported import BLESwiftVirtualRadio

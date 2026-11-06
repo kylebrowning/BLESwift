@@ -10,8 +10,8 @@ import Dispatch
 import Foundation
 import Testing
 
-/// A real `Central` against `VirtualCentralBackend`, in one process and on every platform —
-/// the proof that the virtual radio runs on iOS, not only under the macOS provider.
+/// A real `Central` against `VirtualCentralBackend`, in one process and on every platform.
+/// This proves that the virtual radio runs on iOS and not only under the macOS provider.
 @Suite("In-process virtual radio")
 struct InProcessTests {
 
@@ -19,9 +19,9 @@ struct InProcessTests {
     private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
     private static let control = CharacteristicIdentifier(uuid: "2A39", service: service)
 
-    /// A custom handler: the control point stores what it is written and notifies it back to
-    /// every subscriber. Subscription changes are published on a stream, so a test can wait
-    /// for the subscription to land instead of sleeping.
+    /// A custom handler. The control point stores what a central writes to it and notifies that
+    /// value back to every subscriber. The handler publishes subscription changes on a stream, so a
+    /// test can wait for a subscription instead of sleeping.
     private actor ControlHandler: VirtualDeviceHandler {
         private var handle: VirtualDeviceHandle?
         private(set) var written: [Data] = []
@@ -54,8 +54,8 @@ struct InProcessTests {
         }
     }
 
-    /// Polls `condition` every 5 ms until it is `true` or `timeout` elapses, for the one thing
-    /// the public surface offers no event for: the backend reaching `.poweredOn`.
+    /// Polls `condition` every 5 ms until it is `true` or `timeout` elapses. It covers the one
+    /// thing the public surface gives no event for: the backend reaching `.poweredOn`.
     private func waitFor(timeout: Duration = .seconds(5), _ condition: () -> Bool) async {
         let deadline = ContinuousClock.now + timeout
         while !condition() {
@@ -116,8 +116,8 @@ struct InProcessTests {
             }
             return nil
         }
-        // The handler hears the subscription once the radio has recorded it, so the write
-        // below cannot notify into an empty subscriber table.
+        // The handler is told of the subscription after the radio recorded it, so the write below
+        // cannot notify into an empty subscriber table.
         var subscribed = false
         for await isSubscribed in handler.subscriptions {
             subscribed = isSubscribed

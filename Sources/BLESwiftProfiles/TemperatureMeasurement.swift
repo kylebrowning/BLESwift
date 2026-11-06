@@ -7,24 +7,24 @@ import BLESwift
 import BLESwiftCore
 import Foundation
 
-/// The Bluetooth SIG "Temperature Measurement" characteristic (GSS §3.199 Temperature
-/// Measurement, `0x2A1C`) from the Health Thermometer service.
+/// The Bluetooth SIG "Temperature Measurement" characteristic (GSS §3.199 Temperature Measurement,
+/// `0x2A1C`) from the Health Thermometer service.
 ///
-/// Byte layout (little-endian): a one-byte `Flags` field, a 4-byte IEEE 11073-20601
-/// FLOAT-Type temperature (see ``/BLESwiftProfiles``), then flag-driven optional fields:
-/// - Flags bit 0 — Temperature Unit: 0 = Celsius, 1 = Fahrenheit.
-/// - Flags bit 1 — Time Stamp present: a 7-byte ``GATTDateTime``.
-/// - Flags bit 2 — Temperature Type present (`UInt8`).
+/// Byte layout (little-endian): a one-byte `Flags` field and a 4-byte IEEE 11073-20601 FLOAT-Type
+/// temperature. Then the optional fields that the flags select:
+/// - Flags bit 0: Temperature Unit. 0 = Celsius, 1 = Fahrenheit.
+/// - Flags bit 1: Time Stamp present. It is a 7-byte ``GATTDateTime``.
+/// - Flags bit 2: Temperature Type present (`UInt8`).
 public struct TemperatureMeasurement: Receivable, Sendable, Equatable {
 
-    /// The unit the temperature is expressed in (Flags bit 0).
+    /// The unit of the temperature (Flags bit 0).
     public enum Unit: Sendable, Equatable {
         case celsius
         case fahrenheit
     }
 
     /// The measurement site (Flags bit 2). Values outside 1–9 decode to
-    /// ``TemperatureType/reserved(_:)`` rather than throwing.
+    /// ``TemperatureType/reserved(_:)`` and do not throw.
     public enum TemperatureType: Sendable, Equatable {
         case armpit
         case body
@@ -60,7 +60,7 @@ public struct TemperatureMeasurement: Receivable, Sendable, Equatable {
 
     /// The temperature value, decoded from the IEEE 11073 FLOAT-Type.
     public let temperature: Double
-    /// The unit `temperature` is expressed in.
+    /// The unit of `temperature`.
     public let unit: Unit
     /// The measurement time, if reported (Flags bit 1).
     public let timestamp: GATTDateTime?

@@ -2,23 +2,26 @@
 #
 # Two-simulator BLE end-to-end test.
 #
-# One simulator advertises as "BLESwift Explorer Sim" (180D) and a second one
-# scans and must find it. Neither simulator has Bluetooth: both Explorer apps
-# route Central/PeripheralHost through the host-side `bleswift-provider`, which
-# runs WITHOUT `--passthrough`, so the two apps meet on the provider's virtual
-# radio. No hardware, no entitlements.
+# One simulator advertises as "BLESwift Explorer Sim" (service 180D). A second simulator scans and
+# must find it. The simulators do not have Bluetooth, so each Explorer app sends its Central and
+# PeripheralHost calls to `bleswift-provider` on the Mac. The provider runs without `--passthrough`,
+# so the two apps connect through its virtual radio. The test needs no hardware and no entitlements.
+#
+# The provider binds an ephemeral port (`--listen 127.0.0.1:0`). The script reads the bound port
+# from the provider's listening line and gives it to both apps as `--env
+# BLESWIFT_LINK=127.0.0.1:<port>`. `SimulatorLink.install()` resolves this value through
+# `LinkEndpoint.fromEnvironment()`. The script does not pin a port, so a port already in use on the
+# machine cannot collide with this run.
 #
 # Usage: Scripts/sim-to-sim-e2e.sh
-#   ADVERTISER_SIM   simulator name for the peripheral  (default "iPhone 17 Pro")
-#   SCANNER_SIM      simulator name for the central     (default "iPhone 17")
-#   ADVERTISER_READY_TIMEOUT
-#                    seconds to wait for the advertiser flow to pass (default 900)
 #
-# The provider binds an ephemeral port (`--listen 127.0.0.1:0`); the bound port is
-# read back from its listening line and handed to both apps as
-# `--env BLESWIFT_LINK=127.0.0.1:<port>`, which `SimulatorLink.install()` resolves
-# through `LinkEndpoint.fromEnvironment()`. Nothing is pinned, so a port already in
-# use on the machine cannot collide with this run.
+# Environment variables:
+#   ADVERTISER_SIM            Name of the simulator for the peripheral.
+#                             Default: "iPhone 17 Pro"
+#   SCANNER_SIM               Name of the simulator for the central.
+#                             Default: "iPhone 17"
+#   ADVERTISER_READY_TIMEOUT  Seconds to wait for the advertiser flow to pass.
+#                             Default: 900
 #
 # See Scripts/e2e/README.md.
 
@@ -26,9 +29,9 @@ set -euo pipefail
 
 ADVERTISER_SIM="${ADVERTISER_SIM:-iPhone 17 Pro}"
 SCANNER_SIM="${SCANNER_SIM:-iPhone 17}"
-# Generous by default: on a cold runner grantiva builds its agent (5-10 minutes by its own
-# log) and a WebDriverAgent runner before the flow's first step ever runs, and that build is
-# paid inside this wait. The CI job's own 25-minute cap is the real backstop.
+# The default is long. On a cold runner, grantiva builds its agent (5-10 minutes in its own log) and
+# a WebDriverAgent runner before the first step of the flow runs, and this time counts inside this
+# wait. The 25-minute limit of the CI job is the real upper limit.
 ADVERTISER_READY_TIMEOUT="${ADVERTISER_READY_TIMEOUT:-900}"
 BUNDLE_ID="com.bleswift.explorer"
 
@@ -47,33 +50,35 @@ ADVERTISER_PID=""
 ADVERTISER_UDID=""
 SCANNER_UDID=""
 
-# stderr, so a `log` inside a function whose stdout is being captured (see
-# `ensure_simulator`) cannot end up glued to the value that function returns.
+# Write to stderr, so that a `log` call inside a function with captured stdout (see
+# `ensure_simulator`) cannot attach to the value that the function returns.
 log() { printf '\n==> %s\n' "$*" >&2; }
 
 cleanup() {
     local status=$?
     log "Tearing down"
     if [[ -n "$ADVERTISER_PID" ]] && kill -0 "$ADVERTISER_PID" 2>/dev/null; then
-        # The keep-alive session holds the runner open; SIGINT is the documented
-        # release ("Release with Ctrl-C").
+        # The keep-alive session holds the runner open. SIGINT is the documented way to release it
+        # ("Release with Ctrl-C").
         kill -INT "$ADVERTISER_PID" 2>/dev/null || true
         sleep 3
         kill -9 "$ADVERTISER_PID" 2>/dev/null || true
     fi
-    # Killing `grantiva run` can strand its `grantiva-runner` child, the WebDriverAgent
-    # `xcodebuild test-without-building` and a `simctl diagnose` log collection, and the
-    # strays keep the simulator "owned by another Grantiva run". `teardown --udid --force`
-    # reclaims one device by live process inspection: it kills exactly that trio, breaks
-    # the lease and reconciles the session registry.
+    # A kill of `grantiva run` can leave these child processes running, and they keep the simulator
+    # "owned by another Grantiva run":
+    #   - the `grantiva-runner` child
+    #   - the WebDriverAgent `xcodebuild test-without-building`
+    #   - a `simctl diagnose` log collection
+    # `teardown --udid --force` reclaims one device by inspection of live processes. It kills
+    # exactly these three processes, breaks the lease, and reconciles the session registry.
     for udid in "$ADVERTISER_UDID" "$SCANNER_UDID"; do
         [[ -n "$udid" ]] || continue
         grantiva simulator teardown --udid "$udid" --force >/dev/null 2>&1 || true
         xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true
     done
     if [[ -n "$PROVIDER_PID" ]] && kill -0 "$PROVIDER_PID" 2>/dev/null; then
-        # TERM first, so the provider's own handler runs `stop()` and closes its sessions;
-        # SIGKILL only if it is still there three seconds later.
+        # Send TERM first, so that the provider's handler runs `stop()` and closes its sessions.
+        # Send SIGKILL only if the provider is still running three seconds later.
         kill "$PROVIDER_PID" 2>/dev/null || true
         for _ in 1 2 3 4 5 6; do
             kill -0 "$PROVIDER_PID" 2>/dev/null || break
@@ -86,30 +91,31 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Simulators -------------------------------------------------------------
-# `grantiva simulator ensure --name <name>` is find-or-create: it reuses a simulator of that
-# name if one exists, and otherwise creates it on the newest installed iOS runtime. grantiva
-# 2.0 no longer infers a device type from a name without a model in it ("BLESwift CI
-# Advertiser" has none, on purpose — see the workflow), so the newest numbered iPhone type is
-# resolved once here for the create path. It boots by default and reports the UDID, which is
-# what every downstream command takes.
+# `grantiva simulator ensure --name <name>` finds or creates a simulator. It reuses a simulator with
+# that name if one exists. Otherwise it creates the simulator on the newest installed iOS runtime.
+# grantiva 2.0 does not infer a device type from a name without a model in it ("BLESwift CI
+# Advertiser" has no model, on purpose; see the workflow), so the script resolves the newest
+# numbered iPhone type once for the create path. By default, `ensure` boots the simulator and
+# reports the UDID. Every later command takes the UDID.
 #
-# `--device-type` is not create-only, though: `ensure` checks an existing device against it,
-# and against the newest runtime it defaults to, and refuses a mismatch ("exists with
-# incompatible configuration"). So a device that already exists is ensured on its own type and
-# runtime (`existing_configuration`). Which device CI runs on is decided before this script —
-# `Scripts/ci/ensure-ci-simulator.sh` creates and refreshes CI's own, a dispatch names the
-# user's — and second-guessing it here broke the day Xcode added a newer iPhone.
+# `--device-type` is not only for creation. `ensure` checks an existing device against it and
+# against the newest runtime (the default), and refuses a mismatch ("exists with incompatible
+# configuration"). So for an existing device, the script uses that device's type and runtime
+# (`existing_configuration`). A step before this script decides which device CI uses:
+# `Scripts/ci/ensure-ci-simulator.sh` creates and refreshes the CI device, and a manual dispatch
+# names the user's device. Do not check this decision again in this script.
 #
-# `--json`, not the plain output: without it `ensure` prints a human sentence
-# ("Reused iPhone 17 Pro (<UDID>) — Booted") that would have to be scraped.
+# Use `--json`, not the plain output. The plain output of `ensure` is a sentence for people, for
+# example "Reused iPhone 17 Pro (<UDID>) — Booted", which the script would have to parse.
 #
-# One case `ensure` refuses outright: a machine with two simulators of the same name, which it
-# answers with `Multiple simulators are named "<name>"; delete duplicates or use a unique
-# name`. GitHub's runner image ships three "iPhone 17 Pro Max" devices, so this is not
-# hypothetical. Deleting a runner's devices is not this script's business, so the duplicate is
-# resolved here instead: pick one device of that name out of `simctl list devices available`,
-# preferring one already booted, and carry on by UDID — which is what every command past this
-# point takes anyway. Warned about, never silent.
+# `ensure` refuses one case completely: a machine with two simulators of the same name. It answers
+# with `Multiple simulators are named "<name>"; delete duplicates or use a unique name`. The GitHub
+# runner image has three "iPhone 17 Pro Max" devices, so this case is real. This script must not
+# delete a runner's devices. Instead, it resolves the duplicate in these steps:
+#   1. Select one device of that name from `simctl list devices available`.
+#   2. Prefer a device that is already booted.
+#   3. Continue with the UDID, which every later command takes.
+# The script always shows a warning for this case.
 duplicate_named_udid() {
     xcrun simctl list devices available -j | python3 -c '
 import json, sys
@@ -122,8 +128,9 @@ print(chosen[0]["udid"] if chosen else "")
 ' "$1"
 }
 
-# "<device type identifier> <runtime identifier>" of an available device of that name (a booted
-# one first, as above), or nothing when there is none and `ensure` will create it.
+# "<device type identifier> <runtime identifier>" of an available device of that name, a booted
+# device first, as above. The function prints nothing if no device exists, and then `ensure` creates
+# the device.
 existing_configuration() {
     xcrun simctl list devices available -j | python3 -c '
 import json, sys
@@ -151,8 +158,8 @@ ensure_simulator() {
     local name="$1"
     local start=$SECONDS
     local udid output errors status errors_file
-    # stderr kept apart from stdout: the JSON `--json` promises is on stdout, and folding a
-    # warning line into it would break the parse on the very path that succeeded.
+    # Keep stderr separate from stdout. The JSON that `--json` gives is on stdout, and a warning
+    # line in it would break the parse on a path that succeeded.
     local existing_type existing_runtime
     local configuration=(--device-type "$ci_device_type")
     read -r existing_type existing_runtime <<<"$(existing_configuration "$name")" || true
@@ -182,9 +189,9 @@ ensure_simulator() {
         udid="$(printf '%s' "$output" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("udid", ""))')"
     fi
     [[ -n "$udid" ]] || { echo "grantiva simulator ensure --name \"$name\" returned no UDID" >&2; exit 1; }
-    # Belt and braces on top of `ensure`'s own boot: `bootstatus -b` blocks until the device
-    # reports itself fully booted, so nothing downstream races a half-started simulator. The
-    # elapsed line is what makes a cold CI runner's boot cost visible.
+    # Extra safety on top of the boot that `ensure` does. `bootstatus -b` blocks until the device
+    # reports a full boot, so no later command runs against a half-started simulator. The
+    # elapsed-time line shows how long a cold CI runner needs to boot.
     xcrun simctl bootstatus "$udid" -b >/dev/null 2>&1 || xcrun simctl boot "$udid" >/dev/null 2>&1 || true
     log "\"$name\" ready after $((SECONDS - start))s"
     echo "$udid"
@@ -204,8 +211,8 @@ log "Building bleswift-provider"
 swift build --product bleswift-provider
 
 log "Starting bleswift-provider on an ephemeral loopback port"
-# Port 0: the system picks. The provider line-buffers stdout and names the *bound* port on
-# its listening line, so the port is read back from the log rather than assumed.
+# Port 0: the system selects the port. The provider line-buffers stdout and names the *bound* port
+# on its listening line, so the script reads the port from the log and does not assume it.
 .build/debug/bleswift-provider --listen "127.0.0.1:0" >"$PROVIDER_LOG" 2>&1 &
 PROVIDER_PID=$!
 
@@ -224,10 +231,10 @@ echo "provider endpoint: $LINK_ENDPOINT"
 
 # --- App --------------------------------------------------------------------
 log "Building BLESwiftExplorer for the simulator"
-# `generic/platform=iOS Simulator`, not a named device: the build's output is the same
-# simulator `.app` either way, and a generic destination needs no device lookup — which on a
-# CI runner can fail to enumerate the simulators `simctl` plainly has ("Unable to find a
-# device matching the provided destination specifier").
+# Build for `generic/platform=iOS Simulator`, not for a named device. The build output is the same
+# simulator `.app`, and a generic destination needs no device lookup. On a CI runner, the lookup can
+# fail to list the simulators that `simctl` shows ("Unable to find a device matching the provided
+# destination specifier").
 xcodebuild build \
     -project Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj \
     -scheme BLESwiftExplorer \
@@ -239,10 +246,10 @@ APP="$(find .build/e2e-dd -name BLESwiftExplorer.app -path '*iphonesimulator*' |
 [[ -n "$APP" ]] || { echo "BLESwiftExplorer.app not found under .build/e2e-dd" >&2; exit 1; }
 echo "app: $APP"
 
-# Installed here, before either grantiva session starts. grantiva's own `--app-file` install
-# then finds the app already present, and WebDriverAgent comes up against a simulator that has
-# already paid for its first install — on a cold CI runner that install is part of what pushes
-# WebDriverAgent past its 90-second startup timeout.
+# The script installs the app here, before either grantiva session starts, so grantiva's
+# `--app-file` install finds the app already present. WebDriverAgent then starts against a simulator
+# that already paid for its first install. On a cold CI runner, this install is one reason that
+# WebDriverAgent can pass its startup timeout of 90 seconds.
 for udid in "$ADVERTISER_UDID" "$SCANNER_UDID"; do
     log "Installing $BUNDLE_ID on $udid"
     install_start=$SECONDS
@@ -252,8 +259,8 @@ done
 
 # --- Advertiser (keep-alive, background) ------------------------------------
 log "Advertiser session on \"$ADVERTISER_SIM\" ($ADVERTISER_UDID)"
-# By UDID, not by name: a runner that has two simulators of the same name makes the name
-# ambiguous, and grantiva refuses it outright.
+# Select the simulator by UDID, not by name. If a runner has two simulators of the same name, the
+# name is ambiguous, and grantiva refuses an ambiguous name completely.
 grantiva run \
     --simulator "$ADVERTISER_UDID" \
     --app-file "$APP" \
@@ -266,20 +273,20 @@ grantiva run \
     >"$ADVERTISER_LOG" 2>&1 &
 ADVERTISER_PID=$!
 
-# `--ready-file` is written once, atomically, after every flow in the session has reached a
-# terminal state — so unlike report.json (rewritten as the run progresses) its existence *is*
-# the verdict, and the keep-alive session outliving the flows does not confuse the wait.
-# Bounded by a wall-clock deadline, not by a count of iterations: each pass also pays for a
-# `kill -0`, so counting `sleep 1`s would cut the wait short of the seconds
-# `ADVERTISER_READY_TIMEOUT` promises.
+# grantiva writes `--ready-file` once, atomically, after every flow in the session reached a final
+# state. report.json changes while the run progresses, but the existence of the ready file is the
+# result, so it does not matter that the keep-alive session continues after the flows. A wall-clock
+# deadline limits the wait, not a count of iterations: each pass also spends time on `kill -0`, so a
+# count of `sleep 1` calls would stop the wait before the seconds that `ADVERTISER_READY_TIMEOUT`
+# promises.
 ADVERTISER_READY=0
 ADVERTISER_WAIT_START=$SECONDS
 ADVERTISER_DEADLINE=$((SECONDS + ADVERTISER_READY_TIMEOUT))
 NEXT_HEARTBEAT=10
 while (( SECONDS < ADVERTISER_DEADLINE )); do
     ELAPSED=$((SECONDS - ADVERTISER_WAIT_START))
-    # A heartbeat every ten seconds: without it a cold runner looks hung for minutes while
-    # grantiva is quietly building its agent.
+    # Print a heartbeat every ten seconds. Without it, a cold runner looks frozen for minutes while
+    # grantiva builds its agent silently.
     if (( ELAPSED >= NEXT_HEARTBEAT )); then
         echo "waiting for the advertiser flow: ${ELAPSED}s of ${ADVERTISER_READY_TIMEOUT}s"
         NEXT_HEARTBEAT=$((ELAPSED + 10))

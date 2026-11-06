@@ -3,16 +3,17 @@
 //  BLESwiftCore
 //
 
-/// Normalizes a Bluetooth UUID string to the canonical form ``ServiceIdentifier`` and
-/// ``CharacteristicIdentifier`` store, matching `CBUUID(string:).uuidString`'s own
-/// normalization exactly (verified by a parity test in `IdentifierTests` against real
-/// `CBUUID`).
+/// Normalizes a Bluetooth UUID string to the canonical form that ``ServiceIdentifier`` and
+/// ``CharacteristicIdentifier`` store. It matches `CBUUID(string:).uuidString` exactly. A parity
+/// test in `IdentifierTests` verifies this against a real `CBUUID`.
 ///
-/// Accepts three forms — a 4-character (16-bit), 8-character (32-bit), or 36-character
-/// dashed (128-bit) hex UUID string, hex digits in either case — and returns the uppercase
-/// form (dashes preserved, positions unchanged). Traps on anything else, mirroring
-/// `CBUUID(string:)`'s own behavior of raising an exception for a string that "does not
-/// represent a valid UUID".
+/// It accepts three forms of hex UUID string, with hex digits in either case.
+/// - 4 characters (16-bit)
+/// - 8 characters (32-bit)
+/// - 36 characters with dashes (128-bit)
+///
+/// It returns the uppercase form, with the dashes unchanged. It traps on any other input, where
+/// `CBUUID(string:)` raises an exception for a string that "does not represent a valid UUID".
 ///
 /// - Parameter uuid: The UUID string to normalize.
 /// - Returns: The normalized, uppercase UUID string.
@@ -46,10 +47,9 @@ func normalizedUUIDString(_ uuid: String) -> String {
 
 /// Whether `character` is a single ASCII hex digit (`0`-`9`, `A`-`F`, `a`-`f`).
 ///
-/// Deliberately not `Character.isHexDigit` — that stdlib property is Unicode-aware and
-/// accepts non-ASCII "hex digit" code points (e.g. fullwidth forms) that `CBUUID(string:)`
-/// itself rejects; this stays byte-for-byte faithful to CoreBluetooth's own, ASCII-only
-/// parsing.
+/// This function deliberately does not use `Character.isHexDigit`. That property is
+/// Unicode-aware and accepts non-ASCII "hex digit" code points (for example, fullwidth forms) that
+/// `CBUUID(string:)` rejects. This function matches CoreBluetooth's ASCII-only parsing.
 private func isASCIIHexDigit(_ character: Character) -> Bool {
     guard character.unicodeScalars.count == 1, let scalar = character.unicodeScalars.first else {
         return false

@@ -16,12 +16,13 @@ import Testing
 import BLESwiftProvider
 #endif
 
-/// The wire boundary's UUID rule: what it accepts, what it refuses, and what each end does
-/// with a peer that sends a string BLESwift's identifiers could not hold.
+/// The UUID rule of the wire boundary: what it accepts, what it refuses, and what each end does
+/// with a peer that sends a string that BLESwift's identifiers could not hold.
 @Suite("Wire identifier validation")
 struct WireIdentifierValidationTests {
 
-    /// Strings BLESwift's identifiers accept — 16-bit, 32-bit and 128-bit forms, either case.
+    /// Strings that BLESwift's identifiers accept. These are the 16-bit, 32-bit, and 128-bit forms,
+    /// in either case.
     private static let valid = [
         "180D", "180d", "abcd", "ABCD", "0000",
         "0000180D", "0000180d", "DEADBEEF", "deadbeef",
@@ -30,7 +31,8 @@ struct WireIdentifierValidationTests {
         "00000000-0000-0000-0000-000000000000",
     ]
 
-    /// Strings they do not — and which would therefore trap if handed straight to one.
+    /// Strings that the identifiers do not accept. They would trap if the code handed them straight
+    /// to an identifier.
     private static let invalid = [
         "", "z", "zz", "not-a-uuid", "180",
         "180DD", "180G", "18 0D", "0000180", "0000180DD", "0000180G",
@@ -39,7 +41,7 @@ struct WireIdentifierValidationTests {
         "6BA7B8109DAD-11D1-80B4-00C04FD430C8-",      // dashes in the wrong places
         "6BA7B810-9DAD-11D1-80B4-00C04FD430CG",      // a non-hex digit
         "6BA7B810_9DAD_11D1_80B4_00C04FD430C8",      // underscores, not dashes
-        "０１８０",                                     // fullwidth digits: hex to Unicode, not to us
+        "０１８０",                                     // fullwidth digits: Unicode counts them as hex, but BLESwift does not
     ]
 
     @Test("The validator accepts exactly the strings BLESwift's identifiers accept")
@@ -47,8 +49,8 @@ struct WireIdentifierValidationTests {
         for uuid in Self.valid {
             #expect(WireIdentifierValidation.isValid(uuid), "\(uuid) should be valid")
             #expect(try WireIdentifierValidation.validated(uuid) == uuid)
-            // The point of the whole exercise: a string the validator passes is one the
-            // identifiers themselves normalize rather than trap on.
+            // This is the purpose of the whole exercise. A string that the validator passes is a
+            // string that the identifiers normalize without trapping.
             #expect(ServiceIdentifier(uuid: uuid).uuidString == uuid.uppercased())
         }
     }
@@ -57,8 +59,8 @@ struct WireIdentifierValidationTests {
     func validatorRefusesMalformedStrings() {
         for uuid in Self.invalid {
             #expect(!WireIdentifierValidation.isValid(uuid), "\(uuid) should be invalid")
-            // Deliberately *not* passed to `ServiceIdentifier(uuid:)`: that call is what this
-            // validator exists to keep from happening, and it would take the process down.
+            // The test does *not* pass this string to `ServiceIdentifier(uuid:)`. The validator
+            // exists to prevent that call, and it would trap.
             #expect(throws: WireDecodingError.invalidIdentifier(uuid)) {
                 try WireIdentifierValidation.validated(uuid)
             }
@@ -113,25 +115,23 @@ struct WireIdentifierValidationTests {
 
     @Test("Advertisement service data keys that collide once normalized are refused")
     func duplicateServiceDataKeysThrow() throws {
-        // `"180d"` and `"180D"` are two keys on the wire and one `ServiceIdentifier` here.
-        // Before this was refused, building the converted dictionary trapped.
+        // `"180d"` and `"180D"` are two keys on the wire and one `ServiceIdentifier` here. The
+        // validator must refuse this case, because building the converted dictionary would trap.
         #expect(throws: WireDecodingError.duplicateIdentifier("180D")) {
             try Self.advertisement(serviceData: ["180d": Data([1]), "180D": Data([2])]).advertisementData
         }
 
-        // Keys that are genuinely distinct still convert, in either case.
         let data = try Self.advertisement(serviceData: ["180d": Data([1]), "181A": Data([2])]).advertisementData
         #expect(data.serviceData?.count == 2)
         #expect(data.serviceData?[ServiceIdentifier(uuid: "180D")] == Data([1]))
         #expect(data.serviceData?[ServiceIdentifier(uuid: "181A")] == Data([2]))
 
-        // A malformed key is still the invalid-identifier violation, not the duplicate one.
         #expect(throws: WireDecodingError.invalidIdentifier("zz")) {
             try Self.advertisement(serviceData: ["zz": Data()]).advertisementData
         }
     }
 
-    /// An otherwise-empty advertisement carrying only `serviceData`.
+    /// An otherwise-empty advertisement that carries only `serviceData`.
     private static func advertisement(serviceData: [String: Data]) -> WireAdvertisement {
         WireAdvertisement(
             localName: nil,
@@ -146,8 +146,8 @@ struct WireIdentifierValidationTests {
     }
 
 #if !targetEnvironment(simulator)
-    // Sockets in a CI simulator are unreliable; the simulator-side path is covered by the
-    // two-simulator E2E on real simulators.
+    // Sockets in a CI simulator are not reliable. The two-simulator E2E on real simulators covers
+    // the simulator-side path.
 
     @Test("Case-variant duplicates in a discovered-characteristics event collapse to one")
     func duplicateDiscoveredCharacteristicsCollapse() async throws {
@@ -180,9 +180,9 @@ struct WireIdentifierValidationTests {
         provider.emit(.didDiscoverServices(peripheral: identifier, services: ["180D"], error: nil))
         #expect(try await bounded { try await servicesTask.value } == [ServiceIdentifier(uuid: "180D")])
 
-        // The provider reports the same characteristic twice, differing only in case. The
-        // mirror cache is keyed by `CharacteristicIdentifier`, which normalizes both to one:
-        // the client must fold them together rather than trap building the cache.
+        // The provider reports the same characteristic twice, differing only in case.
+        // `CharacteristicIdentifier` normalizes both to one key, so the client must fold them and
+        // not trap when it builds the cache.
         let characteristicsTask = Task { try await peripheral.discoverCharacteristics(for: ServiceIdentifier(uuid: "180D")) }
         await waitFor {
             provider.requests.withLock { $0 }.contains(
@@ -201,7 +201,8 @@ struct WireIdentifierValidationTests {
         let characteristics = try await bounded { try await characteristicsTask.value }
         #expect(characteristics == [CharacteristicIdentifier(uuid: "2A37", service: ServiceIdentifier(uuid: "180D"))])
 
-        // The link is still up: the collision was folded, not fatal, and not a session drop.
+        // The link is still up. The client folded the collision. It was not fatal, and it was not a
+        // session drop.
         #expect(central.state == .poweredOn)
         #expect(provider.helloCount.withLock { $0 } == 1)
     }
@@ -222,11 +223,11 @@ struct WireIdentifierValidationTests {
         #expect(central.state == .poweredOn)
         #expect(provider.helloCount.withLock { $0 } == 1)
 
-        // A discovery completion naming a service no `ServiceIdentifier` could hold. Before
-        // the wire boundary validated it this took the *client* process down.
+        // A discovery completion names a service that no `ServiceIdentifier` could hold. Without
+        // wire-boundary validation, this would take the *client* process down.
         provider.emit(.didDiscoverServices(peripheral: UUID(), services: ["not-a-uuid"], error: nil))
 
-        // The client treats it as a provider fault: the session is dropped and redialed, so a
+        // The client treats it as a provider fault. It drops the session and dials again, so a
         // second hello reaches the provider.
         await waitFor(timeout: .seconds(5)) { provider.helloCount.withLock { $0 } >= 2 }
         #expect(provider.helloCount.withLock { $0 } >= 2)
@@ -244,7 +245,6 @@ struct WireIdentifierValidationTests {
         try await provider.start()
         let endpoint = LinkEndpoint(host: "127.0.0.1", port: await provider.port)
 
-        // An innocent bystander, to prove the provider closes one session and not the link.
         let bystanderQueue = DispatchQueue(label: "wireidvalidation.bystander")
         let bystander = LinkCentral(
             endpoint: endpoint,
@@ -281,7 +281,6 @@ struct WireIdentifierValidationTests {
 
         connection.send(.centralRequest(.discoverServices(peripheral: UUID(), services: ["zz"])))
 
-        // The offender's session goes; the bystander's stays.
         await waitFor(timeout: .seconds(5)) { await provider.sessionCount == 1 }
         #expect(await provider.sessionCount == 1)
         #expect(bystanderCentral.state == .poweredOn)

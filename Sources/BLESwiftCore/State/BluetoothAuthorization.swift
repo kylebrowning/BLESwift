@@ -3,17 +3,17 @@
 //  BLESwiftCore
 //
 
-/// The app's authorization to use Bluetooth, as reported by `Central`.
+/// The app's authorization to use Bluetooth, as `Central` reports it.
 ///
-/// BLESwift-owned; the backend's native authorization-mapping (`init(_:)`) lives in the
-/// `BLESwift` module — this type never exposes a CoreBluetooth type in its own public API.
+/// BLESwift owns this type, so no CoreBluetooth type appears in its public API. The `BLESwift`
+/// module maps the backend's native authorization to it (`init(_:)`).
 public enum BluetoothAuthorization: Sendable, Equatable {
 
     /// The user has not yet granted or denied Bluetooth authorization.
     case notDetermined
 
-    /// The app is not authorized to use Bluetooth and the user cannot change this, e.g.
-    /// due to parental controls.
+    /// The app is not authorized to use Bluetooth, and the user cannot change this, for example
+    /// because of parental controls.
     case restricted
 
     /// The user explicitly denied Bluetooth authorization for this app.

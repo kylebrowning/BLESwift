@@ -1,9 +1,10 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-// Strict warnings only when explicitly requested (CI / local dev). Xcode compiles package
-// dependencies with -suppress-warnings, which hard-conflicts with -warnings-as-errors and
-// makes the package unbuildable for consumers. Build strict with: BLESWIFT_STRICT=1 swift build
+// Strict warnings are only for CI and local development. Set BLESWIFT_STRICT to request them. Xcode
+// compiles package dependencies with -suppress-warnings, which conflicts with -warnings-as-errors
+// and would make the package impossible to build for consumers. To build strict, run:
+// BLESWIFT_STRICT=1 swift build
 let strict = Context.environment["BLESWIFT_STRICT"] != nil
 
 let sharedSwiftSettings: [SwiftSetting] = [
@@ -31,9 +32,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0")
     ],
     targets: [
-        // Back-deployment tiers. Non-products: consumers never import them. Each one is
-        // deleted, with its test target, when the floor is raised past the OS it serves —
-        // see the "Back-deployment" DocC article in BLESwift.
+        // Back-deployment tiers. They are not products, and consumers never import them. When the
+        // floor rises past the OS that a tier serves, delete the tier and its test target. See the
+        // "Back-deployment" DocC article in BLESwift.
         .target(
             name: "BLESwiftCompat17",
             resources: [.copy("BLESwiftCompat17.docc")],

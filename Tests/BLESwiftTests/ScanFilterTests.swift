@@ -9,9 +9,11 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Exercises `ScanFilter.matches` per field (pure, no Central), `Central.scan(filter:)`'s
-/// pre-recording drop of non-matching sightings, `findFirst`'s every-exit-path teardown,
-/// and the `connect(identifier:fallbackScan:)` saved-device flow.
+/// Tests:
+/// - `ScanFilter.matches` for each field. This is pure and has no Central.
+/// - the drop of non-matching sightings in `Central.scan(filter:)` before it records them
+/// - the teardown of `findFirst` on every exit path
+/// - the saved-device flow of `connect(identifier:fallbackScan:)`
 @Suite("ScanFilter")
 struct ScanFilterTests {
 
@@ -55,13 +57,13 @@ struct ScanFilterTests {
         let filter = ScanFilter(namePrefix: "Kettle")
         #expect(filter.matches(makeDiscovery(localName: "Kettle-01")))
         #expect(!filter.matches(makeDiscovery(localName: "Toaster-01")))
-        // Falls back to the cached peripheral name when localName is absent.
+        // If localName is absent, the filter falls back to the cached peripheral name.
         #expect(filter.matches(makeDiscovery(peripheralName: "Kettle-01")))
         // No advertised name and no cached name fails.
         #expect(!filter.matches(makeDiscovery()))
-        // The "No Name" display fallback is not a name to match against.
+        // The "No Name" fallback for display is not a name to match against.
         #expect(!ScanFilter(namePrefix: "No").matches(makeDiscovery()))
-        // The advertised name wins over the cached one.
+        // The advertised name wins over the cached name.
         #expect(!filter.matches(makeDiscovery(localName: "Toaster", peripheralName: "Kettle")))
     }
 
@@ -90,7 +92,7 @@ struct ScanFilterTests {
         let filter = ScanFilter(manufacturerDataPrefix: Data([0x01, 0x02]))
         #expect(filter.matches(makeDiscovery(manufacturerData: Data([0x4C, 0x00, 0x01, 0x02, 0x03]))))
         #expect(!filter.matches(makeDiscovery(manufacturerData: Data([0x4C, 0x00, 0x02, 0x01]))))
-        // The company identifier bytes themselves never count toward the prefix.
+        // The bytes of the company identifier never count toward the prefix.
         #expect(!filter.matches(makeDiscovery(manufacturerData: Data([0x01, 0x02]))))
         #expect(!filter.matches(makeDiscovery()))
         #expect(!ScanFilter(nameExact: "No Name").matches(makeDiscovery()))
@@ -201,8 +203,8 @@ struct ScanFilterTests {
             rssi: -50
         )
 
-        // If the non-matching sighting had wrongly been recorded/emitted, this .next()
-        // would have returned it instead of the matching peripheral.
+        // If the code had recorded and emitted the non-matching sighting, this .next() would return
+        // it and not the matching peripheral.
         let event = try await iterator.next()
         guard case .discovered(let discovery) = event else {
             Issue.record("expected .discovered, got \(String(describing: event))")
@@ -213,7 +215,7 @@ struct ScanFilterTests {
 
     // MARK: - findFirst
 
-    /// Waits (bounded) for `central`'s scan to be live before scripting a discovery.
+    /// Waits (with a bound) until `central`'s scan is live, so the test can script a discovery.
     private func waitUntilScanning(_ central: Central) async throws {
         for _ in 0..<2000 where !central.isScanning {
             try await Task.sleep(for: .milliseconds(1))
@@ -232,7 +234,7 @@ struct ScanFilterTests {
         }
         try await waitUntilScanning(central)
 
-        // A non-matching sighting first — findFirst must keep waiting.
+        // A non-matching sighting comes first. findFirst must keep waiting.
         fakeCentral.simulateDiscovery(
             peripheral: PeripheralIdentifier(uuid: UUID(), name: nil),
             advertisement: AdvertisementData(localName: "Toaster-01"),
@@ -247,7 +249,7 @@ struct ScanFilterTests {
 
         let discovery = try await task.value
         #expect(discovery.peripheral == expected)
-        // Torn down synchronously before findFirst returned — no queue flush here.
+        // The teardown was synchronous, before findFirst returned. There is no queue flush here.
         #expect(central.isScanning == false)
     }
 
@@ -308,10 +310,10 @@ struct ScanFilterTests {
     func connectByIdentifierViaFallbackScan() async throws {
         let (central, fakeCentral, fakePeripheral) = makeTestCentral()
         fakeCentral.simulateStateChange(.poweredOn)
-        // The saved UUID is stale (not retrievable), but the peripheral the fallback scan
-        // finds IS registered retrievable — connect(_:)'s reserveConnectingSlot resolves the
-        // discovered peripheral via retrievePeripherals(withIdentifiers:), so an
-        // unregistered one could never complete the connect.
+        // The saved UUID is stale (not retrievable). The peripheral that the fallback scan finds IS
+        // registered as retrievable, because `reserveConnectingSlot` of connect(_:) resolves the
+        // discovered peripheral with retrievePeripherals(withIdentifiers:). An unregistered
+        // peripheral could never complete the connect.
         await fakeCentral.onQueue {
             fakeCentral.retrievablePeripherals[fakePeripheral.identifier] = fakePeripheral
             fakeCentral.connectBehavior = .succeed
@@ -334,7 +336,7 @@ struct ScanFilterTests {
 
         let peripheral = try await task.value
         #expect(peripheral.id == fakePeripheral.peripheralIdentifier)
-        // The fallback-found peripheral's UUID may (and here does) differ from the saved one.
+        // The UUID that the fallback finds may differ from the saved UUID. Here it does.
         #expect(peripheral.id.uuid != staleIdentifier)
         #expect(central.isScanning == false)
     }

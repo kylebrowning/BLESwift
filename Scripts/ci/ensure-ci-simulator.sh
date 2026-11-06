@@ -1,33 +1,39 @@
 #!/bin/zsh
-# Prints the UDID of a simulator dedicated to CI, creating it if it does not exist.
+# Prints the UDID of a simulator dedicated to CI. The script creates the simulator if it does not
+# exist.
 #
 #   Scripts/ci/ensure-ci-simulator.sh <name> [<ios-major>]
 #
-# The optional second argument pins an iOS major (e.g. "17"): the runtime is then the
-# highest installed one of that major, and no such runtime is an error saying how to install
-# one, not a fall back to a newer one.
-# Without it the runtime is the highest installed of any major.
+# The optional second argument pins an iOS major version (for example "17"). The runtime is then the
+# highest installed runtime of that major version. If none exists, the script stops with an error
+# that tells how to install one, and does not use a newer runtime. Without the second argument, the
+# runtime is the highest installed runtime of any major version.
 #
-# CI on a self-hosted runner shares the machine with whoever sits at it. A job that picks
-# "the newest iPhone" by name picks the device that person is debugging on, installs a test
-# app into it and — in the E2E — force-tears it down afterwards. So CI devices carry names
+# CI on a self-hosted runner shares the machine with the person who sits at it. A job that selects
+# "the newest iPhone" by name selects the device that this person debugs on. The job installs a test
+# app into that device and, in the E2E, force-tears it down afterward. So CI devices have names that
 # nobody else uses, and every job resolves them here.
 #
-# A device of that name is reused (booted or not; the caller boots it) when it is available
-# and on the chosen runtime; one on another runtime, or left unavailable because its runtime
-# was removed, is deleted and recreated, so the CI device follows runtime installs rather
-# than freezing on the one it was created with. A delete that fails is fatal: `grantiva
-# simulator ensure --name` refuses a duplicated name, and creating alongside a stale device
-# would hand the E2E that ambiguity on every run. Creation uses the newest numbered iPhone
-# the chosen runtime itself supports — an older runtime does not support every device type
-# the host has installed — on that runtime (several builds of one version share an
-# identifier; which build is CoreSimulator's).
+# The script reuses a device of that name if it is available and on the chosen runtime. The device
+# can be booted or not. The caller boots it. The script deletes and recreates a device in these
+# cases:
+#   - The device is on another runtime.
+#   - The device is unavailable because its runtime was removed.
+# So the CI device follows runtime installs and does not stay on the runtime of its creation.
+#
+# If a delete fails, the script stops with an error, because `grantiva simulator ensure --name`
+# refuses a duplicated name. A device created next to a stale device would make the E2E see this
+# problem on every run.
+#
+# The script creates the device on the chosen runtime, with the newest numbered iPhone that this
+# runtime supports. An older runtime does not support every device type that the host has installed.
+# Several builds of one version share an identifier, and CoreSimulator decides which build is used.
 set -euo pipefail
 name="$1"
-major="${2:-}"   # optional iOS major, e.g. "17"; empty means the highest installed
+major="${2:-}"   # optional iOS major, for example "17". If empty, use the highest installed major.
 
-# Each Python block prints its own diagnostic and exits non-zero itself: under `set -e` a
-# failing command substitution aborts the assignment, so a shell guard after it never runs.
+# Each Python block prints its own diagnostic and exits with a non-zero status itself. Under `set
+# -e`, a failing command substitution aborts the assignment, so a shell guard after it never runs.
 runtime="$(xcrun simctl list runtimes -j | python3 -c '
 import json, sys
 major = sys.argv[1]
@@ -47,8 +53,9 @@ runtimes.sort(key=lambda r: [int(x) for x in r["version"].split(".")])
 print(runtimes[-1]["identifier"])
 ' "$major")"
 
-# One line per existing device of that name: "keep <udid>" for an available device on the
-# chosen runtime, "replace <udid>" for anything else (another runtime, or unavailable).
+# One line for each existing device of that name.
+# "keep <udid>" is for an available device on the chosen runtime.
+# "replace <udid>" is for any other device (on another runtime, or unavailable).
 plan="$(mktemp)"
 trap 'rm -f "$plan"' EXIT
 xcrun simctl list devices -j | python3 -c '
@@ -67,8 +74,9 @@ existing=""
 while read -r action udid; do
     case "$action" in
         keep)
-            # Exactly one device of the name survives: a second current one (hand-created, or a
-            # second runner service) is deleted too, or the E2E's `ensure --name` sees a duplicate.
+            # Exactly one device of the name survives. The script also deletes a second current
+            # device (created by hand, or by a second runner service). Otherwise the E2E's `ensure
+            # --name` sees a duplicate.
             if [[ -n "$existing" ]]; then
                 echo "deleting \"$name\" ($udid): duplicate of $existing" >&2
                 xcrun simctl delete "$udid" >&2 || { echo "could not delete duplicate \"$name\" ($udid)" >&2; exit 1; }
@@ -102,9 +110,10 @@ def rank(t):
 print(sorted(types, key=rank)[-1]["identifier"])
 ' "$runtime")"
 
-# `simctl create` prints the new UDID; anything else on stdout (beta Xcodes chatter on some
-# paths) must not reach the caller, which writes this into GITHUB_ENV one line at a time.
-# `|| true` so a no-match grep reaches the guard below instead of aborting under `set -e`.
+# `simctl create` prints the new UDID. Other output on stdout (beta Xcodes can print extra text on
+# some paths) must not reach the caller, which writes this output into GITHUB_ENV one line at a
+# time. The `|| true` lets a grep without a match reach the guard below. Without it, the script
+# would abort under `set -e`.
 created="$(xcrun simctl create "$name" "$device_type" "$runtime")"
 udid="$(print -- "$created" | grep -E -o -m1 '[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}' || true)"
 [[ -n "$udid" ]] || { echo "simctl create did not return a UDID:" >&2; print -- "$created" >&2; exit 1; }

@@ -1,12 +1,11 @@
-# Scanner side of the two-simulator end-to-end test — the load-bearing assertion.
+# Scanner side of the two-simulator end-to-end test. This flow has the main assertion.
 #
-# The advertiser simulator is already advertising as "BLESwift Explorer Sim" on
-# 180D through the host-side bleswift-provider's virtual radio. This scanner runs
-# a real BLESwift `scan(services:)` and must see it under that name.
+# The advertiser simulator is already advertising as "BLESwift Explorer Sim" on 180D, through the
+# virtual radio of the bleswift-provider on the Mac. This scanner runs a real BLESwift
+# `scan(services:)` and must see the advertiser under that name.
 #
-# The Scan screen is a List: both the scan button and the Discoveries section sit
-# below the fold on an iPhone, so each has to be scrolled into view before it can
-# be tapped or asserted on.
+# The Scan screen is a List. On an iPhone, the scan button and the Discoveries section are below the
+# visible area, so the flow must scroll each of them into view before it taps or asserts on it.
 appId: com.bleswift.explorer
 ---
 - launchApp

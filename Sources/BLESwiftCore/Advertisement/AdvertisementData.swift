@@ -5,43 +5,39 @@
 
 import Foundation
 
-/// A typed, `Sendable` view of the advertisement packet a peripheral is broadcasting;
-/// parsed once from CoreBluetooth's `[String: Any]` payload.
+/// A typed, `Sendable` view of the advertisement packet that a peripheral broadcasts. BLESwift
+/// parses it once from CoreBluetooth's `[String: Any]` payload.
 public struct AdvertisementData: Sendable {
 
-    /// The peripheral's locally-advertised name (`CBAdvertisementDataLocalNameKey`); may
-    /// differ from the name CoreBluetooth otherwise caches.
+    /// The local name that the peripheral advertises (`CBAdvertisementDataLocalNameKey`). It can
+    /// differ from the name that CoreBluetooth caches.
     public let localName: String?
 
-    /// The service UUIDs found in the advertisement packet
-    /// (`CBAdvertisementDataServiceUUIDsKey`).
+    /// The service UUIDs in the advertisement packet (`CBAdvertisementDataServiceUUIDsKey`).
     public let serviceUUIDs: [ServiceIdentifier]?
 
-    /// Manufacturer-specific advertisement data
-    /// (`CBAdvertisementDataManufacturerDataKey`).
+    /// Manufacturer-specific advertisement data (`CBAdvertisementDataManufacturerDataKey`).
     public let manufacturerData: Data?
 
     /// A mapping of service UUID to service-specific advertisement data
     /// (`CBAdvertisementDataServiceDataKey`).
     public let serviceData: [ServiceIdentifier: Data]?
 
-    /// The transmit power of the peripheral, in dBm
-    /// (`CBAdvertisementDataTxPowerLevelKey`).
+    /// The transmit power of the peripheral, in dBm (`CBAdvertisementDataTxPowerLevelKey`).
     public let txPowerLevel: Int?
 
-    /// Whether the peripheral is currently accepting connections
-    /// (`CBAdvertisementDataIsConnectable`).
+    /// Whether the peripheral accepts connections (`CBAdvertisementDataIsConnectable`).
     public let isConnectable: Bool?
 
-    /// Service UUIDs found in the "overflow" area of the advertisement packet
+    /// Service UUIDs in the "overflow" area of the advertisement packet
     /// (`CBAdvertisementDataOverflowServiceUUIDsKey`).
     public let overflowServiceUUIDs: [ServiceIdentifier]?
 
-    /// Service UUIDs the peripheral is soliciting from a central
+    /// Service UUIDs that the peripheral asks a central to offer
     /// (`CBAdvertisementDataSolicitedServiceUUIDsKey`).
     public let solicitedServiceUUIDs: [ServiceIdentifier]?
 
-    /// Creates an `AdvertisementData` directly, with every field defaulted to `nil`.
+    /// Creates an `AdvertisementData` directly. Every field has the default value `nil`.
     public init(
         localName: String? = nil,
         serviceUUIDs: [ServiceIdentifier]? = nil,

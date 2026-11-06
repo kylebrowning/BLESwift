@@ -8,7 +8,7 @@ import CoreBluetooth
 
 extension WriteType {
 
-    /// This write type's `CBCharacteristicWriteType` equivalent.
+    /// The equivalent `CBCharacteristicWriteType`.
     var cbWriteType: CBCharacteristicWriteType {
         switch self {
         case .withResponse:

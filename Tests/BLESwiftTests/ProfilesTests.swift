@@ -8,9 +8,9 @@ import Testing
 import BLESwiftCore
 @testable import BLESwiftProfiles
 
-/// Decode / round-trip tests for every `BLESwiftProfiles` type, plus direct tests of the
-/// internal `IEEE11073Float` codec. Every byte vector is annotated with the GSS field
-/// breakdown it was hand-built from; decoding is little-endian throughout.
+/// Decode and round-trip tests for every `BLESwiftProfiles` type, and direct tests of the internal
+/// `IEEE11073Float` codec. Each byte vector is annotated with its GSS field breakdown. Decoding is
+/// little-endian everywhere.
 @Suite("BLESwiftProfiles decoders")
 struct ProfilesTests {
 
@@ -52,8 +52,8 @@ struct ProfilesTests {
 
     @Test("IEEE11073Float decodes 36.5 °C: mantissa 365, exponent -1")
     func ieeeFloatDecodesExampleValue() throws {
-        // 36.5 = 365 × 10^-1. Mantissa 365 = 0x00016D as signed 24-bit LE (0x6D 0x01 0x00);
-        // exponent -1 = 0xFF.
+        // 36.5 = 365 × 10^-1. Mantissa 365 = 0x00016D as signed 24-bit LE (0x6D 0x01 0x00).
+        // Exponent -1 = 0xFF.
         let value = try IEEE11073Float.decode(Data([0x6D, 0x01, 0x00, 0xFF]))
         #expect(value == 36.5)
     }
@@ -67,7 +67,8 @@ struct ProfilesTests {
 
     @Test("IEEE11073Float decodes a negative mantissa")
     func ieeeFloatNegativeMantissa() throws {
-        // -365 × 10^-1 = -36.5. -365 as signed 24-bit = 0xFFFE93 → LE 0x93 0xFE 0xFF; exp -1.
+        // -365 × 10^-1 = -36.5. -365 as signed 24-bit = 0xFFFE93, which is LE 0x93 0xFE 0xFF.
+        // Exponent -1.
         let value = try IEEE11073Float.decode(Data([0x93, 0xFE, 0xFF, 0xFF]))
         #expect(value == -36.5)
     }
@@ -95,7 +96,7 @@ struct ProfilesTests {
 
     @Test("HeartRateMeasurement decodes 8-bit BPM with no optional fields")
     func heartRate8Bit() throws {
-        // [flags 0x00][bpm 72]. bit0=0 → u8 BPM; bit2=0 → contact not supported.
+        // [flags 0x00][bpm 72]. bit0=0 means u8 BPM. bit2=0 means contact is not supported.
         let m = try HeartRateMeasurement(bluetoothData: Data([0x00, 72]))
         #expect(m.beatsPerMinute == 72)
         #expect(m.sensorContact == .notSupported)
@@ -117,7 +118,7 @@ struct ProfilesTests {
 
     @Test("HeartRateMeasurement reports supported-but-not-detected contact")
     func heartRateContactNotDetected() throws {
-        // flags 0x04 = bit2 supported, bit1 clear → notDetected.
+        // flags 0x04 = bit2 supported, bit1 clear, so the result is notDetected.
         let m = try HeartRateMeasurement(bluetoothData: Data([0x04, 60]))
         #expect(m.sensorContact == .notDetected)
     }
@@ -125,7 +126,7 @@ struct ProfilesTests {
     @Test("HeartRateMeasurement throws on truncated payload")
     func heartRateTruncated() {
         #expect(throws: BLESwiftError.self) {
-            _ = try HeartRateMeasurement(bluetoothData: Data([0x01, 0x2C])) // bit0 wants u16, only 1 byte
+            _ = try HeartRateMeasurement(bluetoothData: Data([0x01, 0x2C])) // bit0 needs u16, but there is only 1 byte
         }
     }
 
@@ -159,7 +160,7 @@ struct ProfilesTests {
     func bodySensorLocation() throws {
         #expect(try BodySensorLocation(bluetoothData: Data([0x02])).location == .wrist)
         #expect(try BodySensorLocation(bluetoothData: Data([0x00])).location == .other)
-        // 0x40 = 64, in the reserved 7…255 range.
+        // 0x40 = 64, in the reserved range 7…255.
         #expect(try BodySensorLocation(bluetoothData: Data([0x40])).location == .reserved(64))
     }
 
@@ -174,7 +175,7 @@ struct ProfilesTests {
 
     @Test("GATTDateTime decodes and round-trips")
     func gattDateTimeRoundTrip() throws {
-        // year 2024 = 0x07E8 → LE 0xE8 0x07; month 8; day 24; 13:45:30.
+        // Year 2024 = 0x07E8, which is LE 0xE8 0x07. Month 8. Day 24. Time 13:45:30.
         let data = Data([0xE8, 0x07, 8, 24, 13, 45, 30])
         let dt = try GATTDateTime(bluetoothData: data)
         #expect(dt.year == 2024)
@@ -203,7 +204,7 @@ struct ProfilesTests {
 
     @Test("CurrentTime.date is nil when month or day is unknown (0)")
     func currentTimeUnknownDate() throws {
-        // month 0 = unknown.
+        // Month 0 means unknown.
         let data = Data([0xE8, 0x07, 0, 24, 13, 45, 30, 6, 0, 0x00])
         let time = try CurrentTime(bluetoothData: data)
         #expect(time.date() == nil)
@@ -213,7 +214,7 @@ struct ProfilesTests {
     func currentTimeFromDate() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
-        // 2024-08-24 is a Saturday → GATT day of week 6.
+        // 2024-08-24 is a Saturday, which is GATT day of week 6.
         let components = DateComponents(year: 2024, month: 8, day: 24, hour: 13, minute: 45, second: 30)
         let date = calendar.date(from: components)!
         let time = CurrentTime(date: date, calendar: calendar, adjustReason: .manualTimeUpdate)
@@ -228,7 +229,7 @@ struct ProfilesTests {
 
     @Test("CSCMeasurement decodes both wheel and crank data")
     func cscBothPresent() throws {
-        // flags 0x03 = wheel(bit0) + crank(bit1).
+        // flags 0x03 = wheel (bit0) + crank (bit1).
         // [flags 0x03][wheel cumulative 0x0000000A = 10][wheel event 0x0400 = 1024]
         // [crank cumulative 0x0005 = 5][crank event 0x0200 = 512]
         let data = Data([0x03, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x04, 0x05, 0x00, 0x00, 0x02])
@@ -251,7 +252,7 @@ struct ProfilesTests {
 
     @Test("CSCMeasurement throws when a flagged group is truncated")
     func cscTruncated() {
-        // flags 0x01 promises wheel data (6 bytes) but only 3 follow.
+        // flags 0x01 promises wheel data (6 bytes), but only 3 bytes follow.
         #expect(throws: BLESwiftError.self) {
             _ = try CSCMeasurement(bluetoothData: Data([0x01, 0x0A, 0x00, 0x00]))
         }
@@ -275,15 +276,23 @@ struct ProfilesTests {
 
     @Test("CyclingPowerMeasurement decodes balance, torque, wheel/crank, and extreme angles")
     func cyclingPowerRichFlags() throws {
-        // flags = bit0|bit1|bit2|bit3|bit4|bit5|bit8 = 0x013F.
-        //   bit0 pedalPowerBalance, bit1 reference=left, bit2 accumulatedTorque,
-        //   bit3 torqueSource=crank, bit4 wheelRev, bit5 crankRev, bit8 extremeAngles.
-        // power 0x0064 = 100 W.
-        // pedalPowerBalance 0x32 = 50 (i.e. 25%).
-        // accumulatedTorque 0x0140 = 320 (10 N·m).
-        // wheel cumulative 0x000003E8 = 1000, wheel event 0x0800 = 2048.
-        // crank cumulative 0x0064 = 100, crank event 0x0400 = 1024.
-        // extremeAngles raw24 = 0x00ABCD → LE 0xCD 0xAB 0x00; max = 0xBCD = 3021, min = 0x00A = 10.
+        // The flags are bit0|bit1|bit2|bit3|bit4|bit5|bit8 = 0x013F:
+        // - bit0 pedalPowerBalance
+        // - bit1 reference=left
+        // - bit2 accumulatedTorque
+        // - bit3 torqueSource=crank
+        // - bit4 wheelRev
+        // - bit5 crankRev
+        // - bit8 extremeAngles
+        //
+        // The fields are:
+        // - power 0x0064 = 100 W
+        // - pedalPowerBalance 0x32 = 50 (that is, 25%)
+        // - accumulatedTorque 0x0140 = 320 (10 N·m)
+        // - wheel cumulative 0x000003E8 = 1000, wheel event 0x0800 = 2048
+        // - crank cumulative 0x0064 = 100, crank event 0x0400 = 1024
+        // - extremeAngles raw24 = 0x00ABCD, which is LE 0xCD 0xAB 0x00. Max = 0xBCD = 3021. Min =
+        //   0x00A = 10.
         var data = Data([0x3F, 0x01, 0x64, 0x00])   // flags 0x013F, power 100
         data.append(0x32)                            // pedalPowerBalance 50
         data.append(contentsOf: [0x40, 0x01])        // accumulatedTorque 320
@@ -321,7 +330,7 @@ struct ProfilesTests {
 
     @Test("CyclingPowerMeasurement throws when a flagged field is truncated")
     func cyclingPowerTruncated() {
-        // flags 0x0004 promises accumulatedTorque (2 bytes) but none follow.
+        // flags 0x0004 promises accumulatedTorque (2 bytes), but no bytes follow.
         #expect(throws: BLESwiftError.self) {
             _ = try CyclingPowerMeasurement(bluetoothData: Data([0x04, 0x00, 0x64, 0x00]))
         }
@@ -331,7 +340,7 @@ struct ProfilesTests {
 
     @Test("TemperatureMeasurement decodes Celsius with no optional fields")
     func temperatureCelsius() throws {
-        // flags 0x00 (celsius, no timestamp, no type). value 36.5 = 0x6D 0x01 0x00 0xFF.
+        // flags 0x00 (celsius, no timestamp, no type). Value 36.5 = 0x6D 0x01 0x00 0xFF.
         let data = Data([0x00, 0x6D, 0x01, 0x00, 0xFF])
         let m = try TemperatureMeasurement(bluetoothData: data)
         #expect(m.temperature == 36.5)
@@ -342,14 +351,14 @@ struct ProfilesTests {
 
     @Test("TemperatureMeasurement decodes Fahrenheit with timestamp and type")
     func temperatureFullFlags() throws {
-        // flags 0x07 = fahrenheit(bit0) | timestamp(bit1) | type(bit2).
-        // value 98.6 = 986 × 10^-1. 986 = 0x0003DA → LE 0xDA 0x03 0x00; exp -1 = 0xFF.
-        // timestamp 2024-08-24 13:45:30. type 0x02 = body.
+        // flags 0x07 = fahrenheit (bit0) | timestamp (bit1) | type (bit2).
+        // Value 98.6 = 986 × 10^-1. 986 = 0x0003DA, which is LE 0xDA 0x03 0x00. Exponent -1 = 0xFF.
+        // Timestamp 2024-08-24 13:45:30. type 0x02 = body.
         var data = Data([0x07, 0xDA, 0x03, 0x00, 0xFF])
         data.append(contentsOf: [0xE8, 0x07, 8, 24, 13, 45, 30]) // GATTDateTime
         data.append(0x02)                                        // type = body
         let m = try TemperatureMeasurement(bluetoothData: data)
-        #expect(abs(m.temperature - 98.6) < 0.0001) // 986 × 10^-1, subject to binary FP rounding
+        #expect(abs(m.temperature - 98.6) < 0.0001) // 986 × 10^-1. Binary floating-point rounding applies.
         #expect(m.unit == .fahrenheit)
         #expect(m.timestamp?.year == 2024)
         #expect(m.timestamp?.day == 24)
@@ -358,7 +367,7 @@ struct ProfilesTests {
 
     @Test("TemperatureMeasurement decodes a reserved temperature type")
     func temperatureReservedType() throws {
-        // flags 0x04 (type present, celsius, no timestamp). value 36.5. type 0x63 = 99 reserved.
+        // flags 0x04 (type present, celsius, no timestamp). Value 36.5. type 0x63 = 99 is reserved.
         let data = Data([0x04, 0x6D, 0x01, 0x00, 0xFF, 0x63])
         let m = try TemperatureMeasurement(bluetoothData: data)
         #expect(m.type == .reserved(99))

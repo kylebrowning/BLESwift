@@ -9,8 +9,9 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Exercises `Central.scan(...)` (Phase 4): discovery/duplicate/loss/throttle event flow,
-/// single-scan discipline, and stream-termination-driven cleanup, all via `FakeCentral`.
+/// Tests `Central.scan(...)`: the event flow for discovery, duplicate, loss, and throttle, the
+/// single-scan rule, and the cleanup that a stream's termination starts. All tests use
+/// `FakeCentral`.
 @Suite("Scan")
 struct ScanTests {
 
@@ -54,10 +55,9 @@ struct ScanTests {
             return
         }
 
-        // A repeat sighting of the same peripheral without allowDuplicates must not yield
-        // anything. Prove it by sighting a *different* peripheral next: if the repeat
-        // sighting above had wrongly yielded an .updated, this .next() would return that
-        // instead of the second peripheral's .discovered.
+        // A repeat sighting without allowDuplicates must not yield anything. Prove it with a
+        // sighting of a *different* peripheral next: had the repeat yielded an .updated, this
+        // .next() would return it and not the second peripheral's .discovered.
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -70)
         await fakeCentral.onQueue {}
 
@@ -143,12 +143,12 @@ struct ScanTests {
             return
         }
 
-        // Delta of 5 from -50 is below the threshold of 10 — suppressed.
+        // A delta of 5 from -50 is below the threshold of 10. The code suppresses it.
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -55)
         await fakeCentral.onQueue {}
 
-        // A throttled sighting doesn't update the stored baseline, so this delta is
-        // computed against the *original* -50 (a delta of 20) and clears the threshold.
+        // A throttled sighting does not update the stored baseline, so the code computes this delta
+        // against the *original* -50 (a delta of 20), which is above the threshold.
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -70)
         let updated = try await iterator.next()
         guard case .updated(let discovery) = updated else {
@@ -172,8 +172,8 @@ struct ScanTests {
         task.cancel()
         _ = await task.result
 
-        // Flush the actor's queue so the onTermination-driven cleanup (which hops via
-        // queue.async) has definitely run before asserting.
+        // Flush the actor's queue so that the cleanup started by onTermination (it hops through
+        // queue.async) has run before the assertion.
         await fakeCentral.onQueue {}
 
         #expect(await fakeCentral.onQueue { fakeCentral.stopScanCallCount } == 1)
@@ -203,7 +203,7 @@ struct ScanTests {
 
         #expect(central.isScanning == true)
 
-        // The first scan is unaffected — it keeps delivering discoveries.
+        // The first scan is not affected. It keeps delivering discoveries.
         let peripheral = PeripheralIdentifier(uuid: UUID(), name: nil)
         let advertisement = AdvertisementData()
         fakeCentral.simulateDiscovery(peripheral: peripheral, advertisement: advertisement, rssi: -50)
@@ -233,7 +233,7 @@ struct ScanTests {
 
         #expect(events.isEmpty)
 
-        await fakeCentral.onQueue {} // flush the onTermination-driven cleanup
+        await fakeCentral.onQueue {} // Flush the cleanup that onTermination starts.
         #expect(central.isScanning == false)
     }
 
@@ -271,7 +271,7 @@ struct ScanTests {
 
         for try await _ in stream {}
 
-        await fakeCentral.onQueue {} // flush the onTermination-driven cleanup
+        await fakeCentral.onQueue {} // Flush the cleanup that onTermination starts.
         #expect(central.isScanning == false)
     }
 }

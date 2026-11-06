@@ -15,19 +15,17 @@ import Foundation
 import BLESwiftCompat17
 import Testing
 
-/// Conformance parity: the link must be behaviorally indistinguishable from a local
-/// backend.
+/// Conformance parity: the link must be behaviorally indistinguishable from a local backend.
 ///
-/// One scenario — power on, scan, connect, read, write, subscribe, read RSSI, disconnect —
-/// runs twice against the *same* scripted `FakeCentral`/`FakePeripheral` script:
+/// One scenario runs twice against the *same* scripted `FakeCentral` and `FakePeripheral` script:
+/// power on, scan, connect, read, write, subscribe, read RSSI, disconnect.
 ///
-/// - **A (local):** `Central` → `FakeCentral`, in-process.
-/// - **B (linked):** `Central` → `LinkCentral` → socket → passthrough `Provider` whose
+/// - **A (local):** `Central` to `FakeCentral`, in-process.
+/// - **B (linked):** `Central` to `LinkCentral` to socket to passthrough `Provider`, whose
 ///   `centralBackendFactory` builds that same fake.
 ///
-/// Both runs produce a log of observable values only (no timings, no call counts), and the
-/// two logs must be identical. A difference is a defect in the link, not a reason to
-/// loosen the comparison.
+/// Each run logs observable values only, with no timings or call counts. The two logs must be
+/// identical. A difference is a defect in the link, not a reason to loosen the comparison.
 @Suite("Link vs local conformance parity")
 struct ParityTests {
 
@@ -53,8 +51,8 @@ struct ParityTests {
         AdvertisementData(localName: deviceName, serviceUUIDs: [heartRate])
     }
 
-    /// A `Sendable` hand-off for a fake the provider's backend factory builds on the
-    /// session's own queue — `Mutex` is non-copyable, so it cannot live in a struct rig.
+    /// A `Sendable` hand-off for a fake that the provider's backend factory builds on the session's
+    /// queue. `Mutex` is non-copyable, so it cannot live in a struct rig.
     private final class FakeBox<Fake: Sendable>: Sendable {
         private let storage = Mutex<Fake?>(nil)
 
@@ -65,11 +63,11 @@ struct ParityTests {
 
     // MARK: - The script
 
-    /// The one script both runs apply, through the fakes' queue-confined setters.
+    /// The one script that both runs apply, through the queue-confined setters of the fakes.
     ///
-    /// `simulateStateChange` is off-queue safe and hops onto the fake's queue itself; the
-    /// setters are not, hence `onQueue`. Both fakes share one queue, so `fake.onQueue`
-    /// covers the peripheral's setters too.
+    /// `simulateStateChange` is safe off the queue. The setters are not, so they go through
+    /// `onQueue`. Both fakes share one queue, so `fake.onQueue` covers the peripheral's setters
+    /// too.
     private static func scriptFake(_ fake: FakeCentral, peripheral: FakePeripheral) async {
         fake.simulateStateChange(.poweredOn)
         await fake.onQueue {
@@ -86,18 +84,17 @@ struct ParityTests {
         data.map { String(format: "%02x", $0) }.joined()
     }
 
-    /// A scenario step that could not be completed — reported as a test failure rather than
-    /// left to hang.
+    /// A scenario step that the test could not complete. The test reports it as a test failure and
+    /// does not leave the step to hang.
     private struct ParityFailure: Error, CustomStringConvertible {
         let description: String
     }
 
-    /// Runs `operation` under the shared ten-second bound, giving up with a recorded failure
-    /// instead of hanging the suite.
+    /// Runs `operation` under the shared ten-second bound and records a failure instead of hanging
+    /// the suite.
     ///
-    /// Every step of this scenario simulates its stimulus exactly once, so a link that
-    /// dropped or reordered that one message must surface as a timeout here — never as a
-    /// silent retry that papers over the loss.
+    /// Each step simulates its stimulus exactly once, so a link that dropped or reordered that
+    /// message appears as a timeout, never as a silent retry.
     private static func bounded<T: Sendable>(
         _ step: String,
         _ operation: @escaping @Sendable () async throws -> T
@@ -114,15 +111,14 @@ struct ParityTests {
 
     // MARK: - The scenario
 
-    /// Drives one `Central` through the full scenario, returning a log of everything it
-    /// observed. Every entry is a value the API handed back — never a duration, a call
-    /// count, or anything else that could differ legitimately between the two runs.
+    /// Drives one `Central` through the full scenario and returns a log of everything that it
+    /// observed. Entries are API values only, with nothing that could legitimately differ between
+    /// the two runs.
     ///
-    /// Each simulated stimulus fires **exactly once**, gated on the fake's own record that
-    /// the corresponding request actually arrived (`scanCallCount`,
-    /// `notifyingCharacteristics`, `cancelCallCounts`). That gate is what gives the suite
-    /// its teeth: a link that dropped the first sighting, the first notification, or the
-    /// disconnect would hang and be reported, not quietly retried into a pass.
+    /// Each simulated stimulus fires **exactly once**, gated on the fake's record that the request
+    /// arrived (`scanCallCount`, `notifyingCharacteristics`, `cancelCallCounts`). A link that
+    /// dropped a sighting, a notification, or the disconnect would hang and be reported, not be
+    /// retried into a pass.
     private static func runScenario(
         central: Central,
         peripheralID: UUID,
@@ -131,13 +127,11 @@ struct ParityTests {
     ) async throws -> [String] {
         var log: [String] = []
 
-        // State.
         await waitFor(timeout: .seconds(10)) { central.state == .poweredOn }
         log.append("state:\(central.state)")
 
-        // Scan. The consumer is started first, then the scan request is awaited on the fake
-        // — in run B that means it has crossed the socket — and only then is the single
-        // sighting delivered.
+        // Scan. The test starts the consumer, then awaits the scan request on the fake. In run B
+        // the request has then crossed the socket. Only then does it deliver the single sighting.
         let events = await central.scan(services: [heartRate], timeout: .seconds(10))
         let discovering = Task { () async throws -> Discovery in
             for try await event in events {
@@ -152,22 +146,19 @@ struct ParityTests {
         let discovery = try #require(try await bounded("discovery") { try await discovering.value })
         log.append("discovered:\(discovery.peripheral.name):\(discovery.peripheral.uuid)")
 
-        // Connect.
         let peripheral = try await central.connect(discovery.peripheral)
         log.append("connected:\(peripheral.id.uuid)")
 
-        // Read.
         let value: Data = try await peripheral.read(from: measurement)
         log.append("read:\(hex(value))")
 
-        // Write, with response. `FakePeripheral.writeValue` auto-completes the write (no
-        // `onWriteRequest` bridge hook is installed here), so nothing further is scripted.
+        // Write, with response. `FakePeripheral.writeValue` completes the write itself, because no
+        // `onWriteRequest` hook is installed.
         try await peripheral.write(controlWrite, to: control, type: .withResponse)
         log.append("wrote:\(control.uuidString)")
 
-        // Subscribe, then notify once. `notifyingCharacteristics` is the fake's own record
-        // that the subscribe landed, so it stands in for the "armed" signal `Peripheral`
-        // does not expose.
+        // Subscribe, then notify once. `notifyingCharacteristics` is the fake's record that the
+        // subscribe landed, so it replaces the "armed" signal that `Peripheral` does not expose.
         let notifications: AsyncThrowingStream<Data, Error> = peripheral.notifications(for: measurement)
         let notified = Task { () async throws -> Data in
             for try await packet in notifications { return packet }
@@ -180,12 +171,11 @@ struct ParityTests {
         let packet = try #require(try await bounded("notification") { try await notified.value })
         log.append("notified:\(hex(packet))")
 
-        // RSSI.
         log.append("rssi:\(try await peripheral.readRSSI())")
 
-        // Disconnect. `FakeCentral.cancelPeripheralConnection` records the call but never
-        // delivers `didDisconnect`, so the one disconnect event is simulated — after the
-        // fake has recorded the cancel, so the ordering is the same in both runs.
+        // Disconnect. `FakeCentral.cancelPeripheralConnection` never delivers `didDisconnect`, so
+        // the test simulates it once, after the fake recorded the cancel. The ordering is the same
+        // in both runs.
         let disconnecting = Task { () async throws -> Bool in
             try await central.disconnect(peripheral.id)
             return true
@@ -202,13 +192,13 @@ struct ParityTests {
 
     // MARK: - Run A: local
 
-    /// The scenario against a `Central` sitting directly on the scripted fake.
+    /// The scenario against a `Central` that sits directly on the scripted fake.
     private func runLocal() async throws -> [String] {
         let queue = DispatchQueue(label: "parity.local")
         let fake = FakeCentral(queue: queue, state: .poweredOn)
         let peripheral = FakePeripheral(identifier: Self.deviceID, name: Self.deviceName, queue: queue)
-        // The `Central` is wired before the script runs, so it sees the `.poweredOn` event
-        // the script delivers — exactly as the linked run's client does.
+        // The test wires the `Central` before the script runs, so it sees the `.poweredOn` event
+        // that the script delivers, exactly as the client of the linked run does.
         let central = Central(backend: fake, queue: queue)
         await Self.scriptFake(fake, peripheral: peripheral)
         return try await Self.runScenario(
@@ -221,8 +211,8 @@ struct ParityTests {
 
     // MARK: - Run B: linked
 
-    /// The same scenario against a `Central` whose backend is a `LinkCentral` dialing a
-    /// passthrough `Provider` that owns the very same kind of scripted fake.
+    /// The same scenario against a `Central` whose backend is a `LinkCentral`. The `LinkCentral`
+    /// dials a passthrough `Provider` that owns the same kind of scripted fake.
     private func runLinked() async throws -> [String] {
         let centralBox = FakeBox<FakeCentral>()
         let peripheralBox = FakeBox<FakePeripheral>()
@@ -231,9 +221,8 @@ struct ParityTests {
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
         configuration.passthrough = true
         configuration.centralBackendFactory = { queue in
-            // Called once, on the session's own queue. Only construction happens here; the
-            // scripting is applied afterwards through `scriptFake`, so both runs are driven
-            // by literally the same code.
+            // The factory calls this once, on the session's queue, and only constructs. The test
+            // scripts afterwards through `scriptFake`, so the same code drives both runs.
             let fake = FakeCentral(queue: queue, state: .poweredOn)
             let peripheral = FakePeripheral(identifier: Self.deviceID, name: Self.deviceName, queue: queue)
             centralBox.store(fake)
@@ -252,12 +241,11 @@ struct ParityTests {
         )
         let central = Central(backend: link, queue: queue)
 
-        // The factory runs when the session is created, i.e. once the client's socket is
-        // accepted — so wait for the fake before scripting it. The window is generous because
-        // the session may have to dial through a spell of the local stack refusing loopback
-        // connects outright (`EADDRINUSE`), which on a machine running several test bundles at
-        // once has been seen to last past ten seconds; the session redials every 50 ms
-        // throughout, so the wait costs nothing when the first dial lands.
+        // The factory runs when the session is created, when the client's socket is accepted, so
+        // the test waits for the fake before it scripts it. The window is generous. The local stack
+        // can refuse loopback connects outright (`EADDRINUSE`) for more than ten seconds when
+        // several test bundles run at once. The session redials every 50 ms, so the wait costs
+        // nothing when the first dial lands.
         await waitFor(timeout: .seconds(45)) { centralBox.value != nil && peripheralBox.value != nil }
         let fake = try #require(centralBox.value)
         let fakePeripheral = try #require(peripheralBox.value)

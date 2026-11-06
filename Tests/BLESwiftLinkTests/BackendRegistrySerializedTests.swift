@@ -18,21 +18,16 @@ import Testing
 import BLESwiftProvider
 #endif
 
-/// Every suite that touches the process-global `BackendRegistry` — or the default
-/// `Central()` / `PeripheralHost()` initializers that consult it — lives here, nested inside
-/// one serialized parent.
+/// Every suite that touches the process-global `BackendRegistry` lives here, including those that
+/// use the default `Central()` and `PeripheralHost()` initializers.
 ///
-/// `.serialized` is **per-suite**, not per-process, and SwiftPM builds one test bundle for
-/// every test target in the package, so two separate top-level serialized suites would still
-/// run *each other's* tests in parallel and trample the registry between them. Nested suites
-/// inherit their parent's serialization, so nesting both inside this one is what actually
-/// serializes them against one another. Nothing else in either bundle may touch
-/// `BackendRegistry` or those initializers.
+/// `.serialized` applies to one suite, not to the process, and SwiftPM runs all test targets in one
+/// bundle. Nesting both suites here lets the parent serialize them against each other. No other
+/// test may touch `BackendRegistry`.
 @Suite("Backend registry", .serialized)
 struct BackendRegistrySerializedTests {
 
-    /// `BackendRegistry` is process-global, so this suite restores a nil registry after every
-    /// test — and runs serialized with its sibling, by way of the parent above.
+    /// `BackendRegistry` is process-global, so this suite restores a nil registry after every test.
     @Suite("BackendRegistry")
     struct BackendRegistryTests {
 
@@ -50,7 +45,6 @@ struct BackendRegistrySerializedTests {
             let fake = box.withLock { $0 }
             #expect(fake != nil)
 
-            // The factory's fake is what the actor drives: a scripted state change reaches it.
             fake?.simulateStateChange(.poweredOff)
             await waitFor { central.state == .poweredOff }
             #expect(central.state == .poweredOff)
@@ -86,7 +80,8 @@ struct BackendRegistrySerializedTests {
             #expect(BackendRegistry.centralFactory?(queue) is FakeCentral)
             #expect(BackendRegistry.peripheralManagerFactory?(queue) is FakePeripheralManager)
 
-            // Each slot takes exactly what the call names: `nil` clears, a factory replaces.
+            // Each slot takes exactly what the call names: `nil` clears it, and a factory replaces
+            // it.
             BackendRegistry.setFactories(central: nil, peripheralManager: { queue in FakePeripheralManager(queue: queue) })
             #expect(BackendRegistry.centralFactory == nil)
             #expect(BackendRegistry.peripheralManagerFactory != nil)
@@ -110,9 +105,8 @@ struct BackendRegistrySerializedTests {
             #expect(BackendRegistry.peripheralManagerFactory == nil)
         }
 
-        /// #53: a function-typed `Mutex` value gained two reabstraction thunks per read, so a
-        /// factory read often enough overflowed the stack when finally called. Before the fix
-        /// this crashed (SIGBUS) well inside the read count used here.
+        /// Regression test for #53: each read of a function-typed `Mutex` value added two
+        /// reabstraction thunks, so a factory read many times overflowed the stack.
         @Test("Reading the factories repeatedly does not nest them deeper (#53)")
         func repeatedReadsDoNotNest() {
             BackendRegistry.centralFactory = { queue in FakeCentral(queue: queue) }
@@ -131,9 +125,8 @@ struct BackendRegistrySerializedTests {
         }
     }
 
-    /// `SimulatorLink` mutates the process-wide `BackendRegistry`, so every test here restores
-    /// an uninstalled state afterwards — and runs serialized with its sibling, by way of the
-    /// parent above.
+    /// `SimulatorLink` changes the process-wide `BackendRegistry`, so every test here restores the
+    /// uninstalled state afterwards.
     @Suite("SimulatorLink.install()")
     struct SimulatorLinkInstallTests {
 
@@ -181,9 +174,8 @@ struct BackendRegistrySerializedTests {
         }
 
 #if os(macOS)
-        // Everything below dials a provider over loopback. It is already `#if os(macOS)`, so
-        // it is compiled out of the iOS-simulator run — where sockets are unreliable — for
-        // free; see `TransportLoopbackTests` for the fence the cross-platform suites carry.
+        // Everything below dials a provider over loopback, so `#if os(macOS)` excludes it from the
+        // iOS-simulator run.
         private static let fixtureJSON = """
         { "devices": [] }
         """
@@ -203,12 +195,9 @@ struct BackendRegistrySerializedTests {
             SimulatorLink.install(endpoint: LinkEndpoint(host: "127.0.0.1", port: await provider.port))
             defer { SimulatorLink.uninstall() }
 
-            // Twenty seconds, not the usual five: these backends are built by
-            // `SimulatorLink.install` with the *production* retry interval of two seconds. The
-            // session's opening burst absorbs the dials a loaded machine refuses outright
-            // (`EADDRINUSE` from the local stack), but once that burst is spent every further
-            // refusal costs a full two seconds. Widen the wait rather than add API to shorten the
-            // interval: the interval is what ships, and it belongs in what is tested.
+            // The wait is twenty seconds, not five. The backends use the production two-second
+            // retry interval, and each dial that a loaded machine refuses (`EADDRINUSE`) costs one
+            // interval. The test must include the shipped interval.
             let central = Central()
             await waitFor(timeout: .seconds(20)) { central.state == .poweredOn }
             #expect(central.state == .poweredOn)
@@ -223,9 +212,8 @@ struct BackendRegistrySerializedTests {
         @Test("isProviderReachable is true against a running provider and false against a closed port")
         func isProviderReachable() async throws {
             let provider = try await makeProvider()
-            // A budget, not a deadline for one dial: on a machine running several test bundles at
-            // once a loopback dial can fail outright (`EADDRINUSE` from the local stack), which
-            // says nothing about the provider — the probe retries inside this window.
+            // A budget, not a deadline for one dial. A loopback dial can fail outright
+            // (`EADDRINUSE`) on a loaded machine, so the probe retries inside this window.
             let reachable = await SimulatorLink.isProviderReachable(
                 LinkEndpoint(host: "127.0.0.1", port: await provider.port),
                 timeout: .seconds(10)
@@ -251,9 +239,8 @@ struct BackendRegistrySerializedTests {
                 codec: .binaryPropertyList,
                 queue: queue
             )
-            // Deliberately no `onConnection` handler: every accepted connection is started (so the
-            // TCP handshake completes and the client sees `.ready`) but nothing is ever sent back —
-            // the "connected but silent" case a refused or black-holed port doesn't exercise.
+            // No `onConnection` handler: the TCP handshake completes and the client sees `.ready`,
+            // but the provider never replies. This is the "connected but silent" case.
             try await listener.start()
             defer { listener.cancel() }
 
@@ -270,9 +257,8 @@ struct BackendRegistrySerializedTests {
 
         @Test("isProviderReachable keeps trying until a provider appears within its timeout")
         func isProviderReachableWaitsForALateProvider() async throws {
-            // The port is taken and released, so the first dials have nowhere to land; the
-            // provider binds it a moment later. A probe that gave up on its first failed dial
-            // would report false here.
+            // The test releases the port, so the first dials have nowhere to land. The provider
+            // binds it later. A probe that gave up after one failed dial would report false.
             let port = try closedPort()
             let appearing = Task {
                 try await Task.sleep(for: .milliseconds(300))
@@ -295,10 +281,9 @@ struct BackendRegistrySerializedTests {
                 codec: .binaryPropertyList,
                 queue: queue
             )
-            // Silent again, and with a 30-second bound: nothing but the cancellation can end this
-            // probe, so a prompt `false` proves the cancelled path resumes at all. Cancelled
-            // before the probe has run a line, which is its own case — the loop must notice the
-            // flag rather than dial once and wait out the timeout.
+            // The listener is silent and the bound is 30 seconds, so only cancellation can end the
+            // probe. Cancelling before the probe runs a line is its own case: the loop must notice
+            // the flag instead of dialing once.
             try await listener.start()
             defer { listener.cancel() }
 
@@ -321,13 +306,10 @@ struct BackendRegistrySerializedTests {
                 codec: .binaryPropertyList,
                 queue: queue
             )
-            // The path the cancellation handler exists for: the probe is *inside* its dial, on a
-            // connection that reached `.ready` and is waiting on a hello that will never come.
-            // Cancelling then used to be able to deadlock — the handler cancels the connection
-            // before the state handler exists, the terminal state is published to nobody, and the
-            // group waits on a continuation no one will ever resume. The connections are held
-            // (the listener does not retain what it accepts) so the probe keeps waiting on a live,
-            // silent socket rather than one that died under it.
+            // The probe is inside its dial, on a connection that reached `.ready` and waits for a
+            // hello that never comes. Cancellation could deadlock here if the handler cancelled the
+            // connection before the state handler existed, so the terminal state would go to
+            // nobody. The test holds the connections because the listener does not retain them.
             let accepted = Mutex<[LinkConnection]>([])
             listener.onConnection = { connection in
                 accepted.withLock { $0.append(connection) }
@@ -344,11 +326,8 @@ struct BackendRegistrySerializedTests {
                     timeout: .seconds(30)
                 )
             }
-            // Gate on the listener actually accepting: the probe has reached `.ready` and sent its
-            // hello, so the cancellation lands mid-dial rather than before the probe started.
-            // This is setup, not the property under test: under load the probe's loopback dial
-            // can sit in its retry schedule for several seconds, so the gate is generous. The
-            // sub-second bound below is what the test actually asserts.
+            // Wait until the listener accepts, so the cancellation lands mid-dial. This gate is
+            // setup and is generous under load. The sub-second bound below is the assertion.
             await waitFor(timeout: .seconds(30)) { accepted.withLock { !$0.isEmpty } }
             #expect(accepted.withLock { !$0.isEmpty })
 
@@ -360,18 +339,17 @@ struct BackendRegistrySerializedTests {
 #endif
     }
 
-    /// `VirtualRadio.install(_:)` mutates the process-wide `BackendRegistry` too, so every test
-    /// here restores an uninstalled state afterwards — and runs serialized with its siblings,
-    /// by way of the parent above. Nothing here dials a socket, so unlike the loopback tests
-    /// above it runs on every platform.
+    /// `VirtualRadio.install(_:)` also changes the process-wide `BackendRegistry`, so every test
+    /// restores the uninstalled state. No test here dials a socket, so this suite runs on every
+    /// platform.
     @Suite("VirtualRadio.install(_:)")
     struct VirtualRadioInstallTests {
 
         private static let service = ServiceIdentifier(uuid: "180D")
         private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: service)
 
-        /// A device that answers no dynamic GATT traffic — its one characteristic carries a
-        /// static value, which the radio serves itself.
+        /// A device that answers no dynamic GATT traffic. Its one characteristic has a static value
+        /// that the radio serves itself.
         private struct StaticHandler: VirtualDeviceHandler {
             func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
                 .failure(.unlikelyError)
@@ -463,21 +441,17 @@ struct BackendRegistrySerializedTests {
             VirtualRadio.install(radio)
             defer { VirtualRadio.uninstall() }
 
-            // Every read made after the install agrees: the radio is installed, and each
-            // factory builds a backend of the radio's own kind.
             let queue = DispatchQueue(label: "VirtualRadioInstallTests.consistent")
             #expect(VirtualRadio.installed === radio)
             #expect(BackendRegistry.centralFactory?(queue) is VirtualCentralBackend)
             #expect(BackendRegistry.peripheralManagerFactory?(queue) is VirtualPeripheralManagerBackend)
 
-            // A second install replaces both slots and `installed` with the new radio.
             let replacement = VirtualRadio()
             VirtualRadio.install(replacement)
             #expect(VirtualRadio.installed === replacement)
             #expect(BackendRegistry.centralFactory?(queue) is VirtualCentralBackend)
             #expect(BackendRegistry.peripheralManagerFactory?(queue) is VirtualPeripheralManagerBackend)
 
-            // And an uninstall clears all three in the same step.
             VirtualRadio.uninstall()
             #expect(VirtualRadio.installed == nil)
             #expect(BackendRegistry.centralFactory == nil)

@@ -2,10 +2,10 @@
 //  AdvertiserModel.swift
 //  BLESwiftExplorer
 //
-//  The peripheral-role counterpart to `ExplorerModel`: a `PeripheralHost` that advertises a
-//  Heart Rate service, answers reads and writes, and notifies subscribers on a 1 s timer.
-//  In the Simulator this runs over the simulator link (see `ExplorerModel.init()`), so a
-//  host-side `bleswift-provider` can see the app as an advertising peripheral.
+//  The peripheral-role counterpart to `ExplorerModel`. It is a `PeripheralHost` that advertises a
+//  Heart Rate service, answers reads and writes, and notifies subscribers every second. In the
+//  Simulator it runs over the simulator link (see `ExplorerModel.init()`), so a `bleswift-provider`
+//  on the host can see the app as an advertising peripheral.
 //
 
 #if os(iOS) || os(macOS)
@@ -19,10 +19,11 @@ import Observation
 @Observable
 final class AdvertiserModel {
 
-    /// The advertised local name. Fixed — the end-to-end test asserts on it.
+    /// The advertised local name. It is fixed because the end-to-end test asserts on it.
     static let localName = "BLESwift Explorer Sim"
 
-    /// The Heart Rate Control Point (`2A39`), hosted write-only so the UI can log writes.
+    /// The Heart Rate Control Point (`2A39`). The host exposes it as write-only, so the UI can log
+    /// writes.
     static let controlPoint = CharacteristicIdentifier(uuid: "2A39", service: HeartRateMeasurement.service)
 
     // MARK: - Published state
@@ -34,9 +35,9 @@ final class AdvertiserModel {
 
     // MARK: - Private state
 
-    // Created lazily on the first `start()` so `BackendRegistry` is consulted *after*
-    // `SimulatorLink.install()` has run — `PeripheralHost()` resolves its backend once, at
-    // construction. Kept across `stop()`/`start()` cycles for reuse.
+    // Created lazily on the first `start()`, so that `BackendRegistry` is consulted *after*
+    // `SimulatorLink.install()` has run. `PeripheralHost()` resolves its backend once, at
+    // construction. The model keeps the host across `stop()` and `start()` cycles.
     private var host: PeripheralHost?
     private var didAddService = false
     private var isPublishing = false
@@ -47,15 +48,15 @@ final class AdvertiserModel {
 
     // MARK: - Start / stop
 
-    /// Builds the host (first call only), publishes the Heart Rate service, and starts
-    /// advertising plus the 1 s notification timer.
+    /// Builds the host (first call only), publishes the Heart Rate service, and starts advertising
+    /// and the one-second notification timer.
     func start() {
         guard !isAdvertising else { return }
         isAdvertising = true
         startTask = Task { [weak self] in await self?.startAdvertising() }
     }
 
-    /// Stops advertising and cancels the timer and stream consumers. The host is kept.
+    /// Stops advertising and cancels the timer and the stream consumers. The model keeps the host.
     func stop() {
         isAdvertising = false
         startTask?.cancel()
@@ -72,27 +73,27 @@ final class AdvertiserModel {
     private func startAdvertising() async {
         let host = existingOrNewHost()
 
-        // Subscribe to the request streams *before* advertising — they do not replay.
+        // Subscribe to the request streams *before* advertising. They do not replay.
         if streamTasks.isEmpty {
             streamTasks.append(Task { [weak self] in await self?.consumeStateEvents(host) })
             streamTasks.append(Task { [weak self] in await self?.consumeReadRequests(host) })
             streamTasks.append(Task { [weak self] in await self?.consumeWriteRequests(host) })
         }
 
-        // The host's manager must reach `.poweredOn` before its GATT database can be
-        // published — `add(_:)` awaits a CoreBluetooth callback that never comes otherwise.
+        // The host's manager must reach `.poweredOn` before the app can publish its GATT database.
+        // Otherwise `add(_:)` waits for a CoreBluetooth callback that never comes.
         for await state in await host.stateEvents() where state == .poweredOn { break }
         guard isAdvertising, !Task.isCancelled else { return }
         await publish(on: host)
     }
 
-    /// Publishes the GATT database (once per power cycle) and starts advertising.
+    /// Publishes the GATT database (once for each power cycle) and starts advertising.
     ///
-    /// Called both from the opening `start()` and from every later `.poweredOn` — a simulator
-    /// link that drops takes the provider's copy of the database and the advertisement with it,
-    /// exactly as a CoreBluetooth power bounce does, so the reconnect has to republish both.
-    /// The reentrancy guard is what keeps the two callers from racing into a double `add(_:)`
-    /// on the very first `.poweredOn`, which they both observe.
+    /// Two callers use this method: the opening `start()` and every later `.poweredOn`. If a
+    /// simulator link drops, the provider loses its copy of the database and the advertisement. A
+    /// CoreBluetooth power bounce has the same effect. So the reconnect must publish both again.
+    /// Both callers observe the first `.poweredOn`, and the reentrancy guard prevents them from
+    /// racing into a double `add(_:)`.
     private func publish(on host: PeripheralHost) async {
         guard isAdvertising, !isPublishing else { return }
         isPublishing = true
@@ -124,7 +125,7 @@ final class AdvertiserModel {
         return host
     }
 
-    /// The hosted GATT database: `2A37` dynamic (`[.read, .notify]`) plus a `2A39` write sink.
+    /// The hosted GATT database: `2A37` dynamic (`[.read, .notify]`) and a `2A39` write sink.
     private static let service = GATTService(
         identifier: HeartRateMeasurement.service,
         characteristics: [
@@ -147,9 +148,10 @@ final class AdvertiserModel {
         for await state in await host.stateEvents() {
             stateText = String(describing: state)
             guard state == .poweredOn else {
-                // Anything else means the radio — or, in the Simulator, the provider's session
-                // — is gone, and the hosted database went with it. The latch is dropped so the
-                // next `.poweredOn` re-adds rather than assuming the service is still there.
+                // Any other state means that the radio is gone. In the Simulator it can mean that
+                // the provider session is gone, and the hosted database with it. The code drops the
+                // latch so that the next `.poweredOn` adds the service again and does not assume it
+                // is still there.
                 didAddService = false
                 continue
             }
@@ -172,7 +174,7 @@ final class AdvertiserModel {
         }
     }
 
-    /// Cycles `bpm` 60 → 100 → 60, one beat per second, pushing each value to subscribers.
+    /// Cycles `bpm` 60 → 100 → 60, one beat each second, and pushes each value to subscribers.
     private func tick(_ host: PeripheralHost) async {
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(1))

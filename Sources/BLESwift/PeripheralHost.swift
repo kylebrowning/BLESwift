@@ -3,16 +3,15 @@
 //  BLESwift
 //
 
-// The peripheral role compiles only for iOS and macOS: `CBPeripheralManager`'s designated
-// initializer is `API_UNAVAILABLE` on watchOS/tvOS, and `CBMutableService`/
-// `CBMutableCharacteristic` construction is unavailable on visionOS, so the role cannot
-// function on any of those platforms (issue #22). The central role is unaffected.
+// The peripheral role compiles only for iOS and macOS. `CBPeripheralManager`'s designated
+// initializer is `API_UNAVAILABLE` on watchOS and tvOS, and `CBMutableService` and
+// `CBMutableCharacteristic` construction is unavailable on visionOS. The central role is not
+// affected.
 #if os(iOS) || os(macOS)
 
-// `@preconcurrency`: `CBPeripheralManager` predates Sendable and is not `Sendable`.
-// `stopAndExtractState()` hands it back to a caller outside this actor's isolation domain —
-// a legitimate one-time ownership transfer — which only type-checks under `@preconcurrency`.
-// Same rationale as `Central`'s.
+// `@preconcurrency`: `CBPeripheralManager` is not `Sendable`. `stopAndExtractState()` gives it
+// to a caller outside this actor's isolation domain. This one-time ownership transfer
+// type-checks only under `@preconcurrency`. `Central` has the same rationale.
 import BLESwiftCore
 @preconcurrency import CoreBluetooth
 import Dispatch
@@ -21,121 +20,126 @@ import Logging
 import BLESwiftCompat16
 import BLESwiftCompat17
 
-/// BLESwift's peripheral-role entry point: an actor wrapping a single `CBPeripheralManager`.
+/// The peripheral-role entry point of BLESwift: an actor that wraps a single
+/// `CBPeripheralManager`.
 ///
-/// Where ``Central`` is the *central* role, `PeripheralHost` is the *peripheral* role — it
-/// hosts a GATT database, advertises it, and answers reads / writes / subscriptions from
-/// remote centrals. Its architecture mirrors ``Central`` exactly: the actor's isolation is
-/// tied directly to the `DispatchQueue` its `CBPeripheralManager` delivers delegate
-/// callbacks on (see ``unownedExecutor``), so every proxy callback already runs on the
-/// actor's own executor with no thread hop.
+/// ``Central`` is the *central* role. `PeripheralHost` is the *peripheral* role. It hosts and
+/// advertises a GATT database, and answers reads, writes, and subscriptions from remote
+/// centrals. Its architecture mirrors ``Central``. The actor's isolation is tied to the
+/// `DispatchQueue` on which its `CBPeripheralManager` delivers delegate callbacks (see
+/// ``unownedExecutor``), so each proxy callback already runs on the actor's executor.
 ///
-/// - Important: The peripheral role is available only on iOS and macOS. CoreBluetooth does
-///   not support constructing a `CBPeripheralManager` on watchOS or tvOS, or building a
-///   GATT database on visionOS, so `PeripheralHost` does not exist on those platforms.
+/// - Important: The peripheral role is available only on iOS and macOS. `PeripheralHost` does
+///   not exist on watchOS or tvOS, which cannot create a `CBPeripheralManager`, or on
+///   visionOS, which cannot build a GATT database.
 ///
-/// - Note: Subscribe to ``readRequests()`` / ``writeRequests()`` / ``subscriptionEvents()``
-///   **before** you ``startAdvertising(_:)``. Those streams do not replay.
+/// - Note: Subscribe to ``readRequests()``, ``writeRequests()``, and
+///   ``subscriptionEvents()`` **before** you call ``startAdvertising(_:)``. Those streams do
+///   not replay.
 public actor PeripheralHost {
 
-    /// The serial `DispatchQueue` backing ``unownedExecutor`` and the `CBPeripheralManager`
-    /// delegate callbacks. Must be serial: `DispatchQueue(label:)` is; a concurrent queue is
-    /// rejected on the 17 tier and undefined below it.
+    /// The serial `DispatchQueue` behind ``unownedExecutor`` and the `CBPeripheralManager`
+    /// delegate callbacks. It must be serial (`DispatchQueue(label:)` is). From iOS 17 and the
+    /// matching platform versions, a concurrent queue is rejected. Earlier, the behavior is
+    /// undefined.
     nonisolated let queue: DispatchQueue
 
-    /// Binds `PeripheralHost` to ``queue``: `DispatchSerialQueue`'s executor on the 17 tier
-    /// and later, `BLESwiftCompat16.SerialQueueExecutor` below it.
+    /// Binds `PeripheralHost` to ``queue``. From iOS 17 and the matching platform versions, it
+    /// uses `DispatchSerialQueue`'s executor. Earlier, it uses
+    /// `BLESwiftCompat16.SerialQueueExecutor`.
     nonisolated let executor: QueueExecutor
 
-    /// Ties this actor's isolation directly to ``queue`` (SE-0424 custom executors), exactly
-    /// as ``Central/unownedExecutor`` does. Declared `public` because it satisfies a
-    /// requirement of the public `Actor` protocol; not meant for direct use by clients.
+    /// Ties this actor's isolation to ``queue`` (SE-0424 custom executors), as
+    /// ``Central/unownedExecutor`` does. It is `public` only because the public `Actor`
+    /// protocol requires it. Do not use it directly.
     public nonisolated var unownedExecutor: UnownedSerialExecutor {
         executor.asUnownedSerialExecutor()
     }
 
-    /// The CoreBluetooth shim this host drives. `Optional`/`var` so ``stopAndExtractState()``
-    /// can `nil` it out as part of handing the `CBPeripheralManager` back to the caller
-    /// (required for a sound non-`Sendable` ownership transfer — see ``Central``'s `manager`).
+    /// The CoreBluetooth shim that this host drives. It is an optional `var`, so
+    /// ``stopAndExtractState()`` can set it to `nil` when it gives the `CBPeripheralManager`
+    /// to the caller. A sound non-`Sendable` ownership transfer needs this (see `manager` of
+    /// ``Central``).
     private var manager: (any PeripheralManaging)?
 
-    /// This host's `CBPeripheralManagerDelegate`, strongly owned here so it outlives the gap
-    /// before `CBPeripheralManager(delegate:queue:options:)`. Non-`nil` only for
+    /// This host's `CBPeripheralManagerDelegate`, held strongly. It is non-`nil` only for
     /// ``init(configuration:)``.
     private let proxy: PeripheralManagerDelegateProxy?
 
-    /// The configuration this host was created with (for its logger and power-alert option).
+    /// The configuration that created this host. It supplies the logger and the power-alert
+    /// option.
     private let configuration: Configuration
 
-    /// Backs the nonisolated, synchronously-readable ``state`` snapshot. `Mutex` (not
-    /// actor-isolated storage) so ``state`` reads without `await` from any isolation domain,
-    /// mirroring ``Central/state``. ``handle(_:)`` is the only writer.
+    /// Backs the nonisolated ``state`` snapshot. It is a `Mutex` and not actor-isolated
+    /// storage, so ``state`` reads without `await` from any isolation domain, as
+    /// ``Central/state`` does. ``handle(_:)`` is the only writer.
     private let stateBox = Mutex<CentralState>(.unknown)
 
-    /// Multicasts every ``CentralState`` transition to ``stateEvents()`` subscribers,
-    /// replaying the latest value to late subscribers.
+    /// Multicasts each ``CentralState`` transition to ``stateEvents()`` subscribers. It
+    /// replays the latest value to late subscribers.
     private let stateBroadcaster = Broadcaster<CentralState>(replay: .latest)
 
-    /// Backs the nonisolated, synchronously-readable ``isAdvertising`` snapshot.
+    /// Backs the nonisolated ``isAdvertising`` snapshot.
     private let isAdvertisingBox = Mutex<Bool>(false)
 
-    /// The single in-flight ``startAdvertising(_:)`` continuation, resolved by
-    /// `.didStartAdvertising`. At most one advertise start is awaited at a time.
+    /// The single in-flight continuation of ``startAdvertising(_:)``. `.didStartAdvertising`
+    /// resolves it. At most one advertise start can be pending.
     private var pendingStartAdvertising: CheckedContinuation<Void, Error>?
 
-    /// In-flight ``add(_:)`` continuations, keyed by the service being added and resolved by
-    /// `.didAddService` for that identifier.
+    /// In-flight continuations of ``add(_:)``, by service. `.didAddService` for that identifier
+    /// resolves each one.
     private var pendingAddService: [ServiceIdentifier: CheckedContinuation<Void, Error>] = [:]
 
-    /// Multicasts every remote-central read request to ``readRequests()`` subscribers.
+    /// Multicasts each remote central's read request to ``readRequests()`` subscribers.
     private let readRequestBroadcaster = Broadcaster<ReadRequest>(replay: .none)
 
-    /// Multicasts every remote-central write-request batch to ``writeRequests()`` subscribers.
+    /// Multicasts each remote central's write-request batch to ``writeRequests()`` subscribers.
     private let writeRequestBroadcaster = Broadcaster<WriteRequest>(replay: .none)
 
-    /// Multicasts every subscribe/unsubscribe to ``subscriptionEvents()`` subscribers.
+    /// Multicasts each subscribe and unsubscribe to ``subscriptionEvents()`` subscribers.
     private let subscriptionBroadcaster = Broadcaster<SubscriptionEvent>(replay: .none)
 
-    /// The centrals currently subscribed to each hosted characteristic, keyed by
-    /// characteristic then by `Subscriber.id` — maintained from `.didSubscribe`/
-    /// `.didUnsubscribe`, and surfaced through ``subscribers(for:)``.
+    /// The subscribed centrals of each hosted characteristic, by characteristic and then
+    /// `Subscriber.id`. `.didSubscribe` and `.didUnsubscribe` update it. ``subscribers(for:)``
+    /// reports it.
     private var subscribersByCharacteristic: [CharacteristicIdentifier: [UUID: Subscriber]] = [:]
 
-    /// Back-pressure readiness waiters (see ``updateValue(_:for:onSubscribed:)``), resumed
-    /// together on `.readyToUpdateSubscribers`. Tokened so a cancelled waiter removes exactly
-    /// itself — the same shape as ``Central``'s `pendingWriteWithoutResponseReady`.
+    /// Waiters for back-pressure readiness (see ``updateValue(_:for:onSubscribed:)``).
+    /// `.readyToUpdateSubscribers` resumes all of them. Each has a token, so a cancelled waiter
+    /// removes exactly itself. `pendingWriteWithoutResponseReady` of ``Central`` has the same
+    /// shape.
     private var readyWaiters: [UInt64: CheckedContinuation<Void, Error>] = [:]
 
-    /// Monotonic allocator for ``readyWaiters`` tokens.
+    /// Allocator for the increasing tokens of ``readyWaiters``.
     private var nextReadyWaiterToken: UInt64 = 0
 
     // MARK: - Background restoration state
 
-    /// Multicasts every ``PeripheralRestorationEvent``. Replay `.allUntilFirstConsumer`:
-    /// restoration happens during app launch, typically before any consumer task has
-    /// started, so events are buffered and replayed to the first ``restorationEvents()``
-    /// consumer. Mirrors ``Central``'s `restorationBroadcaster`.
+    /// Multicasts each ``PeripheralRestorationEvent`` with `.allUntilFirstConsumer` replay.
+    /// Restoration happens at launch, typically before any consumer starts, so the events are
+    /// buffered and replayed to the first ``restorationEvents()`` consumer. It mirrors
+    /// `restorationBroadcaster` of ``Central``.
     private let restorationBroadcaster = Broadcaster<PeripheralRestorationEvent>(replay: .allUntilFirstConsumer)
 
-    /// Creates a `PeripheralHost`, synchronously creating its underlying `CBPeripheralManager`
-    /// on a fresh, dedicated `DispatchQueue`. Creation is synchronous (not deferred
-    /// behind an async `start()`) so restoration can register its restore identifier before
-    /// `willRestoreState` can arrive — same reason as ``Central/init(configuration:)``.
+    /// Creates a `PeripheralHost` and its underlying `CBPeripheralManager` synchronously, on a
+    /// new dedicated `DispatchQueue`. The creation is not deferred behind an async `start()`,
+    /// so restoration registers its restore identifier before `willRestoreState` can arrive.
+    /// See ``Central/init(configuration:)``.
     ///
-    /// - Parameter configuration: Start-time options. Defaults to `Configuration()`.
+    /// - Parameter configuration: Start-time options. The default is `Configuration()`.
     public init(configuration: Configuration = Configuration()) {
         let queue = DispatchQueue(label: "com.bleswift.PeripheralHost")
         self.queue = queue
         self.executor = QueueExecutor(queue: queue)
         self.configuration = configuration
 
-        // A registered backend (see `BackendRegistry`) replaces CoreBluetooth wholesale.
+        // A registered backend (see `BackendRegistry`) replaces CoreBluetooth completely.
         if let factory = BackendRegistry.peripheralManagerFactory {
             let backend = factory(queue)
             self.manager = backend
             self.proxy = nil
-            // Hopped onto `queue` because the backend's `eventHandler` setter may be
-            // queue-confined; `[weak self]` like the CoreBluetooth path — no retain cycle.
+            // Hop onto `queue`, because the backend's `eventHandler` setter can be
+            // queue-confined. `[weak self]` avoids a retain cycle, as in the CoreBluetooth path.
             queue.sync {
                 backend.eventHandler = { [weak self] event in
                     guard let self else { return }
@@ -152,7 +156,7 @@ public actor PeripheralHost {
         var options: [String: Any] = [
             CBPeripheralManagerOptionShowPowerAlertKey: configuration.showPowerAlert
         ]
-        // Must differ from any `Central`'s restore identifier — a CoreBluetooth requirement.
+        // CoreBluetooth requires this to differ from any `Central` restore identifier.
         if let peripheralRestoration = configuration.peripheralRestoration {
             options[CBPeripheralManagerOptionRestoreIdentifierKey] = peripheralRestoration.identifier
         }
@@ -165,36 +169,34 @@ public actor PeripheralHost {
         let manager = CBPeripheralManager(delegate: proxy, queue: queue, options: options)
         self.manager = manager
 
-        // Make the same proxy reachable via the associated object, so the conformance's
-        // `respond`/`updateValue`/`add` can recover the CoreBluetooth objects it registers.
+        // Make the same proxy reachable through the associated object, so the conformance's
+        // `respond`, `updateValue`, and `add` can recover the CoreBluetooth objects.
         manager.bleSwiftRegisterProxy(proxy)
 
-        // Sets the proxy's handler directly, bypassing the `eventHandler` associated-object
-        // mechanism (which would create a second, wrong proxy) — same as `Central.init`.
+        // Set the proxy's handler directly. The `eventHandler` associated-object path would
+        // create a second proxy. `Central.init` does the same.
         proxy.handler = { [weak self] event in
             guard let self else { return }
             self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
         }
     }
 
-    /// Creates a `PeripheralHost` driving a custom backend — the seam that lets a scriptable
-    /// fake stand in for a real `CBPeripheralManager`. Production apps use
-    /// ``init(configuration:)``.
+    /// Creates a `PeripheralHost` that drives a custom backend, for example a scriptable fake
+    /// instead of a real `CBPeripheralManager`. Production apps use ``init(configuration:)``.
     ///
-    /// - Important: `queue` **must be the exact `DispatchQueue` instance** `backend`
-    ///   confines its event deliveries to. A mismatch surfaces only as an `assumeIsolated`
-    ///   trap the first time an event arrives off-queue.
+    /// - Important: `queue` **must be the exact `DispatchQueue` instance** that `backend` uses
+    ///   for its event deliveries. A mismatch causes an `assumeIsolated` trap the first time
+    ///   an event arrives off the queue.
     ///
-    /// - Important: **Retention.** The closure installed on `backend.eventHandler` captures
-    ///   `self` strongly, and `backend` is held by this host — a deliberate reference cycle
-    ///   that keeps a host alive for as long as `backend` lives. Clear it explicitly
-    ///   (`backend.eventHandler = nil`) for deterministic teardown.
+    /// - Important: **Retention.** The closure that this initializer installs on
+    ///   `backend.eventHandler` captures `self` strongly, and this host holds `backend`. This
+    ///   deliberate reference cycle keeps the host alive as long as `backend` lives. To tear
+    ///   down deterministically, set `backend.eventHandler = nil`.
     ///
     /// - Parameters:
     ///   - backend: The ``PeripheralManaging`` conformance to drive.
-    ///   - queue: The `DispatchQueue` `backend`'s events are confined to. Must be serial
-    ///     (`DispatchQueue(label:)` is).
-    ///   - configuration: Start-time options. Defaults to `Configuration()`.
+    ///   - queue: The serial `DispatchQueue` that confines `backend`'s events.
+    ///   - configuration: Start-time options. The default is `Configuration()`.
     public init(
         backend: any PeripheralManaging,
         queue: DispatchQueue,
@@ -206,8 +208,8 @@ public actor PeripheralHost {
         self.manager = backend
         self.proxy = nil
 
-        // `queue.sync` is safe here: nothing else runs on `queue` during init. Strong
-        // self-capture forms the deliberate cycle documented above.
+        // `queue.sync` is safe, because nothing else runs on `queue` during init. The strong
+        // capture of `self` makes the deliberate cycle that the documentation describes.
         queue.sync {
             backend.eventHandler = { event in
                 self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
@@ -215,17 +217,15 @@ public actor PeripheralHost {
         }
     }
 
-    /// Stops this host, detaching the underlying `CBPeripheralManager`'s delegate, and hands
-    /// the manager back to the caller so it can be adopted by other code.
+    /// Stops this host. It detaches the delegate of the underlying `CBPeripheralManager` and
+    /// gives the manager to the caller, so other code can adopt it.
     ///
-    /// Fails every pending advertise/add-service/readiness continuation with
-    /// ``BLESwiftError/stopped`` and finishes the request streams before returning. BLESwift
-    /// never crashes here: a naive `precondition` becomes a thrown ``BLESwiftError/stopped``.
+    /// Before it returns, it fails every pending advertise, add-service, and readiness
+    /// continuation with ``BLESwiftError/stopped`` and finishes the request streams.
     ///
     /// - Returns: The underlying `CBPeripheralManager`.
-    /// - Throws: ``BLESwiftError/stopped`` if this host has already been stopped, or was not
-    ///   created against a real `CBPeripheralManager` (only reachable via the backend
-    ///   initializer — never through the public production API).
+    /// - Throws: ``BLESwiftError/stopped`` if this host is already stopped, or if a custom
+    ///   backend (not a real `CBPeripheralManager`) created it.
     public func stopAndExtractState() throws -> CBPeripheralManager {
         guard let currentManager = manager else {
             throw BLESwiftError.stopped
@@ -240,7 +240,7 @@ public actor PeripheralHost {
         subscriptionBroadcaster.finish()
         subscribersByCharacteristic.removeAll()
 
-        // Give up this actor's own reference before returning `cbManager` — see ``manager``.
+        // Release this actor's reference before the method returns `cbManager`. See ``manager``.
         manager = nil
         cbManager.stopAdvertising()
         cbManager.delegate = nil
@@ -251,43 +251,42 @@ public actor PeripheralHost {
 
     // MARK: - Public surface: state
 
-    /// The current state of the Bluetooth radio. A synchronous snapshot — readable without
-    /// `await` from any isolation domain — kept current by ``handle(_:)`` on every
-    /// `.didUpdateState`.
+    /// The current state of the Bluetooth radio, as a synchronous snapshot. You can read it
+    /// without `await` from any isolation domain.
     public nonisolated var state: CentralState {
         stateBox.withLock { $0 }
     }
 
-    /// The app's current Bluetooth authorization status.
+    /// The current Bluetooth authorization status of the app.
     ///
-    /// - Note: Returns `.notDetermined` after ``stopAndExtractState()`` — this host no longer
-    ///   owns a manager to ask at that point.
+    /// - Note: It returns `.notDetermined` after ``stopAndExtractState()``, because this host
+    ///   no longer owns a manager.
     public var authorization: BluetoothAuthorization {
         guard let manager else { return .notDetermined }
         return type(of: manager).bluetoothAuthorization
     }
 
-    /// Whether this host is currently advertising. A synchronous snapshot, kept current by
-    /// ``startAdvertising(_:)``/``stopAdvertising()`` and the advertising completion.
+    /// Whether this host advertises, as a synchronous snapshot.
     public nonisolated var isAdvertising: Bool {
         isAdvertisingBox.withLock { $0 }
     }
 
-    /// Returns a multicast stream of every ``CentralState`` transition, replaying the most
-    /// recent state to late subscribers.
+    /// Returns a multicast stream of every ``CentralState`` transition. It replays the latest
+    /// state to late subscribers.
     public func stateEvents() -> AsyncStream<CentralState> {
         stateBroadcaster.stream()
     }
 
     // MARK: - Public surface: GATT database
 
-    /// Publishes a service (and its characteristics) into the local GATT database, awaiting
+    /// Publishes a service and its characteristics into the local GATT database. It waits for
     /// CoreBluetooth's confirmation.
     ///
     /// - Parameter service: The service to publish.
-    /// - Throws: ``BLESwiftError/stopped`` if this host has been stopped;
-    ///   ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled; or whatever
-    ///   error CoreBluetooth reports if it rejects the service.
+    /// - Throws: One of these errors:
+    ///   - ``BLESwiftError/stopped`` if this host is stopped.
+    ///   - ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled.
+    ///   - The error that CoreBluetooth reports if it rejects the service.
     public func add(_ service: GATTService) async throws {
         guard manager != nil else { throw BLESwiftError.stopped }
         try await withCancellableContinuation(
@@ -313,16 +312,18 @@ public actor PeripheralHost {
 
     // MARK: - Public surface: advertising
 
-    /// Begins advertising, awaiting `peripheralManagerDidStartAdvertising`.
+    /// Starts to advertise. It waits for `peripheralManagerDidStartAdvertising`.
     ///
-    /// Returns immediately if already advertising. Only one advertise start may be awaited at
-    /// a time.
+    /// It returns immediately if the host already advertises. Only one advertise start can be
+    /// pending.
     ///
     /// - Parameter advertisement: The local name and service UUIDs to advertise.
-    /// - Throws: ``BLESwiftError/stopped`` if this host has been stopped;
-    ///   ``BLESwiftError/invalidArgument(_:)`` if another ``startAdvertising(_:)`` is already
-    ///   awaiting its completion; ``BLESwiftError/operationCancelled`` if the calling `Task`
-    ///   is cancelled; or whatever error CoreBluetooth reports if advertising fails to start.
+    /// - Throws: One of these errors:
+    ///   - ``BLESwiftError/stopped`` if this host is stopped.
+    ///   - ``BLESwiftError/invalidArgument(_:)`` if another ``startAdvertising(_:)`` waits for
+    ///     its completion.
+    ///   - ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled.
+    ///   - The error that CoreBluetooth reports if advertising fails to start.
     public func startAdvertising(_ advertisement: PeripheralAdvertisement) async throws {
         guard let manager else { throw BLESwiftError.stopped }
         if manager.isAdvertising { return }
@@ -347,7 +348,7 @@ public actor PeripheralHost {
         )
     }
 
-    /// Stops advertising. Idempotent; safe to call when not advertising.
+    /// Stops advertising. It is idempotent.
     public func stopAdvertising() {
         manager?.stopAdvertising()
         isAdvertisingBox.withLock { $0 = false }
@@ -356,28 +357,27 @@ public actor PeripheralHost {
     // MARK: - Public surface: request streams
 
     /// Returns a multicast stream of every read request from a remote central. Answer each
-    /// with ``respond(to:with:)-(ReadRequest,_)``. Does not replay — subscribe before
-    /// advertising.
+    /// with ``respond(to:with:)-(ReadRequest,_)``. It does not replay. Subscribe before you
+    /// advertise.
     public func readRequests() -> AsyncStream<ReadRequest> {
         readRequestBroadcaster.stream()
     }
 
     /// Returns a multicast stream of every write-request batch from a remote central. Answer
-    /// each with ``respond(to:with:)-(WriteRequest,_)``. Does not replay — subscribe before
-    /// advertising.
+    /// each with ``respond(to:with:)-(WriteRequest,_)``. It does not replay. Subscribe before
+    /// you advertise.
     public func writeRequests() -> AsyncStream<WriteRequest> {
         writeRequestBroadcaster.stream()
     }
 
-    /// Returns a multicast stream of every subscribe/unsubscribe from a remote central. Does
-    /// not replay — subscribe before advertising. See also ``subscribers(for:)`` for the
-    /// current snapshot.
+    /// Returns a multicast stream of every subscribe and unsubscribe from a remote central. It
+    /// does not replay. Subscribe before you advertise. For the current set, see
+    /// ``subscribers(for:)``.
     public func subscriptionEvents() -> AsyncStream<SubscriptionEvent> {
         subscriptionBroadcaster.stream()
     }
 
-    /// The centrals currently subscribed to `characteristic`, sorted by identifier for
-    /// determinism.
+    /// The centrals that are subscribed to `characteristic`, sorted by identifier.
     public func subscribers(for characteristic: CharacteristicIdentifier) -> [Subscriber] {
         (subscribersByCharacteristic[characteristic]?.values).map { subscribers in
             subscribers.sorted { $0.id.uuidString < $1.id.uuidString }
@@ -386,8 +386,8 @@ public actor PeripheralHost {
 
     // MARK: - Public surface: respond
 
-    /// Answers a remote central's read request. Every read request must be answered exactly
-    /// once; a second response for the same request is a no-op.
+    /// Answers a read request from a remote central. Answer each request exactly once. A second
+    /// response for the same request does nothing.
     ///
     /// - Parameters:
     ///   - request: The read request to answer, from ``readRequests()``.
@@ -401,8 +401,8 @@ public actor PeripheralHost {
         }
     }
 
-    /// Answers a remote central's write-request batch. A single call acknowledges the whole
-    /// batch. Every write request must be answered exactly once.
+    /// Answers a write-request batch from a remote central. A single call acknowledges the
+    /// whole batch. Answer each batch exactly once.
     ///
     /// - Parameters:
     ///   - request: The write-request batch to answer, from ``writeRequests()``.
@@ -418,24 +418,24 @@ public actor PeripheralHost {
 
     // MARK: - Public surface: notifications with back-pressure
 
-    /// Pushes `value` as a notification/indication for `characteristic`, awaiting transmit
-    /// capacity if the queue is momentarily full.
+    /// Pushes `value` as a notification or indication for `characteristic`. If the transmit
+    /// queue is full, it waits for capacity.
     ///
-    /// Mirrors the central-side back-pressure pattern (``Peripheral``'s
-    /// `writeWithoutResponse` awaiting `canSendWriteWithoutResponse`): CoreBluetooth's
-    /// `updateValue` returns `false` when its transmit queue is full; this method then
-    /// suspends until `peripheralManagerIsReady(toUpdateSubscribers:)` and retries.
+    /// This mirrors the central side's back-pressure pattern. When CoreBluetooth's
+    /// `updateValue` returns `false`, the transmit queue is full. The method then suspends
+    /// until `peripheralManagerIsReady(toUpdateSubscribers:)` and tries again.
     ///
     /// - Parameters:
-    ///   - value: The bytes to notify. Values longer than a subscriber's
-    ///     ``Subscriber/maximumUpdateValueLength`` are truncated by CoreBluetooth; fragment
-    ///     larger payloads yourself.
-    ///   - characteristic: The characteristic to notify on. Must have been added via
-    ///     ``add(_:)`` and declare `.notify` or `.indicate`.
-    ///   - centrals: The specific subscribers to notify, or `nil` (the default) for every
-    ///     currently-subscribed central.
-    /// - Throws: ``BLESwiftError/stopped`` if this host is stopped (including mid-wait);
-    ///   ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled.
+    ///   - value: The bytes to notify. CoreBluetooth truncates a value that is longer than a
+    ///     subscriber's ``Subscriber/maximumUpdateValueLength``. Fragment larger payloads
+    ///     yourself.
+    ///   - characteristic: The characteristic on which to notify. Add it with ``add(_:)``. It
+    ///     must declare `.notify` or `.indicate`.
+    ///   - centrals: The subscribers to notify. The default `nil` notifies every subscribed
+    ///     central.
+    /// - Throws: One of these errors:
+    ///   - ``BLESwiftError/stopped`` if this host is stopped, even during the wait.
+    ///   - ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled.
     public func updateValue(
         _ value: Data,
         for characteristic: CharacteristicIdentifier,
@@ -453,15 +453,15 @@ public actor PeripheralHost {
     // MARK: - Public surface: background restoration
 
     #if os(iOS)
-    /// Returns a stream of every ``PeripheralRestorationEvent`` — replaying every event
-    /// buffered since this `PeripheralHost` was created to the first consumer, in order.
-    /// Events appear here only when ``Configuration/peripheralRestoration`` was set.
+    /// Returns a stream of every ``PeripheralRestorationEvent``. It replays to the first
+    /// consumer, in order, every event since this `PeripheralHost` was created. Events appear
+    /// only when ``Configuration/peripheralRestoration`` is set.
     public func restorationEvents() -> AsyncStream<PeripheralRestorationEvent> {
         restorationBroadcaster.stream()
     }
     #else
-    /// Internal mirror of the iOS-only public `restorationEvents()` — see the dual-access note
-    /// in `RestorationConfiguration.swift`. Reachable off-iOS only via `@testable`.
+    /// Internal mirror of the iOS-only public `restorationEvents()`. See the dual-access note
+    /// in `RestorationConfiguration.swift`. On other platforms, only `@testable` can reach it.
     func restorationEvents() -> AsyncStream<PeripheralRestorationEvent> {
         restorationBroadcaster.stream()
     }
@@ -469,8 +469,8 @@ public actor PeripheralHost {
 
     // MARK: - Event handling
 
-    /// The delegate proxy (or fake) forwards every ``PeripheralHostEvent`` here, already on
-    /// this actor's executor via `assumeIsolated`.
+    /// The delegate proxy (or fake) forwards every ``PeripheralHostEvent`` here, already on this
+    /// actor's executor through `assumeIsolated`.
     func handle(_ event: PeripheralHostEvent) {
         switch event {
         case .didUpdateState(let state):
@@ -510,10 +510,10 @@ public actor PeripheralHost {
             resumeReadyWaiters()
 
         case .willRestoreState(let restored):
-            // CoreBluetooth itself re-publishes the GATT database and resumes advertising on
-            // the app's behalf; BLESwift only reflects that and surfaces it. `updateValue`
-            // post-restoration is handled separately, by the proxy re-registering the live
-            // `CBMutableCharacteristic` handles (see `peripheralManager(_:willRestoreState:)`).
+            // CoreBluetooth itself publishes the GATT database again and resumes advertising.
+            // BLESwift only mirrors that state. For `updateValue` after restoration, the proxy
+            // registers the live `CBMutableCharacteristic` handles again (see
+            // `peripheralManager(_:willRestoreState:)`).
             if restored.advertisement != nil {
                 isAdvertisingBox.withLock { $0 = true }
             }
@@ -555,8 +555,9 @@ public actor PeripheralHost {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Suspends until the next `.readyToUpdateSubscribers`, registering a tokened waiter that
-    /// cancels cleanly. Mirrors ``Central``'s `awaitWriteWithoutResponseReadiness`.
+    /// Suspends until the next `.readyToUpdateSubscribers`. The waiter has a token, so
+    /// cancellation removes it cleanly. It mirrors `awaitWriteWithoutResponseReadiness` of
+    /// ``Central``.
     private func awaitReadyToUpdate() async throws {
         let assignedToken = Mutex<UInt64?>(nil)
         try await withCancellableContinuation(
@@ -590,8 +591,8 @@ public actor PeripheralHost {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Fails every pending advertise/add-service/readiness continuation with `error` — called
-    /// when the radio leaves `.poweredOn` and during ``stopAndExtractState()``.
+    /// Fails every pending advertise, add-service, and readiness continuation with `error`.
+    /// It runs when the radio leaves `.poweredOn` and during ``stopAndExtractState()``.
     private func failPendingOperations(error: Error) {
         if let continuation = pendingStartAdvertising {
             pendingStartAdvertising = nil
@@ -611,16 +612,17 @@ public actor PeripheralHost {
 
     // MARK: - Helpers
 
-    /// The one continuation wrapper for this actor: pairs `withCheckedThrowingContinuation`
-    /// with a cancellation handler. `register` populates a continuation slot synchronously
-    /// (actor-isolated); `onCancelled` hops back onto ``queue`` and `assumeIsolated` to
-    /// take-then-resume it — never a `Task {}`. Mirrors ``Central``'s
-    /// `withCancellableGATTContinuation`.
+    /// The one continuation wrapper for this actor. It pairs `withCheckedThrowingContinuation`
+    /// with a cancellation handler. `register` fills a continuation slot synchronously, on the
+    /// actor. `onCancelled` hops onto ``queue``, takes the continuation with `assumeIsolated`,
+    /// and resumes it. It never uses a `Task {}`. It mirrors `withCancellableGATTContinuation`
+    /// of ``Central``.
     private func withCancellableContinuation<T: Sendable>(
         register: (CheckedContinuation<T, Error>) -> Void,
         onCancelled: @escaping @Sendable () -> Void
     ) async throws -> T {
-        // Explicit isolation pin on Swift ≤6.3 — see Central.withCancellableGATTContinuation.
+        // Explicit isolation pin for Swift 6.3 and earlier. See
+        // `Central.withCancellableGATTContinuation`.
         try await withTaskCancellationHandler {
             #if compiler(>=6.4)
             try await withCheckedThrowingContinuation(register)
@@ -632,8 +634,8 @@ public actor PeripheralHost {
         }
     }
 
-    /// Writes one log line via the configured `swift-log` logger, tagged with a `category`
-    /// metadata key. Mirrors ``Central``'s `log(_:level:category:)`.
+    /// Writes one log line to the configured `swift-log` logger, with a `category` metadata
+    /// key. It mirrors `log(_:level:category:)` of ``Central``.
     private func log(_ message: @autoclosure () -> Logger.Message, level: Logger.Level, category: String) {
         configuration.logger.log(level: level, message(), metadata: ["category": .string(category)])
     }

@@ -6,8 +6,8 @@
 import BLESwiftTestSupport
 import Testing
 
-/// `ManualClock` on its own: it moves only when advanced, resumes exactly the sleepers an
-/// advance reaches, and settles a cancel against an advance exactly once.
+/// `ManualClock` on its own. It moves only when the test advances it, resumes exactly the sleepers
+/// that an advance reaches, and settles a cancel against an advance exactly once.
 @Suite("ManualClock")
 struct ManualClockTests {
 
@@ -87,8 +87,8 @@ struct ManualClockTests {
         sleeper.cancel()
         await #expect(throws: CancellationError.self) { try await sleeper.value }
         #expect(clock.sleeperCount == 0)
-        // A second resume of the same continuation would trap; reaching the deadline after
-        // the cancel must find nothing to resume.
+        // A second resume of the same continuation would trap, so the deadline reached after the
+        // cancel must find nothing to resume.
         clock.advance(by: .seconds(10))
         #expect(clock.sleeperCount == 0)
     }
@@ -105,10 +105,10 @@ struct ManualClockTests {
     @Test("A cancelled task sleeping until a deadline already reached throws, as ContinuousClock does (#81)", .timeLimit(.minutes(1)))
     func cancelledSleepUntilPastThrows() async {
         let clock = ManualClock()
-        // The task parks on a stream that nothing finishes until it is cancelled — `next()`
-        // answers a cancelled task with `nil` — so the sleep below always runs on a task
-        // already cancelled, whichever of the task and the cancel is scheduled first. The
-        // continuation is held to the end: dropped, it would finish the stream itself.
+        // The task parks on a stream that nothing finishes until the task is cancelled. `next()`
+        // answers a cancelled task with `nil`, so the sleep below always runs on an already
+        // cancelled task, in either order of the task and the cancel. The test holds the
+        // continuation to the end because dropping it would finish the stream.
         let (gate, gateContinuation) = AsyncStream<Void>.makeStream()
         let sleeper = Task {
             for await _ in gate {}
@@ -120,8 +120,8 @@ struct ManualClockTests {
         #expect(clock.sleeperCount == 0)
         gateContinuation.finish()
 
-        // The same, for `sleep(for: .zero)` on a cancelled task — the shape a `Central`'s
-        // reconnect loop takes when it is cancelled during a zero backoff.
+        // The same test for `sleep(for: .zero)` on a cancelled task, which happens when a
+        // `Central`'s reconnect loop is cancelled during a zero backoff.
         let (secondGate, secondGateContinuation) = AsyncStream<Void>.makeStream()
         let zero = Task {
             for await _ in secondGate {}
@@ -143,7 +143,7 @@ struct ManualClockTests {
         let second = Task { try await clock.sleep(for: .seconds(1)) }
         await waiter.value
         #expect(clock.sleeperCount == 2)
-        // Already satisfied: no registration is coming, so this must not wait for one.
+        // Already satisfied. No registration comes, so this call must not wait for one.
         await clock.waitForSleepers(2)
         await clock.waitForSleepers(0)
         clock.advance(by: .seconds(1))
@@ -157,17 +157,17 @@ struct ManualClockTests {
         let sleeper = Task { try await clock.sleep(for: .seconds(1)) }
         await clock.waitForSleepers(1)
         let waiter = Task { await clock.waitForSleepers(2) }
-        // Cancelled only once it is registered (#82): cancelled before, the registration's
-        // own `isCancelled` check would answer it, and the remove-and-resume path — the one
-        // that could resume a continuation twice — would never run.
+        // Cancel the waiter only after it is registered. Otherwise the registration's `isCancelled`
+        // check would answer it and the remove-and-resume path, which could resume a continuation
+        // twice, would never run.
         await clock.waitForWaiters(1)
         #expect(clock.waiterCount == 1)
         waiter.cancel()
         await waiter.value
         #expect(clock.waiterCount == 0)
         #expect(clock.sleeperCount == 1)
-        // The cancelled waiter is gone: a registration that would have satisfied it must not
-        // resume it a second time.
+        // The cancelled waiter is gone. A registration that would have satisfied it must not resume
+        // it again.
         let second = Task { try await clock.sleep(for: .seconds(1)) }
         await clock.waitForSleepers(2)
         clock.advance(by: .seconds(1))
@@ -178,9 +178,10 @@ struct ManualClockTests {
 
     @Test("A cancelled waitForWaiters returns once, and a later waiter does not resume it", .timeLimit(.minutes(1)))
     func cancelledWaitForWaitersReturns() async {
-        // Nothing reports a watcher as registered, so whether the cancel lands before the
-        // registration (its own `isCancelled` check) or after it (the remove-and-resume path)
-        // is the scheduler's choice. Both must return exactly once; repeating covers both.
+        // Nothing reports that a watcher is registered, so the scheduler decides whether the cancel
+        // arrives before the registration (its `isCancelled` check) or after it (the
+        // remove-and-resume path). Both orders must return exactly once. The loop repeats the test
+        // to cover both.
         for _ in 0..<200 {
             await cancelledWaitForWaitersOnce()
         }
@@ -188,14 +189,14 @@ struct ManualClockTests {
 
     private func cancelledWaitForWaitersOnce() async {
         let clock = ManualClock()
-        // Watches for two waiters; only one will ever register before the cancel.
+        // Watches for two waiters. Only one waiter registers before the cancel.
         let watcher = Task { await clock.waitForWaiters(2) }
         let waiter = Task { await clock.waitForSleepers(1) }
         await clock.waitForWaiters(1)
         watcher.cancel()
         await watcher.value
-        // A second waiter now satisfies the cancelled watcher's count; it must not be resumed
-        // a second time (a double resume would trap).
+        // A second waiter now satisfies the cancelled watcher's count. The clock must not resume
+        // the watcher again (a double resume would trap).
         let secondWaiter = Task { await clock.waitForSleepers(1) }
         await clock.waitForWaiters(2)
         let sleeper = Task { try await clock.sleep(for: .seconds(1)) }

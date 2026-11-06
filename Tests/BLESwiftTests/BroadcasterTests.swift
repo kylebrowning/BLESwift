@@ -9,10 +9,9 @@ import Testing
 import BLESwiftCore
 @testable import BLESwift
 
-/// Exercises ``Broadcaster`` in isolation: multicast fan-out, every ``ReplayMode``, and
-/// `AsyncStream.Continuation.BufferingPolicy` handling. `Central`'s own state stream reuses
-/// this primitive (see `CentralTests`), so correctness here is load-bearing for the whole
-/// event-fan-out story.
+/// Tests ``Broadcaster`` alone: the multicast fan-out, every ``ReplayMode``, and
+/// `AsyncStream.Continuation.BufferingPolicy`. The `Central` state stream uses this primitive (see
+/// `CentralTests`), so the whole event fan-out depends on it.
 @Suite("Broadcaster")
 struct BroadcasterTests {
 
@@ -26,8 +25,8 @@ struct BroadcasterTests {
         async let collected1 = collect(stream1, count: 3)
         async let collected2 = collect(stream2, count: 3)
 
-        // Give both `for await` loops a chance to start iterating before yielding —
-        // otherwise a yield could race ahead of a subscriber's first `next()` call.
+        // Give both `for await` loops time to start iterating before the yield. Otherwise the yield
+        // could run before a subscriber's first `next()` call.
         await Task.yield()
         await Task.yield()
 
@@ -115,7 +114,7 @@ struct BroadcasterTests {
 
         let firstStream = broadcaster.stream()
         async let firstCollected = collect(firstStream, count: 3)
-        await Task.yield() // let the first subscriber register (and drain replay) first
+        await Task.yield() // Let the first subscriber register and drain the replay first.
 
         let secondStream = broadcaster.stream()
         async let secondCollected = collect(secondStream, count: 1)
@@ -135,17 +134,17 @@ struct BroadcasterTests {
         broadcaster.yield(1)
         broadcaster.yield(2)
 
-        // First consumer registers (draining and clearing the buffer), receives one live
-        // element, then terminates.
+        // The first consumer registers, drains and clears the buffer, receives one live element,
+        // and terminates.
         let firstStream = broadcaster.stream()
         async let firstCollected = collect(firstStream, count: 3)
         await Task.yield()
-        broadcaster.yield(3) // live for the first consumer; must NOT be buffered
+        broadcaster.yield(3) // This element is live for the first consumer. The broadcaster must NOT buffer it.
         #expect(await firstCollected == [1, 2, 3])
 
-        // A later subscriber gets no replay of anything — not the original backlog
-        // (cleared at first registration) and not the post-registration yield (never
-        // buffered) — only what is yielded live from here on.
+        // A later subscriber gets no replay. It does not get the original backlog, because the
+        // first registration cleared it. It does not get the yield after registration, because the
+        // broadcaster never buffered it. It gets only elements yielded live from here on.
         let secondStream = broadcaster.stream()
         async let secondCollected = collect(secondStream, count: 1)
         await Task.yield()
@@ -162,9 +161,9 @@ struct BroadcasterTests {
         broadcaster.yield(1)
         broadcaster.yield(2)
 
-        // The first (and only) consumer drains the backlog and terminates, leaving the
-        // broadcaster with zero live continuations — the previous implementation treated
-        // the next subscriber as a "first consumer" again and re-replayed history.
+        // The first consumer, the only one, drains the backlog and terminates. The broadcaster then
+        // has zero live continuations. The previous implementation treated the next subscriber as a
+        // first consumer again and replayed the history.
         let firstStream = broadcaster.stream()
         let firstCollected = await collect(firstStream, count: 2)
         #expect(firstCollected == [1, 2])
@@ -192,20 +191,18 @@ struct BroadcasterTests {
         }
 
         broadcaster.yield(1)
-        // Wait for the value to be observed before cancelling, so this isn't a race
-        // between "task starts consuming" and "cancel".
+        // Wait until the task observes the value, then cancel. This avoids a race between "the task
+        // starts to consume" and "cancel".
         try? await Task.sleep(for: .milliseconds(20))
 
         task.cancel()
         let received = await task.value
         #expect(received == [1])
 
-        // A second subscriber proves the broadcaster itself is still alive and
-        // functional after the first unregistered; if `onTermination` had failed to
-        // remove the cancelled continuation from the broadcaster's dictionary, this
-        // would still pass (the stale entry is silently ignored by `yield`), so the real
-        // proof of unregistration is indirect — but this at minimum confirms cancellation
-        // didn't corrupt or hang the broadcaster.
+        // A second subscriber proves that the broadcaster still works after the first unregistered.
+        // The proof of unregistration is indirect: if `onTermination` did not remove the cancelled
+        // continuation, the test would still pass, because `yield` ignores the stale entry. The
+        // test does confirm that the cancellation did not corrupt or hang the broadcaster.
         let secondStream = broadcaster.stream()
         async let secondCollected = collect(secondStream, count: 1)
         await Task.yield()
@@ -256,8 +253,8 @@ struct BroadcasterTests {
         let broadcaster = Broadcaster<Int>(replay: .none)
         let stream = broadcaster.stream(policy: .bufferingNewest(1))
 
-        // Yield synchronously before any consumer iterates, so all three elements land in
-        // the stream's internal buffer, where the buffering policy applies.
+        // Yield synchronously before any consumer iterates. All three elements go into the stream's
+        // internal buffer, where the buffering policy applies.
         broadcaster.yield(1)
         broadcaster.yield(2)
         broadcaster.yield(3)
@@ -271,8 +268,8 @@ struct BroadcasterTests {
         #expect(received == [3])
     }
 
-    /// Collects exactly `count` elements from `stream`, then returns without waiting for
-    /// it to finish (the stream may still have a live producer).
+    /// Collects exactly `count` elements from `stream`, then returns without waiting for the stream
+    /// to finish. The stream can still have a live producer.
     private func collect(_ stream: AsyncStream<Int>, count: Int) async -> [Int] {
         var results: [Int] = []
         var iterator = stream.makeAsyncIterator()
@@ -284,30 +281,31 @@ struct BroadcasterTests {
 
     @Test("Stress: yielding while subscribers cancel never deadlocks")
     func concurrentYieldAndCancellationDoNotDeadlock() async {
-        // Regression coverage for a lock-order inversion: `yield(_:)` must not hold the
-        // broadcaster's `Mutex` across `AsyncStream.Continuation.yield`, which — when it
-        // resumes a suspended consumer — takes that consumer task's status lock. A
-        // concurrent cancellation of the same consumer holds that status lock while running
-        // `onTermination`, which re-enters the `Mutex`. Steadily-suspended subscribers (so
-        // every fan-out resumes several consumers) plus constant subscribe/cancel churn
-        // drives both halves at once.
+        // Regression test for a lock-order inversion. `yield(_:)` must not hold the broadcaster's
+        // `Mutex` across `AsyncStream.Continuation.yield`. That call can resume a suspended
+        // consumer, which takes the consumer task's status lock. A concurrent cancellation of the
+        // same consumer holds that status lock while it runs `onTermination`, which enters the
+        // `Mutex` again.
         //
-        // Every call into the broadcaster — yielding, subscribing, cancelling — is made from
-        // `DispatchQueue.global()` threads, and the deadline is enforced by a blocking
-        // `DispatchSemaphore.wait` on one more of them, handed back to this test through a
-        // continuation. So no cooperative thread is ever blocked and the workload never
-        // competes with the watchdog for the pool (which matters under
-        // `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`, where the pool is a single thread): the
-        // pool is left to the subscriber tasks, which only iterate.
+        // The test causes both actions at the same time:
+        // - Subscribers stay suspended, so each fan-out resumes several consumers.
+        // - Subscribe and cancel calls run continuously.
+        //
+        // Every call into the broadcaster (yield, subscribe, cancel) comes from a
+        // `DispatchQueue.global()` thread. A blocking `DispatchSemaphore.wait` on one more such
+        // thread enforces the deadline and returns the result through a continuation. No
+        // cooperative thread is blocked, so the workload does not compete with the watchdog for the
+        // pool. This matters with `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`, where the pool has one
+        // thread, used only by the subscriber tasks, which only iterate.
         let finishedSignal = DispatchSemaphore(value: 0)
         let stopProducing = Mutex<Bool>(false)
 
         DispatchQueue.global().async {
             let broadcaster = Broadcaster<Int>(replay: .none)
 
-            // Steady subscribers spend most of their time suspended, so each fan-out
-            // resumes them one after another — the half of the inversion that touches
-            // consumer status locks.
+            // Steady subscribers stay suspended most of the time, so each fan-out resumes them one
+            // after another. This is the half of the inversion that touches the consumers' status
+            // locks.
             let steady = (0..<8).map { _ -> Task<Void, Never> in
                 let stream = broadcaster.stream()
                 return Task.detached {
@@ -335,9 +333,9 @@ struct BroadcasterTests {
                             for await _ in stream {}
                         }
                         usleep(100)
-                        // Cancelling a consumer that is very likely suspended awaiting the
-                        // producer: cancellation runs `onTermination` synchronously, under
-                        // that consumer's status lock, on this thread.
+                        // Cancel a consumer that is very likely suspended waiting for the producer.
+                        // The cancellation runs `onTermination` synchronously on this thread, under
+                        // that consumer's status lock.
                         consumer.cancel()
                     }
                 }

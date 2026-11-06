@@ -10,9 +10,9 @@ import BLESwiftCompat17
 @Suite("BLESwiftCompat17.Mutex")
 struct MutexTests {
 
-    /// `Mutex` is `~Copyable`, so a concurrent closure borrows rather than copies a local one —
-    /// which the compiler rejects, for this shim and for `Synchronization.Mutex` alike. Shared
-    /// mutexes are reached through a reference type instead, as production code does.
+    /// `Mutex` is `~Copyable`, so a concurrent closure borrows a local `Mutex` and does not copy
+    /// it. The compiler rejects this borrow, for this shim and for `Synchronization.Mutex`.
+    /// Production code, and this test, reach shared mutexes through a reference type.
     private final class Counter: Sendable {
         let value = Mutex<Int>(0)
     }
@@ -52,7 +52,7 @@ struct MutexTests {
         held.wait()
         #expect(box.withLockIfAvailable { $0 } == nil)
         release.signal()
-        // Spin briefly until the holder has released.
+        // Spin for a short time until the holder has released.
         var free: Int? = nil
         for _ in 0..<1000 where free == nil {
             free = box.withLockIfAvailable { $0 }

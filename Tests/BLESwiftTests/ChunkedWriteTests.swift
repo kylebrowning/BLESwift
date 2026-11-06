@@ -10,9 +10,9 @@ import BLESwiftCore
 import BLESwiftTestSupport
 import BLESwift
 
-/// Exercises `Peripheral.writeChunked(...)` — both the plain `async throws` overload and the
-/// `AsyncThrowingStream<WriteProgress, Error>` progress overload — through
-/// `makeConnectedTestCentral()`'s `FakeCentral`/`FakePeripheral` pair.
+/// Tests `Peripheral.writeChunked(...)`: the plain `async throws` overload and the
+/// `AsyncThrowingStream<WriteProgress, Error>` progress overload. The tests use the `FakeCentral`
+/// and `FakePeripheral` pair of `makeConnectedTestCentral()`.
 @Suite("Chunked writes")
 struct ChunkedWriteTests {
 
@@ -54,7 +54,8 @@ struct ChunkedWriteTests {
             try await peripheral.writeChunked(payload, to: Self.characteristic, type: .withoutResponse, chunkSize: 20)
         }
 
-        // Blocked before the first chunk: no writes should land while back-pressured.
+        // The write is blocked before the first chunk. No write must arrive while back pressure is
+        // active.
         try await Task.sleep(for: .milliseconds(50))
         #expect(await fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.characteristic] } == nil)
 
@@ -71,9 +72,9 @@ struct ChunkedWriteTests {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
         await fakePeripheral.onQueue {
             fakePeripheral.scriptedMaximumWriteValueLength = 20
-            // Suppress the fake's automatic `.withResponse` completion so completions can be
-            // driven one chunk at a time; without this, all five chunks race to completion
-            // before the poll below can observe exactly two.
+            // Stop the fake's automatic `.withResponse` completion so that the test drives
+            // completions one chunk at a time. Otherwise all five chunks complete before the poll
+            // below can observe exactly two.
             fakePeripheral.onWriteRequest = { _, _, _ in }
         }
 
@@ -82,11 +83,11 @@ struct ChunkedWriteTests {
             try await peripheral.writeChunked(payload, to: Self.characteristic, chunkSize: 20)
         }
 
-        // Complete chunk one so chunk two gets issued.
+        // Complete chunk one. Then the code issues chunk two.
         await waitUntil { await fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.characteristic] } == 1 }
         await fakePeripheral.onQueue { fakePeripheral.simulateWriteCompletion(for: Self.characteristic) }
 
-        // Chunk two is now issued and awaiting its completion — cancel instead of completing it.
+        // The code now issues chunk two and waits for its completion. Cancel instead of completing.
         await waitUntil { await fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.characteristic] } == 2 }
         writeTask.cancel()
 
@@ -113,9 +114,9 @@ struct ChunkedWriteTests {
 
         #expect(progress.map(\.bytesSent) == [20, 40, 60, 80, 100])
         #expect(progress.allSatisfy { $0.totalBytes == 100 })
-        // Strictly increasing.
+        // The values strictly increase.
         #expect(zip(progress, progress.dropFirst()).allSatisfy { $0.bytesSent < $1.bytesSent })
-        // isComplete only on the last emission.
+        // isComplete is true only on the last emission.
         #expect(progress.dropLast().allSatisfy { !$0.isComplete })
         #expect(progress.last?.isComplete == true)
         #expect(progress.last?.bytesSent == 100)
@@ -152,7 +153,7 @@ struct ChunkedWriteTests {
         } catch {
             Issue.record("expected a BLESwiftError, got \(error)")
         }
-        // No write should have been issued for either rejected call.
+        // The code must not issue a write for either rejected call.
         #expect(await fakePeripheral.onQueue { fakePeripheral.writeCallCounts[Self.characteristic] } == nil)
     }
 
@@ -176,7 +177,7 @@ struct ChunkedWriteTests {
 
     // MARK: - Helpers
 
-    /// Polls `condition` until it's `true`, or a generous timeout elapses.
+    /// Polls `condition` until it is `true` or a long timeout ends.
     private func waitUntil(timeout: Duration = .seconds(2), _ condition: () async -> Bool) async {
         let deadline = ContinuousClock.now + timeout
         while await !condition() {

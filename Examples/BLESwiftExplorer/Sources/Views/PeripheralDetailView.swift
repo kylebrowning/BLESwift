@@ -2,11 +2,16 @@
 //  PeripheralDetailView.swift
 //  BLESwiftExplorer
 //
-//  Screen 3: the GATT browser and per-characteristic operations —
-//  discoverServices/Characteristics/Descriptors, properties(of:), read (hex + typed
-//  profile decode, Task 6), single write, chunked write with a live progress bar (Task 3),
-//  notify toggle with a `survivesReconnect` switch (Task 2) and live values, RSSI polling,
-//  `readDeviceInformation`/`readBatteryLevel` (Task 6), and ANCS status (Task 7, iOS).
+//  Screen 3: the GATT browser and the operations for each characteristic:
+//  - discoverServices, discoverCharacteristics, and discoverDescriptors
+//  - properties(of:)
+//  - read (hex and typed profile decode)
+//  - single write
+//  - chunked write with a live progress bar
+//  - notify toggle with a `survivesReconnect` switch, and live values
+//  - RSSI polling
+//  - `readDeviceInformation` and `readBatteryLevel`
+//  - ANCS status (iOS)
 //
 
 import BLESwift
@@ -81,7 +86,7 @@ final class PeripheralDetailModel {
 
     func read(_ char: CharacteristicIdentifier) async {
         do {
-            // Raw read as `Data`, then a typed profile decode when the UUID is known.
+            // Raw read as `Data`, then a typed profile decode if the UUID is known.
             let data: Data = try await peripheral.read(from: char)
             update(char) { $0.lastValue = CharacteristicDecoder.decode(data, for: char) }
         } catch {
@@ -102,8 +107,8 @@ final class PeripheralDetailModel {
         }
     }
 
-    /// Chunked write via the `AsyncThrowingStream<WriteProgress, Error>` overload (Task 3),
-    /// driving a live progress bar.
+    /// Chunked write through the `AsyncThrowingStream<WriteProgress, Error>` overload. It drives a
+    /// live progress bar.
     func writeChunkedStreamed(_ char: CharacteristicIdentifier, hex: String) async {
         guard let data = Self.parseHex(hex), !data.isEmpty else {
             update(char) { $0.lastValue = "invalid/empty hex" }
@@ -123,7 +128,7 @@ final class PeripheralDetailModel {
         }
     }
 
-    /// Chunked write via the plain `async throws` overload (Task 3) — no progress stream.
+    /// Chunked write through the plain `async throws` overload. It has no progress stream.
     func writeChunkedAwaited(_ char: CharacteristicIdentifier, hex: String) async {
         guard let data = Self.parseHex(hex), !data.isEmpty else {
             update(char) { $0.lastValue = "invalid/empty hex" }
@@ -137,7 +142,7 @@ final class PeripheralDetailModel {
         }
     }
 
-    // MARK: Notifications (Task 2)
+    // MARK: Notifications
 
     func toggleNotify(_ char: CharacteristicIdentifier, survivesReconnect: Bool) {
         if let existing = notifyTasks[char] {
@@ -189,7 +194,7 @@ final class PeripheralDetailModel {
         rssiTask = nil
     }
 
-    // MARK: Profiles (Task 6)
+    // MARK: Profiles
 
     func loadDeviceInformation() async {
         do {
@@ -209,7 +214,7 @@ final class PeripheralDetailModel {
         }
     }
 
-    // MARK: ANCS (Task 7, iOS)
+    // MARK: ANCS (iOS)
 
     #if os(iOS)
     func refreshANCS() async {

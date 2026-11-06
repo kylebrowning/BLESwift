@@ -36,9 +36,9 @@ struct PeripheralHostTests {
         let (host, fake, _) = makeFakePeripheralHost()
         #expect(host.state == .unknown)
 
-        // Subscribe before simulating, so the transition is observed. (The .latest replay
-        // only buffers *yielded* values; the initial .unknown is never yielded, so it is not
-        // replayed here.)
+        // Subscribe before the simulation so that the test observes the transition. The .latest
+        // replay buffers only *yielded* values, and the code never yields the initial .unknown, so
+        // the replay does not include it.
         var iterator = await host.stateEvents().makeAsyncIterator()
 
         fake.simulateStateChange(.poweredOn)
@@ -77,7 +77,7 @@ struct PeripheralHostTests {
     func advertising() async throws {
         let (host, fake, _) = makeFakePeripheralHost()
         fake.simulateStateChange(.poweredOn)
-        await fake.onQueue {} // flush
+        await fake.onQueue {} // Flush.
 
         #expect(!host.isAdvertising)
         try await host.startAdvertising(PeripheralAdvertisement(localName: "Rig", serviceUUIDs: [heartRate]))
@@ -197,11 +197,11 @@ struct PeripheralHostTests {
 
         let central = aCentral()
         fake.simulateSubscribe(central: central, to: measurement)
-        await fake.onQueue {} // flush subscribe
+        await fake.onQueue {} // Flush the subscribe.
 
         let update = Task { try await host.updateValue(Data([0xAA]), for: measurement) }
 
-        // The first (false) call must have happened, and the update must still be pending.
+        // The first call (false) must have happened, and the update must still be pending.
         await waitFor { await fake.onQueue { fake.updateValueCalls.count } >= 1 }
         #expect(await fake.onQueue { fake.updateValueCalls.first?.returned } == false)
 
@@ -241,7 +241,7 @@ struct PeripheralHostTests {
         #expect(await fake.onQueue { fake.removeAllServicesCallCount } == 1)
         #expect(await fake.onQueue { fake.addedServices.isEmpty })
 
-        // A backend-backed host was not created against a real CBPeripheralManager.
+        // The test does not create a host with a backend against a real CBPeripheralManager.
         do {
             _ = try await host.stopAndExtractState()
             Issue.record("expected stopAndExtractState() to throw .stopped")

@@ -2,10 +2,10 @@
 //  ProfilesConsumerTests.swift
 //  ConsumerTests
 //
-//  Out-of-package proof that the `BLESwiftProfiles` product's typed decoders are usable by a
-//  real consumer that depends on the root package only by path. Also the type-check gate for
-//  the `Examples/HeartRateMonitor` sample, which now uses `BLESwiftProfiles`'
-//  `HeartRateMeasurement` rather than defining its own.
+//  Proof outside the package that the typed decoders of the `BLESwiftProfiles` product work for a
+//  real consumer, which depends on the root package only by path. The file is also the type-check
+//  gate for the `Examples/HeartRateMonitor` sample, which uses `BLESwiftProfiles`'s
+//  `HeartRateMeasurement` and does not define its own.
 //
 
 import BLESwiftCore
@@ -18,7 +18,8 @@ struct ProfilesConsumerTests {
 
     @Test("BLESwiftProfiles.HeartRateMeasurement decodes an 8-bit reading")
     func decodesHeartRateMeasurement() throws {
-        // [flags 0x00][bpm 72]: bit0 clear → 8-bit BPM; bit2 clear → contact not supported.
+        // [flags 0x00][bpm 72]: bit 0 is clear, so the BPM is 8-bit. Bit 2 is clear, so contact is
+        // not supported.
         let reading = try BLESwiftProfiles.HeartRateMeasurement(bluetoothData: Data([0x00, 72]))
         #expect(reading.beatsPerMinute == 72)
         #expect(reading.sensorContact == .notSupported)

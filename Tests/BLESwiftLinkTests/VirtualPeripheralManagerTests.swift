@@ -14,13 +14,12 @@ import Foundation
 import BLESwiftCompat17
 import Testing
 
-/// Sim-to-sim in one process: a real `PeripheralHost` driven by a
-/// ``VirtualPeripheralManagerBackend`` and a real `Central` driven by a
-/// ``VirtualCentralBackend``, both served by one ``VirtualRadio``, holding a full GATT
-/// conversation with no CoreBluetooth and no hardware.
+/// Simulator-to-simulator in one process. A real `PeripheralHost` is driven by a
+/// ``VirtualPeripheralManagerBackend`` and a real `Central` by a ``VirtualCentralBackend``. One
+/// ``VirtualRadio`` serves both, so they hold a full GATT conversation with no CoreBluetooth and no
+/// hardware.
 ///
-/// The peripheral-role mirror of `CrossRoleEndToEndTests.fullConversation`, with the virtual
-/// radio standing in for the fake bridge.
+/// This is the peripheral-role mirror of `CrossRoleEndToEndTests.fullConversation`.
 @Suite("VirtualPeripheralManagerBackend")
 struct VirtualPeripheralManagerTests {
 
@@ -28,8 +27,8 @@ struct VirtualPeripheralManagerTests {
     private static let measurement = CharacteristicIdentifier(uuid: "2A37", service: heartRate)
     private static let control = CharacteristicIdentifier(uuid: "2A39", service: heartRate)
 
-    /// The Heart Rate service the host publishes: a dynamic, readable/notifying measurement
-    /// and a write-only control point.
+    /// The Heart Rate service that the host publishes. It has a dynamic measurement that is
+    /// readable and notifying, and a write-only control point.
     private static var service: GATTService {
         GATTService(identifier: heartRate, characteristics: [
             GATTCharacteristic(identifier: measurement, properties: [.read, .notify], permissions: [.readable]),
@@ -41,7 +40,6 @@ struct VirtualPeripheralManagerTests {
     func fullConversation() async throws {
         let radio = VirtualRadio()
 
-        // ---- Peripheral role: its own queue, backed by the radio ----
         let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.Host")
         let host = PeripheralHost(
             backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue),
@@ -49,7 +47,6 @@ struct VirtualPeripheralManagerTests {
         )
         try await host.add(Self.service)
 
-        // Subscribe to the request streams BEFORE advertising — they do not replay.
         let written = Mutex<Data?>(nil)
         let readResponder = Task { @Sendable in
             for await request in await host.readRequests() {
@@ -68,7 +65,6 @@ struct VirtualPeripheralManagerTests {
         )
         #expect(host.isAdvertising)
 
-        // ---- Central role: a different queue, same radio ----
         let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.Central")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
         await waitFor { central.state == .poweredOn }
@@ -83,24 +79,21 @@ struct VirtualPeripheralManagerTests {
 
         let peripheral = try await central.connect(discovery.peripheral)
 
-        // Read: answered by the host's `readRequests()` responder, not by any stored value.
         let measured: Data = try await peripheral.read(from: Self.measurement)
         #expect(measured == Data([0, 72]))
 
-        // Write: reaches the host's `writeRequests()`, which acknowledges it.
         try await peripheral.write(Data([0x2A]), to: Self.control)
         #expect(written.withLock { $0 } == Data([0x2A]))
 
-        // Notify: subscribing must surface on the host side as a real subscriber.
         let notifications = Task { () -> Data? in
             for try await value in peripheral.notifications(for: Self.measurement) as AsyncThrowingStream<Data, Error> {
                 return value
             }
             return nil
         }
-        // `Peripheral` publishes no "notifications are armed" signal of its own, so the wait is
-        // on the radio's own subscription table — the very state the push consults — and on the
-        // host's subscriber list behind it.
+        // `Peripheral` has no "notifications are armed" signal, so the test waits on the radio's
+        // subscription table, which the push consults, and then on the host's subscriber list
+        // behind it.
         await waitFor(timeout: .seconds(10)) { await radio.isSubscribed(characteristic: Self.measurement) }
         await waitFor(timeout: .seconds(10)) { await !host.subscribers(for: Self.measurement).isEmpty }
         #expect(await !host.subscribers(for: Self.measurement).isEmpty)
@@ -109,10 +102,9 @@ struct VirtualPeripheralManagerTests {
 
         try await central.disconnect(peripheral.id)
 
-        // ---- Teardown: once the host stops advertising, a fresh scan finds nothing ----
         await host.stopAdvertising()
-        // Same fixed-delay fallback: `stopAdvertising()` reaches the radio asynchronously and
-        // reports no completion of its own.
+        // This is the same fixed-delay fallback. `stopAdvertising()` reaches the radio
+        // asynchronously and reports no completion of its own.
         try await Task.sleep(for: .milliseconds(100))
         var again: Discovery?
         for try await event in await central.scan(services: [Self.heartRate], timeout: .seconds(1)) {
@@ -133,7 +125,7 @@ struct VirtualPeripheralManagerTests {
         let host = PeripheralHost(backend: backend, queue: hostQueue)
         try await host.add(Self.service)
 
-        // Drop the handler *without* removing the device — the one state in which a request
+        // Drop the handler *without* removing the device. This is the one state in which a request
         // would otherwise be parked with nothing left to answer it.
         await backend.detachEventHandlerForTesting()
 
@@ -141,7 +133,6 @@ struct VirtualPeripheralManagerTests {
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
         await waitFor { central.state == .poweredOn }
 
-        // The device is registered but never advertised, so connect by identifier.
         let peripheral = try await central.connect(PeripheralIdentifier(uuid: identifier, name: nil))
         do {
             let value: Data = try await peripheral.read(from: Self.measurement)
@@ -158,7 +149,6 @@ struct VirtualPeripheralManagerTests {
         let radio = VirtualRadio()
         let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.SilentHost")
         let identifier = UUID()
-        // A short stand-in for `VirtualRadio.attTimeout`, so the test need not wait 30 s.
         let backend = VirtualPeripheralManagerBackend(
             radio: radio,
             queue: hostQueue,
@@ -169,8 +159,8 @@ struct VirtualPeripheralManagerTests {
         let host = PeripheralHost(backend: backend, queue: hostQueue)
         try await host.add(Self.service)
 
-        // The first read is swallowed — a host wedged in its own handler — and every one
-        // after it is answered.
+        // The host swallows the first read, as a host that is wedged in its own handler does. The
+        // host answers every read after it.
         let seen = Mutex<Int>(0)
         let readResponder = Task { @Sendable in
             for await request in await host.readRequests() {
@@ -194,7 +184,6 @@ struct VirtualPeripheralManagerTests {
             #expect(nsError.code == ATTError.unlikelyError.rawValue)
         }
 
-        // The timed-out request released the remote's serial chain: the next read still works.
         let measured: Data = try await peripheral.read(from: Self.measurement)
         #expect(measured == Data([0, 72]))
         #expect(seen.withLock { $0 } == 2)
@@ -207,9 +196,9 @@ struct VirtualPeripheralManagerTests {
         let radio = VirtualRadio()
         let identifier = UUID()
         let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.WindowHost")
-        // Long enough that nothing times out while the window is being filled and asserted —
-        // the subject here is the window, not the ATT timeout — but far short of the 30 s
-        // default, which would leave the writes this test holds parked for the rest of the run.
+        // Long enough that nothing times out while the test fills the window and asserts on it. The
+        // subject is the window, not the ATT timeout. It is short of the 30 s default, which would
+        // leave the held writes parked for the rest of the run.
         let backend = VirtualPeripheralManagerBackend(
             radio: radio,
             queue: hostQueue,
@@ -220,7 +209,7 @@ struct VirtualPeripheralManagerTests {
         let host = PeripheralHost(backend: backend, queue: hostQueue)
         try await host.add(Self.service)
 
-        // A hosted host that is merely slow: every write is held, unanswered, until this test
+        // A hosted host that is only slow. It holds every write, unanswered, until this test
         // decides to answer it.
         let answering = Mutex<Bool>(false)
         let held = Mutex<[WriteRequest]>([])
@@ -235,8 +224,8 @@ struct VirtualPeripheralManagerTests {
         }
         defer { writeResponder.cancel() }
 
-        // The backend is driven directly: `Peripheral`'s own writer honors the window, and the
-        // window itself is what is under test.
+        // The test drives the backend directly. `Peripheral`'s own writer honors the window, and
+        // the window itself is what the test examines.
         let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.WindowCentral")
         let central = VirtualCentralBackend(radio: radio, queue: centralQueue)
         await waitFor { await Self.onQueue(centralQueue) { !central.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
@@ -251,15 +240,13 @@ struct VirtualPeripheralManagerTests {
             central.connect(remote, options: nil, requiresANCS: false)
         }
         await waitFor { await Self.onQueue(centralQueue) { remote.connectionState == .connected } }
-        // A service at a time: a characteristic discovery for a service the remote has not
-        // discovered yet is a no-op, so the sweep has to land first — the order `Central`
-        // issues them in.
+        // One service at a time: a characteristic discovery for an undiscovered service does
+        // nothing, so the sweep must land first. `Central` issues them in the same order.
         await Self.onQueue(centralQueue) { remote.discoverServices([Self.heartRate]) }
         await waitFor { await Self.onQueue(centralQueue) { remote.isDiscovered(Self.heartRate) } }
         await Self.onQueue(centralQueue) { remote.discoverCharacteristics([Self.control], for: Self.heartRate) }
         await waitFor { await Self.onQueue(centralQueue) { remote.isDiscovered(Self.control) } }
 
-        // ---- Fill the window: the slots are taken synchronously, so this is exact ----
         let window = LinkFlowControl.writeWithoutResponseWindow
         await Self.onQueue(centralQueue) {
             #expect(remote.canSendWriteWithoutResponse)
@@ -267,12 +254,11 @@ struct VirtualPeripheralManagerTests {
                 remote.writeValue(Data([0x01]), for: Self.control, type: .withoutResponse)
             }
         }
-        // The window is shut, so the 65th write parks in `CentralSession.drainWrites` rather
-        // than joining an unbounded chain behind a host that has answered none of the first 64.
+        // The window is shut, so the 65th write parks in `CentralSession.drainWrites`. It does not
+        // join an unbounded chain behind a host that has answered none of the first 64.
         #expect(await Self.onQueue(centralQueue) { !remote.canSendWriteWithoutResponse })
         #expect(ready.withLock { $0 } == 0)
 
-        // ---- The host starts answering: the chain drains and the window reopens ----
         answering.withLock { $0 = true }
         await waitFor(timeout: .seconds(10)) {
             for request in held.withLock({ let pending = $0; $0 = []; return pending }) {
@@ -281,7 +267,8 @@ struct VirtualPeripheralManagerTests {
             return await Self.onQueue(centralQueue) { remote.canSendWriteWithoutResponse }
         }
         #expect(await Self.onQueue(centralQueue) { remote.canSendWriteWithoutResponse })
-        // Once, on the transition that reopened it — not once per write answered.
+        // The event fires once, on the transition that reopened the window, and not once for each
+        // write that the host answered.
         #expect(ready.withLock { $0 } == 1)
     }
 
@@ -335,8 +322,8 @@ struct VirtualPeripheralManagerTests {
         )
         try await host.add(Self.service)
 
-        // A host that would happily acknowledge anything it is handed: the refusal has to come
-        // from the radio's own ATT layer, or this responder answers the write successfully.
+        // A host that would acknowledge anything that it receives. The refusal has to come from the
+        // radio's own ATT layer. Otherwise this responder answers the write successfully.
         let arrived = Mutex(0)
         let writeResponder = Task { @Sendable in
             for await request in await host.writeRequests() {
@@ -346,10 +333,10 @@ struct VirtualPeripheralManagerTests {
         }
         defer { writeResponder.cancel() }
 
-        // The backend is driven directly: `Peripheral`'s own writer refuses a write to a
-        // characteristic that declares no write property before it ever reaches a radio, and
-        // the radio's refusal — what real hardware does at the ATT layer, for a host that has
-        // no fixture handler to refuse for it — is what is under test.
+        // The test drives the backend directly, because `Peripheral`'s own writer would refuse a
+        // write to a characteristic with no write property before it reached a radio. The radio's
+        // refusal is under test. Real hardware refuses at the ATT layer for a host with no fixture
+        // handler.
         let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.ReadOnlyCentral")
         let central = VirtualCentralBackend(radio: radio, queue: centralQueue)
         await waitFor { await Self.onQueue(centralQueue) { !central.retrievePeripherals(withIdentifiers: [identifier]).isEmpty } }
@@ -373,7 +360,6 @@ struct VirtualPeripheralManagerTests {
         }
         await waitFor { await Self.onQueue(centralQueue) { remote.isDiscovered(Self.measurement) } }
 
-        // `measurement` declares `.read` and `.notify` and nothing else, so ATT refuses.
         await Self.onQueue(centralQueue) {
             remote.writeValue(Data([0x2A]), for: Self.measurement, type: .withResponse)
         }
@@ -384,7 +370,7 @@ struct VirtualPeripheralManagerTests {
         #expect(refused.1?.code == ATTError.writeNotPermitted.rawValue)
         #expect(arrived.withLock { $0 } == 0)
 
-        // The writable characteristic on the same device is unaffected: the refusal is the
+        // The writable characteristic on the same device is unaffected. The refusal is the
         // permission check, not a blanket block on writes to this host.
         await Self.onQueue(centralQueue) {
             remote.writeValue(Data([0x2A]), for: Self.control, type: .withResponse)
@@ -398,9 +384,9 @@ struct VirtualPeripheralManagerTests {
     func advertisedLocalNameBecomesPeripheralName() async throws {
         let radio = VirtualRadio()
 
-        // Registered under a placeholder name, the way `Provider` names a host session's
-        // device after its link client. CoreBluetooth reports the *advertised* local name, and
-        // so must the radio: otherwise a scanner sees the placeholder, not the advertiser.
+        // The device is registered under a placeholder name, as `Provider` names a host session's
+        // device after its link client. CoreBluetooth reports the *advertised* local name, and the
+        // radio must too, or a scanner sees the placeholder.
         let hostQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.RenamedHost")
         let host = PeripheralHost(
             backend: VirtualPeripheralManagerBackend(radio: radio, queue: hostQueue, name: "PlaceholderClient"),
@@ -431,9 +417,8 @@ struct VirtualPeripheralManagerTests {
         let backend = VirtualPeripheralManagerBackend(radio: radio, queue: queue)
         let started = Mutex(false)
 
-        // Both calls on one queue turn, which is what CoreBluetooth permits and what raced:
-        // the start's flag write comes off the radio's chain, the stop's used to be made here
-        // and to be overwritten by it a moment later.
+        // Both calls are in one queue turn, which CoreBluetooth permits. The start's flag write
+        // comes off the radio's chain, so the stop's flag write must not be overwritten by it.
         await Self.onQueue(queue) {
             backend.eventHandler = { event in
                 if case .didStartAdvertising = event { started.withLock { $0 = true } }
@@ -442,18 +427,16 @@ struct VirtualPeripheralManagerTests {
             backend.stopAdvertising()
         }
 
-        // Both calls have reached the radio by the time the start reports itself applied and
-        // the chain behind it has drained.
+        // Both calls have reached the radio when the start reports that it is applied and the chain
+        // behind it has drained.
         await waitFor { started.withLock { $0 } }
         await waitFor { await Self.onQueue(queue) { !backend.isAdvertising } }
         #expect(await Self.onQueue(queue) { !backend.isAdvertising })
 
-        // And the radio agrees: a scan started now finds nothing to report.
         let centralQueue = DispatchQueue(label: "VirtualPeripheralManagerTests.advertising.central")
         let central = Central(backend: VirtualCentralBackend(radio: radio, queue: centralQueue), queue: centralQueue)
         await waitFor { central.state == .poweredOn }
         var found: Discovery?
-        // A scan that finds nothing ends by timing out, which is the outcome under test.
         do {
             for try await event in await central.scan(services: [Self.heartRate], timeout: .milliseconds(200)) {
                 if case .discovered(let discovery) = event {
@@ -484,14 +467,14 @@ struct VirtualPeripheralManagerTests {
         #expect(started.withLock { $0 } == [nil])
         #expect(await radio.services(of: identifier, matching: nil) == [Self.heartRate])
 
-        // Detaching is not a teardown: the device stays on the radio, exactly as
-        // ``CompositePeripheralManager/eventHandler`` documents for every child it clears.
+        // Detaching is not a teardown. The device stays on the radio, as
+        // ``CompositePeripheralManager/eventHandler`` documents for every child that it clears.
         await Self.onQueue(queue) { backend.eventHandler = nil }
         _ = await Self.onQueue(queue) { true }
         #expect(await radio.services(of: identifier, matching: nil) == [Self.heartRate])
 
-        // And re-attaching re-installs a working backend rather than an inert one: the
-        // advertisement it is given is applied and completes without the removal error.
+        // A new attach installs a working backend, not an inert one. The advertisement that the
+        // test gives it is applied and completes without the removal error.
         await Self.onQueue(queue) {
             backend.eventHandler = { event in
                 if case .didStartAdvertising(let error) = event { started.withLock { $0.append(error) } }
@@ -505,7 +488,7 @@ struct VirtualPeripheralManagerTests {
 
     // MARK: - Departing subscribers
 
-    /// Runs `body` on `queue` and returns its result, without blocking a cooperative thread.
+    /// Runs `body` on `queue` and returns its result. It does not block a cooperative thread.
     private static func onQueue<T: Sendable>(
         _ queue: DispatchQueue,
         _ body: @escaping @Sendable () -> T
@@ -515,11 +498,10 @@ struct VirtualPeripheralManagerTests {
         }
     }
 
-    /// A hosted `PeripheralHost` on `radio` publishing ``service``, with an observer already
+    /// A hosted `PeripheralHost` on `radio` that publishes ``service``, with an observer already
     /// attached to its subscription events.
     ///
-    /// The stream is created *before* this returns — `subscriptionEvents()` does not replay,
-    /// so an observer started behind the first subscribe would miss it.
+    /// The stream is created *before* this returns, because `subscriptionEvents()` does not replay.
     private static func hostRig(
         radio: VirtualRadio,
         label: String,
@@ -537,11 +519,11 @@ struct VirtualPeripheralManagerTests {
         return (host, log, observer)
     }
 
-    /// Connects `backend` to `identifier` and subscribes it to ``measurement``, returning the
-    /// remote so each test can control exactly how that central departs.
+    /// Connects `backend` to `identifier` and subscribes it to ``measurement``. It returns the
+    /// remote, so each test controls how that central departs.
     ///
-    /// The backend is driven directly rather than through a `Central`: a notification stream
-    /// unsubscribes when it terminates, which is the one thing these tests must *not* do.
+    /// The test drives the backend directly and not through a `Central`, because a notification
+    /// stream unsubscribes when it terminates and these tests must *not* do that.
     private static func subscribedRemote(
         _ backend: VirtualCentralBackend,
         on queue: DispatchQueue,
@@ -555,16 +537,16 @@ struct VirtualPeripheralManagerTests {
         })
         await onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
         await waitFor { await onQueue(queue) { remote.connectionState == .connected } }
-        // Discovered before it is subscribed: a `PeripheralRemote` no-ops a `setNotifyValue`
-        // for a characteristic it has not discovered, exactly as CoreBluetooth does.
+        // Discover before subscribing: a `PeripheralRemote` ignores a `setNotifyValue` on an
+        // undiscovered characteristic, as CoreBluetooth does.
         await onQueue(queue) { remote.discoverServices([Self.heartRate]) }
         await waitFor { await onQueue(queue) { remote.isDiscovered(Self.heartRate) } }
         await onQueue(queue) { remote.discoverCharacteristics([Self.measurement], for: Self.heartRate) }
         await waitFor { await onQueue(queue) { remote.isDiscovered(Self.measurement) } }
         await onQueue(queue) { remote.setNotifyValue(true, for: Self.measurement) }
-        // Both halves of the arming, each on a bound a starved runner cannot outrun: the
-        // radio's own subscription table — which is what a `remove()` or a disconnect walks —
-        // and the host's view of it behind that.
+        // Wait for both halves of the arming, each with a bound that a starved runner cannot
+        // outrun: the radio's subscription table, which a `remove()` or disconnect walks, and then
+        // the host's view behind it.
         await waitFor(timeout: .seconds(10)) {
             await radio.isSubscribed(session: backend.sessionID, characteristic: Self.measurement)
         }
@@ -588,14 +570,14 @@ struct VirtualPeripheralManagerTests {
         let remote = try await Self.subscribedRemote(backend, on: queue, to: identifier, host: host, radio: radio)
         #expect(await host.subscribers(for: Self.measurement).map(\.id) == [backend.sessionID])
 
-        // The central goes away without unsubscribing first, exactly as a real one does when
-        // its connection is cancelled.
+        // The central goes away without a prior unsubscribe, as a real central does when its
+        // connection is cancelled.
         await Self.onQueue(queue) { backend.cancelPeripheralConnection(remote) }
 
         await waitFor(timeout: .seconds(10)) { await host.subscribers(for: Self.measurement).isEmpty }
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
-        // The log is filled by a task of its own, so the event can still be in flight when the
-        // host's list has already emptied.
+        // A task of its own fills the log, so the event can still be in flight when the host's list
+        // has already emptied.
         await waitFor(timeout: .seconds(10)) { log.lastUnsubscribe != nil }
         let departure = try #require(log.lastUnsubscribe)
         #expect(departure.central.id == backend.sessionID)
@@ -625,16 +607,14 @@ struct VirtualPeripheralManagerTests {
         )
         #expect(await host.subscribers(for: Self.measurement).map(\.id) == [session])
 
-        // Released, not cancelled: `deinit` detaches the session from the radio, and the
-        // subscriptions that go with it must still reach the host.
+        // The test releases the session and does not cancel it. `deinit` detaches the session from
+        // the radio. The subscriptions that go with it must still reach the host.
         remote = nil
         backend = nil
         #expect(remote == nil && backend == nil)
 
         await waitFor(timeout: .seconds(10)) { await host.subscribers(for: Self.measurement).isEmpty }
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
-        // The log is filled by a task of its own, so the event can still be in flight when the
-        // host's list has already emptied.
         await waitFor(timeout: .seconds(10)) { log.lastUnsubscribe != nil }
         let departure = try #require(log.lastUnsubscribe)
         #expect(departure.central.id == session)
@@ -662,8 +642,6 @@ struct VirtualPeripheralManagerTests {
 
         await waitFor(timeout: .seconds(10)) { await host.subscribers(for: Self.measurement).isEmpty }
         #expect(await host.subscribers(for: Self.measurement).isEmpty)
-        // The log is filled by a task of its own, so the event can still be in flight when the
-        // host's list has already emptied.
         await waitFor(timeout: .seconds(10)) { log.lastUnsubscribe != nil }
         let departure = try #require(log.lastUnsubscribe)
         #expect(departure.central.id == backend.sessionID)

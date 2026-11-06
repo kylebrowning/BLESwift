@@ -8,60 +8,58 @@ import CoreBluetooth
 import Foundation
 import BLESwiftCompat17
 
-/// Bridges real `CBCentralManagerDelegate` callbacks into a `CentralEvent` handler
-/// closure — the `CentralManaging` conformance's implementation of `eventHandler` for
-/// `CBCentralManager`.
+/// Bridges `CBCentralManagerDelegate` callbacks into a `CentralEvent` handler closure. It
+/// implements `eventHandler` for `CBCentralManager` in the `CentralManaging` conformance.
 ///
-/// Holds its handler `Mutex`-guarded rather than a plain stored property specifically
-/// because `willRestoreState` can arrive **during `CBCentralManager.init` itself**, before
-/// the handler has been assigned (see ``bufferedRestoredState``).
+/// A `Mutex` guards the handler and not a plain stored property, because `willRestoreState`
+/// can arrive **during `CBCentralManager.init` itself**, before `Central` assigns the handler
+/// (see ``bufferedRestoredState``).
 ///
-/// Every callback forwards synchronously to ``handler``: sound because CoreBluetooth only
-/// ever calls back on the queue the manager was created with, which is exactly the
-/// `DispatchQueue` backing `Central`'s custom `SerialExecutor`.
+/// Each callback forwards synchronously to ``handler``. This is safe, because CoreBluetooth
+/// calls back only on the queue that `Central` used to create the manager. That queue is the
+/// `DispatchQueue` behind `Central`'s custom `SerialExecutor`.
 ///
-/// This proxy is also the ONLY place BLESwift touches a raw `[String: Any]` advertisement
-/// dictionary: `didDiscover` converts it into ``AdvertisementData`` eagerly, before
-/// anything crosses into actor-isolated code.
+/// This proxy is the ONLY place where BLESwift reads a raw `[String: Any]` advertisement
+/// dictionary. `didDiscover` converts it to ``AdvertisementData`` before anything crosses into
+/// actor-isolated code.
 ///
-/// The `CBPeripheralDelegate` half of what was previously a combined proxy now lives in
-/// ``PeripheralDelegateProxy`` — one instance per `CBPeripheral`.
+/// ``PeripheralDelegateProxy`` has the `CBPeripheralDelegate` half, one instance for each
+/// `CBPeripheral`.
 final class CentralDelegateProxy: NSObject, CBCentralManagerDelegate {
 
-    /// Receives every ``CentralEvent`` this proxy converts from a real CoreBluetooth
-    /// callback. `Mutex`-guarded so the assignment (from `Central`, off the CB queue
-    /// during `init`) and a callback delivery racing in from the CB queue can never
-    /// observe a torn value.
+    /// Receives each ``CentralEvent`` that this proxy converts from a CoreBluetooth callback.
+    /// A `Mutex` guards it, so the assignment from `Central` (off the CB queue, during `init`)
+    /// and a callback on the CB queue can race without a torn value.
     ///
-    /// Typed `@Sendable` because `Mutex.withLock` requires its `Value` be safely handed
-    /// across isolation domains, which the protocol's plain, non-`@Sendable`
-    /// `eventHandler` closure type cannot satisfy — `CBCentralManager`'s `eventHandler`
-    /// setter bridges the two with a narrowly justified `nonisolated(unsafe)` wrap.
+    /// The type is `@Sendable`, because `Mutex.withLock` needs a `Value` that is safe to hand
+    /// across isolation domains. The protocol's plain `eventHandler` closure is not
+    /// `@Sendable`. The `CBCentralManager.eventHandler` setter bridges the two with a narrow
+    /// `nonisolated(unsafe)` wrap.
     ///
-    /// Wrapped in a struct, never stored as the `Mutex`'s `Value` directly (#53). `withLock`
-    /// hands its `Value` to the body `inout`; when that `Value` is a function type the
-    /// compiler reabstracts the closure on the way in and writes a reabstracted copy back on
-    /// the way out, even from a read (swiftlang/swift#91348). Each `get` then nested the
-    /// stored handler two thunks deeper, and after some thousands of events calling it
-    /// overflowed the stack. A struct `Value` has no function-type abstraction to convert.
-    /// Every closure-holding `Mutex` in BLESwift uses the same shape.
+    /// The handler is wrapped in a struct and never stored directly as the `Mutex` `Value`.
+    /// `withLock` passes its `Value` to the body as `inout`. For a function-type `Value`, the
+    /// compiler reabstracts the closure on the way in and writes a reabstracted copy back,
+    /// even from a read (swiftlang/swift#91348). Each `get` then nested the handler two
+    /// thunks deeper, and after some thousands of events a call overflowed the stack. A struct
+    /// `Value` has no function-type abstraction to convert. Each `Mutex` in BLESwift that holds
+    /// a closure uses this shape.
     private struct HandlerStorage: Sendable {
         var handler: (@Sendable (CentralEvent) -> Void)?
     }
     private let handlerBox = Mutex(HandlerStorage())
 
-    /// The `CentralEvent` handler this proxy forwards to. Set once, by `Central`.
+    /// The `CentralEvent` handler that this proxy forwards to. `Central` sets it once.
     var handler: (@Sendable (CentralEvent) -> Void)? {
         get { handlerBox.withLock { $0.handler } }
         set { handlerBox.withLock { $0.handler = newValue } }
     }
 
     #if os(iOS)
-    /// Buffers the (already-converted) `willRestoreState` payload until the first
-    /// `centralManagerDidUpdateState(_:)` drains it into ``handler``. Buffered rather than
-    /// forwarded immediately because `willRestoreState` is the one delegate callback that
-    /// can arrive **during `CBCentralManager.init` itself**, before `Central` has installed
-    /// ``handler`` at all. `Mutex`-guarded, not queue-confinement, for that reason.
+    /// Buffers the converted `willRestoreState` payload. The first
+    /// `centralManagerDidUpdateState(_:)` drains it into ``handler``. The proxy does not
+    /// forward it immediately, because `willRestoreState` can arrive **during
+    /// `CBCentralManager.init` itself**, before `Central` installs ``handler``. For the same
+    /// reason, a `Mutex` guards it and not queue confinement.
     private let bufferedRestoredState = Mutex<RestoredState?>(nil)
     #endif
 
@@ -69,9 +67,8 @@ final class CentralDelegateProxy: NSObject, CBCentralManagerDelegate {
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         #if os(iOS)
-        // Drain a buffered `willRestoreState` before the state event, preserving
-        // CoreBluetooth's own ordering. If `handler` isn't installed yet, leave the buffer
-        // intact rather than dropping the restoration payload.
+        // Drain a buffered `willRestoreState` before the state event, to keep CoreBluetooth's
+        // order. If `handler` is not installed yet, keep the buffer. Do not drop the payload.
         if handler != nil {
             let restored = bufferedRestoredState.withLock { buffered -> RestoredState? in
                 let value = buffered
@@ -87,16 +84,14 @@ final class CentralDelegateProxy: NSObject, CBCentralManagerDelegate {
     }
 
     #if os(iOS)
-    /// Captures CoreBluetooth's state-restoration payload **synchronously**: converts the
-    /// raw dictionary to the `Sendable` ``RestoredState`` eagerly and buffers it for
-    /// ``centralManagerDidUpdateState(_:)`` to drain. See ``bufferedRestoredState`` for why
-    /// this cannot forward directly.
+    /// Captures CoreBluetooth's state-restoration payload **synchronously**, converts it to the
+    /// `Sendable` ``RestoredState``, and buffers it for ``centralManagerDidUpdateState(_:)`` to
+    /// drain. For why it cannot forward directly, see ``bufferedRestoredState``.
     ///
-    /// This proxy no longer conforms to `CBPeripheralDelegate`; `Central.handle(_:)`'s
-    /// `.willRestoreState` case wires each restored peripheral's `eventHandler` instead,
-    /// once the buffer drains. Known narrow limitation: a peripheral event arriving between
-    /// the raw `willRestoreState` callback and that drain is not yet covered by an attached
-    /// event target.
+    /// This proxy does not conform to `CBPeripheralDelegate`. After the buffer drains, the
+    /// `.willRestoreState` case of `Central.handle(_:)` connects the `eventHandler` of each
+    /// restored peripheral. Known limitation: a peripheral event that arrives between the raw
+    /// `willRestoreState` callback and that drain has no event target yet.
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         let restored = RestoredState(restorationDictionary: dict)
         bufferedRestoredState.withLock { $0 = restored }

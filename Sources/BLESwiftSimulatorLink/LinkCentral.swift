@@ -8,90 +8,84 @@ import BLESwiftLink
 import Dispatch
 import Foundation
 
-/// A `CentralManaging` backed by a provider process rather than a local `CBCentralManager`:
-/// every call is encoded as a `CentralRequest` and sent over one `LinkClientSession`,
-/// and every `CentralWireEvent` the provider sends back is translated into a `CentralEvent`
-/// or a ``LinkPeripheral``'s `PeripheralEvent`.
+/// A `CentralManaging` that a provider process backs, not a local `CBCentralManager`. It sends each
+/// call to the provider over one `LinkClientSession`. It turns each `CentralWireEvent` that comes
+/// back into a `CentralEvent`, or into a `PeripheralEvent` of a ``LinkPeripheral``.
 ///
-/// Hand one to `Central(backend:queue:)`, passing the *same* `DispatchQueue`:
+/// Give one to `Central(backend:queue:)`. Pass the *same* `DispatchQueue`:
 ///
 /// ```swift
 /// let queue = DispatchQueue(label: "ble")
 /// let central = Central(backend: LinkCentral(endpoint: endpoint, queue: queue), queue: queue)
 /// ```
 ///
-/// **Radio state.** ``radioState`` starts `.unsupported` — a provider that has not answered
-/// is indistinguishable from a machine without Bluetooth — and that first `.unsupported` is
-/// delivered as soon as an ``eventHandler`` is attached, so a `Central` whose provider never
-/// appears still reflects it. The provider's own `didUpdateState` replaces it; if the link
-/// then drops, every peripheral that was not already disconnected is reported disconnected
-/// with `LinkError.providerDisconnected` and the state falls back to `.unsupported` until
-/// the provider reconnects and sends its real state.
+/// - ``radioState`` is `.unsupported` until the provider reports its state.
+/// - If an established link drops, the central reports each connected peripheral as disconnected
+///   with `LinkError.providerDisconnected`. The state returns to `.unsupported`.
+/// - Call every member on ``queue``. Events arrive with `queue.async`.
 ///
-/// **Concurrency — queue-confined, not lock-protected.** Every stored property is
-/// `nonisolated(unsafe)`, safe only because every `CentralManaging` method and property
-/// accessor asserts `dispatchPrecondition(condition: .onQueue(queue))` and touches state
-/// inline; session callbacks already arrive on ``queue``, so the mirror caches are updated
-/// there too. Event delivery is always `queue.async`, never inline, as the seam requires.
+/// For the full rules, see <doc:BLESwiftSimulatorLink#Backend-rules>.
 public final class LinkCentral: CentralManaging, Sendable {
 
-    /// The queue every request, mirror update, and event delivery is confined to — the same
-    /// queue the owning `Central` must be constructed with.
+    /// The queue to which the central confines every request, mirror update, and event delivery.
+    /// The owning `Central` must be constructed with the same queue.
     public let queue: DispatchQueue
 
-    /// The client session this central owns; held strongly for its whole lifetime.
+    /// The client session that this central owns. The central holds it strongly for its whole
+    /// lifetime.
     private let session: LinkClientSession
 
     nonisolated(unsafe) private var _eventHandler: ((CentralEvent) -> Void)?
     nonisolated(unsafe) private var _radioState: CentralState = .unsupported
     nonisolated(unsafe) private var _didDeliverInitialState = false
-    /// Every peripheral this central has vended, so the same instance is returned for a given
-    /// identifier — the object the provider's wire events are routed to.
+    /// Every peripheral that this central gave out, so that the central returns the same
+    /// instance for a given identifier. The provider's wire events go to this object.
     ///
-    /// **Bounded, least-recently-sighted first.** A long-lived scan across a busy room would
-    /// otherwise grow this table without limit, one mirror per identifier ever seen. Beyond
-    /// ``maximumPeripherals`` entries the least recently sighted ones are dropped, and only
-    /// ones that are `.disconnected`: anything connecting, connected, or disconnecting is
-    /// still referenced by a live operation, so it is skipped however old it is. The reason
-    /// for a cap rather than a prune is `VirtualCentralBackend`'s: forgetting a peripheral
-    /// that many sightings ago cannot strand a client that has not also connected to it, and
-    /// a forgotten identifier is not refused — the next retrieval simply mints a fresh mirror.
+    /// **The table has a limit. It drops the least recently sighted entry first.** A long scan in
+    /// a busy room would grow this table without limit, with one mirror for each identifier ever
+    /// seen. When the table has more than ``maximumPeripherals`` entries, the central drops the
+    /// least recently sighted ones. It drops only entries that are `.disconnected`. A live
+    /// operation still refers to anything that is connecting, connected, or disconnecting, so the
+    /// central skips such an entry, however old it is.
+    ///
+    /// The reason for a cap and not a prune is the same as in `VirtualCentralBackend`. If the
+    /// central forgets a peripheral that it sighted many sightings ago, no client is stranded
+    /// unless the client also connected to it. The central does not refuse a forgotten
+    /// identifier, and the next retrieval creates a new mirror.
     nonisolated(unsafe) private var _peripherals: [UUID: LinkPeripheral] = [:]
 
-    /// ``_peripherals``' keys in least-recently-sighted order, which is what the cap evicts
-    /// from. Linear to update, over a list bounded by ``maximumPeripherals``.
+    /// The keys of ``_peripherals`` in least-recently-sighted order. The cap evicts from this
+    /// list. An update is linear, over a list that ``maximumPeripherals`` bounds.
     nonisolated(unsafe) private var _sightingOrder: [UUID] = []
 
-    /// How many peripheral mirrors this central keeps.
+    /// The number of peripheral mirrors that this central keeps.
     private let maximumPeripherals: Int
 
-    /// The mirror table's default size, used by every public initializer. Tests override it
-    /// to force eviction without minting a thousand identifiers.
+    /// The default size of the mirror table. Every public initializer uses it. Tests override it
+    /// to force eviction without creating a thousand identifiers.
     package static let defaultMaximumPeripherals = 1024
 
     nonisolated(unsafe) private var _nextChannelIdentifier: UInt32 = 1
     nonisolated(unsafe) private var _channels: [UInt32: ChannelEntry] = [:]
 
-    /// One L2CAP channel this central is tunnelling, and the peripheral that owns it — so a
+    /// One L2CAP channel that this central tunnels, and the peripheral that owns it, so that a
     /// disconnect can tear down exactly that peripheral's channels.
     private struct ChannelEntry {
         let channel: LinkL2CAPChannel
         let peripheral: UUID
     }
 
-    /// Creates a central that drives the provider at `endpoint`, and starts dialing it
-    /// immediately. Reconnection is automatic, at `retryInterval`.
+    /// Creates a central that controls the provider at `endpoint`, and starts dialing it at once.
+    /// Reconnection is automatic, at `retryInterval`.
     ///
     /// - Parameters:
-    ///   - endpoint: The provider's host and port.
-    ///   - queue: The serial queue this central is confined to — the same instance the
-    ///     owning `Central` is constructed with. Must be serial (`DispatchQueue(label:)`
-    ///     is).
-    ///   - clientName: A human-readable name sent in the handshake, for provider-side
-    ///     logging. Defaults to the current process's name.
-    ///   - codec: The codec used to encode messages. Defaults to
-    ///     `LinkCodec.binaryPropertyList`.
-    ///   - retryInterval: How long to wait before redialing after a failure. Defaults to two
+    ///   - endpoint: The host and port of the provider.
+    ///   - queue: The serial queue to which this central is confined. It is the instance with
+    ///     which the owning `Central` is constructed.
+    ///   - clientName: A name that people can read, sent in the handshake for provider-side logs.
+    ///     The default is the name of the current process.
+    ///   - codec: The codec that encodes messages. The default is `LinkCodec.binaryPropertyList`.
+    ///   - retryInterval: How long to wait before a new dial after a failure. The default is two
     ///     seconds.
     public convenience init(
         endpoint: LinkEndpoint,
@@ -110,17 +104,17 @@ public final class LinkCentral: CentralManaging, Sendable {
         )
     }
 
-    /// Creates a central whose mirror table holds at most `maximumPeripherals` peripherals —
-    /// the designated initializer, for tests that cannot mint
+    /// Creates a central whose mirror table holds at most `maximumPeripherals` peripherals. This
+    /// is the designated initializer. Tests use it because they cannot create
     /// ``defaultMaximumPeripherals`` identifiers to force an eviction.
     ///
     /// - Parameters:
-    ///   - endpoint: The provider's host and port.
-    ///   - queue: The serial queue this central is confined to.
-    ///   - clientName: A human-readable name sent in the handshake.
-    ///   - codec: The codec used to encode messages.
-    ///   - retryInterval: How long to wait before redialing after a failure.
-    ///   - maximumPeripherals: How many peripheral mirrors to keep.
+    ///   - endpoint: The host and port of the provider.
+    ///   - queue: The serial queue to which this central is confined.
+    ///   - clientName: A name that people can read, sent in the handshake.
+    ///   - codec: The codec that encodes messages.
+    ///   - retryInterval: How long to wait before a new dial after a failure.
+    ///   - maximumPeripherals: The number of peripheral mirrors to keep.
     package init(
         endpoint: LinkEndpoint,
         queue: DispatchQueue,
@@ -139,8 +133,8 @@ public final class LinkCentral: CentralManaging, Sendable {
             queue: queue,
             retryInterval: retryInterval
         )
-        // Weak captures: the session is owned by this central, so a strong capture would be a
-        // cycle and `deinit` — which stops the session — would never run.
+        // The captures are weak. This central owns the session, so a strong capture would make
+        // a cycle, and `deinit`, which stops the session, would never run.
         session.onDisconnected = { [weak self] _ in self?.handleLinkDropped() }
         session.onMessage = { [weak self] message in self?.handle(message) }
         session.start()
@@ -148,12 +142,13 @@ public final class LinkCentral: CentralManaging, Sendable {
 
     deinit {
         session.stop()
-        // The same teardown ``shutdown()`` performs, minus the queue hop it cannot take: a
-        // deallocating object cannot be captured by a `queue.async`, and the table would
-        // otherwise go with the central untouched — leaving every writer suspended for credit
-        // parked on a continuation nothing would ever resume, since the provider's events can
-        // no longer reach a central that no longer exists. `deinit` is the last reference by
-        // definition, so the table is this thread's to take without the queue's protection.
+        // This is the same teardown as ``shutdown()``, but without the queue hop, which it
+        // cannot take: a `queue.async` cannot capture an object that is deallocating. Without
+        // this teardown, the table would go with the central untouched, and every writer that
+        // is suspended for credit would stay parked on a continuation that nothing resumes. The
+        // provider's events can no longer reach a central that does not exist. `deinit` is the
+        // last reference by definition, so the table belongs to this thread to take, without
+        // the queue's protection.
         let doomed = _channels
         _channels = [:]
         for entry in doomed.values {
@@ -161,24 +156,29 @@ public final class LinkCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Whether the provider has accepted the handshake and the link is live.
+    /// Whether the provider accepted the handshake and the link is live.
     public var isProviderConnected: Bool {
         session.isConnected
     }
 
-    /// Stops the session, then runs the teardown a dropped link runs — every connected
-    /// peripheral disconnected with `LinkError.providerDisconnected`, every open L2CAP channel
-    /// failed, and the state dropped to `.unsupported` — and detaches every event handler a
-    /// turn behind it, this central's and each of its peripherals'. Idempotent, and safe to call from any
-    /// thread. Nothing calls it in production; `deinit` does the same work on its own.
+    /// Stops the session, then runs the teardown that a dropped link runs:
     ///
-    /// **The teardown runs before the handlers go, and the handlers go a turn behind it.**
-    /// `session.stop()` marks the session stopped before the connection's terminal transition
-    /// is observed, so the session's own `onDisconnected` never fires: without this, a
-    /// consumer mid-`read` was left awaiting a completion nothing would ever deliver rather
-    /// than failed. `deliver(_:)` hands its event to the *next* queue turn, so clearing the
-    /// handler in this block would swallow every event this teardown just produced — it is
-    /// queued behind them instead.
+    /// - Every connected peripheral is disconnected with `LinkError.providerDisconnected`.
+    /// - Every open L2CAP channel fails.
+    /// - The state drops to `.unsupported`.
+    ///
+    /// Then it detaches every event handler, one turn later, including the handler of this
+    /// central and the handler of each of its peripherals. Repeated calls are safe, and it is
+    /// safe to call from any thread. Nothing calls it in production, because `deinit` does the
+    /// same work on its own.
+    ///
+    /// **The teardown runs before the handlers go. The handlers go one turn later.**
+    /// `session.stop()` marks the session stopped before the code observes the connection's
+    /// terminal transition, so the session's `onDisconnected` never fires. Without this teardown,
+    /// a consumer in the middle of a `read` would wait for a completion that nothing delivers and
+    /// would not fail. `deliver(_:)` hands its event to the *next* queue turn, so clearing the
+    /// handler in this block would lose every event that this teardown just produced. Thus the
+    /// code queues the clearing behind those events.
     public func shutdown() {
         session.stop()
         queue.async { [self] in
@@ -194,22 +194,25 @@ public final class LinkCentral: CentralManaging, Sendable {
 
     // MARK: - CentralManaging
 
-    /// The app's Bluetooth authorization status. Always `.allowedAlways`: authorization is
-    /// the provider process's concern, and it would have refused the handshake otherwise.
+    /// The Bluetooth authorization status of the app. It is always `.allowedAlways`, because the
+    /// provider process is responsible for authorization and would have refused the handshake
+    /// otherwise.
     public static var bluetoothAuthorization: BluetoothAuthorization { .allowedAlways }
 
-    /// The provider's last reported radio state, or `.unsupported` while no provider is
-    /// connected.
+    /// The last radio state that the provider reported. The value is `.unsupported` while no
+    /// provider is connected.
     public var radioState: CentralState {
         dispatchPrecondition(condition: .onQueue(queue))
         return _radioState
     }
 
-    /// Receives every `CentralEvent` translated from the provider's wire events.
+    /// Receives every `CentralEvent` that the central translated from the provider's wire
+    /// events.
     ///
-    /// Attaching a handler schedules delivery of the current ``radioState`` — mirroring
-    /// CoreBluetooth's `centralManagerDidUpdateState(_:)` after a delegate is set, and making
-    /// the initial `.unsupported` observable even when the provider is never reachable.
+    /// When an app attaches a handler, the central schedules the delivery of the current
+    /// ``radioState``. This mirrors the `centralManagerDidUpdateState(_:)` that CoreBluetooth
+    /// sends after an app sets a delegate. It also makes the first `.unsupported` observable when
+    /// the provider is never reachable.
     public var eventHandler: ((CentralEvent) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -224,42 +227,43 @@ public final class LinkCentral: CentralManaging, Sendable {
         }
     }
 
-    /// Asks the provider to start scanning.
+    /// Asks the provider to start a scan.
     public func scanForPeripherals(withServices services: [ServiceIdentifier]?, options: ScanOptions) {
         dispatchPrecondition(condition: .onQueue(queue))
         send(.scan(services: services?.map(\.uuidString), allowDuplicates: options.allowDuplicates))
     }
 
-    /// Asks the provider to stop scanning.
+    /// Asks the provider to stop the scan.
     public func stopScan() {
         dispatchPrecondition(condition: .onQueue(queue))
         send(.stopScan)
     }
 
-    /// Asks the provider to connect to `peripheral`. A peripheral from another shim family is
-    /// ignored, as the seam specifies.
+    /// Asks the provider to connect to `peripheral`. The function ignores a peripheral from
+    /// another shim family, as the seam specifies.
     ///
-    /// **A mirror the cap evicted is re-filed rather than refused.** The table is bounded, so
-    /// a caller holding a peripheral retrieved long enough ago can find its entry gone by the
-    /// time it connects — and dropping the request on the floor would leave that caller
-    /// waiting for a `didConnect` nothing was ever going to send. The identity check is on the
-    /// peripheral's *owner*, which no eviction changes; only a peripheral belonging to another
-    /// central is ignored.
+    /// **The central files again a mirror that the cap evicted. It does not refuse it.** The table
+    /// has a limit, so a caller can hold a peripheral that it retrieved long ago, and the entry
+    /// can be gone when the caller connects. If the central dropped the request, the caller would
+    /// wait for a `didConnect` that nobody sends. The identity check is on the peripheral's
+    /// *owner*, which no eviction changes. The central ignores only a peripheral that belongs to
+    /// another central.
     ///
-    /// **A mirror this central has since replaced is failed, not ignored.** An eviction
-    /// followed by a fresh retrieval of the same identifier mints a second mirror, and the
-    /// provider's events for that identifier go to the new one — so connecting the old one
-    /// could never complete. Dropping the request would park the caller on its connect timeout
-    /// for an outcome already settled, so it is answered instead: `didFailToConnect` with
-    /// ``stalePeripheralHandleError``, delivered on ``queue`` like every other event.
+    /// **The central fails a mirror that it replaced. It does not ignore it.** An eviction and
+    /// then a new retrieval of the same identifier create a second mirror, and the provider's
+    /// wire events for that identifier go to the new mirror. A connect on the old mirror could
+    /// never complete, and if the central dropped the request, the caller would wait for its
+    /// connect timeout for an outcome that is already settled. Thus the central answers the
+    /// request. It delivers `didFailToConnect` with ``stalePeripheralHandleError``, on ``queue``,
+    /// like every other event.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let target = peripheral as? LinkPeripheral, target.isOwned(by: self) else { return }
         guard let filed = _peripherals[target.identifier] else {
             _peripherals[target.identifier] = target
             touch(target.identifier)
-            // Marked connecting *before* the cap runs, so the eviction this insert may trigger
-            // cannot pick the very peripheral being connected.
+            // Mark the peripheral as connecting *before* the cap runs, so the eviction that this
+            // insert can trigger cannot choose the peripheral that the code is connecting.
             target.markConnecting()
             evictStalePeripherals(reserving: 0)
             send(.connect(peripheral: target.identifier, options: options.map(WireConnectOptions.init), requiresANCS: requiresANCS))
@@ -273,11 +277,11 @@ public final class LinkCentral: CentralManaging, Sendable {
         send(.connect(peripheral: target.identifier, options: options.map(WireConnectOptions.init), requiresANCS: requiresANCS))
     }
 
-    /// The error a connect fails with when the peripheral it was handed is no longer the
-    /// mirror this central has filed for that identifier.
+    /// The error with which a connect fails when the peripheral that the caller passed is no
+    /// longer the mirror that this central filed for that identifier.
     ///
-    /// In `LinkError.domain` but outside `LinkError`'s own cases: this is a client-side
-    /// refusal, not a failure the link reported.
+    /// The error is in `LinkError.domain`, but it is not one of the cases of `LinkError`. It is a
+    /// client-side refusal and not a failure that the link reported.
     public static var stalePeripheralHandleError: NSError {
         NSError(
             domain: LinkError.domain,
@@ -286,8 +290,8 @@ public final class LinkCentral: CentralManaging, Sendable {
         )
     }
 
-    /// Asks the provider to cancel `peripheral`'s connection or connection attempt. A
-    /// peripheral from another shim family is ignored.
+    /// Asks the provider to cancel `peripheral`'s connection or connection attempt. The function
+    /// ignores a peripheral from another shim family.
     public func cancelPeripheralConnection(_ peripheral: any PeripheralRemote) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let target = peripheral as? LinkPeripheral, _peripherals[target.identifier] === target else { return }
@@ -295,30 +299,30 @@ public final class LinkCentral: CentralManaging, Sendable {
         send(.cancelConnection(peripheral: target.identifier))
     }
 
-    /// Returns this central's peripheral for each identifier, creating a placeholder for one
-    /// it has not seen. The same instance is always returned for a given identifier, so a
-    /// `Central` that attaches an event handler to a retrieved peripheral is attaching it to
-    /// the object the wire events will be routed to.
+    /// Returns this central's peripheral for each identifier. It creates a placeholder for an
+    /// identifier that it has not seen. It always returns the same instance for a given
+    /// identifier, so a `Central` that attaches an event handler to a retrieved peripheral
+    /// attaches it to the object to which the code routes the wire events.
     ///
-    /// **Every identifier gets one, seen or not.** This call is synchronous — there is no
-    /// round trip to ask the provider what it has scanned — so nothing here can tell a
-    /// previously-seen identifier from an invented one, and none is omitted. That is the
-    /// point: a placeholder is what lets `Central.connect(identifier:)` reach a peripheral
-    /// the provider's passthrough radio knows from a previous run of the client process,
-    /// which no scan in *this* process has sighted. An identifier nothing knows fails where
-    /// it should, at the connect: the provider answers `didFailToConnect` with
+    /// **Every identifier gets a peripheral, seen or not.** This call is synchronous, with no
+    /// round trip to ask the provider what it scanned. Thus nothing here can tell a previously
+    /// seen identifier from an invented identifier, and the function omits none. This is
+    /// intended. A placeholder lets `Central.connect(identifier:)` reach a peripheral that the
+    /// provider's passthrough radio knows from an earlier run of the client process, although no
+    /// scan in *this* process sighted it. An identifier that nothing knows fails where it must
+    /// fail, at the connect. The provider answers `didFailToConnect` with
     /// `VirtualRadio.unknownDeviceError` (the `BLESwiftProvider` domain, code `1`).
     ///
-    /// This is the one place the link's answer is wider than
-    /// `Central.knownPeripherals(withIdentifiers:)` promises, whose contract omits
-    /// unrecognized identifiers — see BLESwift's "Running in the iOS Simulator" article.
+    /// This is the one place where the link's answer is wider than the promise of
+    /// `Central.knownPeripherals(withIdentifiers:)`, whose contract omits unrecognized
+    /// identifiers. See the article "Running in the iOS Simulator" in BLESwift.
     public func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote] {
         dispatchPrecondition(condition: .onQueue(queue))
         return identifiers.map { peripheral(for: $0) }
     }
 
-    /// Every cached peripheral that is currently connected and exposes at least one of
-    /// `services` in its mirror cache.
+    /// Every cached peripheral that is connected and that exposes at least one of `services` in
+    /// its mirror cache.
     public func retrieveConnectedPeripherals(withServices services: [ServiceIdentifier]) -> [any PeripheralRemote] {
         dispatchPrecondition(condition: .onQueue(queue))
         let wanted = Set(services)
@@ -333,7 +337,7 @@ public final class LinkCentral: CentralManaging, Sendable {
         send(.registerForConnectionEvents(services: services?.map(\.uuidString), peripherals: peripherals))
     }
 
-    /// Asks the provider to cancel a prior connection-event registration.
+    /// Asks the provider to cancel an earlier connection-event registration.
     public func unregisterForConnectionEvents() {
         dispatchPrecondition(condition: .onQueue(queue))
         send(.unregisterForConnectionEvents)
@@ -341,14 +345,14 @@ public final class LinkCentral: CentralManaging, Sendable {
 
     // MARK: - Sending
 
-    /// Sends `request` over the link. The peripherals' one door to the session.
+    /// Sends `request` over the link. This is the peripherals' one door to the session.
     func send(_ request: CentralRequest) {
         dispatchPrecondition(condition: .onQueue(queue))
         session.send(.centralRequest(request))
     }
 
-    /// Allocates the next local L2CAP channel id. Monotonic from 1, so `0` is never a live
-    /// channel and can stand in for "no channel" in a failed open.
+    /// Allocates the next local L2CAP channel id. The ids are monotonic from 1, so `0` is never a
+    /// live channel. A failed open can use `0` for "no channel".
     func allocateChannelIdentifier() -> UInt32 {
         dispatchPrecondition(condition: .onQueue(queue))
         let identifier = _nextChannelIdentifier
@@ -359,14 +363,15 @@ public final class LinkCentral: CentralManaging, Sendable {
     // MARK: - L2CAP channels
 
     /// Creates the client half of an L2CAP channel under `identifier` and files it against
-    /// `peripheral`, ready for the provider's `didOpenL2CAPChannel` to hand to `Central`.
-    /// Called by ``LinkPeripheral/openL2CAPChannel(_:)`` before it sends the open request.
+    /// `peripheral`. The channel is then ready for the provider's `didOpenL2CAPChannel` to give
+    /// to `Central`. ``LinkPeripheral/openL2CAPChannel(_:)`` calls this before it sends the open
+    /// request.
     @discardableResult
     func registerChannel(_ identifier: UInt32, psm: L2CAPPSM, peripheral: UUID) -> LinkL2CAPChannel {
         dispatchPrecondition(condition: .onQueue(queue))
-        // The send closure hops onto `queue` — a channel's own methods run wherever its
-        // consumer happens to be — and doubles as the deregistration point for a
-        // client-initiated close, which the provider answers with no event of its own.
+        // The send closure hops onto `queue`, because a channel's methods run wherever its
+        // consumer is. The closure is also the point where the code deregisters a channel after
+        // a client-initiated close, which the provider answers with no event of its own.
         let channel = LinkL2CAPChannel(channel: identifier, psm: psm) { [weak self] request in
             guard let self else { return }
             queue.async { [self] in
@@ -378,27 +383,27 @@ public final class LinkCentral: CentralManaging, Sendable {
         return channel
     }
 
-    /// How many peripheral mirrors this central currently holds. Must be read on ``queue``.
+    /// The number of peripheral mirrors that this central holds. Read it on ``queue``.
     ///
-    /// A test hook: a malformed event must cost the session without filing a mirror for the
-    /// peripheral it named.
+    /// This is a test hook. A malformed event must cost the session and must not file a mirror
+    /// for the peripheral that the event named.
     package var peripheralCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _peripherals.count
     }
 
-    /// How many L2CAP channels this central currently has filed — the client halves of
-    /// opens that are either live or still awaiting their completion.
+    /// The number of L2CAP channels that this central has filed. These are the client halves of
+    /// opens that are live or that still wait for their completion.
     ///
-    /// A test hook: a failed open must leave nothing behind in the table. Must be called on
+    /// This is a test hook. A failed open must leave nothing in the table. Call it on
     /// ``queue``.
     package var openChannelCount: Int {
         dispatchPrecondition(condition: .onQueue(queue))
         return _channels.count
     }
 
-    /// Tears down every channel `predicate` selects, reporting `error` on each inbound
-    /// stream, and drops them from the table. Must be called on ``queue``.
+    /// Tears down every channel that `predicate` selects. It reports `error` on each inbound
+    /// stream and drops the channels from the table. Call it on ``queue``.
     private func closeChannels(matching predicate: (ChannelEntry) -> Bool, error: Error?) {
         dispatchPrecondition(condition: .onQueue(queue))
         let doomed = _channels.filter { predicate($0.value) }
@@ -408,7 +413,8 @@ public final class LinkCentral: CentralManaging, Sendable {
 
     // MARK: - Peripheral table
 
-    /// The peripheral for `identifier`, created (and cached) if this central has not seen it.
+    /// The peripheral for `identifier`. The central creates and caches it if it has not seen
+    /// it.
     private func peripheral(for identifier: UUID, name: String? = nil) -> LinkPeripheral {
         dispatchPrecondition(condition: .onQueue(queue))
         if let existing = _peripherals[identifier] {
@@ -416,12 +422,12 @@ public final class LinkCentral: CentralManaging, Sendable {
             touch(identifier)
             return existing
         }
-        // Evicted *before* the insert, never after: a mirror this central has only just
-        // minted is `.disconnected`, which is exactly what the cap calls stale, so a table
-        // whose other entries are all busy would otherwise answer the overflow by dropping
-        // the very mirror being handed to the caller — leaving that caller holding an
-        // unfiled object the provider's events could never reach. A slot is reserved for the
-        // insert, so the table still settles at ``maximumPeripherals`` whenever it can.
+        // Evict *before* the insert and never after. A mirror that this central just created is
+        // `.disconnected`, which the cap calls stale. If all other entries are busy, the table
+        // would answer the overflow by dropping the mirror that the code is about to give to the
+        // caller. The caller would hold an unfiled object, and the provider's events could never
+        // reach it. The code reserves a slot for the insert, so the table still settles at
+        // ``maximumPeripherals`` whenever it can.
         evictStalePeripherals(reserving: 1)
         let created = LinkPeripheral(identifier: identifier, name: name, central: self, queue: queue)
         _peripherals[identifier] = created
@@ -429,8 +435,8 @@ public final class LinkCentral: CentralManaging, Sendable {
         return created
     }
 
-    /// Moves `identifier` to the most-recently-sighted end of ``_sightingOrder``. Must be
-    /// called on ``queue``.
+    /// Moves `identifier` to the most-recently-sighted end of ``_sightingOrder``. Call it on
+    /// ``queue``.
     private func touch(_ identifier: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         if let index = _sightingOrder.firstIndex(of: identifier) {
@@ -439,14 +445,14 @@ public final class LinkCentral: CentralManaging, Sendable {
         _sightingOrder.append(identifier)
     }
 
-    /// Drops the least recently sighted `.disconnected` mirrors until the table is back
-    /// within ``maximumPeripherals``. A peripheral in any other connection state is left
-    /// alone: a connect, a live connection, or a cancellation in flight still refers to it,
-    /// and the provider's events for it must reach the instance its owner is holding. Must be
-    /// called on ``queue``.
+    /// Drops the least recently sighted `.disconnected` mirrors until the table is within
+    /// ``maximumPeripherals`` again. The function leaves a peripheral in any other connection
+    /// state alone, because a connect, a live connection, or a cancellation in flight still
+    /// refers to it, and the provider's events for it must reach the instance that its owner
+    /// holds. Call it on ``queue``.
     ///
-    /// - Parameter reserving: How many slots the caller is about to fill, kept free on top of
-    ///   the entries already in the table.
+    /// - Parameter reserving: The number of slots that the caller is about to fill. The function
+    ///   keeps them free in addition to the entries that are already in the table.
     private func evictStalePeripherals(reserving: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         let limit = maximumPeripherals - reserving
@@ -460,11 +466,11 @@ public final class LinkCentral: CentralManaging, Sendable {
                 kept.append(identifier)
                 continue
             }
-            // Detached before it goes, exactly as `CentralSession` and
-            // `VirtualCentralBackend` detach the remotes their own caps evict: an owner still
-            // holding this mirror keeps its handler alive with it, and the mirror is no longer
-            // this central's to deliver through — a later event for the same identifier
-            // reaches the fresh mirror minted in its place, and this one must stay silent.
+            // Detach the mirror before it goes, as `CentralSession` and `VirtualCentralBackend`
+            // detach the remotes that their own caps evict. An owner that still holds this mirror
+            // keeps its handler alive with it, but the mirror is no longer a way for this central
+            // to deliver. A later event for the same identifier reaches the new mirror that the
+            // code created in its place, and this mirror must stay silent.
             candidate.detachEventHandler()
             _peripherals.removeValue(forKey: identifier)
             overflow -= 1
@@ -474,8 +480,8 @@ public final class LinkCentral: CentralManaging, Sendable {
 
     // MARK: - Link lifecycle
 
-    /// Handles the link dropping after having been established: everything that was connected
-    /// is now unreachable, and the radio state is unknowable again.
+    /// Handles a link that dropped after it was established. Everything that was connected is now
+    /// unreachable, and the radio state is unknowable again.
     private func handleLinkDropped() {
         dispatchPrecondition(condition: .onQueue(queue))
         let error = LinkError.providerDisconnected.nsError
@@ -490,49 +496,50 @@ public final class LinkCentral: CentralManaging, Sendable {
         deliver(.didUpdateState(.unsupported))
     }
 
-    /// Routes an inbound message; anything that is not a `Central`-role event is not this
-    /// client's business.
+    /// Routes an inbound message. A message that is not a `Central`-role event is not a concern
+    /// of this client.
     private func handle(_ message: LinkMessage) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard case .centralEvent(let event) = message else { return }
         do {
             try handle(event)
         } catch {
-            // A provider that puts a field no BLESwift type can hold on the wire — an
-            // identifier no identifier accepts, a negotiated maximum no caller can divide by
-            // — is faulty, not merely unlucky: the session is dropped and redialed rather
-            // than trapping this process on the provider's behalf.
+            // A provider that puts a field on the wire that no BLESwift type can hold is faulty.
+            // The field can be an identifier that no identifier accepts, or a negotiated maximum
+            // that no caller can divide by. Drop the session and dial again. Do not trap this
+            // process on behalf of the provider.
             session.dropConnection()
         }
     }
 
     // MARK: - Wire events
 
-    /// Translates one ``CentralWireEvent`` into mirror-cache updates (applied inline) and the
-    /// `CentralEvent`/`PeripheralEvent` it stands for (delivered on the next queue tick).
+    /// Translates one ``CentralWireEvent`` into updates of the mirror cache and the
+    /// `CentralEvent` or `PeripheralEvent` that it stands for. The code applies the updates
+    /// inline and delivers the events on the next queue tick.
     ///
-    /// **Every field is validated before `peripheral(for:)` is called.** A throw from this
-    /// method drops the session, so anything the mirror table was given first outlives the
-    /// event that never happened: `peripheral(for:)` *mints* an entry for an unknown
-    /// identifier, and a `.disconnected` mirror filed for a malformed event is then kept —
-    /// and reported to the caller — across the reconnect that follows, and can evict a real
-    /// one on its way in. So each case below reads its identifiers, lengths, and
-    /// advertisements into locals first, and only then asks for the mirror to apply them to.
+    /// **The code validates every field before it calls `peripheral(for:)`.** A throw from this
+    /// method drops the session, so anything that the code gave to the mirror table first
+    /// outlives the event that never happened. `peripheral(for:)` *creates* an entry for an
+    /// unknown identifier. A `.disconnected` mirror that the code filed for a malformed event
+    /// stays in the table, shows up to the caller across the reconnect that follows, and can
+    /// evict a real mirror when it enters. Thus each case below first reads its identifiers,
+    /// lengths, and advertisements into local values, and only then asks for the mirror to which
+    /// it applies them.
     private func handle(_ event: CentralWireEvent) throws {
         dispatchPrecondition(condition: .onQueue(queue))
         switch event {
 
         case .didUpdateState(let state):
-            // Deliberately does NOT set `_didDeliverInitialState`: a provider state that
-            // lands before a handler is attached would otherwise suppress the setter's
-            // once-only delivery, leaving `Central.state` stuck at `.unknown` against a
-            // perfectly healthy provider. The attach always delivers `_radioState`, which
-            // this assignment has already brought up to date.
+            // Do NOT set `_didDeliverInitialState` here, on purpose. A provider state that lands
+            // before a handler is attached would otherwise suppress the once-only delivery of the
+            // setter, and `Central.state` would stay `.unknown` against a healthy provider. The
+            // attach always delivers `_radioState`, which this assignment has already updated.
             _radioState = state.state
             deliver(.didUpdateState(state.state))
 
         case .didDiscover(let uuid, let name, let advertisement, let rssi):
-            // Validated before the mirror table is touched — see the note above the switch.
+            // Validate this before touching the mirror table. See the note above the switch.
             let data = try advertisement.advertisementData
             let target = peripheral(for: uuid, name: name)
             deliver(.didDiscover(
@@ -542,10 +549,10 @@ public final class LinkCentral: CentralManaging, Sendable {
             ))
 
         case .didConnect(let uuid, let name, let maximumWriteWithResponse, let maximumWriteWithoutResponse):
-            // Validated before anything is mirrored: a maximum of zero spins
-            // `Peripheral.writeChunked` forever and a negative one traps it, so a provider
-            // that reports either is refused the same way one that reports a malformed
-            // identifier is — the session is dropped, not the process.
+            // Validate this before mirroring anything. A maximum of zero makes
+            // `Peripheral.writeChunked` loop forever, and a negative maximum makes it trap. Refuse
+            // a provider that reports either value, as for a malformed identifier: drop the
+            // session and not the process.
             let withResponse = try WireLengthValidation.validated(maximumWriteWithResponse)
             let withoutResponse = try WireLengthValidation.validated(maximumWriteWithoutResponse)
             let target = peripheral(for: uuid)
@@ -586,10 +593,9 @@ public final class LinkCentral: CentralManaging, Sendable {
         case .didDiscoverCharacteristics(let uuid, let service, let characteristics, let error):
             let serviceIdentifier = ServiceIdentifier(uuid: try WireIdentifierValidation.validated(service))
             var discovered: [CharacteristicIdentifier: CharacteristicProperties] = [:]
-            // Built by subscript, deliberately: two wire entries whose UUID strings differ
-            // only in case are one `CharacteristicIdentifier`, and the last one reported
-            // wins. Building the dictionary from the pairs instead would trap on the
-            // collision.
+            // Build the dictionary by subscript, on purpose. Two wire entries whose UUID strings
+            // differ only in case are one `CharacteristicIdentifier`, and the last one reported
+            // wins. Building the dictionary from the pairs would trap on the collision.
             for characteristic in characteristics {
                 let identifier = CharacteristicIdentifier(
                     uuid: try WireIdentifierValidation.validated(characteristic.uuid),
@@ -666,8 +672,8 @@ public final class LinkCentral: CentralManaging, Sendable {
                 return
             }
             guard let entry = _channels[identifier] else {
-                // The provider opened a channel this central has no record of — its half is
-                // live and would otherwise be pumped forever, so close it explicitly.
+                // The provider opened a channel that this central has no record of. Its half is
+                // live and would be pumped forever, so close it explicitly.
                 send(.l2capClose(channel: identifier))
                 target.deliver(.didOpenL2CAPChannel(channel: nil, error: Self.unknownChannelError))
                 return
@@ -675,8 +681,8 @@ public final class LinkCentral: CentralManaging, Sendable {
             target.deliver(.didOpenL2CAPChannel(channel: entry.channel, error: nil))
 
         case .l2capData(let identifier, let data):
-            // A throw here drops the session — the frame was larger than the chunk size both
-            // ends agreed on, which no honest provider sends.
+            // A throw here drops the session. The frame was larger than the chunk size that both
+            // ends agreed on, and no honest provider sends such a frame.
             try _channels[identifier]?.channel.receive(data)
 
         case .l2capCredit(let identifier, let bytes):
@@ -688,25 +694,25 @@ public final class LinkCentral: CentralManaging, Sendable {
         }
     }
 
-    /// The error a successful-looking open reports when this central has no channel filed
-    /// under the id the provider named — a protocol violation, not something a caller can
-    /// act on.
+    /// The error that an open reports when it looks successful but this central has no channel
+    /// filed under the id that the provider named. This is a protocol violation that a caller
+    /// cannot act on.
     private static let unknownChannelError = NSError(
         domain: LinkError.domain,
         code: 101,
         userInfo: [NSLocalizedDescriptionKey: "The provider reported an L2CAP channel this central never opened"]
     )
 
-    /// The error open channels are torn down with when their peripheral disconnects without
-    /// one of its own.
+    /// The error with which the code tears down open channels when their peripheral disconnects
+    /// without an error of its own.
     private static let disconnectedError = NSError(
         domain: LinkError.domain,
         code: 102,
         userInfo: [NSLocalizedDescriptionKey: "The peripheral disconnected, closing its L2CAP channels"]
     )
 
-    /// Delivers `event` to ``eventHandler`` asynchronously on ``queue``, honoring the seam's
-    /// never-inline delivery contract.
+    /// Delivers `event` to ``eventHandler`` asynchronously on ``queue``, as the seam's
+    /// never-inline delivery contract requires.
     private func deliver(_ event: CentralEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
         queue.async { [self] in

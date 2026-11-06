@@ -66,8 +66,8 @@ struct LinkFramingTests {
     func exactlyAtAndOneOverTheCap() throws {
         let cap = LinkFraming.maximumPayloadLength
 
-        // One byte over: refused on the declared length alone, before the bytes are waited for
-        // — the header is all this needs, so nothing of that size is ever buffered.
+        // One byte over. The decoder refuses the frame on the declared length alone, so it never
+        // buffers anything of that size.
         var oversized = Data([1])
         withUnsafeBytes(of: UInt32(cap + 1).bigEndian) { oversized.append(contentsOf: $0) }
         #expect(throws: LinkFramingError.payloadTooLarge(UInt32(cap + 1))) {
@@ -75,7 +75,6 @@ struct LinkFramingTests {
         }
         #expect(oversized.count == LinkFraming.headerLength)
 
-        // And the cap itself is a legal length, not an off-by-one refusal.
         var atCap = try LinkFraming.encodeFrame(codec: .json, payload: Data(repeating: 0x5A, count: cap))
         let frames = try LinkFraming.decodeFrames(from: &atCap)
         #expect(frames.count == 1)
@@ -85,9 +84,8 @@ struct LinkFramingTests {
 
     @Test("A payload past the cap is refused before it can be framed")
     func encodingRefusesAnOversizedPayload() {
-        // The encoder's own bound, and the one `LinkConnection.send(_:)` fails a connection
-        // on: a frame this end cannot legally send is never written, and the length is never
-        // converted to the `UInt32` the header carries.
+        // This is the encoder's bound. `LinkConnection.send(_:)` fails a connection on it, so this
+        // end never writes a frame it cannot legally send.
         let oversized = Data(repeating: 0x5A, count: LinkFraming.maximumPayloadLength + 1)
         #expect(throws: LinkFramingError.payloadTooLarge(UInt32(LinkFraming.maximumPayloadLength + 1))) {
             try LinkFraming.encodeFrame(codec: .json, payload: oversized)
@@ -96,9 +94,9 @@ struct LinkFramingTests {
 
     @Test("A declared length above Int32.max is rejected, never converted")
     func tooLargeForA32BitInt() {
-        // 0x8000_0000: the smallest length whose `Int(_:)` traps where `Int` is 32 bits
-        // (watchOS's arm64_32). Decoding must compare it as the `UInt32` it was read as, so
-        // this is a thrown error on every platform rather than a trap on one.
+        // 0x8000_0000 is the smallest length whose `Int(_:)` traps where `Int` is 32 bits (watchOS
+        // arm64_32). Decoding must compare it as a `UInt32`, so it is a thrown error on every
+        // platform.
         var buffer = Data([1, 0x80, 0x00, 0x00, 0x00])
         #expect(throws: LinkFramingError.payloadTooLarge(0x8000_0000)) {
             try LinkFraming.decodeFrames(from: &buffer)
@@ -108,9 +106,8 @@ struct LinkFramingTests {
 
     @Test("Ten thousand tiny frames in one buffer all decode, and quickly")
     func manySmallFramesInOneBuffer() throws {
-        // The shape a busy link produces: one read carrying thousands of small frames.
-        // Compacting the buffer per frame made this quadratic — every removal shifts the whole
-        // remainder down — so the bound is on the work, not just the answer.
+        // One read that carries thousands of small frames. Compacting the buffer for each frame was
+        // quadratic, so the bound is on the work and not only on the answer.
         let count = 10_000
         var buffer = Data()
         for index in 0..<count {
@@ -131,7 +128,6 @@ struct LinkFramingTests {
             #expect(frame.codec == (index.isMultiple(of: 2) ? .json : .binaryPropertyList), "frame \(index)")
             #expect(Array(frame.payload) == [UInt8(index & 0xFF), UInt8((index >> 8) & 0xFF)], "frame \(index)")
         }
-        // The partial frame at the end is kept, and it is *all* that is kept.
         #expect(buffer == trailing.prefix(4))
         #expect(elapsed < .seconds(1), "decoding took \(elapsed)")
     }

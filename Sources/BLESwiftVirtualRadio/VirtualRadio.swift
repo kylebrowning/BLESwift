@@ -8,17 +8,16 @@ import Foundation
 import Logging
 import BLESwiftCompat17
 
-/// An in-process BLE radio hosting ``VirtualDevice``s and serving them to any number of
-/// ``VirtualCentralBackend``s — fixture devices and simulator-to-simulator BLE with no
-/// hardware involved.
+/// An in-process BLE radio. It hosts ``VirtualDevice``s and serves them to any number of
+/// ``VirtualCentralBackend``s. It supports fixture devices and simulator-to-simulator BLE with no
+/// hardware.
 ///
-/// The radio owns every piece of shared state: the registered devices, each backend's
-/// scanner, its connections, and its notification subscriptions. Backends are queue-confined
-/// classes that call in with `await` and deliver results back on their own queue, so no
-/// CoreBluetooth-shaped delivery contract is ever violated.
+/// The radio owns all shared state: the registered devices, each backend's scanner, connections,
+/// and notification subscriptions. Backends are queue-confined classes. They call in with `await`
+/// and deliver results back on their own queue, so the radio never violates a CoreBluetooth
+/// delivery contract.
 ///
-/// The `NSError` domain of this radio's errors is `"BLESwiftProvider"`, kept from before the
-/// radio moved out of that module, so callers that already switch on it keep working.
+/// The `NSError` domain of this radio's errors is `"BLESwiftProvider"`.
 ///
 /// ```swift
 /// let radio = VirtualRadio()
@@ -29,47 +28,43 @@ import BLESwiftCompat17
 /// ```
 public actor VirtualRadio {
 
-    /// The RSSI every sighting and `PeripheralRemote.readRSSI()` reports.
-    /// Virtual devices have no radio distance, so a single plausible value stands in.
+    /// The RSSI that every sighting and `PeripheralRemote.readRSSI()` reports. Virtual devices have
+    /// no radio distance, so one plausible value stands in.
     public static let rssi = -50
 
-    /// The length ceiling for a `.withResponse` write, on every device. 512 is the maximum
-    /// ATT attribute length, the natural ceiling for a link with no real MTU negotiation —
-    /// and the length a `.withResponse` write really does reach on hardware, through ATT long
-    /// writes.
+    /// The length ceiling for a `.withResponse` write, on every device. 512 is the maximum ATT
+    /// attribute length. A `.withResponse` write really reaches this length on hardware, through
+    /// ATT long writes.
     public static let maximumValueLength = 512
 
-    /// The default length a single ATT packet may carry: 182, iOS's ATT_MTU of 185 less the
-    /// three bytes of ATT header. The ceiling for a `.withoutResponse` write, and the
-    /// `maximumUpdateValueLength` a subscriber of a virtual device reports. A device sets its
-    /// own with ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``; this is what
-    /// one that does not gets.
+    /// The default length that a single ATT packet can carry: 182, the iOS ATT_MTU (185) less the
+    /// three-byte ATT header. It is the ceiling for a `.withoutResponse` write and the
+    /// `maximumUpdateValueLength` that a subscriber of a virtual device reports. A device sets its
+    /// own length with ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``. A device that
+    /// does not set one gets this value.
     ///
-    /// **The two write types differ sharply on hardware, and a harness that hides it is worse
-    /// than useless.** A `.withResponse` write reaches 512 bytes because ATT splits it into
-    /// long-write chunks; a `.withoutResponse` write is one ATT packet and cannot exceed
-    /// ATT_MTU − 3, and CoreBluetooth *silently drops* an oversize one. Reporting 512 for both
-    /// let a 400-byte `.withoutResponse` write pass here and vanish on device — the single
-    /// most common MTU footgun this harness exists to catch.
+    /// **The two write types differ sharply on hardware.** A `.withResponse` write reaches 512
+    /// bytes, because ATT splits it into long-write chunks. A `.withoutResponse` write is one ATT
+    /// packet and cannot exceed ATT_MTU − 3. CoreBluetooth *silently drops* an oversize one. If the
+    /// radio reported 512 for both, a 400-byte `.withoutResponse` write would pass here and vanish
+    /// on a device. This is the most common MTU trap, and this harness exists to catch it.
     ///
-    /// **A notification is one ATT packet too**, so it is held to this ceiling rather than to
-    /// ``maximumValueLength``: there is no long-write equivalent for a notification, and
-    /// CoreBluetooth truncates one past the subscriber's `maximumUpdateValueLength`. Reporting
-    /// 512 to a device handler had it push a 400-byte update that arrived whole here and
-    /// arrived clipped to 182 on device — the same divergence in the opposite direction.
+    /// **A notification is one ATT packet too.** The radio holds it to this ceiling and not to
+    /// ``maximumValueLength``, because a notification has no long-write equivalent. CoreBluetooth
+    /// truncates a notification that is longer than the subscriber's `maximumUpdateValueLength`. A
+    /// 400-byte update would arrive whole here and clipped to 182 on a device.
     public static let maximumWriteWithoutResponseLength = 182
 
-    /// How long a GATT request parked for a hosted `PeripheralHost` waits for that host's
-    /// answer before it is refused with `ATTError.unlikelyError`.
+    /// How long a GATT request that is parked for a hosted `PeripheralHost` waits for that host's
+    /// answer. After this time, the radio refuses the request with `ATTError.unlikelyError`.
     ///
-    /// A host that never responds — one wedged in its own request handler, or a link client
-    /// that stopped answering — would otherwise leave the central's read or write suspended
-    /// forever, and with it every later operation queued behind it on that remote. Thirty
-    /// seconds is the ATT transaction timeout Bluetooth Core specifies, so a virtual radio
-    /// gives up on the same schedule real hardware does.
+    /// Without it, a host that never responds (a host wedged in its request handler, or a link
+    /// client that stopped answering) would leave the central's read or write suspended forever,
+    /// with every later operation queued behind it. Thirty seconds is the ATT transaction timeout
+    /// that Bluetooth Core specifies.
     public static let attTimeout = Duration.seconds(30)
 
-    /// The error a connection attempt to an unregistered device fails with.
+    /// The error that a connection attempt to an unregistered device fails with (code 1).
     public static var unknownDeviceError: NSError {
         NSError(
             domain: "BLESwiftProvider",
@@ -78,7 +73,7 @@ public actor VirtualRadio {
         )
     }
 
-    /// The error a connected central is disconnected with when its device is removed.
+    /// The error that a connected central is disconnected with when its device is removed (code 2).
     public static var deviceRemovedError: NSError {
         NSError(
             domain: "BLESwiftProvider",
@@ -87,58 +82,56 @@ public actor VirtualRadio {
         )
     }
 
-    /// How often a duplicate-allowing scanner re-reports every matching device.
+    /// How often a scanner that allows duplicates reports every matching device again.
     private static let duplicateInterval = Duration.seconds(1)
 
-    /// Where the radio reports a mutation refused because its handle is stale. Nothing else
-    /// in the radio logs: this is the one event that is silently *not* what its caller asked
-    /// for, and a session teardown that quietly did nothing is worth a line.
+    /// Where the radio reports a mutation that it refused because its handle is stale. Nothing else
+    /// in the radio logs. This is the one event that silently is *not* what its caller asked for.
     private static let logger = Logger(label: "BLESwiftVirtualRadio.VirtualRadio")
 
-    /// One registered device: its description, whether it is currently advertising, which
-    /// registration of its identifier it belongs to, and the faults armed on it.
+    /// One registered device: its description, whether it is advertising, which registration of its
+    /// identifier it belongs to, and the faults armed on it.
     ///
-    /// Fault state lives here, with the registration, so it goes when the device does:
-    /// `remove()` followed by registering the identifier again starts clean, and a stale
-    /// handle can no more arm a fault on its successor than it can unadvertise it.
+    /// Fault state lives here, with the registration, so it goes when the device goes. A `remove()`
+    /// followed by a new registration of the identifier starts clean, and a stale handle cannot arm
+    /// a fault on its successor.
     struct DeviceState {
         var descriptor: VirtualDeviceDescriptor
         let handler: any VirtualDeviceHandler
         var isAdvertising: Bool
-        /// The generation ``register(_:advertising:)`` stamped this registration with. A
-        /// handle from an earlier registration of the same identifier carries an older one
-        /// and is refused. See ``VirtualDeviceHandle/generation``.
+        /// The generation that ``register(_:advertising:)`` stamped this registration with. The
+        /// radio refuses a handle from an earlier registration, which carries an older generation.
+        /// See ``VirtualDeviceHandle/generation``.
         let generation: UInt64
-        /// The ATT answers injected per characteristic. See
+        /// The ATT answers injected for each characteristic. See
         /// ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
         var attErrors: [CharacteristicIdentifier: InjectedATTErrors] = [:]
-        /// The error the next connection attempts fail with, and how many of them —
-        /// `nil` for every attempt until cleared. See
-        /// ``VirtualDeviceHandle/failConnections(with:times:)``.
+        /// The error that the next connection attempts fail with, and how many of them (`nil` means
+        /// every attempt until cleared). See ``VirtualDeviceHandle/failConnections(with:times:)``.
         var connectionFailure: (error: NSError, remaining: Int?)?
     }
 
-    /// The ATT error injected for each operation on one characteristic, `nil` where the
-    /// operation is served normally. An entry with all three `nil` is not kept.
+    /// The ATT error injected for each operation on one characteristic. A `nil` slot means the
+    /// radio serves the operation normally. The radio keeps no entry with all three slots `nil`.
     struct InjectedATTErrors {
         var read: ATTError?
         var write: ATTError?
         var subscribe: ATTError?
 
-        /// Whether every slot is clear, so the entry can be dropped.
+        /// Whether every slot is clear, so the radio can drop the entry.
         var isEmpty: Bool { read == nil && write == nil && subscribe == nil }
     }
 
-    /// What ``connect(session:device:sink:)`` answers: the error to fail the attempt with,
-    /// or the connected device's name and the one-packet length it negotiates.
+    /// What ``connect(session:device:sink:)`` answers: the error that fails the attempt, or the
+    /// connected device's name and negotiated one-packet length.
     ///
-    /// Answered in the one hop rather than left to follow-up calls: the device could be
-    /// removed or re-registered between them, and a connection that just succeeded would then
-    /// be named `nil` or report a ceiling that belongs to a different registration.
+    /// The radio answers in one hop, because the device could be removed or registered again
+    /// between follow-up calls. A connection that just succeeded would then get the name `nil`, or
+    /// report a ceiling that belongs to a different registration.
     package struct ConnectOutcome: Sendable {
-        /// The error to fail the attempt with; `nil` when it succeeded.
+        /// The error that fails the attempt, or `nil` when the attempt succeeded.
         package let error: NSError?
-        /// The connected device's name; `nil` on failure or for an unnamed device.
+        /// The connected device's name, or `nil` on failure or for an unnamed device.
         package let name: String?
         /// The connected device's ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``.
         package let maximumWriteWithoutResponseLength: Int
@@ -149,13 +142,13 @@ public actor VirtualRadio {
         }
     }
 
-    /// One backend's active scan.
+    /// The active scan of one backend.
     struct Scanner {
         var services: [ServiceIdentifier]?
         var repeater: Task<Void, Never>?
     }
 
-    /// Everything the radio holds on behalf of one attached backend.
+    /// Everything that the radio holds on behalf of one attached backend.
     struct Session {
         let centralSink: @Sendable (CentralEvent) -> Void
         var peripheralSinks: [UUID: @Sendable (PeripheralEvent) -> Void] = [:]
@@ -166,146 +159,129 @@ public actor VirtualRadio {
     var devices: [UUID: DeviceState] = [:]
     var sessions: [UUID: Session] = [:]
 
-    /// Stamps every registration, so a handle can be told from one the same identifier was
-    /// re-registered under since. Monotonic across the radio — nothing reads it as a count,
-    /// only as an identity — and never reused.
+    /// Stamps every registration, so the radio can tell a handle from a handle of the same
+    /// identifier that was registered again later. The value is monotonic across the radio and
+    /// never reused. Read it as an identity, not a count.
     private var lastGeneration: UInt64 = 0
 
-    /// The identifiers this radio currently has devices registered for, readable without
-    /// awaiting the actor.
+    /// The identifiers of the devices registered on this radio. Code can read it without an
+    /// `await`.
     ///
-    /// A backend has to answer `retrievePeripherals(withIdentifiers:)` **synchronously**, on
-    /// its own queue, so it cannot ask the radio. Pushing a snapshot to it instead was the
-    /// obvious alternative and the wrong one: the push costs an actor hop plus a queue hop, so
-    /// a client that registers a device and connects to it in the same synchronous flow — the
-    /// provider's own sessions do exactly that — could look the identifier up before the
-    /// snapshot arrived and be told no such device exists. This is the same set, written
-    /// inside ``register(_:advertising:)`` and the removal path before either returns, so a
-    /// registration is visible to every backend the instant it has happened.
+    /// A backend must answer `retrievePeripherals(withIdentifiers:)` **synchronously**, on its own
+    /// queue, so it cannot ask the radio. A pushed snapshot would cost an actor hop plus a queue
+    /// hop. A client that registers a device and connects to it in one synchronous flow, as the
+    /// provider's sessions do, could look up the identifier before the snapshot arrived and be told
+    /// that no such device exists.
+    ///
+    /// The code writes this set inside ``register(_:advertising:)`` and the removal path, before
+    /// either returns, so every backend sees a registration the instant it happens.
     package nonisolated let knownDeviceIDs = Mutex<Set<UUID>>([])
 
-    /// Each registered device's connect delay, readable without awaiting the actor — only
+    /// The connect delay of each registered device. Code can read it without an `await`. Only
     /// devices with a non-zero ``VirtualLatency/connect`` have an entry.
     ///
-    /// ``VirtualCentralBackend/connect(_:options:requiresANCS:)`` has to decide
-    /// **synchronously, on its own queue**, whether an attempt sleeps before it reaches the
-    /// radio: a delayed attempt must not sit in the backend's serial chain, where a cancel
-    /// queued behind it would wait out the delay and then see a spurious `didConnect`. Like
-    /// ``knownDeviceIDs``, this is written inside ``register(_:advertising:)``,
-    /// ``setLatency(_:device:generation:)``, and the removal path before any of them returns.
+    /// ``VirtualCentralBackend/connect(_:options:requiresANCS:)`` must decide **synchronously, on
+    /// its own queue**, whether an attempt sleeps before it reaches the radio. A delayed attempt
+    /// must not sit in the backend's serial chain, where a queued cancel would wait out the delay
+    /// and then see a spurious `didConnect`. Like ``knownDeviceIDs``, the code writes this inside
+    /// ``register(_:advertising:)``, ``setLatency(_:device:generation:)``, and the removal path,
+    /// before any of them returns.
     package nonisolated let connectLatencies = Mutex<[UUID: Duration]>([:])
 
-    /// The clock every delay on this radio sleeps on: a device's ``VirtualLatency``, the
-    /// duplicate-sighting repeater, and a hosted `PeripheralHost`'s ATT timeout. Wall time
-    /// unless ``init(clock:)`` was given another.
+    /// The clock that every delay on this radio sleeps on: a device's ``VirtualLatency``, the
+    /// repeater for duplicate sightings, and a hosted `PeripheralHost`'s ATT timeout. It is wall
+    /// time unless the caller gave another clock to ``init(clock:)``.
     public nonisolated let clock: any Clock<Duration>
 
-    /// Notification subscriptions, keyed by device, then characteristic, to the set of
-    /// session identifiers currently subscribed.
+    /// The notification subscriptions: device, then characteristic, then the set of subscribed
+    /// session identifiers.
     private var subscriptions: [UUID: [CharacteristicIdentifier: Set<UUID>]] = [:]
 
-    /// The tail of each device's report chain: the task delivering the last subscription
-    /// report — or trailing `didDisconnect` — enqueued for that device, which the next one
-    /// waits on. An entry is removed when its step finishes while still the tail, so the
-    /// table holds only devices with a report in flight.
+    /// The tail of each device's report chain: the task that delivers the last subscription report,
+    /// or the last trailing `didDisconnect`, enqueued for that device. The next step waits on it. A
+    /// step that finishes while it is still the tail removes the entry, so the table holds only
+    /// devices with a report in flight.
     ///
-    /// **Why a chain (#76):** the radio changes its subscription table synchronously and
-    /// then awaits `handler.subscriptionChanged`. The actor is reentrant across that await,
-    /// so a later table change for the same device — a disconnect, removal, re-registration,
-    /// `setServices`, or detach dropping that subscription — could report
-    /// `isSubscribed: false` while the earlier `isSubscribed: true` report was still in
-    /// flight, and a handler that awaits inside its report then finished the two out of
-    /// order. Every report is now a step on its device's chain, enqueued in the same
-    /// synchronous actor section as the table change it reports, so chain order is table
-    /// order and a handler hears each device's changes one at a time, in the order they
-    /// happened. See ``enqueueReport(device:_:)``.
+    /// **Why a chain exists:** The radio changes its subscription table synchronously and then
+    /// awaits `handler.subscriptionChanged`. The actor is reentrant across that await, so a later
+    /// table change for the same device (from a disconnect, a removal, a re-registration,
+    /// `setServices`, or a detach) could report `isSubscribed: false` while the earlier
+    /// `isSubscribed: true` report was in flight. A handler that awaits inside its report then
+    /// finished the two out of order.
+    ///
+    /// Every report is thus a step on its device's chain, enqueued in the same synchronous actor
+    /// section as the table change that it reports. Chain order is table order, and a handler hears
+    /// each device's changes one at a time, in the order they happened. See
+    /// ``enqueueReport(device:_:)``.
     private var reportChains: [UUID: ReportChain] = [:]
 
-    /// One device's report chain: its tail and the sequence number that identifies it, so a
-    /// step that finishes can tell whether it is still the tail.
+    /// The report chain of one device: its tail, and the sequence number that a finishing step uses
+    /// to check whether it is still the tail.
     private struct ReportChain {
         let tail: Task<Void, Never>
         let sequence: UInt64
     }
 
-    /// Stamps every chain step, so the one that finishes can tell whether a later step has
-    /// been chained behind it. Monotonic across the radio and never reused.
+    /// Stamps every chain step, so a finishing step can check whether a later step was chained
+    /// behind it. The value is monotonic across the radio and never reused.
     private var lastReportSequence: UInt64 = 0
 
-    /// Whether the current task is delivering a report from a device's chain — `true` for
-    /// the whole of every chain step, and so inside every handler's `subscriptionChanged`
-    /// and every task it spawns from there (a `Task.detached` drops it).
+    /// Whether the current task delivers a report from a device's chain. The value is `true` for
+    /// the whole of every chain step: inside every handler `subscriptionChanged` and inside every
+    /// task that the handler spawns from there. A `Task.detached` drops it.
     ///
-    /// **A task spawned during a report keeps this for its whole lifetime**, not only while
-    /// the report is open: a notification loop a handler starts on `didSubscribe` runs with
-    /// it set until the loop ends, so every radio call that loop makes — a `setServices`, a
-    /// forced disconnect — returns before its reports are delivered, exactly as a call made
-    /// from inside the report does. A handler that needs to wait for those reports starts
-    /// the loop with `Task.detached`.
+    /// **A task that is spawned during a report keeps this value for its whole lifetime**, not only
+    /// while the report is open. For example, a handler starts a notification loop on
+    /// `didSubscribe`. The loop runs with the value set until it ends, so every radio call that the
+    /// loop makes (such as `setServices` or a forced disconnect) returns before the radio delivers
+    /// its reports, as a call from inside the report does. A handler that needs to wait for those
+    /// reports starts the loop with `Task.detached`.
     ///
-    /// Every entry point that enqueues reports awaits its chain's tail before returning,
-    /// so a caller knows its reports have been delivered. Called from inside a report, that
-    /// wait would be on the very step the caller is running inside — a deadlock — so an
-    /// entry point that finds this set enqueues its steps and returns without awaiting them.
-    /// See ``settle(_:)``.
+    /// Every entry point that enqueues reports awaits the tail of its chain before it returns, so
+    /// the caller knows its reports were delivered. A call from inside a report would wait on the
+    /// very step that it runs inside, a deadlock. An entry point that finds this value set thus
+    /// enqueues its steps and returns without waiting. See ``settle(_:)``.
     @TaskLocal static var isReporting = false
 
-    /// How many devices currently have a report chain. Not API: it exists so a test can
-    /// assert that a burst of reports left no chain behind once every one was delivered.
+    /// How many devices have a report chain now. This is a test hook, not API. A test uses it to
+    /// assert that a burst of reports left no chain behind.
     package var reportChainCount: Int {
         reportChains.count
     }
 
     /// Creates an empty radio.
     ///
-    /// - Parameter clock: The clock every delay on this radio sleeps on. Defaults to
-    ///   `ContinuousClock()`; a test hands in `BLESwiftTestSupport`'s `ManualClock` and
-    ///   advances it to drive a device's ``VirtualLatency`` to its deadline.
+    /// - Parameter clock: The clock that every delay on this radio sleeps on. The default is
+    ///   `ContinuousClock()`. A test gives the `ManualClock` of `BLESwiftTestSupport` and advances
+    ///   it to drive a device's ``VirtualLatency`` to its deadline.
     public init(clock: any Clock<Duration> = ContinuousClock()) {
         self.clock = clock
     }
 
     // MARK: - Devices
 
-    /// Registers `device`, making it visible to every backend this radio serves.
+    /// Registers `device` and makes it visible to every backend that this radio serves.
     ///
-    /// **An identifier already registered is replaced, and the old registration retired as
-    /// ``VirtualDeviceHandle/remove()`` retires one** — what a link client redialing under a
-    /// stable `hostIdentifier` produces. Each subscription the old registration held is
-    /// reported to the *old* handler as an unsubscribe, and every central connected to it
-    /// then hears `didDisconnect` with ``deviceRemovedError`` — unsubscribes first, as every
-    /// teardown here orders them, since a `Central` that heard the disconnect first would
-    /// reconnect to the new registration and re-subscribe while the old unsubscribe was
-    /// still in flight. The new handler hears nothing, since it never saw those subscribers
-    /// arrive. Left in place, as they were before, the connections and subscriptions
-    /// carried over to a registration whose handler had been told of neither: it inherited
-    /// subscribers it never received `subscriptionChanged(isSubscribed: true)` for, the old
-    /// handler never heard the matching unsubscribes, and the centrals stayed connected to a
-    /// device that had changed under them without a word.
+    /// If the identifier is already registered, the radio replaces it and retires the old
+    /// registration as ``VirtualDeviceHandle/remove()`` does. A link client that redials with a
+    /// stable `hostIdentifier` causes this case.
     ///
-    /// While the old handler is reporting those unsubscribes, a connected central has lost its
-    /// connection but not yet heard so — the same window, with the same outcomes, that
-    /// ``VirtualDeviceHandle/disconnect(_:error:)`` documents. A scanning central may also see
-    /// the new registration's sighting before that `didDisconnect`.
+    /// 1. The radio reports each subscription of the old registration to the *old* handler as an
+    ///    unsubscribe.
+    /// 2. Every central that is connected to the old registration hears `didDisconnect` with
+    ///    ``deviceRemovedError``.
+    /// 3. The new handler hears nothing.
     ///
-    /// The new device state is installed before the first `await`, and the identifier
-    /// stays in `knownDeviceIDs` throughout, so a backend resolving the identifier while
-    /// the old handler is still being told about its unsubscribes finds the device there —
-    /// the identifier is never absent, which is the whole point of re-registering instead
-    /// of removing and registering.
-    ///
-    /// The retirement's reports go on the identifier's report chain, behind every report
-    /// already in flight for it, and the new registration shares that chain: the new
-    /// handler hears nothing until the old handler's retirement reports have run. Called
-    /// from inside a subscription report — a handler's `subscriptionChanged`, or a task it
-    /// spawned there — this returns before those reports are delivered, since awaiting
-    /// them would wait on the report it was called from.
+    /// The unsubscribes come first, so the window of <doc:InProcessMocking#Forced-disconnects>
+    /// applies. If you call this method from inside a subscription report, it returns before the
+    /// radio delivers the retirement's reports. See
+    /// <doc:InProcessMocking#Report-order-and-reentrancy>.
     ///
     /// - Parameters:
     ///   - device: The device to host.
-    ///   - advertising: Whether it starts out advertising. Defaults to `true`.
-    /// - Returns: A ``VirtualDeviceHandle`` for pushing notifications and mutating the
-    ///   device after registration.
+    ///   - advertising: Whether it starts out advertising. The default is `true`.
+    /// - Returns: A ``VirtualDeviceHandle`` that pushes notifications and changes the device after
+    ///   registration.
     @discardableResult
     public func register(_ device: VirtualDevice, advertising: Bool = true) async -> VirtualDeviceHandle {
         let identifier = device.descriptor.identifier
@@ -314,9 +290,10 @@ public actor VirtualRadio {
             (20...512).contains(packetLength),
             "maximumWriteWithoutResponseLength must be in 20...512 (ATT_MTU 23 − 3 up to the attribute maximum); got \(packetLength)"
         )
-        // Retired before the new state goes in, so every table — connections, sinks,
-        // subscriptions — belongs to one registration at a time; its reports wait until the
-        // new state is in place, so nothing a handler does on hearing them finds a gap.
+        // Retire the old registration before the new state goes in, so every table (connections,
+        // sinks, subscriptions) belongs to one registration at a time. The retirement's reports
+        // wait until the new state is in place, so nothing a handler does on hearing them finds a
+        // gap.
         let retired = retire(identifier)
         lastGeneration += 1
         let generation = lastGeneration
@@ -339,16 +316,14 @@ public actor VirtualRadio {
         return VirtualDeviceHandle(identifier: identifier, generation: generation, radio: self)
     }
 
-    /// Whether the device registered under `device` is the one `generation` was handed out
-    /// for. Must be checked by every mutation a ``VirtualDeviceHandle`` performs.
+    /// Whether the device registered under `device` is the one for which the radio handed out
+    /// `generation`. Every mutation that a ``VirtualDeviceHandle`` performs must check this.
     ///
-    /// A registration replaces any earlier one for the same identifier — which is exactly what
-    /// a link client redialing under a stable `hostIdentifier` produces — and the session it
-    /// replaced tears itself down asynchronously afterwards. Keyed by identifier alone, that
-    /// teardown's `remove`, `stopAdvertising`, and `removeAllHostedServices` would land on the
-    /// *new* session's device: the reconnect would come up registered, then be unregistered,
-    /// unadvertised, or emptied a moment later by a session that no longer exists. The
-    /// generation is what tells the two apart.
+    /// A registration replaces any earlier one for the same identifier, as when a link client
+    /// redials with a stable `hostIdentifier`. The replaced session tears itself down
+    /// asynchronously afterwards. If the radio keyed by identifier alone, that teardown's `remove`,
+    /// `stopAdvertising`, and `removeAllHostedServices` would land on the *new* session's device
+    /// and unregister, unadvertise, or empty it. The generation tells the two sessions apart.
     func isCurrent(_ device: UUID, generation: UInt64, operation: String) -> Bool {
         guard let state = devices[device] else { return false }
         guard state.generation == generation else {
@@ -363,17 +338,17 @@ public actor VirtualRadio {
         return true
     }
 
-    /// The generation currently registered under `device`, or `nil` if nothing is.
+    /// The generation registered under `device`, or `nil` if nothing is registered.
     ///
-    /// Not API: it exists so a test can act on a device through the radio when the
+    /// This is a test hook, not API. A test uses it to act on a device through the radio when the
     /// ``VirtualDeviceHandle`` for it belongs to the backend that registered it.
     package func generation(of device: UUID) -> UInt64? {
         devices[device]?.generation
     }
 
-    /// The name of a registered device, or `nil` if it is unknown or unnamed.
+    /// The name of a registered device, or `nil` if the device is unknown or unnamed.
     ///
-    /// - Parameter device: The device's identifier.
+    /// - Parameter device: The identifier of the device.
     /// - Returns: The device's name.
     public func name(of device: UUID) -> String? {
         devices[device]?.descriptor.name
@@ -390,14 +365,13 @@ public actor VirtualRadio {
         }
     }
 
-    /// Replaces a registered device's advertisement. See
+    /// Replaces the advertisement of a registered device. See
     /// ``VirtualDeviceHandle/setAdvertisement(_:)``.
     ///
     /// A non-`nil` ``BLESwiftCore/AdvertisementData/localName`` also becomes the device's
-    /// ``VirtualDeviceDescriptor/name``, which is CoreBluetooth's behavior: a `CBPeripheral`
-    /// discovered from an advertisement carrying a local name reports that name, so a
-    /// `PeripheralHost` that advertises under a local name is seen under it. An advertisement
-    /// without a local name leaves the existing name alone.
+    /// ``VirtualDeviceDescriptor/name``, as in CoreBluetooth, where a `CBPeripheral` discovered
+    /// from an advertisement with a local name reports that name. An advertisement without a local
+    /// name leaves the existing name alone.
     func setAdvertisement(_ advertisement: AdvertisementData, device: UUID, generation: UInt64) {
         guard isCurrent(device, generation: generation, operation: "setAdvertisement") else { return }
         devices[device]?.descriptor.advertisement = advertisement
@@ -406,10 +380,10 @@ public actor VirtualRadio {
         }
     }
 
-    /// Replaces a registered device's latency. See ``VirtualDeviceHandle/setLatency(_:)``.
+    /// Replaces the latency of a registered device. See ``VirtualDeviceHandle/setLatency(_:)``.
     ///
-    /// The connect delay is mirrored into ``connectLatencies`` before this returns, so a
-    /// backend deciding on its own queue sees the new value the moment the handle's call has
+    /// The radio mirrors the connect delay into ``connectLatencies`` before this method returns, so
+    /// a backend that decides on its own queue sees the new value as soon as the handle's call has
     /// landed.
     func setLatency(_ latency: VirtualLatency, device: UUID, generation: UInt64) {
         guard isCurrent(device, generation: generation, operation: "setLatency") else { return }
@@ -417,9 +391,9 @@ public actor VirtualRadio {
         recordConnectLatency(latency.connect, of: device)
     }
 
-    /// Mirrors `delay` into ``connectLatencies`` — an entry for a non-zero delay, none for
-    /// zero, so a device whose delay was cleared, or re-registered without one, leaves no
-    /// entry behind for a backend to sleep on.
+    /// Mirrors `delay` into ``connectLatencies``. A non-zero delay gets an entry and a zero delay
+    /// gets none, so a device whose delay was cleared, or that was registered again without one,
+    /// leaves no entry for a backend to sleep on.
     private nonisolated func recordConnectLatency(_ delay: Duration, of device: UUID) {
         connectLatencies.withLock { (latencies: inout [UUID: Duration]) -> Void in
             if delay > .zero {
@@ -430,40 +404,39 @@ public actor VirtualRadio {
         }
     }
 
-    /// The delay a device's ``VirtualLatency`` sets for one kind of request, as of now, or
-    /// `nil` when there is none to wait out — the device is gone, or the delay is zero.
+    /// The delay that a device's ``VirtualLatency`` sets for one kind of request, as of now, or
+    /// `nil` when there is no delay to wait out (the device is gone or the delay is zero).
     ///
-    /// The zero check is what keeps an undelayed operation on its old path exactly: a
-    /// `sleep(for: .zero)` would still suspend and, on a `ManualClock`, register a sleeper
-    /// for a test to wait on, so nothing is ever slept for `.zero`.
+    /// The code never sleeps for `.zero`. A `sleep(for: .zero)` would still suspend, and on a
+    /// `ManualClock` it would register a sleeper for a test to wait on.
     private func latency(for operation: KeyPath<VirtualLatency, Duration>, on device: UUID) -> Duration? {
         guard let delay = devices[device]?.descriptor.latency[keyPath: operation], delay > .zero else { return nil }
         return delay
     }
 
-    /// Replaces a registered device's GATT database. See
+    /// Replaces the GATT database of a registered device. See
     /// ``VirtualDeviceHandle/setServices(_:)``.
     ///
-    /// A service the new database drops is reported to every connected session as
-    /// `PeripheralEvent.didModifyServices`, carrying the invalidated services —
-    /// CoreBluetooth's `peripheral(_:didModifyServices:)`, which is how a central learns that
-    /// handles it discovered are gone and must be discovered again. Nothing is reported for a
-    /// database that only gained services: CoreBluetooth's callback names what was
-    /// *invalidated*, and a purely additive change invalidates nothing.
+    /// If the new database drops a service, the radio reports `PeripheralEvent.didModifyServices`,
+    /// with the invalidated services, to every connected session. This is CoreBluetooth's
+    /// `peripheral(_:didModifyServices:)`: a central learns that handles it discovered are gone and
+    /// must be discovered again. The radio reports nothing for a database that only gained
+    /// services, because a purely additive change invalidates nothing.
     ///
-    /// **A subscription under an invalidated service goes with it**, and is reported to the
-    /// device's handler as an unsubscribe, exactly as ``disconnect(session:device:)`` and
-    /// ``remove(device:generation:)`` report theirs — CoreBluetooth delivers
-    /// `didUnsubscribeFrom` when a published service is removed. Left standing, the entry was
-    /// a subscriber a link-hosted `PeripheralHost` could never lose, and it also poisoned
-    /// re-subscription: re-adding the service and subscribing again found the session already
-    /// in the set, so no transition was reported and the host — which starts notifying on
-    /// `didSubscribe` — was never told, while the central sat waiting on a stream that reported
-    /// itself armed.
+    /// **A subscription under an invalidated service goes with it.** The radio reports it to the
+    /// device's handler as an unsubscribe, as ``disconnect(session:device:)`` and
+    /// ``remove(device:generation:)`` do. CoreBluetooth delivers `didUnsubscribeFrom` when code
+    /// removes a published service. If the entry stayed:
     ///
-    /// The unsubscribes go on the device's report chain and this returns once they are
-    /// delivered — unless called from inside a subscription report, when it returns before
-    /// (see ``isReporting``).
+    /// - It would be a subscriber that a link-hosted `PeripheralHost` could never lose.
+    /// - It would poison re-subscription. After the service was added and subscribed again, the
+    ///   radio would find the session already in the set and report no transition. The host starts
+    ///   to notify on `didSubscribe`, so it would never be told, and the central would wait on a
+    ///   stream that reported itself armed.
+    ///
+    /// The unsubscribes go on the device's report chain. This method returns after the radio
+    /// delivers them, except for a call from inside a subscription report, which returns before.
+    /// See ``isReporting``.
     func setServices(_ services: [GATTService], device: UUID, generation: UInt64) async {
         guard isCurrent(device, generation: generation, operation: "setServices") else { return }
         let before = Set(devices[device]?.descriptor.services.map(\.identifier) ?? [])
@@ -476,10 +449,10 @@ public actor VirtualRadio {
             session.peripheralSinks[device]?(.didModifyServices(Array(invalidated)))
             dropped.append((subscriber(sessionID, device: device), dropSubscriptions(session: sessionID, device: device, under: invalidated)))
         }
-        // Every table is settled before the first `await`, as in ``detach(session:)``, so a
-        // handler that calls back into the radio cannot observe a half-applied database —
-        // and the handler and subscribers are taken now, so a removal or re-registration
-        // landing between the reports cannot redirect them.
+        // Settle every table before the first `await`, as ``detach(session:)`` does, so a handler
+        // that calls back into the radio cannot observe a half-applied database. Take the handler
+        // and the subscribers now, so a removal or a re-registration between the reports cannot
+        // redirect them.
         var tail: Task<Void, Never>?
         for entry in dropped {
             tail = reportUnsubscribed(entry.characteristics, on: device, handler: handler, central: entry.central) ?? tail
@@ -487,22 +460,22 @@ public actor VirtualRadio {
         await settle(tail)
     }
 
-    /// Removes a registered device, disconnecting every central attached to it. See
+    /// Removes a registered device and disconnects every central that is attached to it. See
     /// ``VirtualDeviceHandle/remove()``.
     ///
-    /// Every subscription the device still had is reported to its handler as an
-    /// unsubscribe, so a hosted `PeripheralHost` is left holding no subscriber it can never
-    /// notify again — CoreBluetooth reports `didUnsubscribe` when a subscribed central goes
-    /// away, and so does this radio — and each connected central hears `didDisconnect`
-    /// with ``deviceRemovedError`` only after that, the order every teardown on this radio
-    /// uses (see ``report(_:)``). Called from inside a subscription report, this returns
-    /// before its own reports are delivered — see ``isReporting``.
+    /// The radio reports every subscription that the device still had to its handler as an
+    /// unsubscribe, so a hosted `PeripheralHost` does not keep a subscriber that it can never
+    /// notify again. CoreBluetooth does the same when a subscribed central goes away. Each
+    /// connected central hears `didDisconnect` with ``deviceRemovedError`` only after that. Every
+    /// teardown on this radio uses this order. See ``report(_:)``. If you call this method from
+    /// inside a subscription report, it returns before the radio delivers its own reports. See
+    /// ``isReporting``.
     func remove(device: UUID, generation: UInt64) async {
         guard isCurrent(device, generation: generation, operation: "remove") else { return }
         guard let retired = retire(device) else { return }
-        // Taken off the synchronous mirrors here, not in `retire`: a re-registration retires
-        // the old state and installs the new in the same actor turn, and the identifier must
-        // stay resolvable throughout. Only a removal makes it unknown.
+        // Take the identifier off the synchronous mirrors here, not in `retire`. A re-registration
+        // retires the old state and installs the new state in one actor turn, and the identifier
+        // must stay resolvable throughout. Only a removal makes it unknown.
         knownDeviceIDs.withLock { (known: inout Set<UUID>) -> Void in
             known.remove(device)
         }
@@ -510,14 +483,13 @@ public actor VirtualRadio {
         await settle(report(retired))
     }
 
-    /// What retiring a registration leaves to deliver once every table is settled: each
-    /// subscription it still held, as the `Subscriber` the handler saw arrive, and the
-    /// `didDisconnect` owed to each session that was connected.
+    /// What the retirement of a registration leaves to deliver after every table is settled: each
+    /// subscription that the registration still held, as the `Subscriber` that the handler saw
+    /// arrive, and the `didDisconnect` that the radio owes to each connected session.
     ///
-    /// Built from the retired descriptor rather than looked up: by the time these are
-    /// reported, the device is gone from the table — or, after a re-registration, is a
-    /// different device — and the handler should see the same `Subscriber` leave as it saw
-    /// arrive.
+    /// The code builds it from the retired descriptor and does not look it up, because by the time
+    /// the radio reports these the device is gone from the table (or, after a re-registration, a
+    /// different device). The handler sees the same `Subscriber` leave as it saw arrive.
     private struct Retirement {
         let handler: any VirtualDeviceHandler
         let departing: [(characteristic: CharacteristicIdentifier, central: Subscriber)]
@@ -525,24 +497,24 @@ public actor VirtualRadio {
         let disconnected: [@Sendable (CentralEvent) -> Void]
     }
 
-    /// Takes `device`'s registration off every actor table — the device, its subscriptions,
-    /// and each session's connection to it and sink for it. The shared body of
-    /// ``remove(device:generation:)`` and a re-``register(_:advertising:)``.
+    /// Takes the registration of `device` off every actor table: the device, its subscriptions, and
+    /// each session's connection and sink for it. This is the shared body of
+    /// ``remove(device:generation:)`` and a new ``register(_:advertising:)``.
     ///
-    /// Synchronous, so a caller can settle the tables — and, for a re-registration, install
-    /// the successor — before anything is reported. Nothing is delivered here: the
-    /// unsubscribes and the `didDisconnect`s come back as a ``Retirement`` for
-    /// ``report(_:)``, which sends them in the one order every teardown uses; `nil` when
-    /// nothing was registered under `device`.
+    /// The method is synchronous, so a caller can settle the tables (and, for a re-registration,
+    /// install the successor) before anything is reported. It delivers nothing. The unsubscribes
+    /// and the `didDisconnect`s come back as a ``Retirement`` for ``report(_:)``, which sends them
+    /// in the one order that every teardown uses. The method returns `nil` when nothing was
+    /// registered under `device`.
     private func retire(_ device: UUID) -> Retirement? {
         guard let state = devices.removeValue(forKey: device) else { return nil }
         let subscriptions = self.subscriptions.removeValue(forKey: device) ?? [:]
         let identifier = PeripheralIdentifier(uuid: device, name: state.descriptor.name)
         var disconnected: [@Sendable (CentralEvent) -> Void] = []
         for sessionID in Array(sessions.keys) {
-            // Dropped for every session, connected or not: the sink routes events *from* this
-            // device, and there is no longer a device to route them from. A live entry would
-            // outlive the device and keep its backend's remote alive with it.
+            // Drop the sink for every session, connected or not. It routes events *from* this
+            // device, and a live entry would outlive the device and keep its backend's remote
+            // alive.
             sessions[sessionID]?.peripheralSinks.removeValue(forKey: device)
             guard let session = sessions[sessionID], session.connections.contains(device) else { continue }
             sessions[sessionID]?.connections.remove(device)
@@ -561,31 +533,19 @@ public actor VirtualRadio {
         return Retirement(handler: state.handler, departing: departing, identifier: identifier, disconnected: disconnected)
     }
 
-    /// Enqueues, on the retired identifier's report chain, each subscription the retired
-    /// registration's handler lost and then the `didDisconnect`s — what a removal or
-    /// re-registration delivers, enqueued only once every table is settled.
+    /// Enqueues, on the retired identifier's report chain, each subscription that the retired
+    /// handler lost, and then the `didDisconnect` events.
     ///
-    /// **The `didDisconnect`s go out last**, the order ``disconnect(centrals:error:device:generation:)``
-    /// keeps and for the same reason: the actor is reentrant across the unsubscribe awaits,
-    /// and a `Central` with a reconnect policy that heard the disconnect first could
-    /// reconnect and re-subscribe while the handler was still being told about the old
-    /// subscription. A removal left nothing to reconnect to, but a re-registration leaves
-    /// the identifier known throughout, so the reconnect lands on the new registration at
-    /// once — and with the same handler behind both, the handler finished the unsubscribe
-    /// *after* the re-subscribe and took a live subscriber for one that had left. As a chain
-    /// step behind the unsubscribes, the `didDisconnect` is now also ordered against every
-    /// other report for the identifier, including a subscribe still in flight when the
-    /// registration was retired.
+    /// The `didDisconnect` events go out last, as in
+    /// ``disconnect(centrals:error:device:generation:)``. A reconnect that an earlier
+    /// `didDisconnect` caused could subscribe on the new registration before the shared handler
+    /// heard the old unsubscribe. The handler would then take a live subscriber for one that had
+    /// left. The chain also orders the events behind every other report in flight.
     ///
-    /// **With nothing to order against, the `didDisconnect`s go out in this actor turn**, as
-    /// they did before the chain existed: a registration that held no subscription enqueues
-    /// no unsubscribe, and if the identifier's chain is empty too, nothing is in flight for
-    /// a `didDisconnect` to overtake. Put on the chain anyway, it hopped through a task and
-    /// opened the window ``VirtualDeviceHandle/disconnect(_:error:)`` describes on every
-    /// teardown, even a bare one. See ``deliverDisconnects(_:device:after:_:)``.
+    /// With no unsubscribe and an empty chain, the events go out in this actor turn. See
+    /// ``deliverDisconnects(_:device:after:_:)``.
     ///
-    /// - Returns: The chain's tail once everything is enqueued, for ``settle(_:)``; `nil`
-    ///   when nothing was put on the chain.
+    /// - Returns: The chain's tail, for ``settle(_:)``, or `nil` when nothing was put on the chain.
     private func report(_ retired: Retirement) -> Task<Void, Never>? {
         var tail: Task<Void, Never>?
         if !retired.departing.isEmpty {
@@ -600,20 +560,23 @@ public actor VirtualRadio {
         }
     }
 
-    /// Delivers a teardown's `didDisconnect`s to `sinks`: as a chain step behind
-    /// `unsubscribes` — the step this teardown enqueued, if any — or, when it enqueued none
-    /// and `device`'s chain is empty, synchronously, in the calling actor turn.
+    /// Delivers the `didDisconnect` events of a teardown to `sinks`:
     ///
-    /// The chain step is what keeps a `didDisconnect` behind every report in flight for the
-    /// device, this teardown's unsubscribes included (see ``report(_:)`` and
-    /// ``disconnect(centrals:error:device:generation:)``). The synchronous path is for a
-    /// teardown with nothing in flight to stay behind: it delivers before the caller's next
-    /// `await`, so a central that held no subscription hears the drop in the same turn the
-    /// radio dropped it, with no window in between.
+    /// - If the teardown enqueued the step `unsubscribes`, the method delivers them as a chain step
+    ///   behind it.
+    /// - If the teardown enqueued none and the chain of `device` is empty, the method delivers them
+    ///   synchronously, in the calling actor turn.
     ///
-    /// - Returns: The chain's tail once everything is enqueued — the step delivering the
-    ///   `didDisconnect`s, or `unsubscribes` — for ``settle(_:)``; `nil` when nothing was
-    ///   put on the chain.
+    /// The chain step keeps a `didDisconnect` behind every report in flight for the device,
+    /// including this teardown's unsubscribes. See ``report(_:)`` and
+    /// ``disconnect(centrals:error:device:generation:)``. The synchronous path is for a teardown
+    /// with nothing in flight to stay behind. It delivers before the caller's next `await`, so a
+    /// central that held no subscription hears the drop in the same turn in which the radio dropped
+    /// it, with no window in between.
+    ///
+    /// - Returns: The chain's tail after everything is enqueued, for ``settle(_:)``: the step that
+    ///   delivers the `didDisconnect` events, or `unsubscribes`. The value is `nil` when nothing
+    ///   was put on the chain.
     func deliverDisconnects(
         _ sinks: [@Sendable (CentralEvent) -> Void],
         device: UUID,
@@ -634,23 +597,22 @@ public actor VirtualRadio {
         }
     }
 
-    /// Chains `step` behind every report already enqueued for `device`, and returns the
-    /// task delivering it.
+    /// Chains `step` behind every report already enqueued for `device`, and returns the task that
+    /// delivers it.
     ///
-    /// Synchronous, and to be called in the same synchronous actor section as the table
-    /// change `step` reports: the chain's order is then the order the table changed in, so
-    /// a device's handler hears its changes in the order they happened, one at a time —
-    /// the next step starts only once the previous one's `subscriptionChanged` has returned.
-    /// The task inherits this actor's isolation, so it runs `step` from the actor and
-    /// removes its own entry here once `step` finishes while it is still the tail; a step
-    /// that is no longer the tail leaves the entry to its successor. Each step runs with
-    /// ``isReporting`` set, which is how an entry point called from inside a handler's
-    /// report knows not to wait on the chain.
+    /// The method is synchronous. Call it in the same synchronous actor section as the table change
+    /// that `step` reports. The chain's order is then the order in which the table changed, so a
+    /// device's handler hears its changes in the order they happened, one at a time. The next step
+    /// starts only after the previous step's `subscriptionChanged` has returned. The task inherits
+    /// this actor's isolation. After `step` finishes, it removes its own entry if it is still the
+    /// tail, and otherwise leaves the entry to its successor. Each step runs with ``isReporting``
+    /// set, so an entry point that a handler calls from inside its report knows that it must not
+    /// wait on the chain.
     ///
-    /// The step runs in its own unstructured task, not the caller's: cancelling the caller —
-    /// a `Central` operation timing out, a test task ending — neither reaches the handler
-    /// nor cuts the caller's wait in ``settle(_:)`` short. The report is delivered, and
-    /// waited for, in full.
+    /// The step runs in its own unstructured task, not in the caller's task. A cancel of the caller
+    /// (a `Central` operation that times out, or a test task that ends) does not reach the handler,
+    /// and does not cut short the caller's wait in ``settle(_:)``. The radio delivers the report in
+    /// full, and the caller waits for it in full.
     func enqueueReport(device: UUID, _ step: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
         let previous = reportChains[device]?.tail
         lastReportSequence += 1
@@ -666,17 +628,22 @@ public actor VirtualRadio {
         return task
     }
 
-    /// Waits for `tail` — the last report an entry point enqueued — to be delivered, so the
-    /// entry point returns only once its reports have reached the handler; nothing to wait
-    /// for when it enqueued none.
+    /// Waits for `tail`, the last report that an entry point enqueued, to be delivered, so the
+    /// entry point returns only after its reports have reached the handler. There is nothing to
+    /// wait for when it enqueued none.
     ///
-    /// **Not from inside a report.** A handler's `subscriptionChanged` that calls back into
-    /// the radio — `setServices`, `disconnect`, `remove`, a re-`register` — runs inside a
-    /// chain step, and the reports that call enqueues are chained behind that very step.
-    /// Waiting for them there would wait on the step to finish, which waits on the handler
-    /// to return, which waits on this: a deadlock. So inside a report — ``isReporting`` set —
-    /// this returns at once, and the entry point returns before its reports are delivered;
-    /// they are still delivered, in order, once the handler returns.
+    /// **Do not call this from inside a report.** A handler's `subscriptionChanged` can call back
+    /// into the radio (`setServices`, `disconnect`, `remove`, a new `register`). That call runs
+    /// inside a chain step, and the reports that it enqueues are chained behind that same step.
+    /// Waiting for them there is a deadlock:
+    ///
+    /// - The wait waits for the step to finish.
+    /// - The step waits for the handler to return.
+    /// - The handler waits for this wait.
+    ///
+    /// Inside a report (``isReporting`` set), this method thus returns at once. The entry point
+    /// returns before the radio delivers its reports, and the radio still delivers them, in order,
+    /// after the handler returns.
     func settle(_ tail: Task<Void, Never>?) async {
         guard let tail, !Self.isReporting else { return }
         await tail.value
@@ -685,11 +652,10 @@ public actor VirtualRadio {
     /// Pushes a notification to every subscribed, connected central. See
     /// ``VirtualDeviceHandle/notify(_:for:to:)``.
     ///
-    /// **The value is truncated to each subscriber's `maximumUpdateValueLength`** — the
-    /// device's own ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength`` — as
-    /// CoreBluetooth truncates a notification that will not fit the subscriber's MTU. Passed
-    /// whole, a payload larger than the maximum this radio reports arrived intact here and
-    /// arrived clipped on device — the same divergence an unenforced write ceiling is.
+    /// **The radio truncates the value to each subscriber's `maximumUpdateValueLength`.** This
+    /// length is the device's ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``.
+    /// CoreBluetooth truncates a notification that does not fit the subscriber's MTU. A payload
+    /// passed whole would arrive intact here and clipped on a device.
     func notify(
         device: UUID,
         characteristic: CharacteristicIdentifier,
@@ -710,12 +676,12 @@ public actor VirtualRadio {
 
     // MARK: - Backend attachment
 
-    /// Attaches a backend under `session`, routing radio-initiated ``BLESwiftCore/CentralEvent``s
-    /// to `centralSink`, which is responsible for hopping onto the backend's queue.
+    /// Attaches a backend under `session`. The radio routes radio-initiated
+    /// ``BLESwiftCore/CentralEvent``s to `centralSink`, which must hop onto the backend's queue.
     ///
-    /// Which identifiers a backend may vend a remote for is *not* pushed here: it reads
-    /// ``knownDeviceIDs`` live, so a device registered a moment ago is retrievable without
-    /// waiting on this actor. See ``knownDeviceIDs``.
+    /// The radio does *not* push which identifiers a backend may vend a remote for. The backend
+    /// reads ``knownDeviceIDs`` live, so a device registered a moment ago is retrievable without
+    /// waiting on this actor.
     func attach(
         session: UUID,
         centralSink: @escaping @Sendable (CentralEvent) -> Void
@@ -723,11 +689,11 @@ public actor VirtualRadio {
         sessions[session] = Session(centralSink: centralSink)
     }
 
-    /// Detaches a backend, cancelling its scan and dropping its connections, its per-device
-    /// sinks — the whole session record goes — and its subscriptions. Each dropped
-    /// subscription is reported to its device's handler as an unsubscribe, from that
-    /// device's report chain; this returns once every one is delivered, unless called from
-    /// inside a subscription report (see ``isReporting``).
+    /// Detaches a backend. The radio cancels its scan and drops its connections, per-device sinks,
+    /// and subscriptions: the whole session record. The radio reports each dropped subscription to
+    /// its device's handler as an unsubscribe, from that device's report chain. This method returns
+    /// after the radio delivers every one of them, except for a call from inside a subscription
+    /// report. See ``isReporting``.
     func detach(session: UUID) async {
         guard let removed = sessions.removeValue(forKey: session) else { return }
         removed.scanner?.repeater?.cancel()
@@ -736,11 +702,11 @@ public actor VirtualRadio {
             guard let handler = devices[device]?.handler else { continue }
             dropped.append((device, handler, subscriber(session, device: device), dropSubscriptions(session: session, device: device)))
         }
-        // Every table is settled before the first `await`, so a handler that calls back into
-        // the radio cannot observe a half-detached session; each handler and subscriber is
-        // taken now too, so a removal or re-registration landing between the reports cannot
-        // redirect them. Each device's reports go on that device's chain, and each chain's
-        // tail is waited for in turn, so none is still undelivered when this returns.
+        // Settle every table before the first `await`, so a handler that calls back into the radio
+        // cannot observe a half-detached session. Take each handler and subscriber now, so a
+        // removal or a re-registration between the reports cannot redirect them. Each device's
+        // reports go on its own chain. Waiting for every chain's tail leaves no report undelivered
+        // on return.
         var tails: [Task<Void, Never>] = []
         for entry in dropped {
             if let tail = reportUnsubscribed(entry.characteristics, on: entry.device, handler: entry.handler, central: entry.central) {
@@ -754,8 +720,9 @@ public actor VirtualRadio {
 
     // MARK: - Scanning
 
-    /// Starts a scan for `session`, reporting one sighting per matching advertising device
-    /// immediately and, when `allowDuplicates` is set, once per second thereafter.
+    /// Starts a scan for `session`. The radio reports one sighting for each matching advertising
+    /// device immediately. When `allowDuplicates` is set, it reports again once each second after
+    /// that.
     func startScan(session: UUID, services: [ServiceIdentifier]?, allowDuplicates: Bool) {
         guard sessions[session] != nil else { return }
         sessions[session]?.scanner?.repeater?.cancel()
@@ -772,30 +739,30 @@ public actor VirtualRadio {
         sessions[session]?.scanner?.repeater = repeater
     }
 
-    /// Whether `session` currently has a scanner installed.
+    /// Whether `session` has a scanner installed now.
     ///
-    /// Not API: it exists so a test can assert that a scan and the `stopScan` right behind it
-    /// left nothing running.
+    /// This is a test hook, not API. A test uses it to assert that a scan and the `stopScan` right
+    /// behind it left nothing running.
     package func hasScanner(session: UUID) -> Bool {
         sessions[session]?.scanner != nil
     }
 
     /// How many sessions are subscribed to `characteristic` on `device`.
     ///
-    /// Not API: it exists so a test can assert that a refused ``setNotify(_:device:characteristic:session:)``
-    /// left no entry behind, and that a ``detach(session:)`` cleared the ones there were.
+    /// This is a test hook, not API. A test uses it to assert that a refused
+    /// ``setNotify(_:device:characteristic:session:)`` left no entry behind, and that a
+    /// ``detach(session:)`` cleared the entries that existed.
     package func subscriberCount(device: UUID, characteristic: CharacteristicIdentifier) -> Int {
         subscriptions[device]?[characteristic]?.count ?? 0
     }
 
-    /// Whether `characteristic` currently has a subscriber — `session` when one is named, any
-    /// session otherwise, on any device this radio hosts.
+    /// Whether `characteristic` has a subscriber now, on any device that this radio hosts. If the
+    /// call names a `session`, the check is for that session. Otherwise it is for any session.
     ///
-    /// Not API: it is the "notifications are armed" signal a test waits on. A `Central`
-    /// publishes no such signal of its own, so tests stood a fixed delay in for one and a
-    /// starved runner could pass the delay with nothing yet subscribed — the notifications
-    /// that followed then had no subscriber to reach. This is the state the push itself
-    /// consults, so a wait on it cannot be early.
+    /// This is a test hook, not API. It is the "notifications are armed" signal that a test waits
+    /// on, because a `Central` publishes none. A fixed delay would let a starved runner pass with
+    /// nothing yet subscribed. This is the state that the push itself consults, so a wait on it
+    /// cannot be early.
     package func isSubscribed(session: UUID? = nil, characteristic: CharacteristicIdentifier) -> Bool {
         for perCharacteristic in subscriptions.values {
             guard let subscribers = perCharacteristic[characteristic] else { continue }
@@ -808,21 +775,22 @@ public actor VirtualRadio {
         return false
     }
 
-    /// Whether `session` currently holds a connection to `device`, as the radio sees it.
+    /// Whether `session` holds a connection to `device` now, as the radio sees it.
     ///
-    /// Not API: it exists so a test can assert that a backend's remote agrees with the radio
-    /// about a connection once a race between a connect and a forced disconnect has settled.
+    /// This is a test hook, not API. A test uses it to assert that a backend's remote agrees with
+    /// the radio about a connection after a race between a connect and a forced disconnect has
+    /// settled.
     package func isConnected(session: UUID, device: UUID) -> Bool {
         isConnected(session: session, to: device)
     }
 
-    /// Stops `session`'s scan, if any.
+    /// Stops the scan of `session`, if any.
     func stopScan(session: UUID) {
         sessions[session]?.scanner?.repeater?.cancel()
         sessions[session]?.scanner = nil
     }
 
-    /// Reports every advertising device matching `session`'s scan filter, once.
+    /// Reports every advertising device that matches the scan filter of `session`, once.
     func emitSightings(for session: UUID) {
         guard let state = sessions[session], let scanner = state.scanner else { return }
         for device in devices.values where device.isAdvertising && matches(scanner.services, device) {
@@ -830,8 +798,8 @@ public actor VirtualRadio {
         }
     }
 
-    /// Reports one device to every active scanner whose filter it matches — used when a
-    /// device starts advertising after a scan is already running.
+    /// Reports one device to every active scanner whose filter it matches. The radio uses this when
+    /// a device starts advertising after a scan has started.
     private func reportSightings(of device: UUID) {
         guard let state = devices[device] else { return }
         for session in sessions.values {
@@ -849,8 +817,8 @@ public actor VirtualRadio {
         )
     }
 
-    /// Whether a device's advertisement satisfies a scan's service filter. A `nil` or empty
-    /// filter matches every device, mirroring CoreBluetooth.
+    /// Whether a device's advertisement satisfies a scan's service filter. A `nil` or empty filter
+    /// matches every device, as in CoreBluetooth.
     private func matches(_ services: [ServiceIdentifier]?, _ device: DeviceState) -> Bool {
         guard let services, !services.isEmpty else { return true }
         let advertised = Set(device.descriptor.advertisement.serviceUUIDs ?? [])
@@ -859,28 +827,21 @@ public actor VirtualRadio {
 
     // MARK: - Connections
 
-    /// Connects `session` to `device`, routing that device's radio-initiated
-    /// ``BLESwiftCore/PeripheralEvent``s to `sink` (which is responsible for hopping onto
-    /// the backend's queue). Registering the sink as part of the connection is what keeps a
-    /// notification from ever outrunning its own delivery path.
+    /// Connects `session` to `device`. The radio routes the device's radio-initiated events to
+    /// `sink`, which must hop onto the backend's queue. The sink's registration is part of the
+    /// connection, so a notification never outruns its delivery path.
     ///
-    /// The device's name and one-packet length are answered here rather than left to a
-    /// second ``name(of:)`` hop: the device could be removed between the two, and the
-    /// connection that just succeeded would then be named `nil`.
+    /// The radio answers the name and the one-packet length here, because the device could be
+    /// removed between two hops.
     ///
-    /// **An armed connection failure is consumed here**, behind the session and device
-    /// guards — an unregistered device fails with ``unknownDeviceError`` as it always has,
-    /// never with a fault armed on a registration that is gone. A failed attempt records
-    /// neither the connection nor the sink, so the device never learns of it, exactly as a
-    /// peripheral that refused the link never sees the central. See
-    /// ``VirtualDeviceHandle/failConnections(with:times:)``. A direct caller of the radio
-    /// connecting a session already connected to the device succeeds without consuming the
-    /// armed failure — ``VirtualCentralBackend`` never sends such a call, since it answers a
-    /// connect on a `.connected` remote itself — because failing it would leave a remote the
-    /// radio still holds connected reporting itself disconnected.
+    /// The radio consumes an armed connection failure here, behind the session and device guards.
+    /// An unregistered device thus fails with ``unknownDeviceError``. A failed attempt records
+    /// neither the connection nor the sink. A session that is already connected succeeds and does
+    /// not consume the failure, because a failure would leave a connected remote that reports
+    /// itself disconnected.
     ///
-    /// - Returns: The outcome: the error to fail the attempt with, or the connected device's
-    ///   name and ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``.
+    /// - Returns: The error that fails the attempt, or the connected device's name and its
+    ///   ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``.
     func connect(
         session: UUID,
         device: UUID,
@@ -908,28 +869,27 @@ public actor VirtualRadio {
         )
     }
 
-    /// Disconnects `session` from `device`, dropping its subscriptions and reporting each of
+    /// Disconnects `session` from `device`. The radio drops its subscriptions and reports each of
     /// them to the device's handler as an unsubscribe. The backend delivers the resulting
-    /// `didDisconnect` itself, mirroring CoreBluetooth's `cancelPeripheralConnection(_:)` —
-    /// but only when this call is what ended the connection.
+    /// `didDisconnect` itself, as CoreBluetooth's `cancelPeripheralConnection(_:)` does, and only
+    /// when this call ended the connection.
     ///
-    /// - Returns: Whether a connection was removed. `false` when the session was not
-    ///   connected to the device — never was, or a forced disconnect, a removal, or a failed
-    ///   connect already settled it — in which case the backend must deliver nothing: the
-    ///   path that did the settling has already reported the outcome, and a second
-    ///   `didDisconnect` on top of it reported the peripheral gone twice and overwrote the
-    ///   state of a reconnect that had started in between. Sinks and subscriptions are
-    ///   dropped either way; they are idempotent.
+    /// - Returns: Whether the radio removed a connection.
+    ///   - The value is `false` when the session was not connected to the device: it never was, or
+    ///     a forced disconnect, a removal, or a failed connect already settled it. The backend must
+    ///     then deliver nothing, because the path that settled it already reported the outcome. A
+    ///     second `didDisconnect` would report the peripheral gone twice and overwrite the state of
+    ///     a reconnect that had started in between.
+    ///   - The radio drops sinks and subscriptions in either case. These operations are idempotent.
     ///
-    /// Returns once the unsubscribes have been reported, so the backend's `didDisconnect`
-    /// follows them — unless called from inside a subscription report, when it returns
-    /// before they are delivered (see ``isReporting``).
+    /// This method returns after the radio reports the unsubscribes, so the backend's
+    /// `didDisconnect` follows them. A call from inside a subscription report returns before the
+    /// radio delivers them. See ``isReporting``.
     @discardableResult
     func disconnect(session: UUID, device: UUID) async -> Bool {
         let removed = sessions[session]?.connections.remove(device) != nil
-        // Goes with the connection: the sink was registered by ``connect(session:device:sink:)``
-        // and the backend delivers the `didDisconnect` itself, so nothing is left to route
-        // through it.
+        // The sink goes with the connection. The backend delivers the `didDisconnect` itself, so
+        // nothing is left to route through the sink.
         sessions[session]?.peripheralSinks.removeValue(forKey: device)
         let dropped = dropSubscriptions(session: session, device: device)
         if let handler = devices[device]?.handler {
@@ -939,11 +899,11 @@ public actor VirtualRadio {
         return removed
     }
 
-    /// Removes every subscription `session` holds on `device` — or, when `services` is given,
-    /// only those under one of those services.
+    /// Removes every subscription that `session` holds on `device`. When `services` is given, it
+    /// removes only the subscriptions under one of those services.
     ///
-    /// - Returns: The characteristics `session` really was subscribed to, so exactly those —
-    ///   and no others — are reported to the device's handler.
+    /// - Returns: The characteristics to which `session` really was subscribed, so the radio
+    ///   reports exactly those, and no others, to the device's handler.
     func dropSubscriptions(
         session: UUID,
         device: UUID,
@@ -965,19 +925,18 @@ public actor VirtualRadio {
 
     /// Tells `handler` that `central` is no longer subscribed to `characteristics`.
     ///
-    /// This is what keeps a hosted `PeripheralHost` — fixture, code-defined, or link-hosted —
-    /// from holding a ghost subscriber after the central behind it disconnected, cancelled,
-    /// or had its backend detached. CoreBluetooth reports `didUnsubscribe` in exactly those
-    /// cases.
+    /// This keeps a hosted `PeripheralHost` (fixture, code-defined, or link-hosted) from holding a
+    /// ghost subscriber after the central behind it disconnected, cancelled, or had its backend
+    /// detached. CoreBluetooth reports `didUnsubscribe` in exactly those cases.
     ///
-    /// Takes the handler and the subscriber rather than looking them up: the reports are
-    /// delivered later, from the device's chain, and a `remove()` or re-`register` landing
-    /// before then would otherwise drop them or hand them to a handler that never saw these
+    /// The method takes the handler and the subscriber and does not look them up. The radio
+    /// delivers the reports later, from the device's chain, and a `remove()` or a new `register`
+    /// could land before then and drop the reports or hand them to a handler that never saw these
     /// subscribers. Every caller captures both in the synchronous section that dropped the
-    /// subscriptions, and enqueues from there, so the chain's order is the table's.
+    /// subscriptions, and enqueues from there, so the chain's order is the table's order.
     ///
-    /// - Returns: The chain step delivering the reports, for ``settle(_:)``; `nil` when
-    ///   there was nothing to report.
+    /// - Returns: The chain step that delivers the reports, for ``settle(_:)``, or `nil` when there
+    ///   was nothing to report.
     @discardableResult
     func reportUnsubscribed(
         _ characteristics: [CharacteristicIdentifier],
@@ -995,19 +954,21 @@ public actor VirtualRadio {
 
     // MARK: - GATT
 
-    /// The services of `device` matching `filter` (every service when `filter` is `nil`),
-    /// after the device's ``VirtualLatency/discovery`` delay.
+    /// The services of `device` that match `filter` (every service when `filter` is `nil`), after
+    /// the device's ``VirtualLatency/discovery`` delay.
     ///
-    /// **The delay comes before every guard**, here and in each GATT entry point below, so
-    /// every check sees the state the device is in once the delay has run out: a device
-    /// removed, re-registered, or disconnected from during the delay answers as it would
-    /// to a request that arrived then. The remote queues its GATT requests behind each other
-    /// on one chain, so a delayed one holds up those behind it, as ATT's one transaction at a
-    /// time does on hardware — with one difference: a delay already started outlives a
-    /// disconnect. Hardware aborts the transaction when the link drops; here the request
-    /// sleeps out its full delay, is refused at the gate, and holds the chain — and a
-    /// reconnect's first operation behind it — for the remainder. A `ManualClock` still
-    /// counts that sleeper. See ``VirtualLatency``.
+    /// **The delay comes before every guard**, here and in each GATT entry point below, so every
+    /// check sees the device's state after the delay has run out. A device that was removed,
+    /// registered again, or disconnected from during the delay answers as it would to a request
+    /// that arrived then.
+    ///
+    /// The remote queues its GATT requests behind each other on one chain, so a delayed request
+    /// holds up those behind it. ATT does the same on hardware, with one transaction at a time. One
+    /// difference: a delay that has started continues after a disconnect. Hardware aborts the
+    /// transaction when the link drops. Here the request sleeps out its full delay, and then the
+    /// gate refuses it. It holds the chain for the remainder, and the first operation of a
+    /// reconnect waits behind it. A `ManualClock` still counts that sleeper. See
+    /// ``VirtualLatency``.
     func services(of device: UUID, matching filter: [ServiceIdentifier]?) async -> [ServiceIdentifier] {
         if let delay = latency(for: \.discovery, on: device) { try? await clock.sleep(for: delay) }
         guard let state = devices[device] else { return [] }
@@ -1017,9 +978,9 @@ public actor VirtualRadio {
         return identifiers.filter { requested.contains($0) }
     }
 
-    /// The characteristics of `service` on `device` matching `filter`, paired with the
-    /// properties each advertises — after the device's ``VirtualLatency/discovery`` delay,
-    /// as ``services(of:matching:)``.
+    /// The characteristics of `service` on `device` that match `filter`, each paired with the
+    /// properties that it advertises. The method applies the device's ``VirtualLatency/discovery``
+    /// delay, as ``services(of:matching:)`` does.
     func characteristics(
         of device: UUID,
         service: ServiceIdentifier,
@@ -1035,35 +996,36 @@ public actor VirtualRadio {
             .map { CharacteristicDiscovery(identifier: $0.identifier, properties: $0.properties) }
     }
 
-    /// Whether `session` currently holds a connection to `device`.
+    /// Whether `session` holds a connection to `device`.
     ///
-    /// The gate every GATT entry point applies, and the same test ``notify(device:characteristic:value:to:)``
-    /// makes before routing a notification: a session that has disconnected — or was never
-    /// connected at all — has no ATT bearer to carry a request over, so the radio must refuse
-    /// rather than serve it. Without it a stale remote could still read, write, and plant a
-    /// subscription that no ``disconnect(session:device:)`` or ``detach(session:)`` would ever
-    /// clean up, because neither walks a device the session is not recorded as connected to.
+    /// Every GATT entry point applies this gate. ``notify(device:characteristic:value:to:)`` makes
+    /// the same test before it routes a notification. A session that has disconnected, or never
+    /// connected, has no ATT bearer to carry a request, so the radio must refuse it. Without the
+    /// gate, a stale remote could still read and write, and could plant a subscription that no
+    /// ``disconnect(session:device:)`` or ``detach(session:)`` would clean up, because neither
+    /// walks a device that the session is not recorded as connected to.
     private func isConnected(session: UUID, to device: UUID) -> Bool {
         sessions[session]?.connections.contains(device) == true
     }
 
-    /// Reads `characteristic` from `offset` on. A characteristic with a static value is
-    /// answered from the database; every other read reaches the device's handler. A session
-    /// that is not connected to `device` is refused with `ATTError.invalidHandle`, a
-    /// characteristic declaring none of `read`, `notify`, or `indicate` with
-    /// `ATTError.readNotPermitted`, and an `offset` past the end of a static value with
-    /// `ATTError.invalidOffset`.
+    /// Reads `characteristic` from `offset` on. The radio answers a characteristic with a static
+    /// value from the database. Every other read reaches the device's handler. The method refuses a
+    /// request in these cases:
     ///
-    /// **The permission check comes before the static short-circuit.** A characteristic the
-    /// fixture gave a value is answered from the database rather than through its handler, so
-    /// a check made only in the handler — which is where ``FixtureDeviceHandler`` makes it —
-    /// would let exactly the write-only characteristics that declare a value be read by any
-    /// connected central. Real hardware refuses that read at the ATT layer, and so does this
-    /// radio, whatever the value behind the handle.
+    /// - A session that is not connected to `device`: `ATTError.invalidHandle`.
+    /// - A characteristic that declares none of `read`, `notify`, or `indicate`:
+    ///   `ATTError.readNotPermitted`.
+    /// - An `offset` after the end of a static value: `ATTError.invalidOffset`.
     ///
-    /// **An injected ATT error comes right after the handle is found**, before permission,
-    /// the static short-circuit, and the handler: it simulates the peripheral's ATT answer for
-    /// a valid handle, so a static-value characteristic fails under it too. See
+    /// **The permission check comes before the static short-circuit.** The radio answers a
+    /// characteristic that has a fixture value from the database, not through its handler, so a
+    /// check made only in the handler (as ``FixtureDeviceHandler`` makes) would be too late. Any
+    /// connected central could then read exactly the write-only characteristics that declare a
+    /// value. Real hardware refuses that read at the ATT layer, and so does this radio.
+    ///
+    /// **An injected ATT error comes right after the radio finds the handle**, before the
+    /// permission check, the static short-circuit, and the handler. It simulates the peripheral's
+    /// ATT answer for a valid handle, so a static-value characteristic fails under it too. See
     /// ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
     ///
     /// The device's ``VirtualLatency/read`` delay comes before all of it, as
@@ -1089,35 +1051,23 @@ public actor VirtualRadio {
         return await state.handler.read(characteristic, offset: offset, from: subscriber(session, device: device))
     }
 
-    /// Writes `value` to `characteristic` through the device's handler. A session that is not
-    /// connected to `device` is refused with `ATTError.invalidHandle`, a characteristic
-    /// declaring neither `write` nor `writeWithoutResponse` with `ATTError.writeNotPermitted`.
+    /// Writes `value` to `characteristic` through the device's handler. The radio refuses a write
+    /// from a session that is not connected to `device` with `ATTError.invalidHandle`. It refuses a
+    /// characteristic that declares neither `write` nor `writeWithoutResponse` with
+    /// `ATTError.writeNotPermitted`.
     ///
-    /// **Each write type carries its own length ceiling**, the one hardware imposes: a
-    /// `.withResponse` write past ``maximumValueLength`` is refused with
-    /// `ATTError.invalidAttributeValueLength`, and a `.withoutResponse` write past the
-    /// device's ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength`` is *dropped* —
-    /// it never reaches the device's handler, and the caller hears nothing, exactly as
-    /// CoreBluetooth drops one too large for a single ATT packet. Enforced here rather than
-    /// in the remote so that every route to a virtual device, hosted or fixture, is held to
-    /// the same ceiling.
+    /// The radio enforces permissions and length here, not in the remote, so every route to a
+    /// virtual device has the ATT layer's limits. A hosted device has no ``FixtureDeviceHandler``
+    /// to refuse for it.
     ///
-    /// **An injected ATT error fails a `.withResponse` write only.** A `.withoutResponse`
-    /// write has no ATT response to carry an error back on, so it reaches the handler as if
-    /// nothing were armed — which is what the peripheral's application code sees on hardware
-    /// too. See ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
-    ///
-    /// **The permission check is the radio's, not the handler's.** It mirrors the one
-    /// ``read(device:characteristic:offset:session:)`` makes, and for the same reason: a
-    /// hosted device — a remote `PeripheralHost` at the far end of a link — has no
-    /// ``FixtureDeviceHandler`` to refuse for it, so a write to a read-only characteristic
-    /// reached its `didReceiveWrite` and was served. Real hardware refuses that write at the
-    /// ATT layer, before any of it reaches the peripheral's application code, and so does this
-    /// radio, whatever the device behind the handle is.
-    ///
-    /// The device's ``VirtualLatency/write`` delay comes before all of it for a
-    /// `.withResponse` write, as ``services(of:matching:)`` explains; a `.withoutResponse`
-    /// write has no answer to delay and is never slept for.
+    /// - A `.withResponse` write longer than ``maximumValueLength`` fails with
+    ///   `ATTError.invalidAttributeValueLength`.
+    /// - A `.withoutResponse` write longer than
+    ///   ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength`` is dropped. The handler
+    ///   never sees it and the caller hears nothing.
+    /// - An injected ATT error fails a `.withResponse` write only. See
+    ///   ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
+    /// - The ``VirtualLatency/write`` delay comes first, for a `.withResponse` write only.
     func write(
         device: UUID,
         characteristic: CharacteristicIdentifier,
@@ -1137,9 +1087,9 @@ public actor VirtualRadio {
                 return .failure(.invalidAttributeValueLength)
             }
         case .withoutResponse:
-            // Dropped, not refused: an unacknowledged write has no response to fail, and
-            // CoreBluetooth reports nothing for one it could not fit in a packet either. The
-            // `.success` releases the caller's transmit slot; nothing reached the device.
+            // Drop the write, do not refuse it: an unacknowledged write has no response to fail,
+            // and CoreBluetooth also reports nothing for a write that does not fit in a packet. The
+            // `.success` releases the caller's transmit slot. Nothing reached the device.
             let ceiling = state.descriptor.maximumWriteWithoutResponseLength
             guard value.count <= ceiling else {
                 Self.logger.debug(
@@ -1156,50 +1106,34 @@ public actor VirtualRadio {
         return await state.handler.write([entry], from: central)
     }
 
-    /// Subscribes or unsubscribes `session` to `characteristic` and reports the change to
+    /// Subscribes `session` to `characteristic` or unsubscribes it, and reports a real change to
     /// the device's handler.
     ///
-    /// A session that is not connected to `device` changes nothing and tells the handler
-    /// nothing: a subscription planted from a disconnected session would be a ghost subscriber
-    /// its `PeripheralHost` could never lose, since neither ``disconnect(session:device:)`` nor
-    /// ``detach(session:)`` walks a device the session has no connection to.
+    /// - A session that is not connected to `device` changes nothing and tells the handler nothing.
+    ///   A subscription that such a session planted would be a ghost subscriber, because
+    ///   ``disconnect(session:device:)`` and ``detach(session:)`` skip a device without a
+    ///   connection.
+    /// - The handler hears only a real membership transition. A repeated enable, or a disable for a
+    ///   characteristic that was never subscribed, reports nothing.
+    /// - The permission check is the radio's, as in
+    ///   ``read(device:characteristic:offset:session:)``. A characteristic without `notify` or
+    ///   `indicate` has no CCCD, so the radio refuses the request. A hosted device has no
+    ///   ``FixtureDeviceHandler`` to refuse for it. A characteristic that is not in the database
+    ///   fails with `ATTError.attributeNotFound`.
+    /// - An injected ATT error refuses enabling and disabling alike, because both write the CCCD.
+    ///   The set and the handler stay as they were. See
+    ///   ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
+    /// - The device's ``VirtualLatency/subscribe`` delay comes first.
     ///
-    /// **Only a real membership transition is reported.** A repeated `setNotifyValue(true)` —
-    /// which CoreBluetooth permits, and which a `Central` re-arming a stream makes — would
-    /// otherwise hand the host a second `didSubscribe` for a subscriber it already has, and a
-    /// `setNotifyValue(false)` for a characteristic that was never subscribed would hand it a
-    /// `didUnsubscribe` for a subscriber it never had. The set decides: the handler hears from
-    /// this call only when the session really joined or really left.
+    /// The transition goes on the device's report chain, behind every report in flight. The method
+    /// returns after delivery, except for a call from inside a subscription report. See
+    /// ``isReporting``. In both cases the answer comes from the table.
     ///
-    /// **The permission check is the radio's, not the handler's.** It mirrors the ones
-    /// ``read(device:characteristic:offset:session:)`` and
-    /// ``write(device:characteristic:value:session:)`` make, and for the same reason:
-    /// subscribing is a write to the characteristic's Client Characteristic Configuration
-    /// descriptor, and a characteristic declaring neither `notify` nor `indicate` has no such
-    /// descriptor for real hardware to accept that write on. A hosted device — a remote
-    /// `PeripheralHost` at the far end of a link — has no ``FixtureDeviceHandler`` to refuse
-    /// for it, so a `setNotifyValue(true)` on a read/write-only characteristic recorded a
-    /// subscription and handed the host a `didSubscribe` no hardware would ever have produced.
-    /// A characteristic that is not in the database at all is refused the same way `read` and
-    /// `write` refuse it, with `ATTError.attributeNotFound`.
-    ///
-    /// **An injected ATT error refuses enabling and disabling alike** — both are writes to
-    /// the same CCCD, and hardware that rejects one rejects the other. The set is left as it
-    /// was and the handler hears nothing, since no transition happened. See
-    /// ``VirtualDeviceHandle/setATTError(_:for:operations:)``.
-    ///
-    /// The device's ``VirtualLatency/subscribe`` delay comes before all of it, enabling and
-    /// disabling alike, as ``services(of:matching:)`` explains.
-    ///
-    /// The transition is reported from the device's report chain, behind every report
-    /// already in flight for the device, and this returns once it has been delivered —
-    /// unless called from inside a subscription report, when it returns before (see
-    /// ``isReporting``). The answer is decided here, from the table, either way.
-    ///
-    /// - Returns: Whether `session` is subscribed to `characteristic` now the call has been
-    ///   applied — `enabled` for a connected session, and the unchanged current state for one
-    ///   that is not or for a request the checks above refused — together with the `ATTError`
-    ///   to fail the request with, or `nil` when it was applied.
+    /// - Returns: Whether `session` is subscribed to `characteristic` after the call is applied,
+    ///   together with the `ATTError` that fails the request, or `nil` when the call was applied.
+    ///   - For a connected session, the first value is `enabled`.
+    ///   - For a session that is not connected, or for a refused request, it is the unchanged
+    ///     current state.
     @discardableResult
     func setNotify(
         _ enabled: Bool,
@@ -1242,7 +1176,7 @@ public actor VirtualRadio {
         return (enabled, nil)
     }
 
-    /// The characteristic definition for `characteristic` in `state`'s current database.
+    /// The definition of `characteristic` in `state`'s current database.
     private func definition(of characteristic: CharacteristicIdentifier, in state: DeviceState) -> GATTCharacteristic? {
         state.descriptor.services
             .first { $0.identifier == characteristic.service }?
@@ -1250,15 +1184,14 @@ public actor VirtualRadio {
             .first { $0.identifier == characteristic }
     }
 
-    /// The ``BLESwiftCore/Subscriber`` a backend session appears as to `device`'s handler.
+    /// The ``BLESwiftCore/Subscriber`` that a backend session appears as to `device`'s handler.
     ///
     /// Its `maximumUpdateValueLength` is the device's
-    /// ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``, not
-    /// ``maximumValueLength``: a notification is a single ATT packet, exactly as a
-    /// `.withoutResponse` write is. See ``maximumWriteWithoutResponseLength``, which stands
-    /// in for a device that is not registered. Every caller looks up a device that is;
-    /// ``retire(_:)`` builds a retired registration's departing subscribers from its own
-    /// descriptor rather than through here.
+    /// ``VirtualDeviceDescriptor/maximumWriteWithoutResponseLength``, not ``maximumValueLength``,
+    /// because a notification is a single ATT packet, as a `.withoutResponse` write is. See
+    /// ``maximumWriteWithoutResponseLength``. The default stands in for an unregistered device,
+    /// which no caller looks up. ``retire(_:)`` builds the departing subscribers of a retired
+    /// registration from its own descriptor and does not use this method.
     func subscriber(_ session: UUID, device: UUID) -> Subscriber {
         Subscriber(
             id: session,
@@ -1268,13 +1201,13 @@ public actor VirtualRadio {
     }
 }
 
-/// One characteristic revealed by discovery: its identifier and the properties it
+/// One characteristic that discovery revealed: its identifier and the properties that it
 /// advertises.
 struct CharacteristicDiscovery: Sendable {
 
     /// The characteristic's identifier.
     let identifier: CharacteristicIdentifier
 
-    /// The operations the characteristic advertises support for.
+    /// The operations that the characteristic advertises support for.
     let properties: CharacteristicProperties
 }

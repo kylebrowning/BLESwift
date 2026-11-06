@@ -2,8 +2,8 @@
 //  ConnectionLogView.swift
 //  BLESwiftExplorer
 //
-//  Screen 4: the scrolling connection log fed by `central.connectionEvents()`, including
-//  the Task 2 `.notificationsRestored` event.
+//  Screen 4: the scrolling connection log that `central.connectionEvents()` feeds.
+//  It includes the `.notificationsRestored` event.
 //
 
 import SwiftUI

@@ -11,14 +11,13 @@ import Dispatch
 import Foundation
 import Testing
 
-/// Device delays and `Central`'s timeouts on a `ManualClock` (#68): every delayed path is
-/// driven to its deadline, or just short of it, by advancing the clock — never by waiting.
+/// Device delays and `Central` timeouts on a `ManualClock`. The tests advance the clock to a
+/// deadline, or to just before it, and never wait.
 @Suite("Latency on a manual clock")
 struct LatencyTests {
 
-    /// A handler that counts the reads that reach it, so a test can assert a delayed read
-    /// is still pending — the radio has not called through — without waiting to see
-    /// whether it does.
+    /// A handler that counts the reads that reach it, so a test can assert that a delayed read is
+    /// still pending without waiting.
     private actor CountingHandler: VirtualDeviceHandler {
         private(set) var reads = 0
 
@@ -34,9 +33,9 @@ struct LatencyTests {
         func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {}
     }
 
-    /// Every `CentralEvent` a backend delivered, read and written on the backend's queue
-    /// only — and published on a stream, so a test can wait for the one it expects after an
-    /// advance instead of draining and hoping the resumed task has hopped by then.
+    /// Every `CentralEvent` that a backend delivered. Only the backend's queue reads and writes it.
+    /// A stream also publishes it, so a test can wait for an expected event after an advance
+    /// instead of draining and hoping the resumed task has hopped.
     private final class EventLog: @unchecked Sendable {
         var events: [CentralEvent] = []
         let stream: AsyncStream<CentralEvent>
@@ -60,8 +59,8 @@ struct LatencyTests {
 
         var connects: Int { events.filter { if case .didConnect = $0 { return true } else { return false } }.count }
 
-        /// Every termination event, in delivery order: `"didDisconnect(<code or nil>)"` or
-        /// `"didFailToConnect(<code>)"`.
+        /// Every termination event, in order of delivery:
+        /// `"didDisconnect(<code or nil>)"` or `"didFailToConnect(<code>)"`.
         var terminations: [String] {
             events.compactMap { event in
                 switch event {
@@ -82,8 +81,8 @@ struct LatencyTests {
         }
     }
 
-    /// A `Central` on a fresh `VirtualCentralBackend` over `radio`, its timers on `clock`,
-    /// waited to `.poweredOn`.
+    /// A `Central` on a fresh `VirtualCentralBackend` over `radio`, with its timers on `clock`.
+    /// The function waits until it is `.poweredOn`.
     private static func central(
         on radio: VirtualRadio,
         clock: any Clock<Duration>,
@@ -96,7 +95,7 @@ struct LatencyTests {
         return (central, backend, queue)
     }
 
-    /// `backend`'s remote for `device`, with `log` attached as the event handler.
+    /// The remote of `backend` for `device`, with `log` attached as the event handler.
     private static func attach(_ backend: VirtualCentralBackend, log: EventLog, device: UUID, on queue: DispatchQueue) async -> VirtualPeripheralRemote {
         await RecordingDevice.onQueue(queue) {
             backend.eventHandler = { log.append($0) }
@@ -104,10 +103,9 @@ struct LatencyTests {
         }
     }
 
-    /// Runs every piece of radio work `backend` — and `remote`, when one is involved — has
-    /// queued, then flushes their deliveries. A delayed GATT request sleeps on the remote's
-    /// chain, not the backend's, so an assertion about what it left behind must wait on the
-    /// remote too.
+    /// Runs all radio work that `backend` (and `remote`, if involved) has queued, then flushes
+    /// their deliveries. A delayed GATT request sleeps on the remote's chain, not the backend's, so
+    /// an assertion about what it left behind must wait on the remote too.
     private static func drain(_ backend: VirtualCentralBackend, remote: VirtualPeripheralRemote? = nil, on queue: DispatchQueue) async {
         await backend.waitForPendingWork()
         await remote?.waitForPendingWork()
@@ -163,10 +161,10 @@ struct LatencyTests {
         try await peripheral.disconnect()
         #expect(await RecordingDevice.isDisconnected(central, id))
 
-        // `Central.disconnect` is what fails the read, with `explicitDisconnect`. The delay
-        // then runs out on a connection the radio no longer holds, and its `invalidHandle`
-        // answer goes unconsumed; that nothing reached the handler is the assertion — made
-        // only once the remote's chain, where the delayed read sleeps, has run it through.
+        // `Central.disconnect` makes the read fail with `explicitDisconnect`. The delay then ends
+        // on a connection that the radio no longer holds, and its `invalidHandle` answer is not
+        // consumed. The assertion is that nothing reached the handler. The test makes it only after
+        // the remote's chain, where the delayed read sleeps, has run the read through.
         clock.advance(by: .seconds(5))
         await #expect(throws: BLESwiftError.explicitDisconnect) { try await read.value }
         let remote = await RecordingDevice.onQueue(queue) {
@@ -187,7 +185,7 @@ struct LatencyTests {
         let id = PeripheralIdentifier(uuid: device.descriptor.identifier, name: nil)
         let (central, _, _) = await RecordingDevice.central(on: radio, label: "LatencyTests.zero")
 
-        // The whole undelayed surface: connect, discovery, read, write, subscribe.
+        // The whole surface without delay: connect, discovery, read, write, subscribe.
         let peripheral = try await central.connect(id)
         #expect(clock.sleeperCount == 0)
         #expect(try await peripheral.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
@@ -204,8 +202,8 @@ struct LatencyTests {
         #expect(try await notifications.value == Data([2]))
         #expect(clock.sleeperCount == 0)
 
-        // A delay set now applies to the next read; clearing it while that read is still
-        // delayed leaves the read its delay, and the read after it has none.
+        // A delay that the test sets now applies to the next read. Clearing the delay while that
+        // read is delayed does not change it. The read after it has no delay.
         await handle.setLatency(VirtualLatency(read: .seconds(5)))
         let delayed = Task { try await peripheral.read(from: RecordingDevice.control) as Data }
         await clock.waitForSleepers(1)
@@ -233,11 +231,11 @@ struct LatencyTests {
         await clock.waitForSleepers(2)
         clock.advance(by: .seconds(30))
         await #expect(throws: BLESwiftError.connectionTimedOut) { try await attempt.value }
-        // The timeout's cancel withdrew the delayed attempt: its sleep is gone too.
+        // Cancelling the timeout withdrew the delayed attempt, so its sleep is gone too.
         #expect(clock.sleeperCount == 0)
         #expect(await RecordingDevice.isDisconnected(central, id))
 
-        // Past the delay the attempt would have landed at: nothing connects.
+        // Past the delay at which the attempt would have arrived: nothing connects.
         clock.advance(by: .seconds(30))
         await Self.drain(backend, on: queue)
         #expect(await RecordingDevice.isDisconnected(central, id))
@@ -311,9 +309,9 @@ struct LatencyTests {
         await RecordingDevice.onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
         await clock.waitForSleepers(1)
 
-        // Same turn: the cancel's `didDisconnect` has not hopped yet, so the connect lands on
-        // a `.disconnecting` remote — and must fail the way it does behind an undelayed cancel,
-        // not start a second delayed attempt the cancel's hop then settles out from under.
+        // Same turn: the cancel's `didDisconnect` has not hopped yet, so the connect arrives at a
+        // `.disconnecting` remote. It must fail as it does behind a cancel without delay. It must
+        // not start a second delayed attempt that the cancel's hop then settles unexpectedly.
         await RecordingDevice.onQueue(queue) {
             backend.cancelPeripheralConnection(remote)
             backend.connect(remote, options: nil, requiresANCS: false)
@@ -325,14 +323,14 @@ struct LatencyTests {
         #expect(await radio.isConnected(session: backend.sessionID, device: device.descriptor.identifier) == false)
         #expect(clock.sleeperCount == 0)
 
-        // Past every deadline there could have been: nothing more.
+        // Past every deadline that there could have been: nothing more.
         clock.advance(by: .seconds(120))
         await Self.drain(backend, remote: remote, on: queue)
         #expect(await RecordingDevice.onQueue(queue) { log.terminations } == ["didDisconnect(nil)", "didFailToConnect(11)"])
         #expect(await RecordingDevice.onQueue(queue) { log.connects } == 0)
 
-        // With the delay cleared, a connect and cancel in one turn take the undelayed path and
-        // leave the remote and the radio agreeing: connected, then cancelled, once.
+        // With the delay cleared, a connect and a cancel in one turn take the path without delay.
+        // The remote and the radio agree: connected, then cancelled, once.
         await handle.setLatency(.none)
         await RecordingDevice.onQueue(queue) {
             log.events.removeAll()
@@ -358,7 +356,7 @@ struct LatencyTests {
         let log = EventLog()
         let remote = await Self.attach(backend, log: log, device: device.descriptor.identifier, on: queue)
 
-        // First attempt: deadline at 60 s. Cancelled at 30 s.
+        // First attempt: deadline at 60 s. The test cancels it at 30 s.
         await RecordingDevice.onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
         await clock.waitForSleepers(1)
         clock.advance(by: .seconds(30))
@@ -370,15 +368,15 @@ struct LatencyTests {
         await RecordingDevice.onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
         await clock.waitForSleepers(1)
 
-        // Past the first attempt's deadline: still connecting.
+        // Past the deadline of the first attempt: still connecting.
         clock.advance(by: .seconds(30))
         await Self.drain(backend, remote: remote, on: queue)
         #expect(await RecordingDevice.onQueue(queue) { log.connects } == 0)
         #expect(await RecordingDevice.onQueue(queue) { remote.connectionState } == .connecting)
         #expect(await radio.isConnected(session: backend.sessionID, device: device.descriptor.identifier) == false)
 
-        // Past the second's: connected, once. The advance only resumes the sleeper, so the
-        // outcome is awaited rather than drained for.
+        // Past the second attempt's deadline: connected, once. The advance only resumes the
+        // sleeper, so the test awaits the result and does not drain for it.
         clock.advance(by: .seconds(30))
         await log.waitForConnect()
         await Self.drain(backend, remote: remote, on: queue)
@@ -405,7 +403,7 @@ struct LatencyTests {
         }
         await clock.waitForSleepers(1)
         clock.advance(by: .seconds(20))
-        // Finished cleanly — no error — with nothing seen.
+        // Finished cleanly, with no error and with nothing seen.
         #expect(try await finished.value == 0)
         #expect(clock.sleeperCount == 0)
     }
@@ -433,7 +431,7 @@ struct LatencyTests {
         }
         #expect(willReconnect == true)
 
-        // The backoff is parked on the clock; nothing reconnects until it is advanced.
+        // The backoff is parked on the clock. Nothing reconnects until the test advances the clock.
         await clock.waitForSleepers(1)
         #expect(await RecordingDevice.isDisconnected(central, id))
         clock.advance(by: .seconds(45))

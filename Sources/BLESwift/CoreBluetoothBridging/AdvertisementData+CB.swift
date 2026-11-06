@@ -9,10 +9,10 @@ import Foundation
 
 extension AdvertisementData {
 
-    /// Parses an `AdvertisementData` from CoreBluetooth's raw advertisement dictionary.
-    /// The only place `BLESwift` touches the raw `[String: Any]` advertisement dictionary.
+    /// Parses an `AdvertisementData` from CoreBluetooth's raw advertisement dictionary. This is
+    /// the only place where `BLESwift` reads that `[String: Any]` dictionary.
     ///
-    /// - Parameter advertisementData: The `[String: Any]` dictionary CoreBluetooth vends
+    /// - Parameter advertisementData: The `[String: Any]` dictionary that CoreBluetooth gives
     ///   to `centralManager(_:didDiscover:advertisementData:rssi:)`.
     init(advertisementData: [String: Any]) {
         let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String

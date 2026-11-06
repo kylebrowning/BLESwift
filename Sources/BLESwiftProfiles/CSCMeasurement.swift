@@ -7,31 +7,37 @@ import BLESwift
 import BLESwiftCore
 import Foundation
 
-/// The Bluetooth SIG "CSC Measurement" characteristic (GSS §3.60 CSC Measurement,
-/// `0x2A5B`) from the Cycling Speed and Cadence service.
+/// The Bluetooth SIG "CSC Measurement" characteristic (GSS §3.60 CSC Measurement, `0x2A5B`) from
+/// the Cycling Speed and Cadence service.
 ///
-/// Byte layout (little-endian): a one-byte `Flags` field, then the flag-driven groups in
-/// order:
-/// - Flags bit 0 — Wheel Revolution Data present: `cumulativeRevolutions` (`UInt32`) then
+/// Byte layout (little-endian): a one-byte `Flags` field, then the groups that the flags select, in
+/// this order:
+/// - Flags bit 0: Wheel Revolution Data. It has `cumulativeRevolutions` (`UInt32`) and then
 ///   `lastEventTime` (`UInt16`, units of 1/1024 s).
-/// - Flags bit 1 — Crank Revolution Data present: `cumulativeRevolutions` (`UInt16`) then
+/// - Flags bit 1: Crank Revolution Data. It has `cumulativeRevolutions` (`UInt16`) and then
 ///   `lastEventTime` (`UInt16`, units of 1/1024 s).
 public struct CSCMeasurement: Receivable, Sendable, Equatable {
 
-    /// Wheel-revolution data (present iff Flags bit 0 is set).
+    /// Wheel-revolution data (present only if Flags bit 0 is set).
     public struct WheelData: Sendable, Equatable {
+        /// Cumulative wheel revolutions.
         public let cumulativeRevolutions: UInt32
+        /// Last wheel event time, in units of 1/1024 s. It wraps at 64 s.
         public let lastEventTime: UInt16
+        /// Creates wheel data from a revolution count and an event time.
         public init(cumulativeRevolutions: UInt32, lastEventTime: UInt16) {
             self.cumulativeRevolutions = cumulativeRevolutions
             self.lastEventTime = lastEventTime
         }
     }
 
-    /// Crank-revolution data (present iff Flags bit 1 is set).
+    /// Crank-revolution data (present only if Flags bit 1 is set).
     public struct CrankData: Sendable, Equatable {
+        /// Cumulative crank revolutions.
         public let cumulativeRevolutions: UInt16
+        /// Last crank event time, in units of 1/1024 s. It wraps at 64 s.
         public let lastEventTime: UInt16
+        /// Creates crank data from a revolution count and an event time.
         public init(cumulativeRevolutions: UInt16, lastEventTime: UInt16) {
             self.cumulativeRevolutions = cumulativeRevolutions
             self.lastEventTime = lastEventTime
@@ -43,7 +49,9 @@ public struct CSCMeasurement: Receivable, Sendable, Equatable {
     /// The Bluetooth SIG-assigned CSC Measurement characteristic (`0x2A5B`).
     public static let characteristic = CharacteristicIdentifier(uuid: "2A5B", service: service)
 
+    /// The wheel data, or `nil` if the peripheral did not send it.
     public let wheel: WheelData?
+    /// The crank data, or `nil` if the peripheral did not send it.
     public let crank: CrankData?
 
     public init(bluetoothData data: Data) throws {

@@ -2,9 +2,9 @@
 //  ExplorerModel.swift
 //  BLESwiftExplorer
 //
-//  The single owner of the app's `Central`. Because `Central` is an actor, every call is
-//  `await`; async streams are consumed from `.task {}` / `Task {}` and their results are
-//  published to this `@MainActor @Observable` state for SwiftUI to render.
+//  The single owner of the app's `Central`. `Central` is an actor, so every call is `await`. The
+//  model consumes async streams from `.task {}` and `Task {}` and publishes their results to this
+//  `@MainActor @Observable` state for SwiftUI to render.
 //
 
 import BLESwift
@@ -13,7 +13,7 @@ import BLESwiftSimulatorLink
 import Foundation
 import Observation
 
-/// A discovered peripheral, wrapped for `Identifiable` list rendering.
+/// A discovered peripheral, wrapped for `Identifiable` list display.
 struct DiscoveredPeripheral: Identifiable {
     var id: UUID { discovery.peripheral.uuid }
     var discovery: Discovery
@@ -22,14 +22,14 @@ struct DiscoveredPeripheral: Identifiable {
     var services: [ServiceIdentifier] { discovery.advertisement.serviceUUIDs ?? [] }
 }
 
-/// A single connection-log line.
+/// A single line of the connection log.
 struct LogEntry: Identifiable {
     let id = UUID()
     let date = Date()
     let text: String
 }
 
-/// Which GATT-compatibility profile the next connect uses (Task 5).
+/// Which GATT-compatibility profile the next connect uses.
 enum CompatibilityChoice: String, CaseIterable, Identifiable {
     case strict, lenient, customLenientRead
     var id: String { rawValue }
@@ -38,8 +38,8 @@ enum CompatibilityChoice: String, CaseIterable, Identifiable {
         switch self {
         case .strict: return .strict
         case .lenient: return .lenient
-        // A custom `GATTCompatibility` (Task 5): read without the `.read` property, but
-        // keep filtered discovery and strict notify/write.
+        // A custom `GATTCompatibility`: read without the `.read` property, but keep filtered
+        // discovery and strict notify and write.
         case .customLenientRead: return GATTCompatibility(allowReadWithoutProperty: true)
         }
     }
@@ -49,7 +49,8 @@ enum CompatibilityChoice: String, CaseIterable, Identifiable {
 @Observable
 final class ExplorerModel {
 
-    // The single `Central`, built synchronously at launch (restoration needs it early).
+    // The single `Central`. The app builds it synchronously at launch, because restoration needs it
+    // early.
     let central: Central
 
     // State & authorization (Screen 1).
@@ -80,16 +81,15 @@ final class ExplorerModel {
 
     init() {
         #if targetEnvironment(simulator)
-        // The Simulator has no Bluetooth; route Central/PeripheralHost to a host-side
-        // bleswift-provider (BLESWIFT_LINK overrides the endpoint).
-        // Must stay ahead of the `Central(configuration:)` below, in this same
-        // initializer: `Central` resolves its backend from `BackendRegistry` once, at
-        // construction, so an install that ran after it would leave this `Central` on
-        // CoreBluetooth for good.
+        // The Simulator has no Bluetooth. Route Central and PeripheralHost to a bleswift-provider
+        // on the host (BLESWIFT_LINK overrides the endpoint). This call must stay ahead of the
+        // `Central(configuration:)` below, because `Central` resolves its backend from
+        // `BackendRegistry` once, at construction. An install after it would leave this `Central`
+        // on CoreBluetooth for good.
         SimulatorLink.install()
         #endif
 
-        // Restoration is iOS-only; on macOS the plain `Configuration` initializer is used.
+        // Restoration is only for iOS. On macOS the plain `Configuration` initializer is used.
         #if os(iOS)
         let configuration = Configuration(
             showPowerAlert: true,
@@ -103,14 +103,14 @@ final class ExplorerModel {
         let stored = UserDefaults.standard.array(forKey: savedDevicesKey) as? [String] ?? []
         self.savedDeviceIDs = stored.compactMap(UUID.init(uuidString:))
 
-        // Start consuming restoration events immediately, in the same launch path — the
-        // stream replays everything buffered since `Central.init`.
+        // Start to consume restoration events immediately, in the same launch path. The stream
+        // replays everything buffered since `Central.init`.
         #if os(iOS)
         Task { [weak self] in await self?.consumeRestorationEvents() }
         #endif
     }
 
-    /// Kicks off the long-lived stream consumers. Called from the root view's `.task`.
+    /// Starts the long-lived stream consumers. The root view's `.task` calls it.
     func start() async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { [weak self] in await self?.consumeStateEvents() }
@@ -127,10 +127,10 @@ final class ExplorerModel {
         }
     }
 
-    // MARK: - Screen 2: scanning with a ScanFilter (Task 4)
+    // MARK: - Screen 2: scanning with a ScanFilter
 
-    /// Starts a filtered scan. Every field of `ScanFilter` reachable from the UI is wired
-    /// through here, plus `allowDuplicates`, `rssiThreshold`, `lossTimeout`, and `timeout`.
+    /// Starts a filtered scan. The UI reaches every field of `ScanFilter` through here. The scan
+    /// also uses `allowDuplicates`, `rssiThreshold`, `lossTimeout`, and `timeout`.
     func startScan(filter: ScanFilter, allowDuplicates: Bool, rssiThreshold: Int?) {
         stopScan()
         discoveries = []
@@ -163,7 +163,7 @@ final class ExplorerModel {
         }
     }
 
-    /// A baseline `scan(services:)` (no `ScanFilter`) — exercises the pre-Task-4 overload.
+    /// A baseline `scan(services:)` (no `ScanFilter`). It exercises the earlier overload.
     func startServiceScan(services: [ServiceIdentifier]) {
         stopScan()
         discoveries = []
@@ -197,7 +197,7 @@ final class ExplorerModel {
         }
     }
 
-    /// `findFirst(matching:timeout:)` (Task 4): returns the first sighting matching `filter`.
+    /// `findFirst(matching:timeout:)`: returns the first sighting that matches `filter`.
     func findFirst(matching filter: ScanFilter) async -> String {
         do {
             let discovery = try await central.findFirst(matching: filter, timeout: .seconds(10))
@@ -207,10 +207,10 @@ final class ExplorerModel {
         }
     }
 
-    // MARK: - Connecting (Tasks 4 & 5 & 7)
+    // MARK: - Connecting
 
-    /// Connects to a discovered peripheral. `compatibility` (Task 5) and, on iOS,
-    /// `requiresANCS` (Task 7) are threaded through the baseline `connect(_:reconnect:...)`.
+    /// Connects to a discovered peripheral. The baseline `connect(_:reconnect:...)` receives
+    /// `compatibility` and, on iOS, `requiresANCS`.
     func connect(
         _ discovery: Discovery,
         compatibility: GATTCompatibility,
@@ -241,7 +241,7 @@ final class ExplorerModel {
         }
     }
 
-    // MARK: - Screen 4: connection log (Task 2 notificationsRestored)
+    // MARK: - Screen 4: connection log
 
     private func consumeConnectionEvents() async {
         for await event in await central.connectionEvents() {
@@ -267,10 +267,10 @@ final class ExplorerModel {
         if connectionLog.count > 200 { connectionLog.removeFirst(connectionLog.count - 200) }
     }
 
-    // MARK: - Screen 5: saved devices (Task 4 connect(identifier:fallbackScan:))
+    // MARK: - Screen 5: saved devices
 
-    /// Reconnects a saved peripheral by UUID, falling back to a `ScanFilter` scan when the
-    /// system no longer knows it (`connect(identifier:fallbackScan:reconnect:...)`).
+    /// Reconnects a saved peripheral by UUID. If the system no longer knows the peripheral, the
+    /// method falls back to a `ScanFilter` scan (`connect(identifier:fallbackScan:reconnect:...)`).
     func reconnectSaved(_ identifier: UUID, fallback: ScanFilter?) async -> Peripheral? {
         do {
             let peripheral = try await central.connect(
@@ -287,7 +287,7 @@ final class ExplorerModel {
         }
     }
 
-    /// Baseline retrieval: peripherals the system already has connected for these services.
+    /// Baseline retrieval: peripherals that the system already has connected for these services.
     func systemConnected(services: [ServiceIdentifier]) async -> [PeripheralIdentifier] {
         (try? await central.systemConnectedPeripherals(withServices: services)) ?? []
     }
@@ -305,10 +305,10 @@ final class ExplorerModel {
         UserDefaults.standard.set(savedDeviceIDs.map(\.uuidString), forKey: savedDevicesKey)
     }
 
-    // MARK: - Screen 6: system connection events (Task 7)
+    // MARK: - Screen 6: system connection events
 
     #if !os(macOS)
-    /// Subscribes to system-level connection events (`connectionEventRegistration` +
+    /// Subscribes to system-level connection events (`connectionEventRegistration` and
     /// `SystemConnectionEvent`). Not available on macOS.
     func consumeSystemConnectionEvents(services: [ServiceIdentifier]?) async {
         for await event in await central.connectionEventRegistration(services: services, peripherals: nil) {

@@ -2,14 +2,14 @@
 //  GATTAssignedNumbers+Services.swift
 //  BLESwiftCore
 //
-//  GENERATED FILE — do not edit by hand.
-//  Source: Bluetooth SIG public assigned numbers (service_uuids.yaml), plus a curated set of
-//  widely-deployed vendor UUIDs. Regenerate per Scripts/generate-assigned-numbers.md.
+//  GENERATED FILE. Do not edit by hand.
+//  Source: Bluetooth SIG public assigned numbers (service_uuids.yaml), and a curated set of
+//  widely-deployed vendor UUIDs. To regenerate, follow Scripts/generate-assigned-numbers.md.
 //
 
 extension GATTAssignedNumbers {
 
-    /// SIG-assigned 16-bit service UUIDs → names.
+    /// SIG-assigned 16-bit service UUIDs and their names.
     static let serviceNames: [UInt16: String] = [
         0x1800: "GAP",
         0x1801: "GATT",
@@ -88,7 +88,7 @@ extension GATTAssignedNumbers {
         0x185F: "Generic Voice Assistant",
     ]
 
-    /// Widely-deployed vendor service UUIDs that have no 16-bit SIG form, keyed by full
+    /// Widely-deployed vendor service UUIDs that have no 16-bit SIG form. The key is the full
     /// normalized (uppercase) UUID string.
     static let vendorServiceNames: [String: String] = [
         "6E400001-B5A3-F393-E0A9-E50E24DCCA9E": "Nordic UART Service",

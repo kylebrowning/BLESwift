@@ -8,7 +8,7 @@ import CoreBluetooth
 
 extension CentralState {
 
-    /// Maps a `CBManagerState` to its ``CentralState`` equivalent.
+    /// Maps a `CBManagerState` to its equivalent ``CentralState``.
     init(_ cbManagerState: CBManagerState) {
         switch cbManagerState {
         case .unknown:

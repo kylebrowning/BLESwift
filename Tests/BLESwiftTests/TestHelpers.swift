@@ -9,12 +9,11 @@ import BLESwiftTestSupport
 import Dispatch
 import Foundation
 
-/// Creates a fresh ``FakeCentral``/``FakePeripheral`` pair sharing one
-/// `DispatchQueue`, ready for a test to script.
+/// Creates a new ``FakeCentral`` and ``FakePeripheral`` pair that share one `DispatchQueue`, so a
+/// test can script the pair.
 ///
-/// - Parameter label: A label for the underlying `DispatchQueue`, useful for
-///   debugging (e.g. visible in Instruments/lldb thread names). Defaults to a generic
-///   label.
+/// - Parameter label: A label for the underlying `DispatchQueue`, visible in thread names in
+///   Instruments or lldb.
 /// - Returns: A fake central, a fake peripheral, and the queue both were created with.
 func makeFakeCentral(label: String = "BLESwiftTests.FakeCentral") -> (FakeCentral, FakePeripheral, DispatchQueue) {
     let queue = DispatchQueue(label: label)
@@ -23,12 +22,12 @@ func makeFakeCentral(label: String = "BLESwiftTests.FakeCentral") -> (FakeCentra
     return (central, peripheral, queue)
 }
 
-/// Creates a real ``Central`` actor wired to a fresh ``FakeCentral``/``FakePeripheral``
-/// pair, for tests that exercise `Central` itself rather than the fakes directly.
+/// Creates a real ``Central`` actor wired to a new ``FakeCentral`` and ``FakePeripheral`` pair. Use
+/// it for tests that exercise `Central` itself and not the fakes directly.
 ///
-/// Uses `Central`'s public `init(backend:queue:configuration:startupBackgroundTask:connectedPeripherals:)`
-/// — no `@testable import` and no direct `handle(_:)`/`handle(_:from:)` wiring needed here;
-/// that initializer does the wiring internally.
+/// It uses the public
+/// `init(backend:queue:configuration:startupBackgroundTask:connectedPeripherals:)` of `Central`,
+/// which does the wiring internally. It needs no `@testable import`.
 func makeTestCentral(
     configuration: Configuration = Configuration(),
     startupBackgroundTask: (any StartupBackgroundTaskRunning)? = nil,
@@ -45,18 +44,17 @@ func makeTestCentral(
     return (central, fakeCentral, fakePeripheral)
 }
 
-/// ``makeTestCentral()`` plus a completed connection: registers the fake peripheral as
-/// retrievable, scripts a successful connect, and connects — returning the connected
-/// ``Peripheral`` handle alongside the rig. The standard starting point for GATT-level
-/// tests (reads/writes/notifications/composites).
+/// ``makeTestCentral()`` plus a completed connection. It registers the fake peripheral as
+/// retrievable, scripts a successful connect, and connects. This is the standard start point for
+/// GATT-level tests (reads, writes, notifications, and composites).
 ///
-/// - Returns: The wired `Central`, the `FakeCentral`/`FakePeripheral` backing it, and the
+/// - Returns: The wired `Central`, the `FakeCentral` and `FakePeripheral` that support it, and the
 ///   connected `Peripheral` handle.
 func makeConnectedTestCentral() async throws -> (Central, FakeCentral, FakePeripheral, Peripheral) {
     let (central, fakeCentral, fakePeripheral) = makeTestCentral()
-    // Power the radio on first: several lifecycle behaviors under test (notably the
-    // last-release `setNotifyValue(false)`, which is ledger-guarded on `.poweredOn`) are
-    // deliberately skipped while the radio isn't on, exactly as on real hardware.
+    // Power the radio on first. Several lifecycle behaviors under test are skipped on purpose while
+    // the radio is not on, as on real hardware. One example is the `setNotifyValue(false)` at the
+    // last release, which the ledger guards on `.poweredOn`.
     fakeCentral.simulateStateChange(.poweredOn)
     await fakeCentral.onQueue {
         fakeCentral.retrievablePeripherals[fakePeripheral.identifier] = fakePeripheral
@@ -66,22 +64,19 @@ func makeConnectedTestCentral() async throws -> (Central, FakeCentral, FakePerip
     return (central, fakeCentral, fakePeripheral, peripheral)
 }
 
-/// Creates an additional `FakePeripheral` on the same queue as `fakeCentral` and registers
-/// it as retrievable — the multi-peripheral test workhorse: feed the identifier it reports
-/// to `central.connect(_:)`, which wires the peripheral's `eventHandler` (and so its GATT/
-/// notification event delivery) itself, on initiation, exactly as it does for the primary
-/// fake peripheral `makeTestCentral()` returns — no separate wiring step is needed here.
+/// Creates an additional `FakePeripheral` on the same queue as `fakeCentral` and registers it as
+/// retrievable. This is the main helper for multi-peripheral tests. Pass the identifier that it
+/// reports to `central.connect(_:)`, which wires the peripheral's `eventHandler` itself, as for the
+/// primary fake peripheral. The helper needs no separate wiring step.
 ///
 /// - Parameters:
-///   - central: The `Central` this peripheral will eventually be connected through. Not
-///     used to wire anything directly (see above); accepted so call sites read as
-///     unambiguously "one more peripheral for this rig", matching `makeTestCentral()`'s own
-///     shape.
-///   - fakeCentral: The fake backing `central`, which the new peripheral is registered
-///     retrievable on.
-///   - identifier: The new peripheral's identifier. Defaults to a fresh `UUID`.
-///   - name: The new peripheral's advertised/cached name.
-/// - Returns: The newly created, already-registered `FakePeripheral`.
+///   - central: The `Central` that will later connect this peripheral. The helper does not use it
+///     to wire anything. It accepts it so that call sites read "one more peripheral for this rig".
+///   - fakeCentral: The fake that supports `central`. The helper registers the new peripheral as
+///     retrievable on it.
+///   - identifier: The identifier of the new peripheral. It defaults to a new `UUID`.
+///   - name: The advertised or cached name of the new peripheral.
+/// - Returns: The new `FakePeripheral`, already registered.
 func addFakePeripheral(
     to central: Central,
     fakeCentral: FakeCentral,
@@ -95,8 +90,8 @@ func addFakePeripheral(
     return peripheral
 }
 
-/// Polls `condition` until it's `true`, or a generous timeout elapses (the surrounding
-/// test's own assertions then report the actual failure).
+/// Polls `condition` until it is `true` or a long timeout ends. After a timeout the test's
+/// assertions report the actual failure.
 func waitFor(timeout: Duration = .seconds(2), _ condition: () async -> Bool) async {
     let deadline = ContinuousClock.now + timeout
     while await !condition() {

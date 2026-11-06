@@ -5,46 +5,47 @@
 
 import Foundation
 
-/// Which side of the link a client identifies itself as during the handshake.
+/// The side of the link that a client identifies as during the handshake.
 public enum LinkRole: String, Codable, Sendable, CaseIterable {
-    /// The client speaks `CentralRequest`/`CentralWireEvent` — it drives a remote
+    /// The client uses `CentralRequest` and `CentralWireEvent`. It controls a remote
     /// `Central`.
     case central
-    /// The client speaks `HostRequest`/`HostWireEvent` — it drives a remote
+    /// The client uses `HostRequest` and `HostWireEvent`. It controls a remote
     /// `PeripheralHost`.
     case peripheral
 }
 
-/// The first message a client sends after connecting, identifying itself to the provider.
+/// The first message that a client sends after it connects. It identifies the client to the
+/// provider.
 public struct ClientHello: Codable, Sendable, Equatable {
 
-    /// The wire protocol version this client speaks.
+    /// The wire protocol version that this client uses.
     public var protocolVersion: Int
 
-    /// Which side of the link this client wants to drive.
+    /// The side of the link that this client wants to control.
     public var role: LinkRole
 
-    /// A human-readable name for this client, for logging on the provider side.
+    /// A name for this client that people can read. The provider uses it for logs.
     public var clientName: String
 
-    /// The identity a `.peripheral` client wants the device the provider hosts for it to
-    /// carry, so a reconnect is the *same* device to every central that had seen it.
+    /// The identity that a `.peripheral` client wants for the device that the provider hosts for
+    /// it. A reconnect then appears as the *same* device to every central that saw it before.
     ///
-    /// A `LinkPeripheralManager` mints one of these per instance and sends it on every hello,
-    /// including the ones its reconnects send. `nil` — which is what a client that predates
-    /// the field, or one in the central role, sends — leaves the provider to mint a fresh
-    /// identifier for the session, as it always did. Optional, so a hello encoded without the
-    /// key still decodes.
+    /// A `LinkPeripheralManager` creates one identity for each instance and sends it in every
+    /// hello, including each reconnect's hello. A central-role client sends `nil`. In that case
+    /// the provider creates a new identifier for the session.
+    ///
+    /// The field is optional, so a hello that was encoded without the key still decodes.
     public var hostIdentifier: UUID?
 
     /// Creates a `ClientHello`.
     ///
     /// - Parameters:
-    ///   - protocolVersion: The wire protocol version this client speaks.
-    ///   - role: Which side of the link this client wants to drive.
-    ///   - clientName: A human-readable name, for provider-side logging.
-    ///   - hostIdentifier: The identity to host a `.peripheral` client's device under.
-    ///     Defaults to `nil`, which lets the provider mint one.
+    ///   - protocolVersion: The wire protocol version that this client uses.
+    ///   - role: The side of the link that this client wants to control.
+    ///   - clientName: A name that people can read. The provider uses it for logs.
+    ///   - hostIdentifier: The identity under which the provider hosts a `.peripheral` client's
+    ///     device. The default is `nil`, which lets the provider create one.
     public init(protocolVersion: Int, role: LinkRole, clientName: String, hostIdentifier: UUID? = nil) {
         self.protocolVersion = protocolVersion
         self.role = role
@@ -53,45 +54,48 @@ public struct ClientHello: Codable, Sendable, Equatable {
     }
 }
 
-/// The provider's reply to a `ClientHello`, accepting or rejecting the connection.
+/// The provider's reply to a `ClientHello`. It accepts or rejects the connection.
 public struct ServerHello: Codable, Sendable, Equatable {
 
-    /// The wire protocol version the provider speaks.
+    /// The wire protocol version that the provider uses.
     public var protocolVersion: Int
 
     /// Whether the provider accepted this client's handshake.
     public var accepted: Bool
 
-    /// When `accepted` is `false`, a human-readable explanation (e.g. a protocol version
-    /// mismatch).
+    /// If `accepted` is `false`, an explanation that people can read. An example is a protocol
+    /// version mismatch.
     public var reason: String?
 
-    /// A human-readable name for the provider, for logging on the client side.
+    /// A name for the provider that people can read. The client uses it for logs.
     public var providerName: String
 
-    /// The identity the provider actually hosted a `.peripheral` client's device under.
+    /// The identity under which the provider actually hosted a `.peripheral` client's device.
     ///
-    /// Normally the `ClientHello.hostIdentifier` the client asked for. It differs when the
-    /// provider refused that choice — an identifier one of its *own* devices already owns —
-    /// and minted a fresh one instead, which is the one thing a client cannot work out for
-    /// itself: its reconnect will keep asking for an identity it is not being hosted under,
-    /// and every central will keep seeing a different device. Reporting it here is what lets
-    /// the client say so.
+    /// Normally this is the `ClientHello.hostIdentifier` that the client asked for. It differs
+    /// if the provider refused that identifier because one of its *own* devices already uses it.
+    /// The provider then creates a new identifier. The client cannot find this out alone, so this
+    /// field lets it report the problem. Otherwise its reconnects keep asking for an identity
+    /// that does not host it, and every central keeps seeing a different device.
     ///
-    /// `nil` for a rejected handshake, for a `.central` client (which hosts nothing), and for
-    /// a provider that predates the field. Optional, so a hello encoded without the key still
-    /// decodes.
+    /// The value is `nil` in these cases:
+    ///
+    /// - The handshake was rejected.
+    /// - The client is a `.central` client, because it hosts nothing.
+    /// - The provider is older than this field.
+    ///
+    /// The field is optional, so a hello that was encoded without the key still decodes.
     public var assignedHostIdentifier: UUID?
 
     /// Creates a `ServerHello`.
     ///
     /// - Parameters:
-    ///   - protocolVersion: The wire protocol version the provider speaks.
+    ///   - protocolVersion: The wire protocol version that the provider uses.
     ///   - accepted: Whether the provider accepted this client's handshake.
-    ///   - reason: A human-readable explanation of a refusal.
-    ///   - providerName: A human-readable name for the provider.
-    ///   - assignedHostIdentifier: The identity a `.peripheral` client's device was hosted
-    ///     under. Defaults to `nil`, which is what every other case sends.
+    ///   - reason: An explanation of a refusal that people can read.
+    ///   - providerName: A name for the provider that people can read.
+    ///   - assignedHostIdentifier: The identity under which the provider hosted a `.peripheral`
+    ///     client's device. The default is `nil`, which every other case sends.
     public init(
         protocolVersion: Int,
         accepted: Bool,

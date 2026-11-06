@@ -3,16 +3,16 @@
 //  BLESwiftCore
 //
 
-/// Whether a GATT write should wait for the peripheral's confirmation.
+/// Whether a GATT write must wait for the peripheral's confirmation.
 ///
-/// BLESwift-owned; the backend's native write-type mapping lives in the `BLESwift`
-/// module — this type never exposes a CoreBluetooth type in its own public API.
+/// BLESwift owns this type, so no CoreBluetooth type appears in its public API. The `BLESwift`
+/// module maps it to the backend's native write type.
 public enum WriteType: Sendable, Hashable {
 
     /// Wait for the peripheral to confirm the write.
     case withResponse
 
-    /// Don't wait for confirmation — the backend delivers no completion callback for
-    /// this write type.
+    /// Do not wait for confirmation. The backend delivers no completion callback for this write
+    /// type.
     case withoutResponse
 }

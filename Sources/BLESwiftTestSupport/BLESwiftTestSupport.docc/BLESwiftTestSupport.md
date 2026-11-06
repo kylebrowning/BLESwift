@@ -4,21 +4,17 @@ Scriptable fakes for unit-testing your own BLE code without hardware.
 
 ## Overview
 
-`CBCentralManager` and `CBPeripheral` can't be instantiated or scripted in tests — there's no
-way to construct one, drive its delegate callbacks, or make it report a particular GATT
-table. BLESwiftTestSupport ships ``FakeCentral`` and ``FakePeripheral``, scriptable stand-ins
-that conform to BLESwiftCore's backend seam (`CentralManaging`/`PeripheralRemote`) the
-same way a real `CBCentralManager`/`CBPeripheral` does, plus ``FakeStartupBackgroundTask`` for
-scripting the iOS background-task seam that protects state restoration.
+You cannot create or script a `CBCentralManager` or `CBPeripheral` in a test. You cannot drive its delegate callbacks or set its GATT table. BLESwiftTestSupport has scriptable replacements:
 
-Wired into a real `Central` (from the `BLESwift` module) via its public
-`Central.init(backend:queue:configuration:startupBackgroundTask:connectedPeripherals:)`, these
-fakes let you exercise your app's actual BLE code — scan handling, connection logic, GATT
-reads/writes, notification subscriptions — end to end, deterministically, with no hardware and
-no third-party mocking library. See <doc:TestingYourBLECode> for the full pattern.
+- ``FakeCentral`` and ``FakePeripheral`` conform to the backend seam of BLESwiftCore (`CentralManaging` and `PeripheralRemote`).
+- ``FakeStartupBackgroundTask`` scripts the iOS background-task seam that protects state restoration.
+- ``ManualClock`` is a clock that moves only when the test moves it.
 
-BLESwiftTestSupport depends on BLESwiftCore only — not on `BLESwift` or CoreBluetooth — so it
-carries no CoreBluetooth-backed code into your test target at all.
+Wire the fakes into a real `Central` with `Central.init(backend:queue:configuration:startupBackgroundTask:connectedPeripherals:)`. Then your tests run the real BLE code of your app, with no hardware and no mocking library. This includes scan handling, connection logic, GATT reads and writes, and notification subscriptions. See <doc:TestingYourBLECode>.
+
+To test timeouts, give the same ``ManualClock`` to `Configuration(clock:)`. To control the delays of a virtual device, also give it to `VirtualRadio(clock:)`. Then the test advances time and does not wait for it.
+
+BLESwiftTestSupport depends only on BLESwiftCore. It does not depend on `BLESwift` or CoreBluetooth.
 
 ## Topics
 

@@ -3,10 +3,9 @@
 //  BLESwiftLinkTests
 //
 
-// Sockets in a CI simulator are unreliable — a runner's simulator network can wedge outright,
-// leaving a loopback connect stuck in `.connecting` for tens of seconds — so every suite that
-// opens one is compiled out there. The simulator-side path is covered by the two-simulator
-// E2E, which runs on real simulators.
+// Sockets in a CI simulator are not reliable: a wedged simulator network leaves a loopback connect
+// in `.connecting` for tens of seconds. So the compiler removes every socket suite from the
+// simulator build. The two-simulator E2E covers that path.
 #if !targetEnvironment(simulator)
 import BLESwiftLink
 import Dispatch
@@ -77,8 +76,8 @@ struct TransportLoopbackTests {
         let listener = try await makeListener()
         defer { listener.cancel() }
         let serverReceived = Mutex<[LinkMessage]>([])
-        // Held: the listener does not retain what it accepts, and a server side that went away
-        // would read as "nothing was sent" whatever the client did.
+        // The test holds the connection, because the listener does not retain what it accepts. A
+        // server side that went away would read as "nothing was sent", whatever the client did.
         let serverSide = Mutex<LinkConnection?>(nil)
         listener.onConnection = { connection in
             serverSide.withLock { $0 = connection }
@@ -93,8 +92,8 @@ struct TransportLoopbackTests {
         client.start()
         await waitFor { if case .ready = client.state { return true }; return false }
 
-        // A small message first: the link works, so what follows is refused for its size and
-        // not because nothing was ever getting through.
+        // A small message first shows that the link works. The server then refuses what follows for
+        // its size, not because nothing was getting through.
         client.send(.centralRequest(.stopScan))
         await waitFor(timeout: .seconds(5)) { serverReceived.withLock { $0.count } == 1 }
 
@@ -110,7 +109,6 @@ struct TransportLoopbackTests {
             return
         }
         #expect(error.domain == "BLESwiftLink.LinkFramingError")
-        // Nothing of it reached the wire: the server saw the small message and no more.
         #expect(serverReceived.withLock { $0 } == [.centralRequest(.stopScan)])
     }
 
@@ -176,7 +174,6 @@ struct TransportLoopbackTests {
         let listener = try await makeListener()
         defer { listener.cancel() }
         let channels = Mutex<[UInt32]>([])
-        // The listener does not retain accepted connections — the caller owns them.
         let serverSide = Mutex<LinkConnection?>(nil)
         listener.onConnection = { connection in
             serverSide.withLock { $0 = connection }
@@ -227,25 +224,22 @@ struct TransportLoopbackTests {
         )
         defer { listener.cancel() }
 
-        // Cancelled before it has run a line, which is the hard case: the cancellation
-        // handler fires before the continuation exists, so nothing but the one-shot guard
-        // inside `start()` can resume it. A bind that hangs is not something a test can
-        // manufacture; a pre-cancelled task exercises the same resumption.
+        // The task is cancelled before it has run a line. The cancellation handler then fires
+        // before the continuation exists, so only the one-shot guard inside `start()` can resume
+        // it. A test cannot manufacture a bind that hangs, but this exercises the same resumption.
         let start = Task { try await listener.start() }
         start.cancel()
 
         let outcome = await start.result
         #expect(throws: CancellationError.self) { try outcome.get() }
-        // Nothing was bound: the listener was cancelled rather than left listening.
         #expect(listener.port == 0)
-        // And it is spent — the one-shot guard stands whichever way `start()` ended.
         await #expect(throws: LinkListenerError.alreadyStarted) { try await listener.start() }
     }
 
     @Test("A listener and a client both given localhost meet on the same loopback address")
     func localhostBindsAndDialsTheSameAddress() async throws {
-        // `localhost` resolves to both loopback families; before `LinkEndpoint` normalized it,
-        // a listener on one family and a client on the other never met.
+        // `localhost` resolves to both loopback families. Without `LinkEndpoint`'s normalization, a
+        // listener on one family and a client on the other would never meet.
         let listener = try LinkListener(
             endpoint: LinkEndpoint(host: "localhost", port: 0),
             codec: .json,

@@ -1,22 +1,12 @@
 # Hosting a GATT server (peripheral role)
 
-Advertise services, host a GATT database, and answer reads, writes, and subscriptions from
-remote centrals with ``PeripheralHost``.
+Advertise services, host a GATT database, and answer reads, writes, and subscriptions from remote centrals with ``PeripheralHost``.
 
 ## Overview
 
-Where ``Central`` is the *central* role — scanning for and connecting to remote peripherals —
-``PeripheralHost`` is the other half of CoreBluetooth: the *peripheral* role. It wraps a single
-`CBPeripheralManager` in an actor whose isolation is tied directly to the serial `DispatchQueue`
-its manager delivers delegate callbacks on, exactly like ``Central``. You build a GATT database
-from value types, advertise it, and respond to remote centrals through `async`/`AsyncSequence`
-APIs — no delegate, no callbacks.
+``Central`` is the *central* role. It scans for remote peripherals and connects to them. ``PeripheralHost`` is the *peripheral* role. It wraps one `CBPeripheralManager` in an actor. Like ``Central``, its isolation is the serial `DispatchQueue` on which the manager delivers callbacks. You build a GATT database from value types, advertise it, and answer remote centrals with `async` calls and `AsyncSequence` streams.
 
-- Important: The peripheral role is available only on iOS and macOS. CoreBluetooth does not
-  support constructing a `CBPeripheralManager` on watchOS or tvOS, or building a GATT database
-  on visionOS, so ``PeripheralHost`` and its backend do not exist on those platforms — the
-  role is excluded at compile time. The central role (``Central``) is available on all five
-  platforms.
+> Important: The peripheral role is available on iOS and macOS only. CoreBluetooth does not support `CBPeripheralManager` on watchOS and tvOS, or a GATT database on visionOS. On those platforms, ``PeripheralHost`` does not exist. The central role (``Central``) is available on all five platforms.
 
 ## Building a GATT database
 
@@ -36,13 +26,11 @@ let service = GATTService(identifier: heartRate, characteristics: [
 ])
 ```
 
-A characteristic with a non-`nil` ``GATTCharacteristic/value`` is *static* — CoreBluetooth
-answers reads from that constant itself. A `nil` value (the default) makes it *dynamic*: reads
-and writes surface as requests for your code to answer, and you push notifications yourself.
+A characteristic with a non-`nil` ``GATTCharacteristic/value`` is *static*. CoreBluetooth answers reads from that constant. A `nil` value (the default) makes the characteristic *dynamic*. Reads and writes arrive as requests that your code must answer. You push notifications yourself.
 
 ## Advertising
 
-Create a host, add the service (awaiting CoreBluetooth's confirmation), then start advertising:
+Create a host, add the service, and start to advertise. ``PeripheralHost/add(_:)`` returns after CoreBluetooth confirms the service.
 
 ```swift
 let host = PeripheralHost()
@@ -56,14 +44,11 @@ try await host.startAdvertising(
 )
 ```
 
-``PeripheralHost/startAdvertising(_:)`` returns once `peripheralManagerDidStartAdvertising`
-fires. Only a local name and service UUIDs are advertised — the only two fields CoreBluetooth
-honors on the advertising side (see ``PeripheralAdvertisement``).
+``PeripheralHost/startAdvertising(_:)`` returns when `peripheralManagerDidStartAdvertising` fires. CoreBluetooth honors only a local name and service UUIDs in an advertisement. See ``PeripheralAdvertisement``.
 
 ## Answering reads and writes
 
-Consume the request streams and answer each request exactly once. Subscribe **before** you
-start advertising — the streams do not replay.
+Consume the request streams and answer each request exactly once. Subscribe **before** you start to advertise. The streams do not replay.
 
 ```swift
 Task {
@@ -82,15 +67,11 @@ Task {
 }
 ```
 
-Reject a request instead with a `.failure(ATTError)` — e.g. `.failure(.writeNotPermitted)`. A
-write request arrives as a **batch** (``WriteRequest/entries``); a single
-`respond(to:with:)` call acknowledges the whole batch.
+To reject a request, respond with a `.failure(ATTError)`, for example `.failure(.writeNotPermitted)`. A write request is a **batch** (``WriteRequest/entries``). One `respond(to:with:)` call acknowledges the whole batch.
 
 ## Notifying subscribers with back-pressure
 
-Track subscribers via ``PeripheralHost/subscriptionEvents()`` (or the
-``PeripheralHost/subscribers(for:)`` snapshot), then push values with
-``PeripheralHost/updateValue(_:for:onSubscribed:)``:
+To track subscribers, use ``PeripheralHost/subscriptionEvents()`` or the ``PeripheralHost/subscribers(for:)`` snapshot. To push values, use ``PeripheralHost/updateValue(_:for:onSubscribed:)``:
 
 ```swift
 Task {
@@ -108,25 +89,15 @@ Task {
 try await host.updateValue(newReading, for: measurement)
 ```
 
-``PeripheralHost/updateValue(_:for:onSubscribed:)`` applies the same back-pressure discipline
-as the central-side `writeWithoutResponse`: when CoreBluetooth's transmit queue is full it
-suspends until `peripheralManagerIsReady(toUpdateSubscribers:)` and retries, so the call returns
-only once the update has actually been queued.
+If the CoreBluetooth transmit queue is full, ``PeripheralHost/updateValue(_:for:onSubscribed:)`` suspends. It waits for `peripheralManagerIsReady(toUpdateSubscribers:)` and tries again. The call returns when CoreBluetooth has queued the update.
 
 ## Tearing down
 
-``PeripheralHost/stopAndExtractState()`` detaches the delegate and hands the underlying
-`CBPeripheralManager` back to you, failing every pending operation with
-``BLESwiftError/stopped``. Use ``PeripheralHost/stopAdvertising()`` /
-``PeripheralHost/removeAllServices()`` for a softer stop.
+``PeripheralHost/stopAndExtractState()`` detaches the delegate and returns the `CBPeripheralManager` to you. It fails every pending operation with ``BLESwiftError/stopped``. For a softer stop, use ``PeripheralHost/stopAdvertising()`` or ``PeripheralHost/removeAllServices()``.
 
 ## Restoring state after a background relaunch
 
-On iOS, CoreBluetooth can relaunch your app in the background and hand back the GATT database
-and advertising state it preserved while your app was suspended or terminated. Opt in by
-passing a ``PeripheralRestorationConfiguration`` as ``Configuration/peripheralRestoration`` —
-its identifier is registered with CoreBluetooth
-(`CBPeripheralManagerOptionRestoreIdentifierKey`) when the manager is created:
+On iOS, CoreBluetooth can relaunch your app in the background. It then returns the GATT database and the advertising state that it kept. To enable this, pass a ``PeripheralRestorationConfiguration`` as ``Configuration/peripheralRestoration``. BLESwift registers its identifier with CoreBluetooth (`CBPeripheralManagerOptionRestoreIdentifierKey`) when it creates the manager:
 
 ```swift
 let host = PeripheralHost(configuration: Configuration(
@@ -134,14 +105,9 @@ let host = PeripheralHost(configuration: Configuration(
 ))
 ```
 
-- Important: The peripheral restore identifier must be **distinct** from any ``Central``'s
-  ``RestorationConfiguration/identifier`` — CoreBluetooth requires a unique restore identifier
-  per manager. That is why the two are separate ``Configuration`` settings.
+> Important: The peripheral restore identifier must be **different** from the ``RestorationConfiguration/identifier`` of any ``Central``. CoreBluetooth requires a unique restore identifier for each manager. For this reason, ``Configuration`` has two separate settings.
 
-Restoration results arrive on ``PeripheralHost/restorationEvents()`` — a **buffered, replayed**
-stream, exactly like ``Central/restorationEvents()``. Every event is buffered from the host's
-creation and replayed, in order, to the first consumer, so state restored during launch is
-never lost even if your consumer task starts strictly afterwards:
+Restoration results arrive on ``PeripheralHost/restorationEvents()``. Like ``Central/restorationEvents()``, this stream is **buffered and replayed**. BLESwift buffers every event from the creation of the host and replays them in order to the first consumer. A consumer that starts late does not lose state that was restored during launch.
 
 ```swift
 Task {
@@ -157,25 +123,13 @@ Task {
 }
 ```
 
-Peripheral-role restoration has a single event: CoreBluetooth itself re-publishes the preserved
-services and resumes the preserved advertisement on your behalf, so there is nothing to
-re-drive. `PeripheralHost` reflects a resumed advertisement in its ``PeripheralHost/isAdvertising``
-snapshot (it does **not** re-issue ``PeripheralHost/startAdvertising(_:)`` — CoreBluetooth
-already did), and pushing notifications via ``PeripheralHost/updateValue(_:for:onSubscribed:)``
-works against the restored characteristics without re-adding them.
+Peripheral-role restoration has one event. CoreBluetooth publishes the preserved services again and resumes the preserved advertisement. You do not need to do either. ``PeripheralHost/isAdvertising`` shows a resumed advertisement. Do not call ``PeripheralHost/startAdvertising(_:)`` again. ``PeripheralHost/updateValue(_:for:onSubscribed:)`` works on the restored characteristics without ``PeripheralHost/add(_:)``.
 
 ## Testing without hardware
 
-`BLESwiftTestSupport`'s `FakePeripheralManager` is a queue-confined, CoreBluetooth-free stand-in
-for `CBPeripheralManager`. Drive a real ``PeripheralHost`` through
-``PeripheralHost/init(backend:queue:configuration:)`` and script the events a real manager would
-deliver — simulate reads, writes, subscriptions, and transmit-queue back-pressure — all without
-a device.
+`FakePeripheralManager` in `BLESwiftTestSupport` replaces `CBPeripheralManager` in tests. It does not use CoreBluetooth. Create a real ``PeripheralHost`` with ``PeripheralHost/init(backend:queue:configuration:)``. Then script the events that a real manager delivers: reads, writes, subscriptions, and transmit-queue back-pressure.
 
-To drive a real ``PeripheralHost`` *and* a real ``Central`` against each other in one process —
-the peripheral hosting a database that the central connects to, reads, writes, and receives
-notifications from — bridge the two fake families with `FakeGATTBridge`; see
-<doc:CrossRoleExample>.
+To connect a real ``PeripheralHost`` to a real ``Central`` in one process, use `FakeGATTBridge`. See <doc:CrossRoleExample>.
 
 ## Topics
 

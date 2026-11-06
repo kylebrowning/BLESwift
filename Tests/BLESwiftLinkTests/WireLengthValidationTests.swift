@@ -13,7 +13,7 @@ import BLESwiftCompat17
 import Testing
 
 /// The wire boundary's rule for a negotiated maximum payload length: what it refuses, what it
-/// clamps, and what a client does with a provider that reports one no caller could use.
+/// clamps, and how a client treats a provider that reports an unusable length.
 @Suite("Wire length validation")
 struct WireLengthValidationTests {
 
@@ -48,7 +48,6 @@ struct WireLengthValidationTests {
         #expect(throws: WireDecodingError.invalidMaximumLength(-20)) {
             try WireSubscriber(id: UUID(), maximumUpdateValueLength: -20).subscriber
         }
-        // A usable one still converts, clamped at the top end.
         #expect(try WireSubscriber(id: UUID(), maximumUpdateValueLength: 180).subscriber.maximumUpdateValueLength == 180)
         #expect(
             try WireSubscriber(id: UUID(), maximumUpdateValueLength: Int.max).subscriber.maximumUpdateValueLength
@@ -72,12 +71,13 @@ struct WireLengthValidationTests {
                 offset: offset
             )
         }
-        // A handler slices its value at the offset, so a negative one would trap the client.
+        // A handler slices its value at the offset, so a negative offset would trap the client.
         #expect(throws: WireDecodingError.invalidOffset(-1)) { try request(offset: -1).readRequest }
         #expect(throws: WireDecodingError.invalidOffset(Int.min)) { try request(offset: Int.min).readRequest }
         #expect(try request(offset: 0).readRequest.offset == 0)
         #expect(try request(offset: 7).readRequest.offset == 7)
-        // An absurd one is clamped rather than refused, exactly as an absurd length is.
+        // The boundary clamps an absurd offset and does not refuse it, as it does for an absurd
+        // length.
         #expect(try request(offset: WireLengthValidation.maximumOffset + 1).readRequest.offset
             == WireLengthValidation.maximumOffset)
         #expect(try request(offset: Int.max).readRequest.offset == WireLengthValidation.maximumOffset)
@@ -100,15 +100,14 @@ struct WireLengthValidationTests {
         #expect(try entry(offset: WireLengthValidation.maximumOffset + 1).entry.offset
             == WireLengthValidation.maximumOffset)
         #expect(try entry(offset: Int.max).entry.offset == WireLengthValidation.maximumOffset)
-        // And a batch carrying one is refused whole.
         #expect(throws: WireDecodingError.invalidOffset(-1)) {
             try WireWriteRequest(token: UUID(), entries: [entry(offset: -1)]).writeRequest
         }
     }
 
 #if !targetEnvironment(simulator)
-    // Sockets in a CI simulator are unreliable; the simulator-side path is covered by the
-    // two-simulator E2E on real simulators.
+    // Sockets in a CI simulator are not reliable. The two-simulator E2E on real simulators covers
+    // the simulator-side path.
 
     @Test(
         "A provider that reports an unusable write maximum loses its client's session",
@@ -134,8 +133,9 @@ struct WireLengthValidationTests {
         let connectTask = Task { try await central.connect(PeripheralIdentifier(uuid: identifier, name: nil)) }
         await waitFor { !provider.requests.withLock { $0 }.isEmpty }
 
-        // A maximum `Peripheral.writeChunked` would spin on (0) or trap on (-1). Neither is
-        // mirrored: the connect never completes, and the session is dropped and redialed.
+        // A maximum that `Peripheral.writeChunked` would spin on (0) or trap on (-1). The client
+        // mirrors neither, so the connect never completes and the session is dropped and dialed
+        // again.
         provider.emit(.didConnect(
             peripheral: identifier,
             name: nil,
@@ -146,8 +146,8 @@ struct WireLengthValidationTests {
         await waitFor(timeout: .seconds(10)) { provider.helloCount.withLock { $0 } >= 2 }
         #expect(provider.helloCount.withLock { $0 } >= 2)
 
-        // The connect neither hung the process nor trapped it: it fails on its own terms once
-        // the link under it goes.
+        // The connect neither hung the process nor trapped it. It fails on its own terms after the
+        // link under it goes.
         connectTask.cancel()
         _ = try? await bounded { try await connectTask.value }
     }
@@ -180,7 +180,8 @@ struct WireLengthValidationTests {
 
         #expect(await peripheral.maximumWriteValueLength(for: .withResponse) == WireLengthValidation.maximumLength)
         #expect(await peripheral.maximumWriteValueLength(for: .withoutResponse) == WireLengthValidation.maximumLength)
-        // Clamped, not treated as a violation: the session stayed up.
+        // The boundary clamps the value and does not treat it as a violation. The session stayed
+        // up.
         #expect(provider.helloCount.withLock { $0 } == 1)
     }
 #endif

@@ -5,56 +5,54 @@
 
 import BLESwiftCompat17
 
-/// How a ``Broadcaster`` replays previously-``yield(_:)``ed elements to a stream created
-/// after those elements were yielded.
+/// How a ``Broadcaster`` replays earlier elements (see ``yield(_:)``) to a later stream.
 enum ReplayMode: Sendable {
 
-    /// New subscribers see only elements yielded after they subscribe.
+    /// New subscribers see only the elements that are yielded after they subscribe.
     case none
 
-    /// New subscribers are immediately sent the most recently yielded element (if any),
-    /// then see every element yielded after that. Used for state streams, where a late
-    /// subscriber should still learn the current value.
+    /// New subscribers first receive the most recent element, if any. Then they see every
+    /// later element. Use it for state streams, where a late subscriber must learn the
+    /// current value.
     case latest
 
-    /// The first subscriber (and only the first — ever) is sent every element yielded so
-    /// far, in order, before seeing anything yielded after that live. The moment that
-    /// first subscriber registers, the replay buffer is cleared and buffering stops for
-    /// good — later subscribers see only elements yielded after they subscribe, as with
-    /// ``none`` (this also bounds memory). Intended for buffered-replay event streams
-    /// (e.g. background restoration) where exactly one consumer drains the backlog.
+    /// The first subscriber receives every element yielded so far, in order, and then every
+    /// later element. When it registers, the broadcaster clears the replay buffer and stops
+    /// buffering for good. Later subscribers behave as with ``none``. Use it for
+    /// buffered-replay event streams, such as background restoration, where exactly one
+    /// consumer drains the backlog.
     case allUntilFirstConsumer
 }
 
-/// A multicast primitive: fans out each ``yield(_:)``ed `Element` to every currently
-/// subscribed `AsyncStream`, with configurable replay semantics for late subscribers.
-/// `AsyncStream` itself supports only one consumer; this is BLESwift's own multicast layer
-/// built on top of it.
+/// A multicast primitive. It fans out each `Element` that code yields (see ``yield(_:)``) to
+/// every subscribed `AsyncStream`, with a configurable replay for late subscribers.
+/// `AsyncStream` itself supports only one consumer.
 ///
-/// State is `Mutex`-guarded rather than actor-confined: `AsyncStream.Continuation`'s
-/// `onTermination` handler fires on an arbitrary thread and must be able to unregister its
-/// continuation synchronously, without an actor hop.
+/// A `Mutex` guards the state, not actor confinement, because `onTermination` runs on an
+/// arbitrary thread and must unregister its continuation synchronously.
 final class Broadcaster<Element: Sendable>: Sendable {
 
-    /// All of a `Broadcaster`'s mutable state, guarded as one unit by ``Broadcaster/box``.
+    /// All the mutable state of a `Broadcaster`, guarded as one unit by ``Broadcaster/box``.
     private struct State {
-        /// Live subscribers, keyed by a monotonically increasing token so
-        /// `onTermination` can remove exactly the continuation it was handed.
+        /// Live subscribers. The key is an increasing token, so `onTermination` removes exactly
+        /// its own continuation.
         var continuations: [UInt64: AsyncStream<Element>.Continuation] = [:]
-        /// The next token to hand out.
+        /// The next token to give out.
         var nextToken: UInt64 = 0
-        /// Replay history, maintained per ``ReplayMode``: unused for `.none`, at most one
-        /// element for `.latest`, and — for `.allUntilFirstConsumer` — every element
-        /// yielded *until the first subscriber registers*, at which point it is drained
-        /// to that subscriber, cleared, and never populated again (see ``replayConsumed``).
+        /// Replay history, as ``ReplayMode`` specifies:
+        ///
+        /// - `.none`: not used.
+        /// - `.latest`: at most one element.
+        /// - `.allUntilFirstConsumer`: every element yielded *until the first subscriber
+        ///   registers*. The first subscriber drains it, and it is never filled again (see
+        ///   ``replayConsumed``).
         var replayBuffer: [Element] = []
-        /// `.allUntilFirstConsumer` only: set once the first subscriber has registered
-        /// (and drained the replay buffer). From then on `yield(_:)` stops buffering and
-        /// later subscribers get no replay — even if every earlier consumer has since
-        /// terminated.
+        /// `.allUntilFirstConsumer` only: set when the first subscriber registers and drains
+        /// the replay buffer. After that, `yield(_:)` does not buffer and later subscribers get
+        /// no replay, even if every earlier consumer has terminated.
         var replayConsumed = false
-        /// Set by ``finish()``; once `true`, new subscribers are immediately finished and
-        /// ``yield(_:)`` is a no-op.
+        /// Set by ``finish()``. New subscribers then finish immediately and ``yield(_:)`` does
+        /// nothing.
         var finished = false
     }
 
@@ -67,13 +65,12 @@ final class Broadcaster<Element: Sendable>: Sendable {
         self.box = Mutex(State())
     }
 
-    /// Returns a fresh `AsyncStream` subscribed to every future ``yield(_:)``, replayed to
-    /// this new subscriber per this broadcaster's ``ReplayMode``.
+    /// Returns a new `AsyncStream` that is subscribed to every future ``yield(_:)``. It
+    /// replays as this broadcaster's ``ReplayMode`` specifies.
     ///
-    /// Cancelling the stream's consuming task — or otherwise letting the stream's
-    /// `AsyncIterator` deinit — unregisters it via `onTermination`; no explicit unsubscribe
-    /// call is needed. If this broadcaster has already ``finish()``ed, the returned stream
-    /// finishes immediately without yielding anything.
+    /// `onTermination` unregisters the stream when its consuming task is cancelled or its
+    /// iterator deinitializes. If this broadcaster already ran ``finish()``, the stream
+    /// finishes immediately and yields nothing.
     func stream(policy: AsyncStream<Element>.Continuation.BufferingPolicy = .unbounded) -> AsyncStream<Element> {
         AsyncStream(bufferingPolicy: policy) { [weak self] continuation in
             guard let self else {
@@ -120,19 +117,18 @@ final class Broadcaster<Element: Sendable>: Sendable {
         }
     }
 
-    /// Fans `element` out to every currently subscribed stream and, per ``ReplayMode``,
-    /// records it for future subscribers. A no-op after ``finish()``.
+    /// Fans `element` out to every subscribed stream. As ``ReplayMode`` specifies, it also
+    /// records the element for future subscribers. It does nothing after ``finish()``.
     ///
-    /// Replay bookkeeping happens under the lock, but the fan-out itself happens *outside*
-    /// it — a continuation removed between the snapshot and the call is harmlessly yielded
-    /// to, since `AsyncStream` drops values after termination.
+    /// The replay bookkeeping runs under the lock. The fan-out runs *outside* it. A yield to a
+    /// continuation that was removed meanwhile is harmless, because `AsyncStream` drops values
+    /// after termination.
     func yield(_ element: Element) {
-        // `continuation.yield` takes the consuming task's status lock (to resume it), while
-        // a concurrent cancellation of that same task holds its status lock and re-enters
-        // `box.withLock` via `onTermination` — holding the lock across the fan-out inverts
-        // that order and deadlocks. Snapshot under the lock, deliver after releasing it,
-        // exactly as `finish()` does. Ordering was only ever guaranteed per-caller anyway,
-        // so the snapshot weakens no documented guarantee.
+        // `continuation.yield` takes the consuming task's status lock. A concurrent cancellation
+        // of that task holds the status lock and then enters `box.withLock` through
+        // `onTermination`. Yielding under the lock would invert the lock order and deadlock.
+        // So take a snapshot under the lock and deliver after releasing it. `finish()` does the
+        // same. The snapshot keeps the per-caller order, which is the only order we guarantee.
         let targets: [AsyncStream<Element>.Continuation] = box.withLock { state in
             guard !state.finished else { return [] }
 
@@ -155,12 +151,12 @@ final class Broadcaster<Element: Sendable>: Sendable {
         }
     }
 
-    /// Finishes every currently subscribed stream. Every stream created after this call
-    /// finishes immediately without yielding anything. Idempotent.
+    /// Finishes every subscribed stream. A stream that is created later finishes immediately
+    /// and yields nothing. It is idempotent.
     func finish() {
-        // `continuation.finish()` synchronously re-enters `box.withLock` via `onTermination`
-        // (see `stream(policy:)`), and `Mutex` isn't reentrant — so pull continuations out
-        // under the lock, then finish each one after it's released.
+        // `continuation.finish()` re-enters `box.withLock` synchronously through `onTermination`
+        // (see `stream(policy:)`), and `Mutex` is not reentrant. So take the continuations out
+        // under the lock and finish them after releasing it.
         let continuationsToFinish: [AsyncStream<Element>.Continuation] = box.withLock { state in
             guard !state.finished else { return [] }
             state.finished = true

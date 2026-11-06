@@ -10,20 +10,21 @@ import BLESwiftCore
 import BLESwiftTestSupport
 @testable import BLESwift
 
-/// Regression tests for the concurrent-connect TOCTOU deadlock (plan-02 "Post-Phase-3
-/// finding"): `connect(id)`'s occupied-slot guard and the slot write were not atomic — the
-/// write happened inside `awaitConnect`'s continuation closure, reached across
-/// `withTimeout`'s `group.addTask` suspension, so a second racing initiator for the same id
-/// passed its guard during the first's suspension and overwrote the first's `Connecting`
-/// entry (and its continuation), orphaning it → the losing task group never returned →
-/// permanent deadlock.
+/// Regression tests for a deadlock in concurrent connect (a TOCTOU race).
+///
+/// The occupied-slot guard in `connect(id)` and the slot write were not atomic. The write happened
+/// in the continuation closure of `awaitConnect`, reached across the suspension of `group.addTask`
+/// in `withTimeout`. A second racing initiator for the same id passed its guard during that
+/// suspension and overwrote the first initiator's `Connecting` entry and continuation. The first
+/// initiator was orphaned, its task group never returned, and the connect deadlocked.
 ///
 /// The fix reserves the slot **synchronously** in each initiator's actor-isolated prologue
-/// (`reserveConnectingSlot`), before any suspension, so a racing caller's guard now sees the
-/// reservation and throws `.duplicateConnect`. These tests exercise all three
-/// `establishConnection`-initiating paths racing one another. Each wraps the racy work in
-/// ``runWithTimeout(_:_:)`` so a reintroduced deadlock surfaces as a loud failure instead of
-/// hanging CI; every test also carries a coarse `.timeLimit` ceiling as a second backstop.
+/// (`reserveConnectingSlot`), before any suspension. A racing caller's guard then sees the
+/// reservation and throws `.duplicateConnect`.
+///
+/// These tests race all three paths that start `establishConnection`. Each test wraps the racy work
+/// in ``runWithTimeout(_:_:)`` so that a deadlock shows as a loud failure and does not hang CI.
+/// Every test also has a coarse `.timeLimit` as a second backstop.
 @Suite("Concurrent-connect deadlock regression")
 struct ConcurrentConnectRegressionTests {
 
@@ -52,7 +53,7 @@ struct ConcurrentConnectRegressionTests {
         #expect(successes.count == 1, "expected exactly one success, got \(results)")
         #expect(duplicates.count == 1, "expected exactly one .duplicateConnect, got \(results)")
 
-        // The winner is genuinely connected.
+        // The winner is connected.
         guard case .connected = await central.connectionState(of: id) else {
             Issue.record("expected the winning connect to leave id .connected")
             return
@@ -65,23 +66,23 @@ struct ConcurrentConnectRegressionTests {
     func connectRacingRestorationConnect() async throws {
         let (central, fakeCentral, fakePeripheral) = makeRestorationTestCentral(connectingTimeout: .seconds(30))
         await register(fakePeripheral, on: fakeCentral)
-        // The restoration manual re-connect hangs, so it stays in-flight (slot reserved and
+        // The restoration's manual re-connect hangs, so it stays in flight (slot reserved and
         // attached) while the racing user connect runs.
         await fakeCentral.onQueue { fakeCentral.connectBehavior = .hang }
         let id = fakePeripheral.peripheralIdentifier
 
-        // Restore a *connecting* peripheral: routing spawns a restoration manual re-connect
-        // for it and consumes `pendingRestoration`, after which a user connect() is no longer
-        // fenced out by `.backgroundRestorationInProgress`.
+        // Restore a *connecting* peripheral. The routing starts the restoration's manual re-connect
+        // for it and consumes `pendingRestoration`. After this, `.backgroundRestorationInProgress`
+        // no longer blocks a user connect().
         fakeCentral.simulateRestoration(restoredState(for: id, state: .connecting))
         fakeCentral.simulateStateChange(.poweredOn)
 
-        // Wait until the restoration connect has actually issued its CoreBluetooth attempt —
-        // i.e. it has reserved and attached to id's slot.
+        // Wait until the restoration connect has issued its CoreBluetooth attempt, so it has
+        // reserved id's slot and attached to it.
         await waitUntil { await fakeCentral.onQueue { fakeCentral.connectCallCount } == 1 }
 
-        // Now race a user connect(id): the slot is occupied by the restoration attempt, so
-        // this must throw .duplicateConnect promptly rather than overwrite it and hang.
+        // Race a user connect(id). The restoration attempt occupies the slot, so this call must
+        // throw .duplicateConnect promptly. It must not overwrite the slot and hang.
         let outcome = await runWithTimeout(.seconds(5)) {
             await connectOutcome(central, id)
         }
@@ -97,7 +98,7 @@ struct ConcurrentConnectRegressionTests {
             return
         }
 
-        // Clean up the still-in-flight restoration attempt so it doesn't outlive the test.
+        // Clean up the restoration attempt that is still in flight so it does not outlive the test.
         await central.cancelAllOperations()
         fakeCentral.simulateDisconnect(id, error: nil)
         await waitUntil {
@@ -115,20 +116,20 @@ struct ConcurrentConnectRegressionTests {
         await fakeCentral.onQueue { fakeCentral.connectBehavior = .succeed }
         let id = fakePeripheral.peripheralIdentifier
 
-        // Establish a connection with an auto-reconnect policy, then drop it — the reconnect
-        // loop enters its backoff sleep.
+        // Establish a connection with an auto-reconnect policy, then drop it. The reconnect loop
+        // enters its backoff sleep.
         _ = try await central.connect(id, reconnect: .always(maxAttempts: nil, backoff: .milliseconds(20)))
 
-        // The reconnect *attempt* (after the backoff) must hang, so it stays in-flight (slot
-        // reserved and attached) while the racing user connect runs.
+        // The reconnect *attempt* after the backoff must hang, so it stays in flight (slot reserved
+        // and attached) while the racing user connect runs.
         await fakeCentral.onQueue { fakeCentral.connectBehavior = .hang }
         fakeCentral.simulateDisconnect(id, error: nil)
 
-        // Wait until the reconnect attempt has issued its CoreBluetooth connect (call #2) —
-        // i.e. it now owns id's slot.
+        // Wait until the reconnect attempt has issued its CoreBluetooth connect (call #2), so it
+        // owns id's slot.
         await waitUntil { await fakeCentral.onQueue { fakeCentral.connectCallCount } == 2 }
 
-        // Race a user connect(id) against the in-flight reconnect attempt.
+        // Race a user connect(id) against the reconnect attempt that is in flight.
         let outcome = await runWithTimeout(.seconds(5)) {
             await connectOutcome(central, id)
         }
@@ -136,11 +137,11 @@ struct ConcurrentConnectRegressionTests {
             Issue.record("user connect() racing an in-flight reconnect attempt deadlocked (timed out)")
             return
         }
-        // The reconnect attempt reserved first, so the user connect observes .duplicateConnect
-        // — cleanly, with no orphaned continuation on either side.
+        // The reconnect attempt reserved the slot first, so the user connect observes
+        // .duplicateConnect, with no orphaned continuation on either side.
         #expect(result.isDuplicate(id), "expected .duplicateConnect(id), got \(result)")
 
-        // Clean up: cancel the reconnect loop + in-flight attempt, then resolve it.
+        // Clean up. Cancel the reconnect loop and the in-flight attempt, then resolve the attempt.
         await central.cancelAllOperations()
         fakeCentral.simulateDisconnect(id, error: nil)
         await waitUntil {
@@ -152,8 +153,8 @@ struct ConcurrentConnectRegressionTests {
 
 // MARK: - Helpers
 
-/// The distilled result of one `connect(_:)` call — success (carrying the resolved id) or a
-/// typed `BLESwiftError`. `Sendable` so it can cross `runWithTimeout`/`async let` boundaries.
+/// The result of one `connect(_:)` call: a success (with the resolved id) or a typed
+/// `BLESwiftError`. It is `Sendable`, so it can cross `runWithTimeout` and `async let`.
 private enum ConnectOutcome: Sendable {
     case success(PeripheralIdentifier)
     case failure(BLESwiftError)
@@ -170,8 +171,8 @@ private enum ConnectOutcome: Sendable {
     }
 }
 
-/// Runs `central.connect(id)` and distills it into a ``ConnectOutcome`` — never throwing, so
-/// racing attempts can be gathered and compared without one throw unwinding the other.
+/// Runs `central.connect(id)` and converts the result to a ``ConnectOutcome``. It never throws, so
+/// the test can gather and compare racing attempts and no throw unwinds another attempt.
 private func connectOutcome(_ central: Central, _ id: PeripheralIdentifier) async -> ConnectOutcome {
     do {
         let peripheral = try await central.connect(id)
@@ -183,15 +184,15 @@ private func connectOutcome(_ central: Central, _ id: PeripheralIdentifier) asyn
     }
 }
 
-/// The outcome of ``runWithTimeout(_:_:)``: the operation's value, or an explicit timeout.
+/// The outcome of ``runWithTimeout(_:_:)``: the value of the operation, or an explicit timeout.
 private enum TimeoutOutcome<T: Sendable>: Sendable {
     case completed(T)
     case timedOut
 }
 
-/// Races `operation` against `timeout`. Concurrency regression tests wrap their racy work in
-/// this so a reintroduced deadlock surfaces as `.timedOut` (a loud, bounded failure) instead
-/// of hanging the whole suite. On timeout the operation task is cancelled.
+/// Races `operation` against `timeout`. A deadlock that returns shows as `.timedOut`, a loud and
+/// bounded failure, and does not hang the suite. On a timeout the function cancels the operation
+/// task.
 private func runWithTimeout<T: Sendable>(
     _ timeout: Duration,
     _ operation: @escaping @Sendable () async -> T
@@ -208,16 +209,16 @@ private func runWithTimeout<T: Sendable>(
     }
 }
 
-/// Registers `peripheral` as retrievable on `central` (its identifier keys the lookup
-/// `Central` performs when reserving a connect slot).
+/// Registers `peripheral` as retrievable on `central`. Its identifier is the key for the lookup
+/// that `Central` does when it reserves a connect slot.
 private func register(_ peripheral: FakePeripheral, on central: FakeCentral) async {
     await central.onQueue {
         central.retrievablePeripherals[peripheral.identifier] = peripheral
     }
 }
 
-/// Polls `condition` until it's `true`, or a generous timeout elapses (at which point the
-/// surrounding assertions report the real failure rather than hanging).
+/// Polls `condition` until it is `true` or a long timeout ends. After a timeout the surrounding
+/// assertions report the failure and the test does not hang.
 private func waitUntil(timeout: Duration = .seconds(2), _ condition: () async -> Bool) async {
     let deadline = ContinuousClock.now + timeout
     while await !condition() {
@@ -226,9 +227,8 @@ private func waitUntil(timeout: Duration = .seconds(2), _ condition: () async ->
     }
 }
 
-/// A `Central` with restoration enabled (via the internal seam on non-iOS platforms — see
-/// the dual-access note in `RestorationConfiguration.swift`), for the restoration-vs-connect
-/// race.
+/// A `Central` with restoration enabled, for the race between restoration and connect. Outside iOS
+/// it uses the internal seam (see the dual-access note in `RestorationConfiguration.swift`).
 private func makeRestorationTestCentral(
     connectingTimeout: Duration
 ) -> (Central, FakeCentral, FakePeripheral) {
@@ -240,7 +240,7 @@ private func makeRestorationTestCentral(
     return makeTestCentral(configuration: configuration)
 }
 
-/// A single-peripheral `RestoredState`, as CoreBluetooth would hand back.
+/// A `RestoredState` with a single peripheral, as CoreBluetooth returns it.
 private func restoredState(for id: PeripheralIdentifier, state: PeripheralConnectionState) -> RestoredState {
     RestoredState(peripherals: [RestoredPeripheral(identifier: id, state: state)])
 }

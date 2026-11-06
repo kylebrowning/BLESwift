@@ -5,12 +5,12 @@
 
 /// Options for a single backend scan request.
 ///
-/// BLESwift-owned; never exposes CoreBluetooth's `[String: Any]` scan-options dictionary
-/// in its public API or in the backend seam. The CoreBluetooth conformance builds that
-/// dictionary internally, in the `BLESwift` module.
+/// BLESwift owns this type, so CoreBluetooth's `[String: Any]` scan-options dictionary never
+/// appears in the public API or the backend seam. The CoreBluetooth conformance in the `BLESwift`
+/// module builds that dictionary internally.
 public struct ScanOptions: Sendable, Hashable {
 
-    /// Whether to keep reporting an already-discovered peripheral's further sightings.
+    /// Whether to keep reporting sightings of a peripheral that is already discovered.
     /// Mirrors `CBCentralManagerScanOptionAllowDuplicatesKey`.
     public var allowDuplicates: Bool
 

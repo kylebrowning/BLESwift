@@ -9,14 +9,16 @@ import Testing
 import BLESwiftCore
 @testable import BLESwift
 
-/// Exercises the pure, radio-free value mappers at the CoreBluetooth seam:
-/// ``ATTError``/`CBATTError.Code`, ``WriteType``/`CBCharacteristicWriteType`,
-/// ``WarningOptions``/CoreBluetooth's connect-options dictionary,
-/// ``AttributePermissions``/`CBAttributePermissions`, ``BluetoothAuthorization``/
-/// `CBManagerAuthorization`, ``PeripheralConnectionState``/`CBPeripheralState`,
-/// the identifier types' `CBUUID` bridge, and the ``CharacteristicProperties``→
-/// `CBCharacteristicProperties` `.cbProperties` getter (the reverse of the direction already
-/// covered by `CharacteristicPropertiesTests`).
+/// Tests the pure value mappers at the CoreBluetooth seam. The mappers need no radio. They are:
+/// - ``ATTError`` and `CBATTError.Code`
+/// - ``WriteType`` and `CBCharacteristicWriteType`
+/// - ``WarningOptions`` and the CoreBluetooth connect-options dictionary
+/// - ``AttributePermissions`` and `CBAttributePermissions`
+/// - ``BluetoothAuthorization`` and `CBManagerAuthorization`
+/// - ``PeripheralConnectionState`` and `CBPeripheralState`
+/// - the `CBUUID` bridge of the identifier types
+/// - the `.cbProperties` getter from ``CharacteristicProperties`` to `CBCharacteristicProperties`,
+///   the reverse of what `CharacteristicPropertiesTests` covers
 @Suite("CoreBluetooth bridging")
 struct CoreBluetoothBridgingTests {
 

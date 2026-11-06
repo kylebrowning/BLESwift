@@ -3,13 +3,12 @@
 //  BLESwiftCore
 //
 
-/// The read/write access permissions of a hosted characteristic (or its descriptors) —
-/// distinct from ``CharacteristicProperties`` (which advertises *what operations exist*);
-/// permissions gate *who may perform them* and whether an encrypted link is required.
+/// The read and write access permissions of a hosted characteristic (or of its descriptors). They
+/// differ from ``CharacteristicProperties``, which advertises *what operations exist*. Permissions
+/// control *who may do them* and whether an encrypted link is required.
 ///
-/// A `Sendable`, value-type mirror of CoreBluetooth's `CBAttributePermissions` option set.
-/// The raw values match `CBAttributePermissions`' exactly, so the `BLESwift` module bridges
-/// the two by raw value at the CoreBluetooth seam.
+/// A `Sendable` value-type mirror of CoreBluetooth's `CBAttributePermissions` option set. The raw
+/// values match exactly, so the `BLESwift` module bridges the two by raw value.
 public struct AttributePermissions: OptionSet, Sendable, Hashable {
 
     /// The raw bitmask, matching `CBAttributePermissions.rawValue`.

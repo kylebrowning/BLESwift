@@ -3,11 +3,11 @@
 //  BLESwift
 //
 
-// `@preconcurrency`: CoreBluetooth's types aren't `Sendable` (never mark them
-// unchecked-`Sendable`). `stopAndExtractState()` hands a `CBCentralManager` back across
-// this actor's isolation boundary as a one-time ownership transfer, which only type-checks
-// under `@preconcurrency`'s unaudited Sendability — without it, returning a non-Sendable
-// type from an actor-isolated method is rejected outright.
+// `@preconcurrency`: The CoreBluetooth types are not `Sendable`. Never mark them as
+// unchecked-`Sendable`. `stopAndExtractState()` returns a `CBCentralManager` across this
+// actor's isolation boundary, as a one-time transfer of ownership. It type-checks only under
+// `@preconcurrency`. Otherwise, the compiler rejects an actor-isolated method that returns a
+// non-Sendable type.
 import BLESwiftCore
 @preconcurrency import CoreBluetooth
 import Dispatch
@@ -19,172 +19,178 @@ import BLESwiftCompat17
 import UIKit
 #endif
 
-/// BLESwift's entry point: an actor wrapping a single `CBCentralManager`.
+/// The entry point of BLESwift: an actor that wraps one `CBCentralManager`.
 ///
-/// `Central`'s isolation is tied directly to the `DispatchQueue` its `CBCentralManager`
-/// delivers delegate callbacks on (see ``unownedExecutor``), so every `CentralDelegateProxy`
-/// callback already runs on `Central`'s own executor and forwards into actor-isolated code
-/// via `assumeIsolated` with no thread hop.
+/// `Central`'s isolation is tied to the `DispatchQueue` on which its `CBCentralManager`
+/// delivers delegate callbacks (see ``unownedExecutor``). Each `CentralDelegateProxy` callback
+/// already runs on `Central`'s executor and enters actor-isolated code through
+/// `assumeIsolated` with no thread hop.
 public actor Central {
 
-    /// The serial `DispatchQueue` backing ``unownedExecutor`` and CoreBluetooth's delegate
-    /// callbacks. Must be serial: `DispatchQueue(label:)` is; a concurrent queue is rejected
-    /// on the 17 tier and undefined below it.
+    /// The serial `DispatchQueue` that backs ``unownedExecutor`` and the CoreBluetooth delegate
+    /// callbacks. It must be serial (`DispatchQueue(label:)` is). On the 17 tier, a concurrent
+    /// queue is rejected. Below it, the behavior is undefined.
     nonisolated let queue: DispatchQueue
 
-    /// Binds the actor to ``queue``: `DispatchSerialQueue`'s executor on the 17 tier and
-    /// later, `BLESwiftCompat16.SerialQueueExecutor` below it.
+    /// Binds the actor to ``queue``. On the 17 tier and later, it uses `DispatchSerialQueue`'s
+    /// executor. Below it, it uses `BLESwiftCompat16.SerialQueueExecutor`.
     nonisolated let executor: QueueExecutor
 
-    /// Ties this actor's isolation to ``queue`` (SE-0424 custom executors). Public only
-    /// because it satisfies the `Actor` protocol requirement — not for direct client use.
+    /// Ties this actor's isolation to ``queue`` (SE-0424 custom executors). It is public only
+    /// because the `Actor` protocol requires it. Do not use it directly.
     public nonisolated var unownedExecutor: UnownedSerialExecutor {
         executor.asUnownedSerialExecutor()
     }
 
-    /// The CoreBluetooth shim this `Central` drives — a real `CBCentralManager` in
-    /// production, a `FakeCentral` in tests. `Optional var`, not `let`: ``stopAndExtractState()``
-    /// nils this out to hand off its `CBCentralManager` (not `Sendable`) across the isolation
-    /// boundary, which is only sound if `Central` gives up its own reference in the same call.
+    /// The CoreBluetooth shim that this `Central` drives: a real `CBCentralManager`, or a
+    /// `FakeCentral` in tests. It is an optional `var`, because ``stopAndExtractState()`` sets
+    /// it to `nil` to hand its non-`Sendable` `CBCentralManager` across the isolation boundary.
+    /// This is safe only if `Central` gives up its own reference in the same call.
     private var manager: (any CentralManaging)?
 
-    /// Read-only access to ``manager`` for same-module extensions of `Central` (`private` is file-scoped).
+    /// Read-only access to ``manager`` for `Central` extensions in other files of this module.
     internal var shim: (any CentralManaging)? { manager }
 
-    /// This `Central`'s `CBCentralManagerDelegate`, strongly owned here so it outlives the gap
-    /// between creation and `CBCentralManager(delegate:queue:options:)` — `willRestoreState`
-    /// can arrive before this `Central` wires its handler. Non-`nil` only for
-    /// ``init(configuration:)``; every other init path wires event delivery via `eventHandler` instead.
+    /// This `Central`'s `CBCentralManagerDelegate`, held strongly so that it stays alive from
+    /// its creation to `CBCentralManager(delegate:queue:options:)`. `willRestoreState` can
+    /// arrive before this `Central` installs its handler. It is non-`nil` only for
+    /// ``init(configuration:)``. Every other init path delivers events through `eventHandler`.
     private let proxy: CentralDelegateProxy?
 
     private let configuration: Configuration
 
-    /// Backs the nonisolated, synchronously-readable ``state`` snapshot. `Mutex` rather than
-    /// actor-isolated storage so ``state`` can be read without `await` from any isolation
-    /// domain; the actor-isolated ``handle(_:)`` is the only writer.
+    /// Backs the nonisolated ``state`` snapshot. It uses a `Mutex` and not actor-isolated
+    /// storage, so any isolation domain can read ``state`` without `await`. Only the
+    /// actor-isolated ``handle(_:)`` writes it.
     private let stateBox = Mutex<CentralState>(.unknown)
 
-    /// Multicasts every ``CentralState`` transition to every ``stateEvents()`` subscriber,
-    /// replaying the latest value to late subscribers.
+    /// Sends every ``CentralState`` transition to every ``stateEvents()`` subscriber and
+    /// replays the latest value to late subscribers.
     private let stateBroadcaster = Broadcaster<CentralState>(replay: .latest)
 
-    /// The in-progress scan, if any — `nil` when no
-    /// ``scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)`` call is active.
-    /// At most one at a time (CoreBluetooth exposes a single physical scanner).
+    /// The scan in progress, or `nil`. Only one scan can run at a time, because CoreBluetooth
+    /// has one physical scanner.
     private var activeScan: ActiveScan?
 
-    /// Backs the nonisolated ``isScanning`` snapshot — same rationale as ``stateBox``.
+    /// Backs the nonisolated ``isScanning`` snapshot, for the reason given at ``stateBox``.
     private let isScanningBox = Mutex<Bool>(false)
 
-    /// This `Central`'s per-peripheral connection state machine, keyed by ``PeripheralIdentifier``.
-    /// Absence of an entry IS that peripheral's idle state — there is no `.idle` case in
-    /// ``PeripheralPhase``; an entry exists only while connecting, connected, or disconnecting.
+    /// The connection state machine of each peripheral, by ``PeripheralIdentifier``. No entry
+    /// means that the peripheral is idle, because ``PeripheralPhase`` has no `.idle` case. An
+    /// entry exists only while the peripheral connects, is connected, or disconnects.
     private var connections: [PeripheralIdentifier: PeripheralPhase] = [:]
 
-    /// One independent auto-reconnect loop per peripheral, running while that peripheral has
-    /// no ``connections`` entry (mid-backoff) — a ledgered unstructured `Task` site. Cancelled
-    /// by that peripheral's own disconnect, a new `connect`, `cancelAllOperations`/
-    /// `disconnectAll()`, or `deinit`.
+    /// One independent auto-reconnect loop for each peripheral. A loop runs while the peripheral
+    /// has no ``connections`` entry (during backoff). It is a ledgered unstructured `Task` site.
+    /// These events cancel the loop:
+    /// - An explicit disconnect of that peripheral.
+    /// - A new `connect`.
+    /// - `cancelAllOperations` or `disconnectAll()`.
+    /// - `deinit`.
     private var reconnectLoops: [PeripheralIdentifier: ReconnectLoop] = [:]
 
-    /// Surviving notification subscriptions parked between an unexpected disconnect and a
-    /// successful auto-reconnect, keyed by peripheral — see
-    /// ``finishNotificationStreams(for:error:retainSurvivors:)`` (entry),
-    /// ``rearmDormantNotifications(_:)`` (exit via reconnect), and
-    /// ``finishDormantNotifications(for:error:)`` (exit without one).
+    /// Notification subscriptions that survive an unexpected disconnect, by peripheral. They
+    /// wait here until an auto-reconnect succeeds. See:
+    /// - ``finishNotificationStreams(for:error:retainSurvivors:)`` (entry).
+    /// - ``rearmDormantNotifications(_:)`` (exit through a reconnect).
+    /// - ``finishDormantNotifications(for:error:)`` (exit without a reconnect).
     private var dormantNotifications: [PeripheralIdentifier: DormantNotifications] = [:]
 
-    /// The (peripheral, characteristic, operation) triples a ``GATTCompatibility`` bypass
-    /// has already warned about — a bypass that skips a check that WOULD have failed logs
-    /// at `.warning` once per triple; compliant hardware under a bypass stays silent.
+    /// The (peripheral, characteristic, operation) triples for which a ``GATTCompatibility``
+    /// bypass already logged a warning. A bypass that skips a check that would have failed logs
+    /// at `.warning` once for each triple. Compliant hardware stays silent.
     private var warnedCompatBypass: Set<CompatWarnKey> = []
 
-    /// Actor-wide monotonic generation allocator, incremented whenever
-    /// ``scheduleReconnect(identifier:policy:timeout:warningOptions:compatibility:)`` starts a new loop.
-    /// Each ``ReconnectLoop`` stores its generation; see ``clearReconnectLoopIfCurrent(id:generation:)``.
+    /// Actor-wide increasing generation counter. It increments when
+    /// ``scheduleReconnect(identifier:policy:timeout:warningOptions:compatibility:)`` starts a
+    /// loop. Each ``ReconnectLoop`` stores its generation. See
+    /// ``clearReconnectLoopIfCurrent(id:generation:)``.
     private var reconnectGeneration: UInt64 = 0
 
-    /// Multicasts every ``ConnectionEvent``. Replay `.none` — unlike ``stateBroadcaster``,
-    /// there's no single current-value snapshot to replay (``connectionState(of:)``/
-    /// ``connectedPeripherals`` serve that purpose).
+    /// Sends every ``ConnectionEvent`` to all subscribers, with `.none` replay. Unlike
+    /// ``stateBroadcaster``, there is no single current value to replay.
+    /// ``connectionState(of:)`` and ``connectedPeripherals`` give the snapshot.
     private let connectionBroadcaster = Broadcaster<ConnectionEvent>(replay: .none)
 
-    /// Per-peripheral `didModifyServices` broadcaster registry, for
-    /// ``Peripheral/serviceChanges()`` — each ``PeripheralIdentifier`` gets its own
-    /// broadcaster so one peripheral's invalidations never reach another's subscribers.
+    /// Registry of `didModifyServices` broadcasters, one for each ``PeripheralIdentifier``, for
+    /// ``Peripheral/serviceChanges()``. The invalidations of one peripheral never reach the
+    /// subscribers of another.
     ///
-    /// `nonisolated` so ``Peripheral/serviceChanges()`` can fetch its `AsyncStream`
-    /// synchronously; ``ServiceChangesRegistry`` is itself `Sendable` and internally `Mutex`-guarded.
+    /// It is `nonisolated`, so ``Peripheral/serviceChanges()`` can get its `AsyncStream`
+    /// synchronously. ``ServiceChangesRegistry`` is `Sendable` and a `Mutex` guards it.
     nonisolated let serviceChangesRegistry = ServiceChangesRegistry()
 
     #if os(iOS)
-    /// Per-peripheral ANCS-authorization broadcasters backing
-    /// ``Peripheral/ancsAuthorizationEvents()`` — same shape and lifetime rules as
-    /// ``serviceChangesRegistry``: keyed by identifier, entries never removed, streams
-    /// deliberately survive disconnect/reconnect.
+    /// ANCS-authorization broadcasters, one for each peripheral, for
+    /// ``Peripheral/ancsAuthorizationEvents()``. They follow the same rules as
+    /// ``serviceChangesRegistry``: keyed by identifier, never removed, and the streams survive
+    /// a disconnect and a reconnect.
     nonisolated let ancsAuthorizationRegistry = ANCSAuthorizationRegistry()
     #endif
 
     #if !os(macOS)
-    /// Live ``connectionEventRegistration(services:peripherals:)`` subscribers, keyed by a
-    /// monotonic token — both the multicast fan-out target for
-    /// `CentralEvent.connectionEventDidOccur` and the refcount driving backend
-    /// register/unregister (register on 0→1, unregister on 1→0).
+    /// Live subscribers of ``connectionEventRegistration(services:peripherals:)``, by an
+    /// increasing token. It has two uses:
+    /// - It is the multicast fan-out target for `CentralEvent.connectionEventDidOccur`.
+    /// - Its count drives the backend: register on 0→1 and unregister on 1→0.
     private var connectionEventSubscribers: [UInt64: AsyncStream<SystemConnectionEvent>.Continuation] = [:]
 
-    /// The next ``connectionEventSubscribers`` token to hand out.
+    /// The next token for ``connectionEventSubscribers``.
     private var nextConnectionEventToken: UInt64 = 0
     #endif
 
     // MARK: - Background restoration state
 
-    /// Multicasts every ``RestorationEvent``. Replay `.allUntilFirstConsumer`: restoration
-    /// happens during app launch, typically before any consumer has subscribed, so every
-    /// event is buffered and replayed in order to the first ``restorationEvents()`` consumer.
+    /// Sends every ``RestorationEvent`` to all subscribers, with `.allUntilFirstConsumer`
+    /// replay. Restoration happens at launch, usually before any consumer subscribes, so the
+    /// broadcaster buffers every event and replays them in order to the first
+    /// ``restorationEvents()`` consumer.
     private let restorationBroadcaster = Broadcaster<RestorationEvent>(replay: .allUntilFirstConsumer)
 
-    /// The restored state captured by `CentralEvent.willRestoreState`, held until the
+    /// The restored state that `CentralEvent.willRestoreState` captured. It is held until the
     /// radio's first `.poweredOn` routes it (``routeRestoredPeripherals(_:)``).
     private var pendingRestoration: RestoredState?
 
-    /// One in-flight manual re-connect per restored-*connecting* peripheral — CoreBluetooth
-    /// never completes a restored-connecting attempt on its own. A ledgered `Task` site
-    /// (like ``reconnectLoops``), keyed by the peripheral being re-connected; each entry
-    /// removes itself on completion.
+    /// The manual reconnect of each peripheral that was restored in the connecting state,
+    /// because CoreBluetooth does not complete such an attempt on its own. It is a ledgered
+    /// `Task` site like ``reconnectLoops``. Each entry removes itself when it completes.
     private var restorationTasks: [PeripheralIdentifier: Task<Void, Never>] = [:]
 
-    /// The startup background-task seam protecting the restoration window — a real
-    /// `UIApplication` background task on iOS with restoration enabled, a no-op otherwise.
+    /// The startup background-task seam that protects the restoration window. On iOS with
+    /// restoration enabled, it is a real `UIApplication` background task. Otherwise, it does
+    /// nothing.
     private let startupBackgroundTask: any StartupBackgroundTaskRunning
 
-    /// Whether the startup restoration window is still open. Guards
-    /// ``endStartupBackgroundTask()``'s idempotence; always `false` when restoration is disabled.
+    /// Whether the startup restoration window is open. It makes
+    /// ``endStartupBackgroundTask()`` idempotent. It is always `false` when restoration is
+    /// disabled.
     private var startupWindowOpen = false
 
-    /// Creates a `Central`, synchronously creating its underlying `CBCentralManager` on a
-    /// fresh, dedicated `DispatchQueue`. Manager creation is synchronous (not deferred
-    /// behind an async `start()`) so background restoration events arriving before an async
-    /// step could run are never missed.
+    /// Creates a `Central` and its underlying `CBCentralManager` synchronously, on a new
+    /// dedicated `DispatchQueue`. The creation is not deferred behind an async `start()`, so
+    /// the `Central` does not miss background restoration events that arrive before an async
+    /// step can run.
     ///
-    /// - Parameter configuration: Start-time options. Defaults to `Configuration()`. On iOS,
-    ///   a non-`nil` `configuration.restoration` registers its identifier with CoreBluetooth
-    ///   at manager creation and opens the startup restoration window.
+    /// - Parameter configuration: Start-time options. The default is `Configuration()`. On
+    ///   iOS, if `configuration.restoration` is not `nil`, the `Central` registers its
+    ///   identifier with CoreBluetooth at manager creation and opens the startup restoration
+    ///   window.
     public init(configuration: Configuration = Configuration()) {
         let queue = DispatchQueue(label: "com.bleswift.Central")
         self.queue = queue
         self.executor = QueueExecutor(queue: queue)
         self.configuration = configuration
 
-        // A registered backend (see `BackendRegistry`) replaces CoreBluetooth wholesale.
-        // Restoration is CoreBluetooth-specific, so the startup window never opens here.
+        // A registered backend (see `BackendRegistry`) replaces CoreBluetooth completely.
+        // Restoration is specific to CoreBluetooth, so the startup window never opens here.
         if let factory = BackendRegistry.centralFactory {
             let backend = factory(queue)
             self.manager = backend
             self.proxy = nil
             self.startupBackgroundTask = NoOpStartupBackgroundTask()
             self.startupWindowOpen = false
-            // Hopped onto `queue` because the backend's `eventHandler` setter may be
-            // queue-confined; `[weak self]` like the CoreBluetooth path — no retain cycle.
+            // Hop onto `queue`, because the backend's `eventHandler` setter can be
+            // queue-confined. `[weak self]` avoids a retain cycle, as in the CoreBluetooth path.
             queue.sync {
                 backend.eventHandler = { [weak self] event in
                     guard let self else { return }
@@ -218,16 +224,16 @@ public actor Central {
 
         self.manager = CBCentralManager(delegate: proxy, queue: queue, options: options)
 
-        // `self` is fully initialized, so it can now be captured. Sets `proxy.handler`
-        // directly (see `proxy`'s doc comment) rather than `manager.eventHandler`.
+        // `self` is fully initialized, so the closure can capture it now. Set `proxy.handler`
+        // directly (see the doc comment of `proxy`) and not `manager.eventHandler`.
         proxy.handler = { [weak self] event in
             guard let self else { return }
             self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
         }
 
-        // Opens the startup background-time window (a no-op runner off-iOS/without
-        // restoration); deferred until after manager creation since `self` can't be
-        // captured by an escaping closure until every stored property is initialized.
+        // Open the startup background-time window. A no-op runner does nothing off-iOS or
+        // without restoration. This call comes after the manager creation, because an escaping
+        // closure cannot capture `self` until every stored property is initialized.
         if configuration.restoration != nil {
             startupBackgroundTask.begin { [weak self] in
                 guard let self else { return }
@@ -240,24 +246,22 @@ public actor Central {
         }
     }
 
-    /// Creates a `Central` adopting an existing `CBCentralManager` (and, optionally, an
-    /// already-connected `CBPeripheral`) — the counterpart to ``stopAndExtractState()``.
+    /// Creates a `Central` that adopts an existing `CBCentralManager` and, optionally, already
+    /// connected `CBPeripheral` objects. It is the counterpart to ``stopAndExtractState()``.
     ///
-    /// - Important: `callbackQueue` **must be the exact `DispatchQueue` instance**
-    ///   `manager` was created with. `CBCentralManager` has no public API to report which
-    ///   queue it delivers callbacks on, so a mismatch is not detectable eagerly — it
-    ///   surfaces only as an `assumeIsolated` trap on the first off-queue callback. If
-    ///   `manager` was created with `queue: nil`, pass `DispatchQueue.main`.
+    /// - Important: `callbackQueue` **must be the exact `DispatchQueue` instance** that created
+    ///   `manager`. `CBCentralManager` cannot report its callback queue, so a mismatch is not
+    ///   detectable at init. It shows as an `assumeIsolated` trap on the first callback from
+    ///   another queue. If `manager` was created with `queue: nil`, pass `DispatchQueue.main`.
     ///
     /// - Parameters:
-    ///   - manager: The existing `CBCentralManager` to adopt, replacing its current delegate.
-    ///   - connectedPeripherals: Every already-connected `CBPeripheral`, if any, adopted as a
-    ///     live session with ``ReconnectPolicy/never`` (no `connect` call existed to specify
-    ///     one). Defaults to `[]`.
-    ///   - callbackQueue: The exact `DispatchQueue` `manager` delivers callbacks on.
-    ///     Required — see the invariant above. Must be serial (`DispatchQueue(label:)` is).
-    ///   - configuration: Start-time options. `showPowerAlert` has no effect here since
-    ///     `manager` already exists. Defaults to `Configuration()`.
+    ///   - manager: The existing `CBCentralManager` to adopt. It replaces the current delegate.
+    ///   - connectedPeripherals: Every `CBPeripheral` that is already connected, if any. Each
+    ///     is adopted as a live session with ``ReconnectPolicy/never``. The default is `[]`.
+    ///   - callbackQueue: The exact serial `DispatchQueue` on which `manager` delivers
+    ///     callbacks.
+    ///   - configuration: Start-time options. `showPowerAlert` has no effect, because `manager`
+    ///     already exists. The default is `Configuration()`.
     public init(
         adopting manager: CBCentralManager,
         connectedPeripherals: [CBPeripheral] = [],
@@ -268,26 +272,25 @@ public actor Central {
         self.executor = QueueExecutor(queue: callbackQueue)
         self.configuration = configuration
 
-        // Restoration can never apply: a restore identifier must be supplied when the
-        // manager is *created*, and this manager already exists.
+        // Restoration cannot apply: a restore identifier must be supplied when the manager is
+        // *created*, and this manager already exists.
         self.startupBackgroundTask = NoOpStartupBackgroundTask()
 
-        // `manager` already exists, so event delivery is wired via `eventHandler` instead
-        // of a stored `proxy`.
+        // `manager` already exists, so events use `eventHandler` and not a stored `proxy`.
         self.proxy = nil
         self.manager = manager
 
-        // Seed the synchronous `state` snapshot from the adopted manager's current state —
-        // it may already be past `centralManagerDidUpdateState(_:)` by adoption time, and
-        // that callback won't fire again to correct a stale `.unknown`.
+        // Set the synchronous `state` snapshot from the adopted manager's current state. The
+        // manager can already be past `centralManagerDidUpdateState(_:)`, which does not fire
+        // again to correct a stale `.unknown`.
         let adoptedState = CentralState(manager.state)
         stateBox.withLock { $0 = adoptedState }
         stateBroadcaster.yield(adoptedState)
 
-        // Adopt each `connectedPeripherals` entry as a live session (`.never` policy — no
-        // `connect` call existed to specify one). Every direct stored-property write must
-        // precede the `eventHandler` closures below — capturing `self` (even weakly) counts
-        // as `self` escaping (SE-0327), after which direct mutation is no longer permitted.
+        // Adopt each `connectedPeripherals` entry as a live session (`.never` policy). Every
+        // direct write to a stored property must come before the `eventHandler` closures below,
+        // because a closure that captures `self` (even weakly) makes `self` escape (SE-0327).
+        // After that, direct mutation is not allowed.
         var adopted: [(identifier: PeripheralIdentifier, peripheral: CBPeripheral)] = []
         for connectedPeripheral in connectedPeripherals {
             let identifier = PeripheralIdentifier(uuid: connectedPeripheral.identifier, name: connectedPeripheral.name)
@@ -300,8 +303,8 @@ public actor Central {
             connectionBroadcaster.yield(.connected(identifier))
         }
 
-        // `self` is fully initialized, so it can now be captured. Event delivery is wired
-        // last, after every session already exists.
+        // `self` is fully initialized, so a closure can capture it now. Set up event delivery
+        // last, after every session exists.
         manager.eventHandler = { [weak self] event in
             guard let self else { return }
             self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
@@ -314,34 +317,32 @@ public actor Central {
         }
     }
 
-    /// Creates a `Central` driving a custom backend — the seam that lets a scriptable fake
-    /// (`BLESwiftTestSupport`'s `FakeCentral`) or any other `CentralManaging` conformance
-    /// stand in for a real `CBCentralManager`. Production code uses ``init(configuration:)``
-    /// or ``init(adopting:connectedPeripherals:callbackQueue:configuration:)`` instead.
+    /// Creates a `Central` that drives a custom backend, such as `FakeCentral` of
+    /// `BLESwiftTestSupport` or any other `CentralManaging` conformance, instead of a real
+    /// `CBCentralManager`. Production code uses ``init(configuration:)`` or
+    /// ``init(adopting:connectedPeripherals:callbackQueue:configuration:)``.
     ///
-    /// - Important: `queue` **must be the exact `DispatchQueue` instance** `backend`
-    ///   confines its event deliveries to — a mismatch is not detectable eagerly and
-    ///   surfaces only as an `assumeIsolated` trap on the first off-queue event.
+    /// - Important: `queue` **must be the exact `DispatchQueue` instance** that `backend` uses
+    ///   for its event deliveries. A mismatch is not detectable at init. It shows as an
+    ///   `assumeIsolated` trap on the first event from another queue.
     ///
-    /// - Important: **Retention.** Unlike the production initializers, the closures this
-    ///   installs on `backend.eventHandler` (and each adopted peripheral's) capture `self`
-    ///   **strongly** — `backend` is itself strongly held by this `Central`, so
-    ///   `Central` → `backend` → closure → `Central` is a deliberate cycle. `backend` alone
-    ///   keeps this `Central` alive for as long as `backend` exists. ``stopAndExtractState()``
-    ///   does not break this cycle (it only recognizes a real `CBCentralManager`-backed
-    ///   `manager`). To release deterministically, clear it explicitly:
-    ///   `backend.eventHandler = nil` (and each adopted peripheral's).
+    /// - Important: **Retention.** Unlike the production initializers, this initializer
+    ///   installs closures on `backend.eventHandler` (and on each adopted peripheral's
+    ///   handler) that capture `self` **strongly**, and this `Central` holds `backend`. The
+    ///   cycle `Central` → `backend` → closure → `Central` is by design, so `backend` alone
+    ///   keeps this `Central` alive. ``stopAndExtractState()`` does not break it, because it
+    ///   recognizes only a real `CBCentralManager`. To release the `Central` at a known time,
+    ///   set `backend.eventHandler = nil` (and the same for each adopted peripheral).
     ///
     /// - Parameters:
     ///   - backend: The `CentralManaging` conformance to drive.
-    ///   - queue: The `DispatchQueue` `backend`'s events are confined to — see the
-    ///     invariant above. Must be serial (`DispatchQueue(label:)` is).
-    ///   - configuration: Start-time options. Defaults to `Configuration()`.
-    ///   - startupBackgroundTask: An injected startup background-task seam; `nil` (the
-    ///     default) uses a no-op.
-    ///   - connectedPeripherals: `PeripheralRemote`s to adopt as live sessions, mirroring
-    ///     ``init(adopting:connectedPeripherals:callbackQueue:configuration:)``'s adoption
-    ///     structure. Defaults to `[]`.
+    ///   - queue: The serial `DispatchQueue` that confines `backend`'s events.
+    ///   - configuration: Start-time options. The default is `Configuration()`.
+    ///   - startupBackgroundTask: An injected startup background-task seam. The default `nil`
+    ///     uses a no-op.
+    ///   - connectedPeripherals: The `PeripheralRemote` values to adopt as live sessions, as in
+    ///     ``init(adopting:connectedPeripherals:callbackQueue:configuration:)``. The default
+    ///     is `[]`.
     public init(
         backend: any CentralManaging,
         queue: DispatchQueue,
@@ -359,8 +360,8 @@ public actor Central {
         self.startupBackgroundTask = runner
         self.startupWindowOpen = configuration.restoration != nil
 
-        // Every direct stored-property write must precede the `eventHandler` closures below
-        // — see the matching comment in `init(adopting:...)`.
+        // Every direct write to a stored property must come before the `eventHandler` closures
+        // below. See `init(adopting:...)`.
         var adopted: [(identifier: PeripheralIdentifier, peripheral: any PeripheralRemote)] = []
         for connectedPeripheral in connectedPeripherals {
             let identifier = PeripheralIdentifier(uuid: connectedPeripheral.identifier, name: connectedPeripheral.name)
@@ -373,13 +374,13 @@ public actor Central {
             connectionBroadcaster.yield(.connected(identifier))
         }
 
-        // `self` is fully initialized, so it can now be captured. Wiring is hopped onto
-        // `queue` via `queue.sync` (safe: nothing else can be running on `queue` yet)
-        // because `backend`'s `eventHandler` setter may be queue-confined, as
-        // `FakeCentral`/`FakePeripheral`'s are.
+        // `self` is fully initialized, so a closure can capture it now. Set up the handlers on
+        // `queue` with `queue.sync`. This is safe, because nothing else runs on `queue` yet. The
+        // backend's `eventHandler` setter can be queue-confined, as in `FakeCentral` and
+        // `FakePeripheral`.
         //
-        // Captures `self` strongly (unlike the production paths' `[weak self]`) — see the
-        // Retention note on this initializer's doc comment.
+        // The closures capture `self` strongly, unlike the production paths. See the Retention
+        // note in this initializer's doc comment.
         queue.sync {
             backend.eventHandler = { event in
                 self.assumeIsolated(onQueue: self.queue) { $0.handle(event) }
@@ -403,8 +404,8 @@ public actor Central {
         }
     }
 
-    /// Cancels any in-flight auto-reconnect loop and restoration re-connect. Actors support
-    /// ordinary `deinit`s that touch isolated storage directly, so no `Task` hop is needed.
+    /// Cancels any auto-reconnect loop and any restoration reconnect in progress. An actor
+    /// `deinit` can use isolated storage directly, so no `Task` hop is needed.
     deinit {
         for loop in reconnectLoops.values {
             loop.task.cancel()
@@ -415,14 +416,16 @@ public actor Central {
         startupBackgroundTask.end()
     }
 
-    /// Stops this `Central`, detaching the underlying `CBCentralManager`'s delegate, and
-    /// hands the manager back to the caller so it can be adopted by other code.
+    /// Stops this `Central`, detaches the delegate of the underlying `CBCentralManager`, and
+    /// hands the manager to the caller, so other code can adopt it.
     ///
-    /// - Returns: The underlying `CBCentralManager`, and every `CBPeripheral` this `Central`
-    ///   was connected to, sorted by identifier for determinism.
-    /// - Throws: ``BLESwiftError/stopped`` if already stopped, not backed by a real
-    ///   `CBCentralManager`, or any tracked peripheral has a connection attempt or disconnect
-    ///   in progress (extracting mid-attempt would strand its pending continuation forever).
+    /// - Returns: The underlying `CBCentralManager` and every connected `CBPeripheral`, sorted
+    ///   by identifier.
+    /// - Throws: ``BLESwiftError/stopped`` in these cases:
+    ///   - The `Central` is already stopped.
+    ///   - A real `CBCentralManager` does not back the `Central`.
+    ///   - A tracked peripheral has a connection attempt or a disconnect in progress. Extraction
+    ///     then would leave the pending continuation waiting forever.
     public func stopAndExtractState() throws -> (manager: CBCentralManager, peripherals: [CBPeripheral]) {
         guard let currentManager = manager else {
             throw BLESwiftError.stopped
@@ -431,7 +434,7 @@ public actor Central {
             throw BLESwiftError.stopped
         }
 
-        // Any entry that isn't `.connected` blocks extraction — see the throws docs above.
+        // An entry that is not `.connected` blocks extraction. See the throws docs above.
         guard !connections.values.contains(where: { if case .connected = $0 { return false }; return true }) else {
             throw BLESwiftError.stopped
         }
@@ -461,12 +464,12 @@ public actor Central {
         closeAllSessionsL2CAPChannels(error: BLESwiftError.stopped)
         connections.removeAll()
 
-        // Give up this actor's own reference before returning `cbManager` — required, not
-        // just tidy; see ``manager``'s doc comment.
+        // Give up this actor's reference before the method returns `cbManager`. This is
+        // required. See the doc comment of ``manager``.
         manager = nil
         cbManager.delegate = nil
-        // Detach every extracted peripheral's event delivery too — its new owner installs
-        // its own delegate.
+        // Also detach every extracted peripheral's event delivery. The new owner installs its
+        // own delegate.
         for (_, peripheral) in connectedPeripherals {
             peripheral.eventHandler = nil
         }
@@ -477,37 +480,37 @@ public actor Central {
 
     // MARK: - Public surface
 
-    /// The current state of the Bluetooth radio. A synchronous snapshot, readable without
-    /// `await` from any isolation domain.
+    /// The current state of the Bluetooth radio, as a synchronous snapshot. You can read it
+    /// without `await` from any isolation domain.
     public nonisolated var state: CentralState {
         stateBox.withLock { $0 }
     }
 
-    /// The app's current Bluetooth authorization status.
+    /// The current Bluetooth authorization status of the app.
     ///
-    /// - Note: Returns `.notDetermined` after ``stopAndExtractState()`` has been called —
-    ///   this `Central` no longer owns a manager to ask at that point.
+    /// - Note: After ``stopAndExtractState()``, this returns `.notDetermined`, because this
+    ///   `Central` no longer owns a manager.
     public var authorization: BluetoothAuthorization {
         guard let manager else { return .notDetermined }
         return type(of: manager).bluetoothAuthorization
     }
 
-    /// Whether a scan is currently active. A synchronous snapshot, readable without
-    /// `await` from any isolation domain.
+    /// Whether a scan is active, as a synchronous snapshot. You can read it without `await`
+    /// from any isolation domain.
     public nonisolated var isScanning: Bool {
         isScanningBox.withLock { $0 }
     }
 
-    /// Returns a multicast stream of every ``CentralState`` transition, replaying the most
-    /// recent state to a late subscriber.
+    /// Returns a multicast stream of every ``CentralState`` transition. It replays the latest
+    /// state to a late subscriber.
     public func stateEvents() -> AsyncStream<CentralState> {
         stateBroadcaster.stream()
     }
 
     // MARK: - Connection lifecycle
 
-    /// A synchronous-to-read (but actor-isolated) snapshot of `id`'s connection lifecycle.
-    /// `.disconnected` when `id` has no tracked entry. See ``ConnectionState``.
+    /// A snapshot of the connection lifecycle of `id`. It is `.disconnected` when `id` has no
+    /// tracked entry. See ``ConnectionState``.
     public func connectionState(of id: PeripheralIdentifier) -> ConnectionState {
         switch connections[id] {
         case .none:
@@ -521,8 +524,7 @@ public actor Central {
         }
     }
 
-    /// A snapshot of every currently-connected peripheral's handle, sorted by
-    /// `id.uuid.uuidString` for determinism.
+    /// A snapshot of the handle of every connected peripheral, sorted by `id.uuid.uuidString`.
     public var connectedPeripherals: [Peripheral] {
         connections.compactMap { identifier, phase -> Peripheral? in
             guard case .connected = phase else { return nil }
@@ -530,38 +532,37 @@ public actor Central {
         }.sorted { $0.id.uuid.uuidString < $1.id.uuid.uuidString }
     }
 
-    /// Returns a multicast stream of every ``ConnectionEvent``, across every peripheral.
-    /// See ``ConnectionEvent`` for the full event vocabulary and replay semantics (none — a
-    /// late subscriber only sees events from the point it subscribes; use
-    /// ``connectionState(of:)``/``connectedPeripherals`` for the current snapshot).
+    /// Returns a multicast stream of every ``ConnectionEvent`` across every peripheral. See
+    /// ``ConnectionEvent`` for the events. There is no replay. A subscriber sees only the
+    /// events after it subscribes. For the current state, use ``connectionState(of:)`` or
+    /// ``connectedPeripherals``.
     public func connectionEvents() -> AsyncStream<ConnectionEvent> {
         connectionBroadcaster.stream()
     }
 
     #if !os(macOS)
-    /// Returns a multicast stream of system-level connection events for peripherals
-    /// matching `services`/`peripherals` (any-of) — delivered when a matching peripheral
-    /// connects to or disconnects from the *system*, by any app or the Bluetooth settings
-    /// pane, not just through this `Central`. Wraps
+    /// Returns a multicast stream of system-level connection events for peripherals that
+    /// match `services` or `peripherals` (any of them). The system delivers an event when a
+    /// matching peripheral connects to or disconnects from the *system*. Any app, or the
+    /// Bluetooth settings pane, can cause the event. It wraps
     /// `CBCentralManager.registerForConnectionEvents(options:)`.
     ///
-    /// The underlying CoreBluetooth registration is refcounted: it is issued when the
-    /// first subscriber's stream is created — with that first call's match options — and
-    /// cancelled when the last subscriber's stream terminates. A later call while
-    /// subscribers exist joins the multicast without re-registering, so its `services`/
-    /// `peripherals` are ignored until the registration next drops to zero and restarts.
+    /// A reference count controls the CoreBluetooth registration:
+    /// - The first subscriber's stream starts the registration, with that call's match options.
+    /// - The last subscriber's termination cancels the registration.
+    /// - A later call while subscribers exist joins the multicast without a new registration,
+    ///   so it ignores its `services` and `peripherals`. They apply again only after the
+    ///   registration drops to zero and starts again.
     ///
-    /// Not available on macOS (CoreBluetooth does not offer connection-event registration
-    /// there).
+    /// This API is not available on macOS.
     ///
     /// - Parameters:
-    ///   - services: Match peripherals exposing any of these services, or `nil` for no
+    ///   - services: Match peripherals that expose any of these services, or `nil` for no
     ///     service criterion.
-    ///   - peripherals: Match these specific peripherals, or `nil` for no peripheral
-    ///     criterion. Both `nil` registers with no match options, which CoreBluetooth
-    ///     treats as matching nothing.
-    /// - Returns: An `AsyncStream` of ``SystemConnectionEvent``; no replay — subscribers
-    ///   only see events delivered after they subscribe.
+    ///   - peripherals: Match these peripherals, or `nil` for no peripheral criterion. If both
+    ///     are `nil`, the registration has no match options, and CoreBluetooth matches nothing.
+    /// - Returns: An `AsyncStream` of ``SystemConnectionEvent``. There is no replay. A
+    ///   subscriber sees only the events after it subscribes.
     public func connectionEventRegistration(
         services: [ServiceIdentifier]? = nil,
         peripherals: [PeripheralIdentifier]? = nil
@@ -584,8 +585,8 @@ public actor Central {
         return stream
     }
 
-    /// Drops one ``connectionEventSubscribers`` entry; unregisters from the backend when
-    /// the last one goes. Idempotent per token.
+    /// Removes one entry of ``connectionEventSubscribers``. When the last entry goes, it
+    /// unregisters from the backend. It is idempotent for each token.
     private func removeConnectionEventSubscriber(_ token: UInt64) {
         guard connectionEventSubscribers.removeValue(forKey: token) != nil else { return }
         if connectionEventSubscribers.isEmpty {
@@ -595,8 +596,8 @@ public actor Central {
     #endif
 
     #if os(iOS)
-    /// `Peripheral.ancsAuthorized`'s resolution path: the live session's backend value, or
-    /// `false` when `id` isn't currently connected.
+    /// Resolves `Peripheral.ancsAuthorized`. It returns the backend's value for the live
+    /// session, or `false` when `id` is not connected.
     func ancsAuthorized(for id: PeripheralIdentifier) -> Bool {
         guard case .connected(let session) = connections[id] else { return false }
         return session.peripheral.ancsAuthorized
@@ -606,33 +607,33 @@ public actor Central {
     #if os(iOS)
     /// Connects to a known peripheral.
     ///
-    /// BLESwift supports N concurrent peripheral connections — connecting to any peripheral
-    /// other than `id` never conflicts. Fails immediately with
-    /// ``BLESwiftError/duplicateConnect(_:)`` only if `id` itself already has a tracked
-    /// entry. A new `connect` call to `id` cancels any in-flight auto-reconnect loop for
-    /// `id` and resets its ``ReconnectPolicy`` to whatever `reconnect` specifies.
+    /// BLESwift supports concurrent connections to several peripherals. The call fails
+    /// immediately with ``BLESwiftError/duplicateConnect(_:)`` only if `id` already has a
+    /// tracked entry. A new call for `id` cancels its auto-reconnect loop and replaces its
+    /// ``ReconnectPolicy``. See <doc:ConnectionsAndReconnection>.
     ///
     /// - Parameters:
     ///   - id: The peripheral to connect to.
-    ///   - timeout: How long to wait before throwing ``BLESwiftError/connectionTimedOut``.
-    ///     Defaults to 15 seconds; `nil` waits indefinitely. On timeout, the pending
-    ///     CoreBluetooth attempt is cancelled and its confirmation awaited before throwing.
-    ///   - reconnect: What to do if this connection is later lost unexpectedly. Defaults to
+    ///   - timeout: How long to wait before the call throws ``BLESwiftError/connectionTimedOut``.
+    ///     The default is 15 seconds. `nil` waits without a limit. On timeout, the call cancels
+    ///     the CoreBluetooth attempt, waits for its confirmation, and then throws.
+    ///   - reconnect: What to do if the connection is lost unexpectedly later. The default is
     ///     ``ReconnectPolicy/never``.
-    ///   - warningOptions: Per-connection override for iOS system alerts on suspended-app
-    ///     connection events. Defaults to ``Configuration``'s `warningOptions`.
-    ///   - compatibility: Accommodations for peripherals that misreport their GATT
-    ///     database — see ``GATTCompatibility``. Defaults to ``GATTCompatibility/strict``;
-    ///     applies to this connection only.
-    ///   - requiresANCS: iOS only — requires ANCS (Apple Notification Center Service)
-    ///     authorization for this connection (`CBConnectPeripheralOptionRequiresANCS`).
-    ///     Track the resulting authorization via ``Peripheral/ancsAuthorized`` and
-    ///     ``Peripheral/ancsAuthorizationEvents()``; reused by auto-reconnect attempts.
-    /// - Returns: A ``Peripheral`` handle once connected.
-    /// - Throws: ``BLESwiftError/duplicateConnect(_:)``, ``BLESwiftError/unexpectedPeripheral(_:)``
-    ///   if `id` is not known to CoreBluetooth, ``BLESwiftError/connectionTimedOut``,
-    ///   ``BLESwiftError/operationCancelled`` on task cancellation, or whatever error
-    ///   CoreBluetooth reports.
+    ///   - warningOptions: Overrides, for this connection, the iOS system alerts for a
+    ///     suspended app. The default is the `warningOptions` of ``Configuration``.
+    ///   - compatibility: Accommodations for peripherals that report their GATT database
+    ///     incorrectly. The default is ``GATTCompatibility/strict``. It applies to this
+    ///     connection only.
+    ///   - requiresANCS: iOS only. Requires ANCS authorization for this connection. Track it
+    ///     with ``Peripheral/ancsAuthorized`` and ``Peripheral/ancsAuthorizationEvents()``.
+    ///     Auto-reconnect attempts reuse this value.
+    /// - Returns: A ``Peripheral`` handle for the connection.
+    /// - Throws: One of these errors:
+    ///   - ``BLESwiftError/duplicateConnect(_:)``.
+    ///   - ``BLESwiftError/unexpectedPeripheral(_:)`` if CoreBluetooth does not know `id`.
+    ///   - ``BLESwiftError/connectionTimedOut``.
+    ///   - ``BLESwiftError/operationCancelled`` on task cancellation.
+    ///   - Any other error that CoreBluetooth reports.
     public func connect(
         _ id: PeripheralIdentifier,
         timeout: Duration? = .seconds(15),
@@ -646,29 +647,30 @@ public actor Central {
     #else
     /// Connects to a known peripheral.
     ///
-    /// BLESwift supports N concurrent peripheral connections — connecting to any peripheral
-    /// other than `id` never conflicts. Fails immediately with
-    /// ``BLESwiftError/duplicateConnect(_:)`` only if `id` itself already has a tracked
-    /// entry. A new `connect` call to `id` cancels any in-flight auto-reconnect loop for
-    /// `id` and resets its ``ReconnectPolicy`` to whatever `reconnect` specifies.
+    /// BLESwift supports concurrent connections to several peripherals. The call fails
+    /// immediately with ``BLESwiftError/duplicateConnect(_:)`` only if `id` already has a
+    /// tracked entry. A new call for `id` cancels its auto-reconnect loop and replaces its
+    /// ``ReconnectPolicy``. See <doc:ConnectionsAndReconnection>.
     ///
     /// - Parameters:
     ///   - id: The peripheral to connect to.
-    ///   - timeout: How long to wait before throwing ``BLESwiftError/connectionTimedOut``.
-    ///     Defaults to 15 seconds; `nil` waits indefinitely. On timeout, the pending
-    ///     CoreBluetooth attempt is cancelled and its confirmation awaited before throwing.
-    ///   - reconnect: What to do if this connection is later lost unexpectedly. Defaults to
+    ///   - timeout: How long to wait before the call throws ``BLESwiftError/connectionTimedOut``.
+    ///     The default is 15 seconds. `nil` waits without a limit. On timeout, the call cancels
+    ///     the CoreBluetooth attempt, waits for its confirmation, and then throws.
+    ///   - reconnect: What to do if the connection is lost unexpectedly later. The default is
     ///     ``ReconnectPolicy/never``.
-    ///   - warningOptions: Per-connection override for iOS system alerts on suspended-app
-    ///     connection events. Defaults to ``Configuration``'s `warningOptions`.
-    ///   - compatibility: Accommodations for peripherals that misreport their GATT
-    ///     database — see ``GATTCompatibility``. Defaults to ``GATTCompatibility/strict``;
-    ///     applies to this connection only.
-    /// - Returns: A ``Peripheral`` handle once connected.
-    /// - Throws: ``BLESwiftError/duplicateConnect(_:)``, ``BLESwiftError/unexpectedPeripheral(_:)``
-    ///   if `id` is not known to CoreBluetooth, ``BLESwiftError/connectionTimedOut``,
-    ///   ``BLESwiftError/operationCancelled`` on task cancellation, or whatever error
-    ///   CoreBluetooth reports.
+    ///   - warningOptions: Overrides, for this connection, the iOS system alerts for a
+    ///     suspended app. The default is the `warningOptions` of ``Configuration``.
+    ///   - compatibility: Accommodations for peripherals that report their GATT database
+    ///     incorrectly. The default is ``GATTCompatibility/strict``. It applies to this
+    ///     connection only.
+    /// - Returns: A ``Peripheral`` handle for the connection.
+    /// - Throws: One of these errors:
+    ///   - ``BLESwiftError/duplicateConnect(_:)``.
+    ///   - ``BLESwiftError/unexpectedPeripheral(_:)`` if CoreBluetooth does not know `id`.
+    ///   - ``BLESwiftError/connectionTimedOut``.
+    ///   - ``BLESwiftError/operationCancelled`` on task cancellation.
+    ///   - Any other error that CoreBluetooth reports.
     public func connect(
         _ id: PeripheralIdentifier,
         timeout: Duration? = .seconds(15),
@@ -680,8 +682,8 @@ public actor Central {
     }
     #endif
 
-    /// The shared body behind the fenced `connect(_:...)` pair — `requiresANCS` exists as
-    /// a public parameter on iOS only, but flows through here (always `false` elsewhere).
+    /// The shared body of the two platform variants of `connect(_:...)`. `requiresANCS` is a
+    /// public parameter on iOS only and is always `false` elsewhere.
     private func connectImpl(
         _ id: PeripheralIdentifier,
         timeout: Duration?,
@@ -692,18 +694,18 @@ public actor Central {
     ) async throws -> Peripheral {
         guard manager != nil else { throw BLESwiftError.stopped }
 
-        // Restoration owns the connection slot until its routing has run — BLESwift rejects
-        // the racing call up front instead of cancelling it after the fact.
+        // Restoration owns the connection slot until its routing has run. Reject the racing call
+        // up front and do not cancel it afterward.
         if pendingRestoration != nil {
             throw BLESwiftError.backgroundRestorationInProgress
         }
 
         let resolvedWarningOptions = warningOptions ?? configuration.warningOptions
 
-        // Claim the connection slot SYNCHRONOUSLY, before any suspension point — this closes
-        // the concurrent-connect TOCTOU deadlock: a second racing `connect(id)` now sees the
-        // reservation and throws `.duplicateConnect` instead of overwriting the pending
-        // continuation (see `reserveConnectingSlot`/`awaitConnect`).
+        // Claim the connection slot SYNCHRONOUSLY, before any suspension point. This closes the
+        // concurrent-connect TOCTOU deadlock: a second racing `connect(id)` sees the reservation
+        // and throws `.duplicateConnect` and does not overwrite the pending continuation (see
+        // `reserveConnectingSlot` and `awaitConnect`).
         try reserveConnectingSlot(
             identifier: id,
             policy: reconnect,
@@ -713,11 +715,11 @@ public actor Central {
             requiresANCS: requiresANCS
         )
 
-        // Cancel an in-flight reconnect loop for THIS peripheral only. Safe after
-        // reserving: a mid-flight reconnect *attempt* would already own the slot, so the
-        // reservation above would have thrown first. A user re-connect supersedes the loop,
-        // so any notification subscriptions parked awaiting it finish now, with
-        // `.explicitDisconnect` — the new connection starts with a clean slate.
+        // Cancel a reconnect loop for THIS peripheral only. This is safe after the reservation,
+        // because a reconnect *attempt* in progress would already own the slot and the
+        // reservation would have thrown. A user connect replaces the loop, so notification
+        // subscriptions that wait for the loop finish now with `.explicitDisconnect`. The new
+        // connection starts with no old state.
         reconnectLoops[id]?.task.cancel()
         reconnectLoops.removeValue(forKey: id)
         finishDormantNotifications(for: id, error: BLESwiftError.explicitDisconnect)
@@ -730,23 +732,23 @@ public actor Central {
         )
     }
 
-    /// Disconnects a connected peripheral, or cancels a connection attempt in progress, for
-    /// `id`. Never triggers a ``ReconnectPolicy`` retry — an explicit `disconnect` is always
-    /// treated as intentional. Other peripherals are unaffected.
+    /// Disconnects `id`, or cancels its connection attempt in progress. An explicit disconnect
+    /// is intentional, so it never triggers a ``ReconnectPolicy`` retry. Other peripherals are
+    /// not affected.
     ///
-    /// Any operations still in flight on the outgoing connection (reads, writes, notification
-    /// streams, L2CAP channels) are failed with ``BLESwiftError/explicitDisconnect``.
+    /// Operations in progress on the outgoing connection (reads, writes, notification streams,
+    /// and L2CAP channels) fail with ``BLESwiftError/explicitDisconnect``.
     ///
     /// - Parameter id: The peripheral to disconnect.
     /// - Throws: ``BLESwiftError/notConnected`` if `id` has no connection, connection attempt,
-    ///   or in-flight auto-reconnect loop; ``BLESwiftError/multipleDisconnectNotSupported`` if
-    ///   `id` is already disconnecting.
+    ///   or auto-reconnect loop. ``BLESwiftError/multipleDisconnectNotSupported`` if `id` is
+    ///   already disconnecting.
     public func disconnect(_ id: PeripheralIdentifier) async throws {
         switch connections[id] {
         case .none:
-            // No tracked entry doesn't mean nothing to stop: an auto-reconnect loop runs
-            // entirely between connections (no `connections` entry during backoff), so a
-            // `disconnect(id)` mid-backoff must still cancel it rather than throw `.notConnected`.
+            // No tracked entry does not mean that nothing needs to stop. An auto-reconnect loop
+            // has no `connections` entry during backoff, so a `disconnect(id)` then must cancel
+            // the loop and not throw `.notConnected`.
             if reconnectLoops[id] != nil {
                 reconnectLoops[id]?.task.cancel()
                 reconnectLoops.removeValue(forKey: id)
@@ -759,10 +761,9 @@ public actor Central {
         case .disconnecting:
             throw BLESwiftError.multipleDisconnectNotSupported
         case .connecting(let connecting):
-            // Reserved-but-unattached slot: no CoreBluetooth attempt has been issued, so
-            // there's nothing to cancel and no disconnect callback would ever complete a
-            // `.disconnecting` transition. Record `.explicitDisconnect` so `awaitConnect`'s
-            // attach resolves it.
+            // The slot is reserved but not attached, so no CoreBluetooth attempt exists to
+            // cancel, and no disconnect callback would complete a `.disconnecting` transition.
+            // Record `.explicitDisconnect`, so the attach in `awaitConnect` resolves it.
             if connecting.continuation == nil {
                 var reserved = connecting
                 reserved.stopping = BLESwiftError.explicitDisconnect
@@ -787,11 +788,11 @@ public actor Central {
         }
     }
 
-    /// Best-effort teardown of every tracked peripheral: cancels every in-flight
-    /// auto-reconnect loop, then disconnects every tracked entry.
+    /// Best-effort teardown of every tracked peripheral. It cancels every auto-reconnect loop
+    /// and then disconnects every tracked entry.
     ///
-    /// Never throws — individual outcomes are observable on ``connectionEvents()``.
-    /// Idempotent, and a no-op with nothing tracked.
+    /// It never throws. Observe the individual outcomes on ``connectionEvents()``. It is
+    /// idempotent.
     public func disconnectAll() async {
         for id in Array(reconnectLoops.keys) {
             reconnectLoops[id]?.task.cancel()
@@ -802,9 +803,10 @@ public actor Central {
             log("disconnectAll() cancelled every in-flight auto-reconnect loop", level: .info, category: "connection")
         }
 
-        // Mid-backoff peripherals have no `connections` entry, so the disconnect loop below
-        // never reaches their parked notification survivors — finish those here. Connected
-        // peripherals' records are finished by `handleTermination`'s `.disconnecting` branch.
+        // Peripherals in backoff have no `connections` entry, so the disconnect loop below
+        // never reaches their parked notification survivors. Finish those here. The
+        // `.disconnecting` branch of `handleTermination` finishes the connected peripherals'
+        // records.
         for id in Array(dormantNotifications.keys) where connections[id] == nil {
             finishDormantNotifications(for: id, error: BLESwiftError.explicitDisconnect)
         }
@@ -814,20 +816,20 @@ public actor Central {
         }
     }
 
-    /// Cancels whatever connection attempt is currently in progress for every tracked
-    /// peripheral, without disconnecting any already-established connection.
+    /// Cancels the connection attempt in progress, if any, for every tracked peripheral. It
+    /// does not disconnect an established connection.
     ///
-    /// A global operation across every peripheral. Like an explicit `disconnect`, never
-    /// triggers a ``ReconnectPolicy`` retry. Does not touch an active scan.
+    /// Like an explicit `disconnect`, it never triggers a ``ReconnectPolicy`` retry. It does
+    /// not touch an active scan.
     ///
-    /// - Parameter error: The error pending operations fail with. Defaults to
+    /// - Parameter error: The error that pending operations fail with. The default is
     ///   ``BLESwiftError/cancelled``.
     public func cancelAllOperations(error: Error? = nil) {
         let resolvedError = error ?? BLESwiftError.cancelled
 
-        // Cancel every in-flight auto-reconnect loop too — a reconnect-in-waiting is a
-        // pending connection attempt. Bumping the generation counter stops a belated loop
-        // iteration from clearing a newer loop's entry.
+        // Also cancel every auto-reconnect loop. A waiting reconnect is a pending connection
+        // attempt. Incrementing the generation counter stops a late loop iteration from
+        // clearing a newer loop's entry.
         if !reconnectLoops.isEmpty {
             for id in Array(reconnectLoops.keys) {
                 reconnectLoops[id]?.task.cancel()
@@ -837,8 +839,8 @@ public actor Central {
             log("cancelAllOperations() cancelled every in-flight auto-reconnect loop", level: .info, category: "connection")
         }
 
-        // A parked notification survivor is a pending operation too — finish every dormant
-        // record with the resolved error, across every peripheral.
+        // A parked notification survivor is also a pending operation. Finish every dormant
+        // record with the resolved error.
         for identifier in Array(dormantNotifications.keys) {
             finishDormantNotifications(for: identifier, error: resolvedError)
         }
@@ -846,7 +848,7 @@ public actor Central {
         for identifier in Array(connections.keys) {
             switch connections[identifier] {
             case .connecting(let connecting):
-                // Reserved-but-unattached slot — same handling as `failPendingConnect`.
+                // The slot is reserved but not attached. Handle it like `failPendingConnect`.
                 if connecting.continuation == nil {
                     var reserved = connecting
                     reserved.stopping = resolvedError
@@ -875,14 +877,16 @@ public actor Central {
 
     // MARK: - Connect internals
 
-    /// Resolves once `id` is connected, or throws. Wraps ``awaitConnect(id:policy:timeout:warningOptions:)``
-    /// in ``withTimeout(clock:_:throwing:operation:)``, which still awaits the real two-phase-cancel
-    /// confirmation before returning rather than abandoning the underlying attempt.
+    /// Resolves after `id` is connected, or throws. It wraps
+    /// ``awaitConnect(id:policy:timeout:warningOptions:)`` in
+    /// ``withTimeout(clock:_:throwing:operation:)``, which still waits for the real
+    /// two-phase-cancel confirmation before it returns.
     ///
-    /// Takes only `identifier`, not the resolved peripheral — `any PeripheralRemote` isn't
-    /// `Sendable`, so it can't cross into `withTimeout`'s `@Sendable` closure; the peripheral
-    /// was already resolved by ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:compatibility:)``,
-    /// which every caller must invoke first, synchronously, in the same actor turn.
+    /// The function takes only `identifier`, because `any PeripheralRemote` is not `Sendable`
+    /// and cannot cross into `withTimeout`'s `@Sendable` closure.
+    /// ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:compatibility:)``
+    /// already resolved the peripheral. Every caller must call it first, synchronously, in the
+    /// same actor turn.
     private func establishConnection(
         identifier: PeripheralIdentifier,
         policy: ReconnectPolicy,
@@ -894,19 +898,23 @@ public actor Central {
         }
     }
 
-    /// Synchronously claims `identifier`'s ``connections`` slot for a new connection attempt,
-    /// before any suspension point — the fix for the concurrent-connect TOCTOU deadlock.
-    /// Resolves the target peripheral, wires its event delivery, and writes a
-    /// continuation-less `.connecting` reservation so a racing call's `nil` guard fails and
-    /// throws `.duplicateConnect` instead of overwriting a live attempt.
+    /// Synchronously claims the ``connections`` slot of `identifier` for a new connection
+    /// attempt, before any suspension point. This prevents the concurrent-connect TOCTOU
+    /// deadlock. The function resolves the target peripheral, sets up its event delivery, and
+    /// writes a `.connecting` reservation with no continuation. A racing call then fails the
+    /// `nil` guard and throws `.duplicateConnect`, and does not overwrite a live attempt.
     ///
     /// Every path that starts a connection through
-    /// ``establishConnection(identifier:policy:timeout:warningOptions:)`` — user `connect`,
-    /// the auto-reconnect loop, and restoration's manual re-connect — must call this first,
-    /// synchronously, in the same actor turn as its own occupied-slot check. (The adoption
-    /// paths write a `.connected` entry directly and need no reservation.)
+    /// ``establishConnection(identifier:policy:timeout:warningOptions:)`` must call this
+    /// function first, synchronously, in the same actor turn as its own check for an occupied
+    /// slot. These paths are:
+    /// - User `connect`.
+    /// - The auto-reconnect loop.
+    /// - The manual reconnect of restoration.
     ///
-    /// - Throws: ``BLESwiftError/duplicateConnect(_:)`` if the slot is already occupied;
+    /// The adoption paths write a `.connected` entry directly and need no reservation.
+    ///
+    /// - Throws: ``BLESwiftError/duplicateConnect(_:)`` if the slot is already occupied.
     ///   ``BLESwiftError/unexpectedPeripheral(_:)`` if CoreBluetooth no longer knows
     ///   `identifier`.
     private func reserveConnectingSlot(
@@ -924,9 +932,9 @@ public actor Central {
             throw BLESwiftError.unexpectedPeripheral(identifier)
         }
 
-        // Wire event delivery before the attempt goes live — the shared mechanism for every
-        // session-creating path. `awaitConnect` issues the actual `connect` only once it has
-        // attached its continuation, so nothing can be delivered here first.
+        // Set up event delivery before the attempt goes live, for every path that creates a
+        // session. `awaitConnect` issues the actual `connect` only after it attaches its
+        // continuation, so no event can arrive first.
         target.eventHandler = { [weak self] event in
             guard let self else { return }
             self.assumeIsolated(onQueue: self.queue) { $0.handle(event, from: identifier) }
@@ -945,15 +953,15 @@ public actor Central {
         ))
     }
 
-    /// Attaches a pending connect continuation to the slot ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:compatibility:)``
-    /// already reserved, starts the CoreBluetooth connection attempt, and suspends until
-    /// ``handle(_:)`` resolves it — never directly from here. Does not create the
-    /// ``connections`` entry itself; the reservation already did, synchronously.
+    /// Attaches a pending connect continuation to the slot that
+    /// ``reserveConnectingSlot(identifier:policy:timeout:warningOptions:compatibility:)``
+    /// reserved, starts the CoreBluetooth connection attempt, and suspends until
+    /// ``handle(_:)`` resolves the continuation. This function never resolves it directly and
+    /// does not create the ``connections`` entry.
     ///
-    /// Wrapped in `withTaskCancellationHandler` so cancelling the surrounding `Task`
-    /// triggers the same two-phase-cancel dance a real cancellation would (see
-    /// ``failPendingConnect(for:error:)``). The handler hops onto ``queue`` via
-    /// `assumeIsolated`, matching `CentralDelegateProxy`'s sanctioned pattern.
+    /// When the surrounding `Task` is cancelled, `withTaskCancellationHandler` starts the
+    /// two-phase-cancel sequence of a real cancellation (see ``failPendingConnect(for:error:)``).
+    /// The handler hops onto ``queue`` through `assumeIsolated`, like `CentralDelegateProxy`.
     private func awaitConnect(
         id: PeripheralIdentifier,
         policy: ReconnectPolicy,
@@ -962,21 +970,19 @@ public actor Central {
     ) async throws -> Peripheral {
         try await withTaskCancellationHandler {
             let attach = { [self] (continuation: CheckedContinuation<Peripheral, Error>) in
-                // Attach to the slot the caller reserved synchronously via
-                // `reserveConnectingSlot` — do NOT create it here. A reserved slot is
-                // `.connecting` with a `nil` continuation (and no CoreBluetooth attempt
-                // issued yet).
+                // Attach to the slot that the caller reserved through `reserveConnectingSlot`. Do
+                // NOT create the slot here. A reserved slot is `.connecting` with a `nil`
+                // continuation, and no CoreBluetooth attempt has started yet.
                 guard case .connecting(var connecting) = connections[id], connecting.continuation == nil else {
-                    // Attach to the slot reserved synchronously via `reserveConnectingSlot`
-                    // — do NOT create it here. If the expected reservation is gone or
-                    // already attached, resolve defensively rather than orphan the continuation.
+                    // The expected reservation is gone or already attached. Resolve the
+                    // continuation defensively. Do not orphan it.
                     continuation.resume(throwing: BLESwiftError.operationCancelled)
                     return
                 }
 
-                // A cancel/timeout/disconnect that raced in during the reservation window —
-                // before any CoreBluetooth `connect` was issued — recorded its error in
-                // `stopping`; resolve here directly since there's nothing to tear down.
+                // A cancel, timeout, or disconnect can race in during the reservation window,
+                // before any CoreBluetooth `connect` starts, and record its error in `stopping`.
+                // Resolve here directly, because nothing needs to be torn down.
                 if let stopping = connecting.stopping {
                     connections.removeValue(forKey: id)
                     connecting.peripheral.eventHandler = nil
@@ -984,15 +990,15 @@ public actor Central {
                     return
                 }
 
-                // Normal attach: wire the continuation, THEN issue the connect — never
-                // before, so no callback can land while still reserved-but-unattached.
+                // Normal attach: set the continuation, THEN issue the connect. Never issue it
+                // earlier, or a callback could arrive while the slot is not attached.
                 connecting.continuation = continuation
                 connections[id] = .connecting(connecting)
                 connectionBroadcaster.yield(.connecting(id))
                 log("Connecting to \(id)", level: .info, category: "connection")
                 manager?.connect(connecting.peripheral, options: warningOptions, requiresANCS: connecting.requiresANCS)
             }
-            // Explicit isolation pin on Swift ≤6.3 — see withCancellableGATTContinuation.
+            // Pin the isolation on Swift 6.3 and earlier. See `withCancellableGATTContinuation`.
             #if compiler(>=6.4)
             return try await withCheckedThrowingContinuation(attach)
             #else
@@ -1007,15 +1013,16 @@ public actor Central {
         }
     }
 
-    /// Fails the pending connect for `id`: two-phase (mark `stopping`, let the
-    /// `didFailToConnect`/`didDisconnect` path resolve) when the radio is on;
-    /// resolved immediately when it isn't. Idempotent; no-op if nothing is pending.
+    /// Fails the pending connect for `id`. If the radio is on, it works in two phases: it marks
+    /// `stopping`, and then the `didFailToConnect` or `didDisconnect` path resolves the connect.
+    /// If the radio is off, it resolves the connect immediately. It is idempotent and does
+    /// nothing if nothing is pending.
     private func failPendingConnect(for id: PeripheralIdentifier, error: Error) {
         guard case .connecting(var connecting) = connections[id] else { return }
         guard connecting.stopping == nil else { return }
 
-        // Reserved-but-unattached slot — nothing to cancel, no callback will arrive; just
-        // record the error. `awaitConnect`'s attach resolves it.
+        // The slot is reserved but not attached, so nothing needs to be cancelled and no
+        // callback will arrive. Record the error. The attach in `awaitConnect` resolves it.
         if connecting.continuation == nil {
             connecting.stopping = error
             connections[id] = .connecting(connecting)
@@ -1033,10 +1040,10 @@ public actor Central {
 
     // MARK: - Disconnect internals
 
-    /// Transitions `identifier` to `.disconnecting` and either asks CoreBluetooth to cancel
-    /// the connection (confirmed via ``handleTermination(identifier:error:)``), or resolves
-    /// synchronously if the radio isn't powered on. Always cancels `identifier`'s in-flight
-    /// reconnect loop first; other peripherals are untouched.
+    /// Moves `identifier` to `.disconnecting`. If the radio is on, it asks CoreBluetooth to
+    /// cancel the connection, and ``handleTermination(identifier:error:)`` confirms the
+    /// cancel. If the radio is not powered on, it resolves synchronously. It first cancels the
+    /// reconnect loop of `identifier`. Other peripherals are not touched.
     private func beginDisconnecting(
         identifier: PeripheralIdentifier,
         peripheral: any PeripheralRemote,
@@ -1047,15 +1054,15 @@ public actor Central {
         reconnectLoops[identifier]?.task.cancel()
         reconnectLoops.removeValue(forKey: identifier)
 
-        // Fail in-flight GATT operations on the outgoing session *before* the entry
-        // transitions away from `.connected` — its registries live inside `Session`, which
-        // is gone once the phase changes.
+        // Fail the GATT operations in progress on the outgoing session *before* the entry
+        // moves away from `.connected`, because its registries live inside `Session`, which is
+        // gone after the phase changes.
         failPendingGATTContinuations(for: identifier, error: .explicitDisconnect)
 
-        // Same rationale for notification streams.
+        // Same for notification streams.
         finishNotificationStreams(for: identifier, error: BLESwiftError.explicitDisconnect)
 
-        // Same rationale for open L2CAP channels.
+        // Same for open L2CAP channels.
         closeL2CAPChannels(for: identifier, error: BLESwiftError.explicitDisconnect)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -1077,16 +1084,19 @@ public actor Central {
 
     // MARK: - Shared connection cleanup
 
-    /// The single cleanup path for every way a tracked connection (or attempt) for
-    /// `identifier` ends: a real `didFailToConnect`/`didDisconnect` callback, or a
-    /// synchronous resolution when there's no radio to wait on.
+    /// The single cleanup path for every way that a tracked connection (or attempt) for
+    /// `identifier` ends: a real `didFailToConnect` or `didDisconnect` callback, or a
+    /// synchronous resolution when no radio is available to wait on.
     ///
-    /// Cleanup order: (1) fail in-flight GATT continuations, (2) finish notification
-    /// streams, (3) yield `.disconnected`, (4) resume the pending continuation(s), (5) start
-    /// a reconnect loop if the ``ReconnectPolicy`` says so. Removes `identifier`'s
-    /// ``connections`` entry once done.
+    /// The cleanup order is:
+    /// 1. Fail the GATT continuations in progress.
+    /// 2. Finish the notification streams.
+    /// 3. Yield `.disconnected`.
+    /// 4. Resume the pending continuations.
+    /// 5. Start a reconnect loop if the ``ReconnectPolicy`` requires it.
     ///
-    /// A no-op (beyond a debug log) if `identifier` has no ``connections`` entry.
+    /// It then removes the ``connections`` entry of `identifier`. If there is no entry, it only
+    /// writes a debug log.
     private func handleTermination(identifier: PeripheralIdentifier, error: Error?) {
         switch connections[identifier] {
         case .none:
@@ -1103,8 +1113,8 @@ public actor Central {
             connecting.continuation = nil
             connections.removeValue(forKey: identifier)
 
-            // Detach event delivery — the counterpart of `awaitConnect`'s attach; a
-            // reconnect re-attaches on its own.
+            // Detach event delivery, the counterpart of the attach in `awaitConnect`. A reconnect
+            // attaches again on its own.
             connecting.peripheral.eventHandler = nil
 
             failPendingGATTContinuations(for: identifier, error: .notConnected)
@@ -1119,9 +1129,8 @@ public actor Central {
 
             continuation?.resume(throwing: resolvedError)
 
-            // Don't spawn a second reconnect loop if one for `identifier` is already
-            // running (its own catch block continues retrying) — only a fresh top-level
-            // failure starts one here.
+            // Do not start a second loop if one already runs for `identifier`. Its own catch
+            // block continues the retries. Only a new top-level failure starts a loop here.
             if willReconnect, reconnectLoops[identifier] == nil {
                 scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility, requiresANCS: requiresANCS)
             }
@@ -1134,16 +1143,16 @@ public actor Central {
             let requiresANCS = session.requiresANCS
             let willReconnect = !policy.isNever
 
-            // Fail GATT ops and finish notification streams before removing the entry —
-            // see `beginDisconnecting`. When a reconnect will follow, subscriptions whose
-            // subscribers opted into `survivesReconnect` are parked dormant instead of dying.
+            // Fail the GATT operations and finish the notification streams before the entry is
+            // removed. See `beginDisconnecting`. When a reconnect follows, subscriptions that
+            // opted into `survivesReconnect` become dormant and do not end.
             let resolvedError = error ?? BLESwiftError.unexpectedDisconnect
             failPendingGATTContinuations(for: identifier, error: .unexpectedDisconnect)
             finishNotificationStreams(for: identifier, error: resolvedError, retainSurvivors: willReconnect)
             closeL2CAPChannels(for: identifier, error: resolvedError)
             connections.removeValue(forKey: identifier)
 
-            // Detach event delivery; a reconnect attempt re-attaches on initiation.
+            // Detach event delivery. A reconnect attempt attaches again at its start.
             session.peripheral.eventHandler = nil
 
             if !willReconnect {
@@ -1151,7 +1160,7 @@ public actor Central {
             }
             connectionBroadcaster.yield(.disconnected(identifier, error: error, willReconnect: willReconnect))
 
-            // Same don't-double-spawn guard as the `.connecting` branch above.
+            // The same guard against a second loop as in the `.connecting` branch.
             if willReconnect, reconnectLoops[identifier] == nil {
                 scheduleReconnect(identifier: identifier, policy: policy, timeout: timeout, warningOptions: warningOptions, compatibility: compatibility, requiresANCS: requiresANCS)
             }
@@ -1159,11 +1168,11 @@ public actor Central {
         case .disconnecting(var disconnecting):
             connections.removeValue(forKey: identifier)
 
-            // Detach event delivery — an explicit disconnect never reconnects.
+            // Detach event delivery. An explicit disconnect never reconnects.
             disconnecting.peripheral.eventHandler = nil
 
-            // Defensive no-op here in the common path (`beginDisconnecting` already did
-            // this); kept for the `cancelAllOperations()`-cancels-a-pending-connect path.
+            // Usually a defensive no-op, because `beginDisconnecting` already did it. It stays for
+            // the path where `cancelAllOperations()` cancels a pending connect.
             failPendingGATTContinuations(for: identifier, error: .explicitDisconnect)
             finishNotificationStreams(for: identifier, error: BLESwiftError.explicitDisconnect)
             closeL2CAPChannels(for: identifier, error: BLESwiftError.explicitDisconnect)
@@ -1181,11 +1190,10 @@ public actor Central {
         }
     }
 
-    /// Fails every pending connect attempt or established connection across every
-    /// peripheral with ``BLESwiftError/bluetoothUnavailable`` proactively, rather than
-    /// waiting on a disconnect callback that may not reliably arrive. Reconnect loops are
-    /// deliberately not cancelled — their attempts fail on their own and policy decides
-    /// whether to keep retrying.
+    /// Fails every pending connect attempt and every established connection with
+    /// ``BLESwiftError/bluetoothUnavailable``. It does not wait for a disconnect callback,
+    /// because that callback may not arrive. Reconnect loops are not cancelled. Their attempts
+    /// fail on their own, and the policy decides whether to retry.
     private func handleBluetoothUnavailable() {
         for identifier in Array(connections.keys) {
             switch connections[identifier] {
@@ -1199,14 +1207,14 @@ public actor Central {
         }
     }
 
-    /// Fails every in-flight GATT operation on `identifier`'s connected session (if any)
-    /// with `error`: every pending continuation is resumed throwing, and every
-    /// per-characteristic FIFO tail (plus the RSSI tail) is cancelled. Cleanup step 1 of
-    /// ``handleTermination(identifier:error:)``; also called directly by
-    /// ``cancelAllOperations(error:)``, which leaves the connection itself intact.
+    /// Fails every GATT operation in progress on the connected session of `identifier` with
+    /// `error`. It resumes every pending continuation with a throw and cancels every
+    /// characteristic FIFO tail and the RSSI tail. This is cleanup step 1 of
+    /// ``handleTermination(identifier:error:)``. ``cancelAllOperations(error:)`` also calls it
+    /// directly, and the connection then stays intact.
     ///
-    /// Distinct from ``failAllPendingOperations(error:)``, which only concerns the active
-    /// scan. A no-op if `identifier` isn't currently `.connected`.
+    /// Unlike ``failAllPendingOperations(error:)``, which concerns only the active scan, it
+    /// does nothing if `identifier` is not `.connected`.
     func failPendingGATTContinuations(for identifier: PeripheralIdentifier, error: BLESwiftError) {
         guard case .connected(var session) = connections[identifier] else {
             log("No connected session for \(identifier) — nothing to fail", level: .debug, category: "gatt")
@@ -1280,28 +1288,28 @@ public actor Central {
     }
 
     /// Calls ``failPendingGATTContinuations(for:error:)`` for every connected peripheral.
-    /// Used by ``stopAndExtractState()`` and ``cancelAllOperations(error:)``.
+    /// ``stopAndExtractState()`` and ``cancelAllOperations(error:)`` use it.
     func failAllSessionsPendingGATTContinuations(error: BLESwiftError) {
         for identifier in Array(connections.keys) {
             failPendingGATTContinuations(for: identifier, error: error)
         }
     }
 
-    /// Finishes every active notification stream on `identifier`'s session with `error` and
-    /// clears its registry — cleanup step 2 of ``handleTermination(identifier:error:)``.
-    /// Must run while the entry is still `.connected` (the registry lives inside `Session`).
+    /// Finishes every active notification stream on the session of `identifier` with `error`
+    /// and clears its registry. This is cleanup step 2 of
+    /// ``handleTermination(identifier:error:)``. It must run while the entry is still
+    /// `.connected`, because the registry lives inside `Session`.
     ///
-    /// Pump tasks are deliberately NOT cancelled here — each ends on its own when its raw
-    /// stream finishes, forwarding `error` to its subscriber; cancelling instead could race
-    /// that delivery and hide the disconnect error.
+    /// It does NOT cancel the pump tasks. Each pump task ends on its own when its raw stream
+    /// finishes, and it forwards `error` to its subscriber. A cancel could race that delivery
+    /// and hide the disconnect error.
     ///
-    /// With `retainSurvivors` (the reconnect-will-follow termination path only): tokens
-    /// registered with `survivesReconnect: true` are parked in ``dormantNotifications``
-    /// instead of dying — the raw broadcaster still finishes with `error` for everyone
-    /// (non-survivors and composite helpers end exactly as before), but a survivor's pump
-    /// catches that error, finds itself dormant, and suspends in
-    /// ``awaitResubscription(identifier:characteristic:token:)`` until the reconnect re-arms
-    /// it or the loop gives up.
+    /// `retainSurvivors` applies only when a reconnect follows. Tokens registered with
+    /// `survivesReconnect: true` become dormant in ``dormantNotifications`` and do not end.
+    /// The raw broadcaster still finishes with `error` for everyone. Non-survivors and
+    /// composite helpers end as usual. A survivor's pump catches that error, finds that it is
+    /// dormant, and suspends in ``awaitResubscription(identifier:characteristic:token:)`` until
+    /// the reconnect enables it again or the loop gives up.
     func finishNotificationStreams(for identifier: PeripheralIdentifier, error: Error, retainSurvivors: Bool = false) {
         guard case .connected(var session) = connections[identifier] else {
             log("No connected session for \(identifier) — no notification streams to finish", level: .debug, category: "gatt")
@@ -1333,7 +1341,7 @@ public actor Central {
 
         if !dormantCharacteristics.isEmpty {
             if dormantNotifications[identifier] != nil {
-                // Should not happen: a stale record means a previous gap never resolved.
+                // Unexpected. A stale record means that a previous gap never resolved.
                 log("Stale dormant notification record for \(identifier) — finishing it before parking new survivors", level: .warning, category: "gatt")
                 finishDormantNotifications(for: identifier, error: error)
             }
@@ -1353,11 +1361,12 @@ public actor Central {
         }
     }
 
-    /// Finishes `identifier`'s parked notification survivors with `error`, removing the
-    /// dormant record — the exit for every gap that does NOT end in a successful reconnect
-    /// (policy exhausted, loop cancelled, explicit disconnect, `stopAndExtractState`).
-    /// Take-then-resumes every parked pump's waiter; each pump then finishes its typed
-    /// stream with `error` and exits on its own. Idempotent; a no-op with no record.
+    /// Finishes the parked notification survivors of `identifier` with `error` and removes the
+    /// dormant record. It is the exit for every gap that does NOT end in a successful
+    /// reconnect: policy exhausted, loop cancelled, explicit disconnect, and
+    /// `stopAndExtractState`. It resumes the waiter of every parked pump with `error`, and each
+    /// pump then finishes its typed stream and exits. It is idempotent and does nothing if no
+    /// record exists.
     func finishDormantNotifications(for identifier: PeripheralIdentifier, error: Error) {
         guard let record = dormantNotifications.removeValue(forKey: identifier) else { return }
 
@@ -1371,7 +1380,7 @@ public actor Central {
     }
 
     /// Calls ``finishNotificationStreams(for:error:)`` for every connected peripheral.
-    /// Used by ``stopAndExtractState()``.
+    /// ``stopAndExtractState()`` uses it.
     func finishAllSessionsNotificationStreams(error: Error) {
         for identifier in Array(connections.keys) {
             finishNotificationStreams(for: identifier, error: error)
@@ -1380,11 +1389,11 @@ public actor Central {
 
     // MARK: - Auto-reconnect
 
-    /// Starts (or restarts) the auto-reconnect loop for `identifier`, per `policy`. Tags the
-    /// spawned task with the current ``reconnectGeneration`` (incremented here) so
-    /// ``runReconnectLoop(identifier:policy:timeout:warningOptions:compatibility:generation:)`` clears
-    /// `identifier`'s entry on exit only if it's still this generation's loop — otherwise a
-    /// superseded loop's belated cleanup could race a newer loop already scheduled.
+    /// Starts (or restarts) the auto-reconnect loop for `identifier`, per `policy`. It
+    /// increments ``reconnectGeneration`` and tags the new task with it.
+    /// ``runReconnectLoop(identifier:policy:timeout:warningOptions:compatibility:generation:)``
+    /// clears the entry of `identifier` on exit only if the loop still has this generation.
+    /// Without the tag, the late cleanup of a superseded loop could remove a newer loop.
     private func scheduleReconnect(
         identifier: PeripheralIdentifier,
         policy: ReconnectPolicy,
@@ -1401,18 +1410,18 @@ public actor Central {
         reconnectLoops[identifier] = ReconnectLoop(task: task, generation: generation)
     }
 
-    /// Removes `identifier`'s ``reconnectLoops`` entry only if `generation` still matches —
-    /// see ``scheduleReconnect(identifier:policy:timeout:warningOptions:compatibility:)``.
+    /// Removes the ``reconnectLoops`` entry of `identifier` only if `generation` still matches.
+    /// See ``scheduleReconnect(identifier:policy:timeout:warningOptions:compatibility:)``.
     private func clearReconnectLoopIfCurrent(id identifier: PeripheralIdentifier, generation: UInt64) {
         if reconnectLoops[identifier]?.generation == generation {
             reconnectLoops.removeValue(forKey: identifier)
         }
     }
 
-    /// Repeatedly attempts to reconnect to `identifier` per `policy`, emitting
-    /// ``ConnectionEvent/reconnecting(_:attempt:)`` before each attempt, until an attempt
-    /// succeeds, `policy` says to stop, or this task is cancelled. Independent of every
-    /// other peripheral's loop.
+    /// Tries repeatedly to reconnect to `identifier` per `policy`, and emits
+    /// ``ConnectionEvent/reconnecting(_:attempt:)`` before each attempt. It stops when an
+    /// attempt succeeds, when `policy` says to stop, or when this task is cancelled. It is
+    /// independent of every other peripheral's loop.
     private func runReconnectLoop(
         identifier: PeripheralIdentifier,
         policy: ReconnectPolicy,
@@ -1427,8 +1436,8 @@ public actor Central {
 
         while !Task.isCancelled {
             guard let delay = await policy.nextDelay(attempt: attempt, error: lastError) else {
-                // Policy exhausted: any parked notification survivors finish with the
-                // original disconnect error — exactly what the caller would see today.
+                // Policy exhausted: parked notification survivors finish with the original
+                // disconnect error.
                 finishDormantNotificationsWithRecordedError(for: identifier)
                 clearReconnectLoopIfCurrent(id: identifier, generation: generation)
                 return
@@ -1437,9 +1446,9 @@ public actor Central {
             do {
                 try await configuration.clock.sleep(for: delay)
             } catch {
-                // Cancelled mid-backoff: the canceller (disconnect/connect/disconnectAll/
-                // cancelAllOperations) usually finished the dormant record already with its
-                // own error; this is the belt-and-braces for any other cancellation.
+                // Cancelled during backoff. The canceller (disconnect, connect, disconnectAll, or
+                // cancelAllOperations) usually finished the dormant record with its own error.
+                // This call is the safety net for any other cancellation.
                 finishDormantNotificationsWithRecordedError(for: identifier)
                 clearReconnectLoopIfCurrent(id: identifier, generation: generation)
                 return
@@ -1457,8 +1466,8 @@ public actor Central {
             log("Reconnect attempt \(attempt) for \(identifier)", level: .info, category: "connection")
 
             do {
-                // Reserve the slot synchronously (same discipline as user `connect(_:)`) so
-                // a racing user `connect(id)` resolves cleanly via `.duplicateConnect`.
+                // Reserve the slot synchronously, as in user `connect(_:)`, so a racing user
+                // `connect(id)` fails cleanly with `.duplicateConnect`.
                 try reserveConnectingSlot(
                     identifier: identifier,
                     policy: policy,
@@ -1481,17 +1490,17 @@ public actor Central {
             }
         }
 
-        // Cancelled between iterations — same belt-and-braces as the mid-backoff exit.
+        // Cancelled between iterations. This is the same safety net as the exit during backoff.
         if connections[identifier] == nil {
             finishDormantNotificationsWithRecordedError(for: identifier)
         }
         clearReconnectLoopIfCurrent(id: identifier, generation: generation)
     }
 
-    /// ``finishDormantNotifications(for:error:)`` with the record's own stored disconnect
-    /// error — the reconnect loop's exits don't carry one of their own. Never touches a
-    /// record while `identifier` has a live entry (a reconnect that already succeeded owns
-    /// it). A no-op with no record.
+    /// Calls ``finishDormantNotifications(for:error:)`` with the disconnect error that the
+    /// record stores, because the reconnect loop's exits have no error of their own. It never
+    /// touches a record while `identifier` has a live entry, because a successful reconnect
+    /// owns the record. It does nothing if no record exists.
     private func finishDormantNotificationsWithRecordedError(for identifier: PeripheralIdentifier) {
         guard connections[identifier] == nil, let record = dormantNotifications[identifier] else { return }
         finishDormantNotifications(for: identifier, error: record.disconnectError)
@@ -1499,8 +1508,8 @@ public actor Central {
 
     // MARK: - Event handling
 
-    /// Updates actor state and fans out the corresponding public event(s) for a
-    /// `CentralEvent`, forwarded here by ``CentralDelegateProxy`` or a test's fake.
+    /// Updates the actor state and fans out the matching public events for a `CentralEvent`.
+    /// ``CentralDelegateProxy`` or a test fake forwards the event here.
     func handle(_ event: CentralEvent) {
         switch event {
         case .didUpdateState(let newState):
@@ -1526,8 +1535,8 @@ public actor Central {
                 return
             }
 
-            // A `didConnect` always means success, even for an attempt marked `stopping` —
-            // CoreBluetooth won the race, so declaring failure would contradict reality.
+            // A `didConnect` always means success, even for an attempt marked `stopping`,
+            // because CoreBluetooth won the race.
             let continuation = connecting.continuation
             connecting.continuation = nil
             let policy = connecting.policy
@@ -1541,8 +1550,8 @@ public actor Central {
             connectionBroadcaster.yield(.connected(identifier))
             continuation?.resume(returning: Peripheral(id: identifier, central: self))
 
-            // A reconnect with parked notification survivors: re-arm them. A ledgered
-            // `Task` site — stored on the session, cancelled by `failPendingGATTContinuations`.
+            // A reconnect with parked notification survivors: re-arm them. This is a ledgered
+            // `Task` site. It is stored on the session. `failPendingGATTContinuations` cancels it.
             if dormantNotifications[identifier] != nil,
                case .connected(var connectedSession) = connections[identifier] {
                 connectedSession.rearmTask = Task { [weak self] in
@@ -1552,7 +1561,7 @@ public actor Central {
             }
 
         case .didFailToConnect(let identifier, let error):
-            // Funnels into the same cleanup path as `didDisconnect`.
+            // Same cleanup path as `didDisconnect`.
             handleTermination(identifier: identifier, error: error)
 
         case .didDisconnect(let identifier, let error):
@@ -1583,9 +1592,9 @@ public actor Central {
         #endif
 
         case .willRestoreState(let restored):
-            // Wire each restored peripheral's event delivery now, before `.poweredOn`
-            // routing adopts/reconnects it — closing the gap where a notification from a
-            // surviving listen would otherwise have nowhere to go.
+            // Set up each restored peripheral's event delivery now, before the `.poweredOn`
+            // routing adopts or reconnects it. Otherwise, a notification from a surviving listen
+            // would have nowhere to go.
             for restoredPeripheral in restored.peripherals {
                 let peripheralIdentifier = restoredPeripheral.identifier
                 guard let target = manager?.retrievePeripherals(withIdentifiers: [peripheralIdentifier.uuid]).first else {
@@ -1597,17 +1606,17 @@ public actor Central {
                 }
             }
 
-            // Stage the restored state until the radio's first `.poweredOn` routes it;
-            // `.willRestore` is buffered/replayed so a later subscriber still sees it.
+            // Stage the restored state until the radio's first `.poweredOn` routes it. The
+            // broadcaster buffers and replays `.willRestore`, so a later subscriber still sees it.
             pendingRestoration = restored
             restorationBroadcaster.yield(.willRestore(restored))
             log("Will restore state: \(restored.peripherals.count) peripheral(s)", level: .info, category: "restore")
         }
     }
 
-    /// Handles a `PeripheralEvent`, forwarded here by ``PeripheralDelegateProxy`` or a
-    /// test's fake. Routes GATT completions to their pending continuations (take-then-resume)
-    /// and `didModifyServices` to ``serviceChangesRegistry``, keyed by `peripheral`.
+    /// Handles a `PeripheralEvent`. ``PeripheralDelegateProxy`` or a test fake forwards the
+    /// event here. It routes GATT completions to their pending continuations (removes, then
+    /// resumes) and `didModifyServices` to ``serviceChangesRegistry``, keyed by `peripheral`.
     func handle(_ event: PeripheralEvent, from peripheral: PeripheralIdentifier) {
         switch event {
         case .didDiscoverServices(let error):
@@ -1638,11 +1647,11 @@ public actor Central {
             resumePendingRSSIRead(rssi: rssi, for: peripheral, error: error)
 
         case .didModifyServices(let invalidatedServices):
-            // No actor-level discovery cache: `isDiscovered(_:)` is backed by CoreBluetooth's
-            // own service graph, which it already prunes on `didModifyServices`.
+            // There is no actor-level discovery cache. `isDiscovered(_:)` uses CoreBluetooth's
+            // service graph, which CoreBluetooth already prunes on `didModifyServices`.
             log("Services modified/invalidated: \(invalidatedServices)", level: .info, category: "gatt")
-            // Reset the enumeration caches touched by the invalidation so a subsequent
-            // enumeration re-discovers anything that appeared.
+            // Reset the enumeration caches that the invalidation touched, so a later enumeration
+            // discovers anything new.
             if case .connected(var session) = connections[peripheral] {
                 session.didEnumerateServices = false
                 session.enumeratedCharacteristicServices.subtract(invalidatedServices)
@@ -1662,10 +1671,9 @@ public actor Central {
 
     // MARK: - GATT event routing
 
-    /// Take-then-resumes every waiter in `session.pendingDiscoverServices`. Not matched to a
-    /// specific service — `didDiscoverServices(error:)` carries no service identifier — so
-    /// every waiter is resumed on any completion; each independently re-checks its own
-    /// service afterward.
+    /// Removes and resumes every waiter in `session.pendingDiscoverServices`. The waiters are
+    /// not per service, because `didDiscoverServices(error:)` carries no service identifier.
+    /// Every waiter resumes on any completion and then checks its own service again.
     private func resumeDiscoverServicesWaiters(for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
         guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didDiscoverServices for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
@@ -1683,8 +1691,9 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes a single service-discovery waiter by token — the reaction to that
-    /// waiter's own cancellation, not a real completion.
+    /// Removes a single service-discovery waiter by token and resumes it with
+    /// ``BLESwiftError/operationCancelled``. It handles the waiter's cancellation, not a real
+    /// completion.
     private func cancelDiscoverServicesWaiter(identifier: PeripheralIdentifier, token: UInt64) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingDiscoverServices.removeValue(forKey: token) else { return }
@@ -1692,8 +1701,8 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Take-then-resumes every waiter for `service` in `pendingDiscoverCharacteristics` —
-    /// keyed by service (unlike services above, since `didDiscoverCharacteristics` carries it).
+    /// Removes and resumes every waiter for `service` in `pendingDiscoverCharacteristics`. These
+    /// waiters are keyed by service, because `didDiscoverCharacteristics` carries it.
     private func resumeDiscoverCharacteristicsWaiters(service: ServiceIdentifier, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
         guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didDiscoverCharacteristics for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
@@ -1710,7 +1719,8 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes a single characteristic-discovery waiter by service + token — see
+    /// Removes a single characteristic-discovery waiter by service and token and resumes it
+    /// with ``BLESwiftError/operationCancelled``. See
     /// ``cancelDiscoverServicesWaiter(identifier:token:)``.
     private func cancelDiscoverCharacteristicsWaiter(identifier: PeripheralIdentifier, service: ServiceIdentifier, token: UInt64) {
         guard case .connected(var session) = connections[identifier] else { return }
@@ -1722,8 +1732,8 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Take-then-resumes every waiter for `characteristic` in `pendingDiscoverDescriptors` —
-    /// keyed like ``resumeDiscoverCharacteristicsWaiters(service:for:error:)``.
+    /// Removes and resumes every waiter for `characteristic` in `pendingDiscoverDescriptors`.
+    /// The keys work like those of ``resumeDiscoverCharacteristicsWaiters(service:for:error:)``.
     private func resumeDiscoverDescriptorsWaiters(characteristic: CharacteristicIdentifier, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
         guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didDiscoverDescriptors for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
@@ -1740,8 +1750,9 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes a single descriptor-discovery waiter by characteristic + token —
-    /// see ``cancelDiscoverCharacteristicsWaiter(identifier:service:token:)``.
+    /// Removes a single descriptor-discovery waiter by characteristic and token and resumes it
+    /// with ``BLESwiftError/operationCancelled``. See
+    /// ``cancelDiscoverCharacteristicsWaiter(identifier:service:token:)``.
     private func cancelDiscoverDescriptorsWaiter(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, token: UInt64) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingDiscoverDescriptors[characteristic]?.removeValue(forKey: token) else { return }
@@ -1752,8 +1763,8 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Take-then-resumes the single pending write continuation for `characteristic`, if
-    /// any (single-slot, guaranteed by the per-characteristic FIFO).
+    /// Removes and resumes the pending write continuation for `characteristic`, if any. Only
+    /// one slot exists, because the per-characteristic FIFO guarantees it.
     private func resumePendingWrite(characteristic: CharacteristicIdentifier, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
         guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didWriteValue for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
@@ -1771,9 +1782,9 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes the single pending write continuation for `characteristic`, if
-    /// still pending — the reaction to cancellation (task cancellation or a `withTimeout`
-    /// timeout) rather than a real `didWriteValue` completion.
+    /// Removes the pending write continuation for `characteristic`, if still pending, and
+    /// resumes it with ``BLESwiftError/operationCancelled``. It handles a task cancellation or
+    /// `withTimeout` timeout, not a real `didWriteValue` completion.
     private func cancelPendingWrite(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingWrites.removeValue(forKey: characteristic) else { return }
@@ -1781,8 +1792,8 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Take-then-resumes the single pending notify-state-change continuation for
-    /// `characteristic`, if any.
+    /// Removes and resumes the pending notify-state-change continuation for `characteristic`,
+    /// if any.
     private func resumePendingNotifyStateChange(characteristic: CharacteristicIdentifier, isNotifying: Bool, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
         guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didUpdateNotificationState for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
@@ -1800,8 +1811,8 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes the single pending RSSI-read continuation, if any (single-slot,
-    /// guaranteed by ``runRSSISerialized(identifier:operation:)``'s own tail-chain).
+    /// Removes and resumes the pending RSSI-read continuation, if any. Only one slot exists,
+    /// because the tail chain of ``runRSSISerialized(identifier:operation:)`` guarantees it.
     private func resumePendingRSSIRead(rssi: Int, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
         guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didReadRSSI for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
@@ -1820,7 +1831,8 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes the single pending RSSI-read continuation, if still pending — see
+    /// Removes the pending RSSI-read continuation, if still pending, and resumes it with
+    /// ``BLESwiftError/operationCancelled``. See
     /// ``cancelPendingWrite(identifier:characteristic:)``.
     private func cancelPendingRSSIRead(identifier: PeripheralIdentifier) {
         guard case .connected(var session) = connections[identifier] else { return }
@@ -1830,8 +1842,8 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Take-then-resumes every waiter in `pendingWriteWithoutResponseReady`. Not keyed by
-    /// characteristic — CoreBluetooth's readiness signal is peripheral-wide.
+    /// Removes and resumes every waiter in `pendingWriteWithoutResponseReady`. The waiters are
+    /// not keyed by characteristic, because CoreBluetooth's readiness signal is peripheral-wide.
     private func resumeWriteWithoutResponseWaiters(for peripheralIdentifier: PeripheralIdentifier) {
         guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring isReadyToSendWriteWithoutResponse for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
@@ -1845,7 +1857,8 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes a single write-without-response-readiness waiter by token — see
+    /// Removes a single write-without-response-readiness waiter by token and resumes it with
+    /// ``BLESwiftError/operationCancelled``. See
     /// ``cancelDiscoverServicesWaiter(identifier:token:)``.
     private func cancelWriteWithoutResponseWaiter(identifier: PeripheralIdentifier, token: UInt64) {
         guard case .connected(var session) = connections[identifier] else { return }
@@ -1854,17 +1867,19 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Routes a `didUpdateValueFor` delivery: an active notification subscription consumes
-    /// it first, else a pending read continuation, else — with restoration enabled — the
-    /// restoration "unhandled listen" surface, else it's logged.
+    /// Routes a `didUpdateValueFor` delivery. The first match in this order consumes it:
+    /// 1. An active notification subscription.
+    /// 2. A pending read continuation.
+    /// 3. With restoration enabled, the restoration "unhandled listen" surface.
+    /// 4. Otherwise, a log line.
     ///
-    /// A `didUpdateValue` error on a notifying characteristic finishes that subscription
-    /// with the error.
+    /// A `didUpdateValue` error on a notifying characteristic finishes that subscription with
+    /// the error.
     private func handleDidUpdateValue(characteristic: CharacteristicIdentifier, value: Data?, error: NSError?, from peripheralIdentifier: PeripheralIdentifier) {
         guard case .connected(var session) = connections[peripheralIdentifier] else {
-            // willRestoreState→poweredOn window: a restored-but-not-yet-routed peripheral
-            // can already be notifying. Surface it on the restoration stream instead of
-            // dropping it as "untracked".
+            // Between `willRestoreState` and `.poweredOn`, a restored peripheral that is not yet
+            // routed can already be notifying. Surface the value on the restoration stream and
+            // do not drop it as "untracked".
             if let pending = pendingRestoration,
                pending.peripherals.contains(where: { $0.identifier == peripheralIdentifier }) {
                 restorationBroadcaster.yield(.unhandledNotification(peripheralIdentifier, characteristic, value))
@@ -1880,7 +1895,7 @@ public actor Central {
             if let error {
                 failNotificationSubscription(identifier: peripheralIdentifier, characteristic: characteristic, error: error)
             } else {
-                // `nil` value yields empty `Data`, matching the pending-read path below.
+                // A `nil` value yields empty `Data`, as in the pending-read path below.
                 subscription.broadcaster.yield(value ?? Data())
             }
             return
@@ -1898,8 +1913,7 @@ public actor Central {
 
         connections[peripheralIdentifier] = .connected(session)
         if configuration.restoration != nil {
-            // The restoration "unhandled listen" surface — only meaningful with restoration
-            // enabled.
+            // The restoration "unhandled listen" surface applies only when restoration is enabled.
             restorationBroadcaster.yield(.unhandledNotification(peripheralIdentifier, characteristic, value))
             log("Unhandled value update for \(characteristic) surfaced on restorationEvents()", level: .info, category: "restore")
         } else {
@@ -1907,9 +1921,9 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes the single pending read continuation for `characteristic`, if
-    /// still pending — the reaction to cancellation (task cancellation or a `withTimeout`
-    /// timeout) rather than a real `didUpdateValue` completion.
+    /// Removes the pending read continuation for `characteristic`, if still pending, and
+    /// resumes it with ``BLESwiftError/operationCancelled``. It handles a task cancellation or
+    /// `withTimeout` timeout, not a real `didUpdateValue` completion.
     private func cancelPendingRead(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingReads.removeValue(forKey: characteristic) else { return }
@@ -1917,8 +1931,8 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Take-then-resumes the single pending descriptor-read continuation for `descriptor`,
-    /// if any (single-slot, guaranteed by the parent characteristic's FIFO).
+    /// Removes and resumes the pending descriptor-read continuation for `descriptor`, if any.
+    /// Only one slot exists, because the parent characteristic's FIFO guarantees it.
     private func resumePendingDescriptorRead(descriptor: DescriptorIdentifier, value: Data?, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
         guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didUpdateValueForDescriptor for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
@@ -1936,9 +1950,10 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes the single pending descriptor-read continuation for `descriptor`,
-    /// if still pending — the reaction to cancellation (task cancellation or a `withTimeout`
-    /// timeout) rather than a real `didUpdateValueForDescriptor` completion.
+    /// Removes the pending descriptor-read continuation for `descriptor`, if still pending,
+    /// and resumes it with ``BLESwiftError/operationCancelled``. It handles a task
+    /// cancellation or `withTimeout` timeout, not a real `didUpdateValueForDescriptor`
+    /// completion.
     private func cancelPendingDescriptorRead(identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingDescriptorReads.removeValue(forKey: descriptor) else { return }
@@ -1946,8 +1961,8 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Take-then-resumes the single pending descriptor-write continuation for `descriptor`,
-    /// if any (single-slot, guaranteed by the parent characteristic's FIFO).
+    /// Removes and resumes the pending descriptor-write continuation for `descriptor`, if any.
+    /// Only one slot exists, because the parent characteristic's FIFO guarantees it.
     private func resumePendingDescriptorWrite(descriptor: DescriptorIdentifier, for peripheralIdentifier: PeripheralIdentifier, error: NSError?) {
         guard case .connected(var session) = connections[peripheralIdentifier] else {
             log("Ignoring didWriteValueForDescriptor for untracked peripheral \(peripheralIdentifier)", level: .debug, category: "gatt")
@@ -1965,8 +1980,9 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes the single pending descriptor-write continuation for `descriptor`,
-    /// if still pending — see ``cancelPendingDescriptorRead(identifier:descriptor:)``.
+    /// Removes the pending descriptor-write continuation for `descriptor`, if still pending,
+    /// and resumes it with ``BLESwiftError/operationCancelled``. See
+    /// ``cancelPendingDescriptorRead(identifier:descriptor:)``.
     private func cancelPendingDescriptorWrite(identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingDescriptorWrites.removeValue(forKey: descriptor) else { return }
@@ -1976,9 +1992,9 @@ public actor Central {
 
     // MARK: - GATT operations
 
-    /// Reads `characteristic`'s current value, routed here by `Peripheral.read(from:timeout:)`.
-    /// Wraps the discovery-then-read sequence in `timeout` (``BLESwiftError/timedOut``) and
-    /// serializes it against other operations on the same characteristic.
+    /// Reads the current value of `characteristic`. `Peripheral.read(from:timeout:)` calls it.
+    /// It wraps the discovery-then-read sequence in `timeout` (``BLESwiftError/timedOut``) and
+    /// orders it against other operations on the same characteristic.
     func performRead(peripheral identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, timeout: Duration?) async throws -> Data {
         try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
             try await self.runOnFIFO(identifier: identifier, characteristic: characteristic) {
@@ -1987,16 +2003,16 @@ public actor Central {
         }
     }
 
-    /// The actual discovery-then-read sequence for ``performRead(peripheral:characteristic:timeout:)``,
-    /// run inside `characteristic`'s FIFO chain.
+    /// The discovery-then-read sequence of ``performRead(peripheral:characteristic:timeout:)``,
+    /// inside the FIFO chain of `characteristic`.
     private func performReadNow(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) async throws -> Data {
         guard case .connected(let session) = connections[identifier] else {
             throw BLESwiftError.notConnected
         }
         let peripheral = session.peripheral
 
-        // BLESwift throws rather than crashing on read-while-listening — CoreBluetooth
-        // can't disambiguate a read completion from a notification on the same characteristic.
+        // Throw an error and do not crash when a read happens while the characteristic listens.
+        // CoreBluetooth cannot tell a read completion from a notification.
         if peripheral.isNotifying(characteristic) {
             throw BLESwiftError.readConflictsWithNotification
         }
@@ -2031,17 +2047,17 @@ public actor Central {
         )
     }
 
-    /// Reports the set of operations `characteristic` supports, routed here by
-    /// `Peripheral.properties(of:)`. Triggers lazy discovery first, then reads the
-    /// discovered characteristic's properties directly (no completion continuation needed).
+    /// Reports the operations that `characteristic` supports. `Peripheral.properties(of:)`
+    /// calls it. It discovers the characteristic lazily and reads its properties directly, so
+    /// it needs no completion continuation.
     func properties(peripheral identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) async throws -> CharacteristicProperties {
         try await runOnFIFO(identifier: identifier, characteristic: characteristic) {
             try await self.propertiesNow(identifier: identifier, characteristic: characteristic)
         }
     }
 
-    /// The actual discovery-then-introspect sequence for
-    /// ``properties(peripheral:characteristic:)``, run inside `characteristic`'s FIFO chain.
+    /// The discovery-then-introspect sequence of ``properties(peripheral:characteristic:)``,
+    /// inside the FIFO chain of `characteristic`.
     private func propertiesNow(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) async throws -> CharacteristicProperties {
         guard case .connected(let session) = connections[identifier] else {
             throw BLESwiftError.notConnected
@@ -2053,9 +2069,8 @@ public actor Central {
         return peripheral.properties(of: characteristic)
     }
 
-    /// Writes `data` to `characteristic`, routed here by
-    /// `Peripheral.write(_:to:type:timeout:)`. Mirrors ``performRead(peripheral:characteristic:timeout:)``'s
-    /// timeout/FIFO wrapping.
+    /// Writes `data` to `characteristic`. `Peripheral.write(_:to:type:timeout:)` calls it. It
+    /// uses the same timeout and FIFO as ``performRead(peripheral:characteristic:timeout:)``.
     func performWrite(
         peripheral identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -2070,15 +2085,14 @@ public actor Central {
         }
     }
 
-    /// Backs `Peripheral.writeChunked(...)`. Holds `characteristic`'s FIFO lane for the
-    /// entire `chunks` sequence (one ``runOnFIFO(identifier:characteristic:operation:)`` job)
-    /// so no other write can interleave between chunks, and loops the same inner
-    /// ``performWriteNow(identifier:characteristic:data:type:)`` primitive a single
-    /// ``performWrite(peripheral:characteristic:data:type:timeout:)`` uses — so each chunk's
-    /// behaviour (`.withoutResponse` back-pressure, `.withResponse` `didWriteValueFor` await)
-    /// is byte-identical to a normal write. `timeout` applies **per chunk**. `progress` is
-    /// invoked after each chunk completes with the cumulative `bytesSent`; an empty `chunks`
-    /// performs no writes and reports a single terminal `(0, totalBytes)`.
+    /// Backs `Peripheral.writeChunked(...)`. It holds the FIFO lane of `characteristic` for the
+    /// whole `chunks` sequence (one ``runOnFIFO(identifier:characteristic:operation:)`` job),
+    /// so no other write can interleave between chunks. Each chunk uses
+    /// ``performWriteNow(identifier:characteristic:data:type:)``, like a normal
+    /// ``performWrite(peripheral:characteristic:data:type:timeout:)``: back-pressure for
+    /// `.withoutResponse`, and a wait for `didWriteValueFor` for `.withResponse`. `timeout`
+    /// applies **per chunk**. `progress` runs after each chunk with the cumulative `bytesSent`.
+    /// An empty `chunks` performs no writes and reports a single `(0, totalBytes)`.
     func performChunkedWrite(
         peripheral identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -2096,8 +2110,8 @@ public actor Central {
         try await runOnFIFO(identifier: identifier, characteristic: characteristic) {
             var bytesSent = 0
             for chunk in chunks {
-                // A cancel between chunks stops the sequence; because we hold the FIFO lane,
-                // no further chunk is sent. A partially-sent payload is the caller's problem.
+                // A cancel between chunks stops the sequence while this code holds the FIFO lane.
+                // The caller must handle a partially sent payload.
                 if Task.isCancelled { throw BLESwiftError.operationCancelled }
                 try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
                     try await self.performWriteNow(
@@ -2113,11 +2127,12 @@ public actor Central {
         }
     }
 
-    /// The actual discovery-then-write sequence for ``performWrite(peripheral:characteristic:data:type:timeout:)``.
+    /// The discovery-then-write sequence of
+    /// ``performWrite(peripheral:characteristic:data:type:timeout:)``.
     ///
-    /// `.withoutResponse` synthesizes completion immediately — CoreBluetooth delivers no
-    /// `didWriteValueFor` for it. BLESwift awaits `canSendWriteWithoutResponse` back-pressure
-    /// first rather than writing regardless and letting CoreBluetooth drop the payload.
+    /// `.withoutResponse` completes immediately, because CoreBluetooth delivers no
+    /// `didWriteValueFor` for it. It first waits for `canSendWriteWithoutResponse`, because
+    /// CoreBluetooth would otherwise drop the payload.
     private func performWriteNow(
         identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -2165,16 +2180,15 @@ public actor Central {
         )
     }
 
-    /// Awaits `peripheral.canSendWriteWithoutResponse` becoming `true` — CoreBluetooth's
-    /// back-pressure signal for `.withoutResponse` writes. A no-op if already `true`.
-    /// Peripheral-wide (not per-characteristic): every waiter is resumed on the next
-    /// readiness signal.
+    /// Waits until `peripheral.canSendWriteWithoutResponse` is `true`, CoreBluetooth's
+    /// back-pressure signal for `.withoutResponse` writes. It returns at once if the value is
+    /// already `true`. The signal is peripheral-wide, and every waiter resumes on the next one.
     private func awaitWriteWithoutResponseReadiness(peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
         if peripheral.canSendWriteWithoutResponse { return }
 
-        // `Mutex`-boxed (not a plain `var`) so it's safely writable from `register`
-        // (actor-isolated) and readable from `onCancelled` (a `@Sendable` closure) — Swift 6
-        // rejects a mutable local captured across that boundary directly.
+        // `Mutex`-boxed and not a plain `var`, so `register` (actor-isolated) can write it and
+        // `onCancelled` (a `@Sendable` closure) can read it. Swift 6 rejects a mutable local
+        // that is captured across that boundary.
         let assignedToken = Mutex<UInt64?>(nil)
         try await withCancellableGATTContinuation(
             register: { (continuation: CheckedContinuation<Void, Error>) in
@@ -2188,8 +2202,8 @@ public actor Central {
                 connections[identifier] = .connected(session)
             },
             onCancelled: {
-                // `assignedToken` is always set by the time this can fire — `register` runs
-                // synchronously before cancellation can be observed.
+                // `assignedToken` is always set when this fires, because `register` runs
+                // synchronously before a cancellation can be observed.
                 self.queue.async {
                     self.assumeIsolated(onQueue: self.queue) { central in
                         guard let token = assignedToken.withLock({ $0 }) else { return }
@@ -2200,9 +2214,9 @@ public actor Central {
         )
     }
 
-    /// Reads `descriptor`'s current value, routed here by
-    /// `Peripheral.readDescriptor(_:timeout:)`. Serializes on the *parent characteristic's*
-    /// FIFO lane so a descriptor op never races a characteristic op on the same characteristic.
+    /// Reads the current value of `descriptor`. `Peripheral.readDescriptor(_:timeout:)` calls
+    /// it. It runs in the FIFO lane of the *parent characteristic*, so a descriptor operation
+    /// never races a characteristic operation on it.
     func performReadDescriptor(peripheral identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier, timeout: Duration?) async throws -> Data {
         try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
             try await self.runOnFIFO(identifier: identifier, characteristic: descriptor.characteristic) {
@@ -2211,8 +2225,9 @@ public actor Central {
         }
     }
 
-    /// The actual discovery-then-read sequence for ``performReadDescriptor(peripheral:descriptor:timeout:)``,
-    /// run inside the parent characteristic's FIFO chain.
+    /// The discovery-then-read sequence of
+    /// ``performReadDescriptor(peripheral:descriptor:timeout:)``, inside the parent
+    /// characteristic's FIFO chain.
     private func performReadDescriptorNow(identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier) async throws -> Data {
         guard case .connected(let session) = connections[identifier] else {
             throw BLESwiftError.notConnected
@@ -2241,9 +2256,8 @@ public actor Central {
         )
     }
 
-    /// Writes `data` to `descriptor`, routed here by
-    /// `Peripheral.writeDescriptor(_:value:timeout:)`. Always with-response — CoreBluetooth
-    /// exposes no write-type parameter for a `CBDescriptor`.
+    /// Writes `data` to `descriptor`. `Peripheral.writeDescriptor(_:value:timeout:)` calls it.
+    /// It always writes with a response, because a `CBDescriptor` write has no write type.
     func performWriteDescriptor(peripheral identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier, data: Data, timeout: Duration?) async throws {
         try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
             try await self.runOnFIFO(identifier: identifier, characteristic: descriptor.characteristic) {
@@ -2252,8 +2266,9 @@ public actor Central {
         }
     }
 
-    /// The actual discovery-then-write sequence for ``performWriteDescriptor(peripheral:descriptor:data:timeout:)``,
-    /// run inside the parent characteristic's FIFO chain.
+    /// The discovery-then-write sequence of
+    /// ``performWriteDescriptor(peripheral:descriptor:data:timeout:)``, inside the parent
+    /// characteristic's FIFO chain.
     private func performWriteDescriptorNow(identifier: PeripheralIdentifier, descriptor: DescriptorIdentifier, data: Data) async throws {
         guard case .connected(let session) = connections[identifier] else {
             throw BLESwiftError.notConnected
@@ -2282,9 +2297,9 @@ public actor Central {
         )
     }
 
-    /// Reads the peripheral's current RSSI, routed here by `Peripheral.readRSSI(timeout:)`.
-    /// RSSI has no owning characteristic, so it serializes via its own single tail rather
-    /// than the per-characteristic FIFO map.
+    /// Reads the current RSSI of the peripheral. `Peripheral.readRSSI(timeout:)` calls it. RSSI
+    /// has no characteristic, so it runs through its own single tail and not the
+    /// per-characteristic FIFO map.
     func performReadRSSI(peripheral identifier: PeripheralIdentifier, timeout: Duration?) async throws -> Int {
         try await withTimeout(clock: configuration.clock, timeout, throwing: BLESwiftError.timedOut) {
             try await self.runRSSISerialized(identifier: identifier) {
@@ -2293,8 +2308,7 @@ public actor Central {
         }
     }
 
-    /// The actual RSSI-read for ``performReadRSSI(peripheral:timeout:)``, run inside the
-    /// RSSI tail chain.
+    /// The RSSI read of ``performReadRSSI(peripheral:timeout:)``, inside the RSSI tail chain.
     private func performReadRSSINow(identifier: PeripheralIdentifier) async throws -> Int {
         guard case .connected(let session) = connections[identifier] else {
             throw BLESwiftError.notConnected
@@ -2321,9 +2335,9 @@ public actor Central {
         )
     }
 
-    /// This peripheral's maximum payload length in bytes for a single write of `type`,
-    /// routed here by `Peripheral.maximumWriteValueLength(for:)`. Never throws — returns
-    /// ``Central/defaultMaximumWriteValueLength`` if `identifier` isn't connected.
+    /// The maximum payload length, in bytes, for a single write of `type`.
+    /// `Peripheral.maximumWriteValueLength(for:)` calls it. It never throws. It returns
+    /// ``Central/defaultMaximumWriteValueLength`` if `identifier` is not connected.
     func maximumWriteValueLength(peripheral identifier: PeripheralIdentifier, for type: WriteType) -> Int {
         guard case .connected(let session) = connections[identifier] else {
             return Central.defaultMaximumWriteValueLength
@@ -2331,18 +2345,17 @@ public actor Central {
         return session.peripheral.maximumWriteValueLength(for: type)
     }
 
-    /// The fallback value when there's no connected peripheral to ask — the classic BLE
-    /// ATT_MTU-3 default (23-byte default ATT_MTU minus the 3-byte write-request header).
+    /// The fallback when no connected peripheral can answer: the classic ATT_MTU-3 default,
+    /// which is the 23-byte default ATT_MTU minus the 3-byte write-request header.
     static let defaultMaximumWriteValueLength = 20
 
     // MARK: - Property enforcement
 
-    /// Throws ``BLESwiftError/unsupportedCharacteristicOperation(_:required:)`` when
-    /// `characteristic`'s advertised properties include none of `required` — unless
-    /// `bypass` (from the session's ``GATTCompatibility``) is set, in which case the
-    /// genuinely-failing check is skipped with a once-per-(peripheral, characteristic,
-    /// operation) warning. Must run AFTER lazy discovery: properties are only known
-    /// post-discovery.
+    /// Throws ``BLESwiftError/unsupportedCharacteristicOperation(_:required:)`` when the
+    /// advertised properties of `characteristic` include none of `required`. If `bypass` (from
+    /// the session's ``GATTCompatibility``) is set, it skips a check that fails and logs a
+    /// warning once for each (peripheral, characteristic, operation). Run it AFTER lazy
+    /// discovery, because the properties are known only then.
     private func requireProperty(
         _ required: CharacteristicProperties,
         operation: CompatOperation,
@@ -2364,30 +2377,31 @@ public actor Central {
 
     // MARK: - Lazy discovery
 
-    /// Ensures `characteristic` (and its owning service) has been discovered on `peripheral`,
-    /// short-circuiting via the shim's own `isDiscovered(_:)` — CoreBluetooth's own graph IS
-    /// the cache.
+    /// Ensures that `characteristic` (and its service) is discovered on `peripheral`. It
+    /// returns early when the shim's `isDiscovered(_:)` is true, because CoreBluetooth's graph
+    /// IS the cache.
     ///
-    /// - Throws: ``BLESwiftError/missingService(_:)``/``BLESwiftError/missingCharacteristic(_:)``
-    ///   if still not discovered once discovery completes, or whatever CoreBluetooth reports.
+    /// - Throws: ``BLESwiftError/missingService(_:)`` or
+    ///   ``BLESwiftError/missingCharacteristic(_:)`` if the item is still not discovered after
+    ///   discovery completes, and any error that CoreBluetooth reports.
     private func ensureDiscovered(_ characteristic: CharacteristicIdentifier, on peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
         try await ensureServiceDiscovered(characteristic.service, on: peripheral, identifier: identifier)
         try await ensureCharacteristicDiscovered(characteristic, on: peripheral, identifier: identifier)
     }
 
-    /// Ensures `service` has been discovered, calling `discoverServices(_:)` and awaiting
-    /// its completion only if `peripheral.isDiscovered(service)` doesn't already report it
-    /// discovered. See ``ensureDiscovered(_:on:identifier:)``.
+    /// Ensures that `service` is discovered. It calls `discoverServices(_:)` and waits for its
+    /// completion only if `peripheral.isDiscovered(service)` is false. See
+    /// ``ensureDiscovered(_:on:identifier:)``.
     private func ensureServiceDiscovered(_ service: ServiceIdentifier, on peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
         guard !peripheral.isDiscovered(service) else { return }
 
-        // `.all` discovery replaces the targeted call with ONE `discoverServices(nil)` per
-        // connection, cached on the session (`didDiscoverAllServices`) — for modules that
-        // only populate their GATT table under unfiltered discovery.
+        // `.all` discovery replaces the targeted call with ONE `discoverServices(nil)` for each
+        // connection, cached on the session (`didDiscoverAllServices`). It serves modules that
+        // fill their GATT table only under unfiltered discovery.
         if case .connected(let session) = connections[identifier], session.compatibility.discovery == .all {
             if !session.didDiscoverAllServices {
                 try await awaitDiscoverAllServices(on: peripheral, identifier: identifier)
-                // Re-read the entry: the await above suspended — don't write back a stale copy.
+                // Read the entry again, because the await suspended. Do not write a stale copy.
                 guard case .connected(var refreshed) = connections[identifier] else {
                     throw BLESwiftError.notConnected
                 }
@@ -2400,8 +2414,7 @@ public actor Central {
             return
         }
 
-        // See `awaitWriteWithoutResponseReadiness`'s matching declaration for why this is
-        // `Mutex`-boxed rather than a plain `var`.
+        // `Mutex`-boxed for the reason given in `awaitWriteWithoutResponseReadiness`.
         let assignedToken = Mutex<UInt64?>(nil)
         try await withCancellableGATTContinuation(
             register: { (continuation: CheckedContinuation<Void, Error>) in
@@ -2430,14 +2443,13 @@ public actor Central {
         }
     }
 
-    /// Ensures `characteristic` has been discovered, calling `discoverCharacteristics(_:for:)`
-    /// and awaiting its completion only if it isn't already discovered. See
+    /// Ensures that `characteristic` is discovered. It calls `discoverCharacteristics(_:for:)`
+    /// and waits for its completion only if the characteristic is not discovered. See
     /// ``ensureDiscovered(_:on:identifier:)``.
     private func ensureCharacteristicDiscovered(_ characteristic: CharacteristicIdentifier, on peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
         guard !peripheral.isDiscovered(characteristic) else { return }
 
-        // See `awaitWriteWithoutResponseReadiness`'s matching declaration for why this is
-        // `Mutex`-boxed rather than a plain `var`.
+        // `Mutex`-boxed for the reason given in `awaitWriteWithoutResponseReadiness`.
         let assignedToken = Mutex<UInt64?>(nil)
         try await withCancellableGATTContinuation(
             register: { (continuation: CheckedContinuation<Void, Error>) in
@@ -2466,25 +2478,23 @@ public actor Central {
         }
     }
 
-    /// Ensures `descriptor` (and its owning characteristic/service) has been discovered on
-    /// `peripheral`, extending the lazy discovery chain one level.
+    /// Ensures that `descriptor` (and its characteristic and service) is discovered on
+    /// `peripheral`. It extends the lazy discovery chain by one level.
     ///
-    /// - Throws: whatever ``ensureDiscovered(_:on:identifier:)`` throws, or
-    ///   ``BLESwiftError/missingDescriptor(_:)`` if still not discovered.
+    /// - Throws: Any error that ``ensureDiscovered(_:on:identifier:)`` throws, and
+    ///   ``BLESwiftError/missingDescriptor(_:)`` if the descriptor is still not discovered.
     private func ensureDescriptorDiscovered(_ descriptor: DescriptorIdentifier, on peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
         try await ensureDiscovered(descriptor.characteristic, on: peripheral, identifier: identifier)
         try await ensureDescriptorsDiscovered(descriptor, on: peripheral, identifier: identifier)
     }
 
-    /// Ensures `descriptor` has been discovered, calling `discoverDescriptors(for:)` on its
-    /// owning characteristic if needed. Unlike characteristics, descriptors have no filter —
-    /// they're always discovered as a group — so a still-undiscovered one triggers a full
-    /// re-discovery.
+    /// Ensures that `descriptor` is discovered. If needed, it calls `discoverDescriptors(for:)`
+    /// on the descriptor's characteristic. Descriptors have no filter and are always discovered
+    /// as a group, so an undiscovered descriptor triggers a full new discovery.
     private func ensureDescriptorsDiscovered(_ descriptor: DescriptorIdentifier, on peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
         guard !peripheral.isDiscovered(descriptor) else { return }
 
-        // See `awaitWriteWithoutResponseReadiness`'s matching declaration for why this is
-        // `Mutex`-boxed rather than a plain `var`.
+        // `Mutex`-boxed for the reason given in `awaitWriteWithoutResponseReadiness`.
         let assignedToken = Mutex<UInt64?>(nil)
         let characteristic = descriptor.characteristic
         try await withCancellableGATTContinuation(
@@ -2516,14 +2526,14 @@ public actor Central {
 
     // MARK: - GATT enumeration
 
-    /// Lists `identifier`'s services, discovering them (`discoverServices(nil)`) first if
-    /// not yet enumerated. Routed here by `Peripheral.discoverServices()`.
+    /// Lists the services of `identifier`. If they are not enumerated yet, it first discovers
+    /// them (`discoverServices(nil)`). `Peripheral.discoverServices()` calls it.
     ///
-    /// Cached per connection (``Session/didEnumerateServices``) until a `didModifyServices`
-    /// invalidation resets it.
+    /// The result is cached for each connection (``Session/didEnumerateServices``) until a
+    /// `didModifyServices` invalidation resets it.
     ///
     /// - Throws: ``BLESwiftError/notConnected``, ``BLESwiftError/operationCancelled`` on task
-    ///   cancellation, or whatever CoreBluetooth reports.
+    ///   cancellation, or any error that CoreBluetooth reports.
     func enumerateServices(peripheral identifier: PeripheralIdentifier) async throws -> [ServiceIdentifier] {
         guard case .connected(let session) = connections[identifier] else {
             throw BLESwiftError.notConnected
@@ -2532,8 +2542,8 @@ public actor Central {
 
         if !session.didEnumerateServices {
             try await awaitDiscoverAllServices(on: peripheral, identifier: identifier)
-            // Re-read the entry: the await above suspended, so the session may have been
-            // torn down/rebuilt — don't write back a stale copy.
+            // Read the entry again. The await suspended, so the session may be torn down and
+            // rebuilt. Do not write back a stale copy.
             guard case .connected(var refreshed) = connections[identifier] else {
                 throw BLESwiftError.notConnected
             }
@@ -2544,14 +2554,15 @@ public actor Central {
         return peripheral.discoveredServices
     }
 
-    /// Lists `service`'s characteristics on `identifier`, discovering the service (if
-    /// needed) and then all of its characteristics the first time this is asked. Routed here
-    /// by `Peripheral.discoverCharacteristics(for:)`.
+    /// Lists the characteristics of `service` on `identifier`. The first time, it discovers the
+    /// service (if needed) and then all of its characteristics.
+    /// `Peripheral.discoverCharacteristics(for:)` calls it.
     ///
-    /// Cached per service (``Session/enumeratedCharacteristicServices``) until invalidated.
+    /// The result is cached for each service (``Session/enumeratedCharacteristicServices``)
+    /// until an invalidation.
     ///
     /// - Throws: ``BLESwiftError/notConnected``, ``BLESwiftError/missingService(_:)``,
-    ///   ``BLESwiftError/operationCancelled``, or whatever CoreBluetooth reports.
+    ///   ``BLESwiftError/operationCancelled``, or any error that CoreBluetooth reports.
     func enumerateCharacteristics(
         peripheral identifier: PeripheralIdentifier,
         service: ServiceIdentifier
@@ -2561,8 +2572,8 @@ public actor Central {
         }
         let peripheral = session.peripheral
 
-        // The owning service must be discovered first — a real `discoverCharacteristics(_:for:)`
-        // is a silent no-op on an undiscovered service; this also surfaces `.missingService`.
+        // Discover the service first. A real `discoverCharacteristics(_:for:)` does nothing,
+        // with no error, on an undiscovered service. This call also gives `.missingService`.
         try await ensureServiceDiscovered(service, on: peripheral, identifier: identifier)
 
         guard case .connected(let refreshed) = connections[identifier] else {
@@ -2580,14 +2591,15 @@ public actor Central {
         return peripheral.discoveredCharacteristics(for: service)
     }
 
-    /// Lists `characteristic`'s descriptors on `identifier`, discovering the owning
-    /// service/characteristic (if needed) and then the descriptors. Routed here by
-    /// `Peripheral.discoverDescriptors(for:)`.
+    /// Lists the descriptors of `characteristic` on `identifier`. It discovers the service and
+    /// characteristic (if needed) and then the descriptors.
+    /// `Peripheral.discoverDescriptors(for:)` calls it.
     ///
-    /// Cached per characteristic (``Session/enumeratedDescriptorCharacteristics``).
+    /// The result is cached for each characteristic
+    /// (``Session/enumeratedDescriptorCharacteristics``).
     ///
-    /// - Throws: ``BLESwiftError/notConnected``, whatever the owning-characteristic discovery
-    ///   throws, ``BLESwiftError/operationCancelled``, or whatever CoreBluetooth reports.
+    /// - Throws: ``BLESwiftError/notConnected``, any error that discovering the characteristic
+    ///   throws, ``BLESwiftError/operationCancelled``, or any error that CoreBluetooth reports.
     func enumerateDescriptors(
         peripheral identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier
@@ -2597,7 +2609,7 @@ public actor Central {
         }
         let peripheral = session.peripheral
 
-        // Discover the owning service + characteristic first (a no-op if already discovered).
+        // Discover the service and characteristic first. This does nothing if already discovered.
         try await ensureDiscovered(characteristic, on: peripheral, identifier: identifier)
 
         guard case .connected(let refreshed) = connections[identifier] else {
@@ -2616,11 +2628,10 @@ public actor Central {
     }
 
     /// Issues `discoverServices(nil)` (discover all) and suspends until ``handle(_:from:)``
-    /// resolves it — same take-then-resume + cancellation machinery as
-    /// ``ensureServiceDiscovered(_:on:identifier:)``, differing only in the `nil` filter.
+    /// resolves it. It works like ``ensureServiceDiscovered(_:on:identifier:)`` except for the
+    /// `nil` filter.
     private func awaitDiscoverAllServices(on peripheral: any PeripheralRemote, identifier: PeripheralIdentifier) async throws {
-        // See `awaitWriteWithoutResponseReadiness`'s matching declaration for why this is
-        // `Mutex`-boxed rather than a plain `var`.
+        // `Mutex`-boxed for the reason given in `awaitWriteWithoutResponseReadiness`.
         let assignedToken = Mutex<UInt64?>(nil)
         try await withCancellableGATTContinuation(
             register: { (continuation: CheckedContinuation<Void, Error>) in
@@ -2645,10 +2656,9 @@ public actor Central {
         )
     }
 
-    /// Issues `discoverCharacteristics(nil, for: service)` (discover *all* of the service's
-    /// characteristics) and suspends until ``handle(_:from:)`` resolves it. Shares the
-    /// machinery of ``ensureCharacteristicDiscovered(_:on:identifier:)``, differing only in
-    /// the `nil` (all-characteristics) filter.
+    /// Issues `discoverCharacteristics(nil, for: service)` (discover *all* characteristics of
+    /// the service) and suspends until ``handle(_:from:)`` resolves it. It works like
+    /// ``ensureCharacteristicDiscovered(_:on:identifier:)`` except for the `nil` filter.
     private func awaitDiscoverAllCharacteristics(
         service: ServiceIdentifier,
         on peripheral: any PeripheralRemote,
@@ -2678,8 +2688,8 @@ public actor Central {
         )
     }
 
-    /// Issues `discoverDescriptors(for: characteristic)` and suspends until resolved — the
-    /// enumeration-side twin of ``ensureDescriptorsDiscovered(_:on:identifier:)`` minus the
+    /// Issues `discoverDescriptors(for: characteristic)` and suspends until it resolves. It is
+    /// the enumeration twin of ``ensureDescriptorsDiscovered(_:on:identifier:)``, without the
     /// per-descriptor cache check.
     private func awaitDiscoverAllDescriptors(
         characteristic: CharacteristicIdentifier,
@@ -2712,21 +2722,23 @@ public actor Central {
 
     // MARK: - Notifications
 
-    /// Registers one `Peripheral.notifications(for:policy:)` subscriber and spawns its pump
-    /// task — the bridge between the shared raw-`Data` multicast and that subscriber's typed
-    /// stream. Called synchronously before the stream is returned, so by queue FIFO ordering
-    /// this always runs before ``handleNotificationStreamTermination(peripheral:characteristic:token:)``
-    /// can be enqueued.
+    /// Registers one `Peripheral.notifications(for:policy:)` subscriber and starts its pump
+    /// task. The pump task bridges the shared raw-`Data` multicast and the subscriber's typed
+    /// stream. The caller enqueues this function before it returns the stream, so the queue's
+    /// FIFO order runs it before
+    /// ``handleNotificationStreamTermination(peripheral:characteristic:token:)`` can be
+    /// enqueued.
     ///
-    /// The pump `Task` is a ledgered site: actor-spawned, stored in
-    /// `Session.notificationPumps` keyed by `token`, cancelled by that method.
+    /// The pump `Task` is a ledgered site. The actor starts it and stores it in
+    /// `Session.notificationPumps`, keyed by `token`. The termination handler cancels it.
     ///
     /// - Parameters:
-    ///   - survivesReconnect: Whether this subscriber's stream is parked (rather than
-    ///     finished) across an unexpected disconnect that a ``ReconnectPolicy`` will retry.
-    ///   - deliver: Decodes and yields one raw value; returns `nil` on success or the decode
-    ///     error, which finishes only that subscriber's stream.
-    ///   - finish: Finishes the subscriber's typed stream, throwing if non-`nil`.
+    ///   - survivesReconnect: Whether this subscriber's stream is parked, and not finished,
+    ///     across an unexpected disconnect that a ``ReconnectPolicy`` will retry.
+    ///   - deliver: Decodes and yields one raw value. It returns `nil` on success or the decode
+    ///     error. A decode error finishes only this subscriber's stream.
+    ///   - finish: Finishes the subscriber's typed stream. It finishes with the error if the
+    ///     value is non-`nil`.
     func startNotificationPump(
         peripheral identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -2761,16 +2773,16 @@ public actor Central {
         connections[identifier] = .connected(session)
     }
 
-    /// The body of one subscriber's pump task: subscribes to the raw multicast (enabling
-    /// notifications if first), forwards values through `deliver`, and finishes the typed
-    /// stream when the raw stream ends.
+    /// The body of one subscriber's pump task. It subscribes to the raw multicast (and enables
+    /// notifications if it is the first subscriber), forwards values through `deliver`, and
+    /// finishes the typed stream when the raw stream ends.
     ///
-    /// A `survivesReconnect` pump loops instead of finishing when its raw stream fails at a
-    /// disconnect a ``ReconnectPolicy`` will retry: it finds its token parked in
-    /// ``dormantNotifications`` (a decode error, thrown while connected, never is — so a
-    /// decode failure still finishes the stream exactly as before), suspends in
-    /// ``awaitResubscription(identifier:characteristic:token:)``, and resumes forwarding on
-    /// the re-armed raw stream the reconnect hands back.
+    /// A `survivesReconnect` pump loops and does not finish when its raw stream fails at a
+    /// disconnect that a ``ReconnectPolicy`` will retry. The pump then:
+    /// 1. Finds its token parked in ``dormantNotifications``. A decode error happens while
+    ///    connected, so the token is not parked then, and the stream finishes.
+    /// 2. Suspends in ``awaitResubscription(identifier:characteristic:token:)``.
+    /// 3. Resumes forwarding on the raw stream that the reconnect hands back.
     private func runNotificationPump(
         identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -2813,22 +2825,23 @@ public actor Central {
             }
         }
 
-        // Belt-and-braces release (idempotent by token): the primary release path is the
-        // typed stream's `onTermination`, but this covers a pump cancelled between that
-        // (pre-registration) no-op and registration above.
+        // Safety-net release, idempotent by token. The primary release path is the typed
+        // stream's `onTermination`. This call covers a pump that was cancelled between that
+        // no-op (before registration) and the registration above.
         releaseNotificationSubscriber(peripheral: identifier, characteristic: characteristic, token: token)
     }
 
-    /// Whether `token` is parked in `identifier`'s dormant record for `characteristic` —
-    /// how a surviving pump distinguishes a reconnect-pending disconnect (park and wait)
-    /// from every other raw-stream failure (finish, as before).
+    /// Whether `token` is parked in the dormant record of `identifier` for `characteristic`.
+    /// A surviving pump uses it to tell a disconnect that waits for a reconnect (park) from
+    /// every other raw-stream failure (finish).
     private func isDormantNotificationToken(_ token: UUID, identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) -> Bool {
         dormantNotifications[identifier]?.characteristics[characteristic]?.tokens.contains(token) ?? false
     }
 
-    /// Suspends a surviving pump until the reconnect re-arms its characteristic (resumed
-    /// with the fresh raw stream), the re-arm fails, or the gap ends without a reconnect
-    /// (resumed throwing). Same isolation-pinned continuation + cancellation-hop pattern as
+    /// Suspends a surviving pump until one of three things happens: the reconnect enables its
+    /// characteristic again (the pump resumes with the new raw stream), the re-enable fails,
+    /// or the gap ends without a reconnect (the pump resumes with a throw). It uses the
+    /// isolation-pinned continuation and cancellation hop of
     /// ``withCancellableGATTContinuation(register:onCancelled:)``.
     private func awaitResubscription(
         identifier: PeripheralIdentifier,
@@ -2837,9 +2850,8 @@ public actor Central {
     ) async throws -> AsyncThrowingStream<Data, Error> {
         try await withTaskCancellationHandler {
             let attach = { [self] (continuation: CheckedContinuation<AsyncThrowingStream<Data, Error>, Error>) in
-                // Re-check dormancy under the same actor turn as registration: the gap may
-                // already have ended between the pump's `isDormantNotificationToken` check
-                // and this attach.
+                // Check dormancy again in the same actor turn as the registration. The gap may
+                // have ended between the pump's `isDormantNotificationToken` check and this attach.
                 guard var record = dormantNotifications[identifier],
                       var subscription = record.characteristics[characteristic],
                       subscription.tokens.contains(token) else {
@@ -2850,7 +2862,7 @@ public actor Central {
                 record.characteristics[characteristic] = subscription
                 dormantNotifications[identifier] = record
             }
-            // Explicit isolation pin on Swift ≤6.3 — see withCancellableGATTContinuation.
+            // Pin the isolation on Swift 6.3 and earlier. See `withCancellableGATTContinuation`.
             #if compiler(>=6.4)
             return try await withCheckedThrowingContinuation(attach)
             #else
@@ -2865,9 +2877,10 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes a single parked resubscription waiter by token — the reaction to
-    /// its pump being cancelled, not a real re-arm outcome. Leaves the token's dormancy
-    /// bookkeeping to ``handleNotificationStreamTermination(peripheral:characteristic:token:)``.
+    /// Removes a single parked resubscription waiter by token and resumes it with
+    /// ``BLESwiftError/operationCancelled``. It handles the pump's cancellation, not a real
+    /// re-enable result. It leaves the token's dormancy bookkeeping to
+    /// ``handleNotificationStreamTermination(peripheral:characteristic:token:)``.
     private func cancelResubscriptionWaiter(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, token: UUID) {
         guard var record = dormantNotifications[identifier],
               var subscription = record.characteristics[characteristic],
@@ -2877,13 +2890,13 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Reacts to a subscriber's typed stream terminating: cancels and forgets its pump task,
-    /// then releases its refcount.
+    /// Reacts when a subscriber's typed stream terminates. It cancels and forgets the
+    /// subscriber's pump task and releases the subscriber's reference count.
     ///
-    /// A token whose pump isn't in the session's ledger may be parked in
-    /// ``dormantNotifications`` (its consumer broke during a reconnect gap, or mid-re-arm):
-    /// its dormancy bookkeeping is removed here too, so a characteristic no one waits on
-    /// anymore is never re-armed.
+    /// A token whose pump is not in the session's ledger may be parked in
+    /// ``dormantNotifications``, because its consumer broke during a reconnect gap or a
+    /// re-enable. This function also removes such a token's dormancy bookkeeping, so a
+    /// characteristic that no one waits for is not enabled again.
     func handleNotificationStreamTermination(
         peripheral identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -2914,21 +2927,23 @@ public actor Central {
         releaseNotificationSubscriber(peripheral: identifier, characteristic: characteristic, token: token)
     }
 
-    /// Registers `token` as one subscriber of `characteristic`'s raw-`Data` notification
-    /// multicast and returns a fresh stream of it — the entry point for typed subscribers
-    /// (via their pump) and the composite helpers alike.
+    /// Registers `token` as one subscriber of the raw-`Data` notification multicast of
+    /// `characteristic` and returns a new stream of it. Typed subscribers (through their pump)
+    /// and the composite helpers use it.
     ///
-    /// First subscriber: the subscription is registered BEFORE enabling — closing the loss
-    /// window — then discovery runs and `setNotifyValue(true)` is awaited. If that fails,
-    /// every current subscriber's stream (and enablement waiter) finishes with the error.
+    /// For the first subscriber, it registers the subscription BEFORE it enables notifications,
+    /// which closes the loss window. Then discovery runs, and it waits for
+    /// `setNotifyValue(true)`. If that fails, every current subscriber's stream (and enablement
+    /// waiter) finishes with the error.
     ///
-    /// Joiners: added to the existing subscription; if the enable handshake is still in
-    /// flight, the joiner awaits its confirmation first — load-bearing for the composite
-    /// helpers' listen-before-write guarantee.
+    /// A joiner is added to the existing subscription. If the enable handshake is still in
+    /// progress, the joiner first waits for its confirmation. The composite helpers'
+    /// listen-before-write guarantee depends on this wait.
     ///
-    /// Deliberately NOT serialized through the per-characteristic FIFO: a subscription must
-    /// be installable even while a read on the same characteristic is pending, so
-    /// notification routing can take precedence (see ``handleDidUpdateValue(characteristic:value:error:from:)``).
+    /// This function is NOT serialized through the per-characteristic FIFO. A subscription must
+    /// be possible while a read on the same characteristic is pending, so that notification
+    /// routing can take precedence (see
+    /// ``handleDidUpdateValue(characteristic:value:error:from:)``).
     func subscribeToNotifications(
         peripheral identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -2951,7 +2966,7 @@ public actor Central {
             return stream
         }
 
-        // First subscriber: register BEFORE enabling (see doc comment — no loss window).
+        // First subscriber: register BEFORE the enable (see the doc comment).
         var subscription = NotificationSubscription()
         subscription.subscriberTokens.insert(token)
         let broadcaster = subscription.broadcaster
@@ -2982,14 +2997,14 @@ public actor Central {
         return stream
     }
 
-    /// The `setNotifyValue(true)` enable handshake shared by
-    /// ``subscribeToNotifications(peripheral:characteristic:token:)`` (first subscriber)
-    /// and ``rearmDormantNotifications(_:)`` (reconnect re-arm) — issues the enable and
-    /// awaits its `didUpdateNotificationState` confirmation.
+    /// The `setNotifyValue(true)` enable handshake, shared by
+    /// ``subscribeToNotifications(peripheral:characteristic:token:)`` (first subscriber) and
+    /// ``rearmDormantNotifications(_:)`` (reconnect). It issues the enable and waits for the
+    /// `didUpdateNotificationState` confirmation.
     ///
-    /// The confirmation's `isNotifying` payload is deliberately ignored — a stale
-    /// disable-confirmation from a released subscription must not fail a fresh enable
-    /// whose own confirmation is still in flight.
+    /// It ignores the confirmation's `isNotifying` payload on purpose. A stale
+    /// disable-confirmation from a released subscription must not fail a new enable that is
+    /// still waiting for its own confirmation.
     private func enableNotifications(
         identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -3015,20 +3030,31 @@ public actor Central {
         )
     }
 
-    /// Re-arms `identifier`'s parked notification survivors after a successful reconnect:
-    /// for each dormant characteristic (in UUID order, for determinism), registers a fresh
-    /// subscription in the CURRENT session, creates one raw stream per parked pump BEFORE
-    /// enabling (no loss window), re-runs discovery and the enable handshake, and hands each
-    /// parked pump its stream. A characteristic that ALREADY has a live subscription — a
-    /// subscriber raced in after `.connected`, exactly as the docs advise — is merged into
-    /// instead: the survivors join that subscription (awaiting its in-flight enable
-    /// handshake if needed) and NO second CCCD write is issued, preserving the one-enable-
-    /// per-characteristic invariant. A characteristic that fails to re-arm (missing after a
-    /// GATT change, enable error) fails only its own streams. Ends by yielding
-    /// ``ConnectionEvent/notificationsRestored(_:restored:failed:)`` — unless every survivor
-    /// left during the gap, or the session vanished mid-re-arm / this task was cancelled (a
-    /// new disconnect or cancelAllOperations), in which case untouched characteristics stay
-    /// dormant for the next reconnect (or are finished by the next termination's cleanup).
+    /// Enables again the parked notification survivors of `identifier` after a successful
+    /// reconnect. For each dormant characteristic, in UUID order, it:
+    /// 1. Registers a new subscription in the CURRENT session.
+    /// 2. Creates one raw stream for each parked pump BEFORE the enable, so there is no loss
+    ///    window.
+    /// 3. Runs discovery and the enable handshake again.
+    /// 4. Hands each parked pump its stream.
+    ///
+    /// A characteristic can ALREADY have a live subscription, for example when a subscriber
+    /// raced in after `.connected`, as the docs advise. The survivors then join that
+    /// subscription, and wait for its enable handshake if it is in progress. The function
+    /// issues NO second CCCD write, which keeps one enable for each characteristic.
+    ///
+    /// A characteristic that fails to enable again fails only its own streams. The cause can be
+    /// a characteristic that a GATT change removed, or an enable error.
+    ///
+    /// At the end, the function yields
+    /// ``ConnectionEvent/notificationsRestored(_:restored:failed:)``. It does not yield the
+    /// event if:
+    /// - Every survivor left during the gap.
+    /// - The session vanished during the re-enable.
+    /// - A new disconnect or `cancelAllOperations` cancelled this task.
+    ///
+    /// In the last two cases, the untouched characteristics stay dormant for the next
+    /// reconnect, or the next termination's cleanup finishes them.
     private func rearmDormantNotifications(_ identifier: PeripheralIdentifier) async {
         guard let record = dormantNotifications[identifier] else { return }
         let characteristics = record.characteristics.keys.sorted { $0.uuidString < $1.uuidString }
@@ -3038,23 +3064,21 @@ public actor Central {
         log("Re-arming \(characteristics.count) notification subscription(s) for \(identifier) after reconnect", level: .debug, category: "gatt")
 
         for characteristic in characteristics {
-            // A cancelled re-arm (a second disconnect, cancelAllOperations) must never keep
-            // acting — a starved-executor resumption could otherwise race the NEW session's
-            // own re-arm.
+            // A cancelled re-arm (a second disconnect, cancelAllOperations) must not continue.
+            // Otherwise, a late resumption could race the re-arm of the NEW session.
             if Task.isCancelled { return }
             guard case .connected(var session) = connections[identifier] else { return }
-            // A consumer that broke during the gap may have emptied this characteristic
-            // (or the whole record) — nothing left to re-arm here.
+            // A consumer that broke during the gap may have emptied this characteristic or the
+            // whole record. Then nothing is left to re-arm here.
             guard let dormantSubscription = dormantNotifications[identifier]?.characteristics[characteristic],
                   !dormantSubscription.tokens.isEmpty else { continue }
             let peripheral = session.peripheral
 
             if var existing = session.notificationSubscriptions[characteristic] {
-                // Merge: a new subscriber already registered this characteristic (and owns,
-                // or is completing, its enable handshake). Never overwrite it — that would
-                // orphan its broadcaster and drop its single-slot enable continuation — and
-                // never issue a second CCCD write: join it, exactly as
-                // `subscribeToNotifications`' joiner path does.
+                // Merge: a new subscriber already registered this characteristic and owns, or is
+                // completing, its enable handshake. Never overwrite it, because that would orphan
+                // its broadcaster and drop its single-slot enable continuation. Never issue a
+                // second CCCD write. Join it, like the joiner path of `subscribeToNotifications`.
                 existing.subscriberTokens.formUnion(dormantSubscription.tokens)
                 let broadcaster = existing.broadcaster
                 let confirmed = existing.enableConfirmed
@@ -3075,24 +3099,23 @@ public actor Central {
                 } catch {
                     guard !Task.isCancelled, case .connected = connections[identifier] else { return }
                     log("Failed to re-arm notifications on \(characteristic) (merge): \(error)", level: .warning, category: "gatt")
-                    // The owning subscriber's own failure path already tore the subscription
-                    // down (or only this waiter was cancelled) — fail just the survivors.
+                    // The owning subscriber's failure path already tore the subscription down, or
+                    // only this waiter was cancelled. Fail only the survivors.
                     failRearm(identifier: identifier, characteristic: characteristic, error: error)
                     failed[characteristic] = error
                 }
                 continue
             }
 
-            // Fresh subscription registered BEFORE enabling — the same no-loss-window
-            // discipline as `subscribeToNotifications`.
+            // Register the new subscription BEFORE the enable, as in `subscribeToNotifications`.
             var subscription = NotificationSubscription()
             subscription.subscriberTokens = dormantSubscription.tokens
             let broadcaster = subscription.broadcaster
             session.notificationSubscriptions[characteristic] = subscription
             connections[identifier] = .connected(session)
 
-            // One raw stream per surviving token, created before the enable so a value
-            // arriving mid-handshake is buffered rather than lost.
+            // One raw stream for each surviving token, created before the enable, so a value that
+            // arrives during the handshake is buffered and not lost.
             var streams: [UUID: AsyncThrowingStream<Data, Error>] = [:]
             for token in dormantSubscription.tokens {
                 streams[token] = broadcaster.stream()
@@ -3106,9 +3129,9 @@ public actor Central {
                 restored.append(characteristic)
             } catch {
                 guard !Task.isCancelled, case .connected = connections[identifier] else {
-                    // The session vanished mid-re-arm (another disconnect), or this task was
-                    // cancelled: stop here and leave this characteristic (and any untouched
-                    // ones) dormant — the new termination either re-parks or finishes them.
+                    // The session vanished during the re-arm (another disconnect), or this task was
+                    // cancelled. Stop. Leave this characteristic and any untouched ones dormant.
+                    // The new termination parks them again or finishes them.
                     return
                 }
                 log("Failed to re-arm notifications on \(characteristic): \(error)", level: .warning, category: "gatt")
@@ -3130,9 +3153,10 @@ public actor Central {
         }
     }
 
-    /// The synchronous success tail of one characteristic's re-arm: takes its dormant entry,
-    /// moves the surviving pumps back into the session's ledger (marking their tokens
-    /// survivors again), and resumes each parked pump with its pre-created raw stream.
+    /// The synchronous success tail of one characteristic's re-arm. It takes the
+    /// characteristic's dormant entry, moves the surviving pumps back into the session's ledger
+    /// (marking their tokens as survivors again), and resumes each parked pump with its
+    /// pre-created raw stream.
     private func completeRearm(
         identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -3168,9 +3192,9 @@ public actor Central {
         }
     }
 
-    /// The synchronous failure tail of one characteristic's re-arm: takes its dormant entry
-    /// and resumes each parked pump throwing `error` — failing only this characteristic's
-    /// surviving streams.
+    /// The synchronous failure tail of one characteristic's re-arm. It takes the
+    /// characteristic's dormant entry and resumes each parked pump with `error`, so it fails
+    /// only this characteristic's surviving streams.
     private func failRearm(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, error: Error) {
         guard var record = dormantNotifications[identifier],
               var dormantSubscription = record.characteristics.removeValue(forKey: characteristic) else { return }
@@ -3186,8 +3210,8 @@ public actor Central {
         }
     }
 
-    /// Suspends a joiner until `characteristic`'s in-flight enable handshake confirms or
-    /// fails. Cancellation removes and resumes only this joiner's own waiter.
+    /// Suspends a joiner until the enable handshake in progress for `characteristic` confirms
+    /// or fails. A cancellation removes and resumes only this joiner's own waiter.
     private func awaitNotificationEnablement(
         identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -3223,8 +3247,8 @@ public actor Central {
         }
     }
 
-    /// Marks `characteristic`'s subscription enable-confirmed and take-then-resumes every
-    /// enablement waiter.
+    /// Marks the subscription of `characteristic` as confirmed by the enable, and removes and
+    /// resumes every enablement waiter.
     private func confirmNotificationEnablement(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) {
         guard case .connected(var session) = connections[identifier],
               var subscription = session.notificationSubscriptions[characteristic] else { return }
@@ -3241,11 +3265,11 @@ public actor Central {
         }
     }
 
-    /// Fails `characteristic`'s entire subscription: removes it, resumes every enablement
-    /// waiter throwing `error`, and finishes the raw broadcaster with it.
+    /// Fails the whole subscription of `characteristic`. It removes the subscription, resumes
+    /// every enablement waiter with `error`, and finishes the raw broadcaster with `error`.
     ///
-    /// No `setNotifyValue(false)` is issued: on the enable-failure path it was never
-    /// confirmed; on the value-error path delivery is already failing.
+    /// It does not issue `setNotifyValue(false)`. After an enable failure, the enable was never
+    /// confirmed. After a value error, the delivery already fails.
     private func failNotificationSubscription(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, error: Error) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let subscription = session.notificationSubscriptions.removeValue(forKey: characteristic) else { return }
@@ -3259,13 +3283,13 @@ public actor Central {
         subscription.broadcaster.finish(throwing: error)
     }
 
-    /// Releases one subscriber's refcount on `characteristic`'s subscription. Idempotent
-    /// per `token`.
+    /// Releases one subscriber's reference on the subscription of `characteristic`. It is
+    /// idempotent for each `token`.
     ///
     /// The **last** release removes the subscription, finishes its broadcaster, and issues
-    /// `setNotifyValue(false)` — but only while still connected and the radio is
-    /// `.poweredOn` (else CoreBluetooth logs "API MISUSE"). The disable's own confirmation
-    /// is not awaited.
+    /// `setNotifyValue(false)`, only while the peripheral is connected and the radio is
+    /// `.poweredOn`. Otherwise CoreBluetooth logs "API MISUSE". It does not wait for the
+    /// disable confirmation.
     func releaseNotificationSubscriber(peripheral identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, token: UUID) {
         guard case .connected(var session) = connections[identifier] else { return }
         session.notificationSurvivorTokens.remove(token)
@@ -3278,8 +3302,8 @@ public actor Central {
             return
         }
 
-        // Take-then-resume this token's own enablement waiter, if it still has one (a
-        // release can arrive while the joiner is still suspended awaiting confirmation).
+        // Remove and resume this token's enablement waiter, if any. A release can arrive while
+        // the joiner is still suspended and waits for the confirmation.
         let waiter = subscription.enableWaiters.removeValue(forKey: token)
 
         if subscription.subscriberTokens.isEmpty {
@@ -3300,25 +3324,26 @@ public actor Central {
         }
     }
 
-    /// The number of live subscriber tokens on `characteristic`'s subscription for `id` — a
-    /// test-visibility hook (`@testable`): subscriber registration is asynchronous, so
-    /// multi-subscriber tests await this count first. Not part of the public API.
+    /// The number of live subscriber tokens on the subscription of `characteristic` for `id`.
+    /// It is a test hook (`@testable`), not public API. Subscriber registration is
+    /// asynchronous, so multi-subscriber tests wait for this count first.
     func notificationSubscriberCount(for characteristic: CharacteristicIdentifier, on id: PeripheralIdentifier) -> Int {
         guard case .connected(let session) = connections[id] else { return 0 }
         return session.notificationSubscriptions[characteristic]?.subscriberTokens.count ?? 0
     }
 
-    /// The number of surviving pumps parked in ``awaitResubscription(identifier:characteristic:token:)``
-    /// for `characteristic` on `id`'s dormant record — a test-visibility hook (`@testable`),
-    /// the dormant counterpart of ``notificationSubscriberCount(for:on:)``: a pump's park is
-    /// asynchronous relative to the disconnect, so gap-behavior tests await this count
-    /// before acting on the gap. Not part of the public API.
+    /// The number of surviving pumps parked in
+    /// ``awaitResubscription(identifier:characteristic:token:)`` for `characteristic` on the
+    /// dormant record of `id`. It is a test hook (`@testable`), not public API, and the
+    /// dormant counterpart of ``notificationSubscriberCount(for:on:)``. A pump parks
+    /// asynchronously after the disconnect, so tests of the gap wait for this count first.
     func dormantNotificationWaiterCount(for characteristic: CharacteristicIdentifier, on id: PeripheralIdentifier) -> Int {
         dormantNotifications[id]?.characteristics[characteristic]?.waiters.count ?? 0
     }
 
-    /// Take-then-resumes the single pending notify-state-change continuation for
-    /// `characteristic`, if still pending — see ``cancelPendingRead(identifier:characteristic:)``.
+    /// Removes the pending notify-state-change continuation for `characteristic`, if still
+    /// pending, and resumes it with ``BLESwiftError/operationCancelled``. See
+    /// ``cancelPendingRead(identifier:characteristic:)``.
     private func cancelPendingNotifyStateChange(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingNotifyStateChanges.removeValue(forKey: characteristic) else { return }
@@ -3326,8 +3351,9 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Take-then-resumes a single enablement waiter by token, removing only this waiter and
-    /// leaving the subscription (and its siblings) intact.
+    /// Removes a single enablement waiter by token and resumes it with
+    /// ``BLESwiftError/operationCancelled``. The subscription and the other waiters stay
+    /// intact.
     private func cancelNotificationEnablementWaiter(identifier: PeripheralIdentifier, characteristic: CharacteristicIdentifier, token: UUID) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard var subscription = session.notificationSubscriptions[characteristic],
@@ -3339,10 +3365,10 @@ public actor Central {
 
     // MARK: - Composite helpers
 
-    /// Backs `Peripheral.writeAndAwaitNotification(write:to:awaitOn:timeout:)`: subscribes to
-    /// `notifyCharacteristic` FIRST, then writes, then returns the first notification value —
-    /// preserving a listen-before-write ordering guarantee. The timeout covers the whole
-    /// sequence, throwing ``BLESwiftError/listenTimedOut``.
+    /// Backs `Peripheral.writeAndAwaitNotification(write:to:awaitOn:timeout:)`. It subscribes
+    /// to `notifyCharacteristic` FIRST, then writes, then returns the first notification value,
+    /// which keeps the listen-before-write order. The timeout covers the whole sequence and
+    /// throws ``BLESwiftError/listenTimedOut``.
     func performWriteAndAwaitNotification(
         peripheral identifier: PeripheralIdentifier,
         writeCharacteristic: CharacteristicIdentifier,
@@ -3360,7 +3386,7 @@ public actor Central {
         }
     }
 
-    /// The actual subscribe → write → await-first-value sequence for
+    /// The subscribe, write, and await-first-value sequence of
     /// ``performWriteAndAwaitNotification(peripheral:writeCharacteristic:notifyCharacteristic:data:timeout:)``.
     private func writeAndAwaitNotificationNow(
         identifier: PeripheralIdentifier,
@@ -3384,11 +3410,11 @@ public actor Central {
         }
     }
 
-    /// Backs `Peripheral.writeAndAssemble(write:to:assembleFrom:expectedLength:timeout:)`:
-    /// like ``performWriteAndAwaitNotification(peripheral:writeCharacteristic:notifyCharacteristic:data:timeout:)``
-    /// but accumulating packets until exactly `expectedLength` bytes arrive
-    /// (`> expectedLength` throws ``BLESwiftError/tooMuchData(expected:received:)``). The
-    /// timeout covers the whole assembly.
+    /// Backs `Peripheral.writeAndAssemble(write:to:assembleFrom:expectedLength:timeout:)`.
+    /// It is like
+    /// ``performWriteAndAwaitNotification(peripheral:writeCharacteristic:notifyCharacteristic:data:timeout:)``,
+    /// but it collects packets until exactly `expectedLength` bytes arrive. More bytes throw
+    /// ``BLESwiftError/tooMuchData(expected:received:)``. The timeout covers the whole assembly.
     func performWriteAndAssemble(
         peripheral identifier: PeripheralIdentifier,
         writeCharacteristic: CharacteristicIdentifier,
@@ -3408,7 +3434,7 @@ public actor Central {
         }
     }
 
-    /// The actual subscribe → write → assemble loop for
+    /// The subscribe, write, and assemble loop of
     /// ``performWriteAndAssemble(peripheral:writeCharacteristic:notifyCharacteristic:data:expectedLength:timeout:)``.
     private func writeAndAssembleNow(
         identifier: PeripheralIdentifier,
@@ -3442,10 +3468,10 @@ public actor Central {
         }
     }
 
-    /// Backs `Peripheral.flush(_:quietPeriod:)`: consumes and discards raw packets until a
-    /// full `quietPeriod` elapses with none arriving — every packet restarts the window.
+    /// Backs `Peripheral.flush(_:quietPeriod:)`. It consumes and discards raw packets until a
+    /// full `quietPeriod` passes with no packet. Every packet restarts the window.
     ///
-    /// - Throws: ``BLESwiftError/invalidArgument(_:)`` if `quietPeriod` isn't strictly
+    /// - Throws: ``BLESwiftError/invalidArgument(_:)`` if `quietPeriod` is not strictly
     ///   positive.
     func performFlush(
         peripheral identifier: PeripheralIdentifier,
@@ -3470,11 +3496,11 @@ public actor Central {
                     try await iterator.next()
                 }
             } catch BLESwiftError.timedOut {
-                // A full quiet period elapsed with no packet: flush complete.
+                // A full quiet period passed with no packet. The flush is complete.
                 break
             }
             guard packet != nil else {
-                // The raw stream ended cleanly underneath us — nothing left to flush.
+                // The raw stream ended cleanly. Nothing is left to flush.
                 break
             }
             flushedPacketCount += 1
@@ -3489,23 +3515,23 @@ public actor Central {
 
     // MARK: - Cancellable continuations
 
-    /// Suspends until `register` resumes the continuation — either normally (a real
-    /// CoreBluetooth completion) or, on cancellation, via `onCancelled`, which hops onto
-    /// ``queue`` via `assumeIsolated` and take-then-resumes whatever `register` populated.
+    /// Suspends until `register` resumes the continuation. Either a real CoreBluetooth
+    /// completion resumes it, or, on cancellation, `onCancelled` does. `onCancelled` hops onto
+    /// ``queue`` through `assumeIsolated`, removes whatever `register` stored, and resumes it.
     ///
-    /// Every GATT continuation goes through this rather than a bare
-    /// `withCheckedThrowingContinuation`: merely marking a `Task` cancelled never resumes a
-    /// suspended continuation, so without this a `timeout:` would hang forever instead of
-    /// throwing ``BLESwiftError/timedOut``.
+    /// Every GATT continuation uses this function and not a bare
+    /// `withCheckedThrowingContinuation`, because a cancelled `Task` does not resume a
+    /// suspended continuation. Otherwise, a `timeout:` would hang and not throw
+    /// ``BLESwiftError/timedOut``.
     private func withCancellableGATTContinuation<T: Sendable>(
         register: (CheckedContinuation<T, Error>) -> Void,
         onCancelled: @escaping @Sendable () -> Void
     ) async throws -> T {
-        // On Swift ≤6.3 the compiler loses the inferred #isolation through the
-        // cancellation-handler closure and runs `register` off the actor's executor —
-        // silently breaking queue confinement for backend calls — so isolation is pinned
-        // explicitly. 6.4 deprecates that overload for a nonisolated(nonsending) one that
-        // inherits the actor correctly on its own.
+        // On Swift 6.3 and earlier, the compiler loses the inferred #isolation through the
+        // cancellation-handler closure and runs `register` off the actor's executor. That
+        // silently breaks the queue confinement for backend calls, so pin the isolation
+        // explicitly. Swift 6.4 deprecates that overload for a nonisolated(nonsending) one,
+        // which inherits the actor correctly.
         try await withTaskCancellationHandler {
             #if compiler(>=6.4)
             try await withCheckedThrowingContinuation(register)
@@ -3519,9 +3545,9 @@ public actor Central {
 
     // MARK: - L2CAP
 
-    /// Opens an L2CAP channel to `psm` on `identifier`, routed here by
-    /// `Peripheral.openL2CAPChannel(psm:timeout:)`. Wraps the open in `timeout`, then
-    /// registers the resulting transport and hands back an ``L2CAPChannel``.
+    /// Opens an L2CAP channel to `psm` on `identifier`.
+    /// `Peripheral.openL2CAPChannel(psm:timeout:)` calls it. It wraps the open in `timeout`,
+    /// registers the resulting transport, and returns an ``L2CAPChannel``.
     func performOpenL2CAPChannel(
         peripheral identifier: PeripheralIdentifier,
         psm: L2CAPPSM,
@@ -3533,10 +3559,10 @@ public actor Central {
         }
     }
 
-    /// Issues the CoreBluetooth L2CAP open and suspends until ``handle(_:from:)`` resolves it
-    /// — same take-then-resume + cancellation discipline as every GATT continuation. The
-    /// waiter is registered under a fresh token before the open is issued, so a `didOpen`
-    /// that lands synchronously still finds it.
+    /// Issues the CoreBluetooth L2CAP open and suspends until ``handle(_:from:)`` resolves it.
+    /// It follows the remove-then-resume and cancellation rules of every GATT continuation. It
+    /// registers the waiter under a new token before it issues the open, so a `didOpen` that
+    /// arrives synchronously still finds the waiter.
     private func awaitL2CAPOpen(identifier: PeripheralIdentifier, psm: L2CAPPSM) async throws -> any L2CAPChannelRemote {
         guard case .connected(var session) = connections[identifier] else {
             throw BLESwiftError.notConnected
@@ -3565,9 +3591,10 @@ public actor Central {
         )
     }
 
-    /// Take-then-resumes the oldest pending L2CAP-open waiter (FIFO by token) for
-    /// `identifier`. On error resumes throwing; on success resumes with the transport; no
-    /// waiter pending leaks the channel by closing it.
+    /// Removes and resumes the oldest pending L2CAP-open waiter (FIFO by token) for
+    /// `identifier`. On an error, it resumes with the error. On success, it resumes with the
+    /// transport. If no waiter is pending, it closes the channel so that the channel does not
+    /// leak.
     private func resumePendingL2CAPOpen(for identifier: PeripheralIdentifier, channel: (any L2CAPChannelRemote)?, error: NSError?) {
         guard case .connected(var session) = connections[identifier] else {
             channel?.close(error: BLESwiftError.notConnected)
@@ -3589,9 +3616,9 @@ public actor Central {
         }
     }
 
-    /// Take-then-resumes a single pending L2CAP-open waiter by token — the reaction to
-    /// cancellation rather than a real `didOpen`. Removing only this token leaves any other
-    /// concurrently pending open untouched.
+    /// Removes a single pending L2CAP-open waiter by token and resumes it with
+    /// ``BLESwiftError/operationCancelled``. It handles a cancellation, not a real `didOpen`.
+    /// Other pending opens stay untouched.
     private func cancelPendingL2CAPOpen(identifier: PeripheralIdentifier, token: UInt64) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let continuation = session.pendingL2CAPOpens.removeValue(forKey: token) else { return }
@@ -3599,9 +3626,9 @@ public actor Central {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Registers a freshly-opened `transport` under a new token and returns the public
-    /// ``L2CAPChannel`` handle. If disconnected between open completing and this running,
-    /// the transport is closed immediately and ``BLESwiftError/notConnected`` is thrown.
+    /// Registers a newly opened `transport` under a new token and returns the public
+    /// ``L2CAPChannel`` handle. If the peripheral disconnects between the open and this call,
+    /// it closes the transport and throws ``BLESwiftError/notConnected``.
     private func registerL2CAPChannel(identifier: PeripheralIdentifier, transport: any L2CAPChannelRemote) throws -> L2CAPChannel {
         guard case .connected(var session) = connections[identifier] else {
             transport.close(error: BLESwiftError.notConnected)
@@ -3614,8 +3641,8 @@ public actor Central {
         return L2CAPChannel(remote: transport, token: token, peripheral: identifier, central: self)
     }
 
-    /// Closes and deregisters a single L2CAP channel — the reaction to an explicit
-    /// `L2CAPChannel.close()`. A no-op if the session is gone or the token is unknown.
+    /// Closes and deregisters a single L2CAP channel, for an explicit `L2CAPChannel.close()`.
+    /// It does nothing if the session is gone or the token is unknown.
     func closeL2CAPChannel(peripheral identifier: PeripheralIdentifier, token: UUID) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard let transport = session.l2capChannels.removeValue(forKey: token) else { return }
@@ -3623,9 +3650,9 @@ public actor Central {
         transport.close(error: nil)
     }
 
-    /// Closes every open L2CAP channel on `identifier`'s session with `error` — the L2CAP
-    /// counterpart of ``finishNotificationStreams(for:error:)``. Must run while still
-    /// `.connected` (channels live inside `Session`).
+    /// Closes every open L2CAP channel on the session of `identifier` with `error`. It is the
+    /// L2CAP counterpart of ``finishNotificationStreams(for:error:)``. Run it while the entry
+    /// is still `.connected`, because the channels live inside `Session`.
     func closeL2CAPChannels(for identifier: PeripheralIdentifier, error: Error) {
         guard case .connected(var session) = connections[identifier] else { return }
         guard !session.l2capChannels.isEmpty else { return }
@@ -3639,7 +3666,7 @@ public actor Central {
     }
 
     /// Calls ``closeL2CAPChannels(for:error:)`` for every connected peripheral.
-    /// Used by ``stopAndExtractState()``.
+    /// ``stopAndExtractState()`` uses it.
     func closeAllSessionsL2CAPChannels(error: Error) {
         for identifier in Array(connections.keys) {
             closeL2CAPChannels(for: identifier, error: error)
@@ -3648,13 +3675,13 @@ public actor Central {
 
     // MARK: - Per-characteristic FIFO
 
-    /// Serializes GATT operations on the same characteristic: awaits `characteristic`'s
-    /// previous tail `Task` before running `operation`, then replaces the tail with a fresh
-    /// one. Different characteristics interleave freely.
+    /// Runs GATT operations on the same characteristic one at a time. It waits for the previous
+    /// tail `Task` of `characteristic` before it runs `operation`, and then replaces the tail.
+    /// Different characteristics interleave freely.
     ///
-    /// `operation` runs **inline**, in this call's own task — not a spawned `Task { }`, which
-    /// would not inherit the caller's cancellation, breaking `withTimeout`'s ability to reach
-    /// `operation`'s continuation-based waits.
+    /// `operation` runs **inline**, in this call's task, and not in a new `Task { }`. Such a
+    /// `Task` would not inherit the caller's cancellation, and `withTimeout` could not reach
+    /// the continuation-based waits of `operation`.
     private func runOnFIFO<T: Sendable>(
         identifier: PeripheralIdentifier,
         characteristic: CharacteristicIdentifier,
@@ -3683,9 +3710,9 @@ public actor Central {
         return try await operation()
     }
 
-    /// The RSSI-only counterpart to ``runOnFIFO(identifier:characteristic:operation:)``:
-    /// serializes `readRSSI()` calls via ``Session/rssiTail`` (a single tail, not a
-    /// per-characteristic map). See that function's doc comment for why `operation` runs inline.
+    /// The RSSI counterpart to ``runOnFIFO(identifier:characteristic:operation:)``. It orders
+    /// `readRSSI()` calls through ``Session/rssiTail`` (a single tail, not a per-characteristic
+    /// map). `operation` runs inline for the reason given at that function.
     private func runRSSISerialized<T: Sendable>(
         identifier: PeripheralIdentifier,
         operation: () async throws -> T
@@ -3713,12 +3740,11 @@ public actor Central {
         return try await operation()
     }
 
-    /// Fails every in-flight operation with `error`. Called whenever the radio leaves
-    /// `.poweredOn`.
+    /// Fails the active scan with `error`. It runs whenever the radio leaves `.poweredOn`.
     ///
-    /// Only fails the active scan directly — connection/GATT operations are handled via
-    /// ``handleBluetoothUnavailable()`` → ``handleTermination(identifier:error:)`` instead,
-    /// since a scan has no such connection-scoped home to route through.
+    /// Connection and GATT operations fail through ``handleBluetoothUnavailable()`` and
+    /// ``handleTermination(identifier:error:)`` instead, because a scan has no
+    /// connection-scoped route.
     func failAllPendingOperations(error: BLESwiftError) {
         log("Failing all pending operations: \(error)", level: .warning, category: "state")
         failActiveScan(error)
@@ -3726,37 +3752,32 @@ public actor Central {
 
     // MARK: - Scanning
 
-    /// Scans for nearby peripherals advertising `services`, yielding a ``ScanEvent`` for
-    /// every sighting. Each call creates its own independent stream; BLESwift enforces
-    /// CoreBluetooth's single-physical-scanner discipline — calling `scan` again while a scan
-    /// is active immediately fails the *new* stream with ``BLESwiftError/alreadyScanning``.
+    /// Scans for nearby peripherals that advertise `services`. It yields a ``ScanEvent`` for
+    /// every sighting. CoreBluetooth has one physical scanner, so a call while a scan is
+    /// active immediately fails the *new* stream with ``BLESwiftError/alreadyScanning``.
     ///
-    /// The scan stops when its stream's consumer stops it (`break`/task cancel), when
-    /// `timeout` elapses, when the radio leaves ``CentralState/poweredOn`` (throwing
-    /// ``BLESwiftError/bluetoothUnavailable``), or when an iOS backgrounding guard fires (see
-    /// below). Connecting to a sighted peripheral does not stop or affect the scan.
+    /// The scan stops when the consumer stops it (`break` or task cancel), when `timeout`
+    /// elapses, or when the radio leaves ``CentralState/poweredOn``. In the last case the
+    /// stream throws ``BLESwiftError/bluetoothUnavailable``. A connection to a sighted
+    /// peripheral does not affect the scan. See <doc:Scanning>.
     ///
     /// - Parameters:
-    ///   - services: The services to scan for. `nil` scans for all peripherals — discouraged
-    ///     by Apple outside short, time-boxed scans.
-    ///   - allowDuplicates: Whether to keep reporting an already-discovered peripheral's
-    ///     further sightings as ``ScanEvent/updated(_:)`` (and track its loss via
-    ///     `lossTimeout`). Defaults to `false`. Mirrors
-    ///     `CBCentralManagerScanOptionAllowDuplicatesKey`.
-    ///   - rssiThreshold: The minimum absolute RSSI delta (in dBm) required for a repeat
-    ///     sighting to be reported as ``ScanEvent/updated(_:)``. `nil` (the default) disables
-    ///     throttling.
-    ///   - lossTimeout: How long a sighted peripheral may go unseen before it's reported as
-    ///     ``ScanEvent/lost(_:)``. Only meaningful when `allowDuplicates` is `true`. Defaults
-    ///     to 15 seconds.
-    ///   - timeout: The maximum duration of the scan. `nil` (the default) scans until the
-    ///     consumer stops it; on elapsing, the stream finishes cleanly.
+    ///   - services: The services to scan for. `nil` scans for all peripherals. Apple
+    ///     discourages this outside short, time-boxed scans.
+    ///   - allowDuplicates: Whether to report repeat sightings as ``ScanEvent/updated(_:)``
+    ///     and to track loss through `lossTimeout`. The default is `false`.
+    ///   - rssiThreshold: The minimum RSSI change, in dBm, for a repeat sighting to produce
+    ///     ``ScanEvent/updated(_:)``. The default `nil` disables throttling.
+    ///   - lossTimeout: How long a sighted peripheral can stay unseen before the scan reports
+    ///     ``ScanEvent/lost(_:)``. It applies only when `allowDuplicates` is `true`. The
+    ///     default is 15 seconds.
+    ///   - timeout: The maximum duration of the scan. The default `nil` scans until the
+    ///     consumer stops it. When the timeout elapses, the stream finishes without an error.
     /// - Returns: A single-consumer stream of ``ScanEvent``s.
     ///
-    /// - Note: On iOS, `allowDuplicates: true` or omitting `services` while backgrounded
-    ///   fails the scan automatically (``BLESwiftError/allowDuplicatesInBackgroundNotSupported``/
-    ///   ``BLESwiftError/missingServiceIdentifiersInBackground``) — both increase
-    ///   battery/CPU cost and `allowDuplicates` stops working in the background at all.
+    /// - Note: On iOS, if the app is in the background, `allowDuplicates: true` fails the scan
+    ///   with ``BLESwiftError/allowDuplicatesInBackgroundNotSupported``. No `services` fails
+    ///   it with ``BLESwiftError/missingServiceIdentifiersInBackground``.
     public func scan(
         services: [ServiceIdentifier]?,
         allowDuplicates: Bool = false,
@@ -3773,30 +3794,31 @@ public actor Central {
         )
     }
 
-    /// Scans for nearby peripherals matching `filter`, yielding a ``ScanEvent`` for every
-    /// matching sighting. ``ScanFilter/services`` is passed to the radio; every other
-    /// filter field is applied on the actor, per sighting, before any recording — a
-    /// non-matching sighting is dropped entirely (not stored, not loss-tracked, no event).
+    /// Scans for nearby peripherals that match `filter`. It yields a ``ScanEvent`` for every
+    /// matching sighting. Only ``ScanFilter/services`` reaches the radio. The actor applies
+    /// every other filter field to each sighting before it records it. A non-matching sighting
+    /// is dropped entirely: not stored, not loss-tracked, and no event.
     ///
-    /// Everything else behaves exactly like
-    /// ``scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)`` — which is a
-    /// thin wrapper over this method: single-scan discipline
-    /// (``BLESwiftError/alreadyScanning``), stop-by-ceasing-to-consume, `timeout`, and the
-    /// iOS backgrounding guards.
+    /// All other behavior is the same as
+    /// ``scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``, which is a thin
+    /// wrapper over this method:
+    /// - The single-scan rule (``BLESwiftError/alreadyScanning``).
+    /// - The stop when the consumer stops.
+    /// - `timeout`.
+    /// - The iOS backgrounding guards.
     ///
     /// - Parameters:
-    ///   - filter: The match criteria. Only ``ScanFilter/services`` reaches the radio.
-    ///   - allowDuplicates: Whether to keep reporting an already-discovered peripheral's
-    ///     further sightings as ``ScanEvent/updated(_:)`` (and track its loss via
-    ///     `lossTimeout`). Defaults to `false`.
-    ///   - rssiThreshold: The minimum absolute RSSI delta (in dBm) required for a repeat
-    ///     sighting to be reported as ``ScanEvent/updated(_:)``. `nil` (the default) disables
-    ///     throttling.
-    ///   - lossTimeout: How long a sighted peripheral may go unseen before it's reported as
-    ///     ``ScanEvent/lost(_:)``. Only meaningful when `allowDuplicates` is `true`. Defaults
-    ///     to 15 seconds.
-    ///   - timeout: The maximum duration of the scan. `nil` (the default) scans until the
-    ///     consumer stops it; on elapsing, the stream finishes cleanly.
+    ///   - filter: The match criteria.
+    ///   - allowDuplicates: Whether to keep reporting sightings of an already discovered
+    ///     peripheral as ``ScanEvent/updated(_:)``, and to track its loss through
+    ///     `lossTimeout`. The default is `false`.
+    ///   - rssiThreshold: The minimum absolute RSSI change, in dBm, for a repeat sighting to
+    ///     produce ``ScanEvent/updated(_:)``. The default `nil` disables throttling.
+    ///   - lossTimeout: How long a sighted peripheral can stay unseen before the scan reports
+    ///     ``ScanEvent/lost(_:)``. It applies only when `allowDuplicates` is `true`. The
+    ///     default is 15 seconds.
+    ///   - timeout: The maximum duration of the scan. The default `nil` scans until the
+    ///     consumer stops it. When the timeout elapses, the stream finishes cleanly.
     /// - Returns: A single-consumer stream of ``ScanEvent``s.
     public func scan(
         filter: ScanFilter,
@@ -3858,23 +3880,22 @@ public actor Central {
         return stream
     }
 
-    /// Routes a `CentralEvent/didDiscover` event to the active scan, if any — a discovery
-    /// delivered after the scan ended is silently dropped. Emits at most one ``ScanEvent``
-    /// per call (none when the scan's filter rejects the sighting or throttling suppresses
-    /// it).
+    /// Routes a `CentralEvent/didDiscover` event to the active scan, if any. It silently drops
+    /// a discovery that arrives after the scan ended. It emits at most one ``ScanEvent``, and
+    /// none if the scan's filter rejects the sighting or throttling suppresses it.
     private func handleDiscovery(peripheral: PeripheralIdentifier, advertisement: AdvertisementData, rssi: Int) {
         guard let scan = activeScan else { return }
 
         let newDiscovery = Discovery(peripheral: peripheral, advertisement: advertisement, rssi: rssi)
 
-        // A non-matching sighting is dropped entirely — not stored, not loss-tracked, no
-        // event. Loss timers only ever exist for sightings that passed the filter.
+        // A non-matching sighting is dropped entirely: not stored, not loss-tracked, no event.
         if let filter = scan.filter, !filter.matches(newDiscovery) {
             return
         }
 
-        // Only allowDuplicates scans track loss — refreshed even if throttled below, since a
-        // throttled sighting is still evidence the peripheral hasn't gone silent.
+        // Only allowDuplicates scans track loss. The timer is refreshed even if throttling
+        // applies below, because a throttled sighting still shows that the peripheral is not
+        // silent.
         if scan.allowDuplicates {
             scheduleLossTimer(for: peripheral, in: scan)
         }
@@ -3885,8 +3906,8 @@ public actor Central {
             return
         }
 
-        // Throttled: don't update the stored discovery (so the next sighting's delta is
-        // still computed against the last *reported* RSSI), and don't yield anything.
+        // Throttled: do not update the stored discovery, so the next sighting's change is still
+        // measured against the last *reported* RSSI, and do not yield anything.
         if let threshold = scan.rssiThreshold, abs(existing.rssi - rssi) < threshold {
             return
         }
@@ -3898,10 +3919,11 @@ public actor Central {
         }
     }
 
-    /// (Re)schedules `peripheral`'s loss-expiry deadline: cancels any existing timer and
-    /// starts a fresh `lossTimeout`-long one. Only called for `allowDuplicates` scans.
+    /// Sets the loss-expiry deadline of `peripheral`. It cancels any existing timer and starts
+    /// a new timer of `lossTimeout`. It runs only for `allowDuplicates` scans.
     ///
-    /// A sanctioned `Task { }` site: stored in `ActiveScan.lossTimers` so it's always cancellable.
+    /// This is an approved `Task { }` site. The task is stored in `ActiveScan.lossTimers`, so
+    /// it is always cancellable.
     private func scheduleLossTimer(for peripheral: PeripheralIdentifier, in scan: ActiveScan) {
         scan.lossTimers[peripheral.uuid]?.cancel()
 
@@ -3913,8 +3935,8 @@ public actor Central {
         }
     }
 
-    /// Reports `peripheral` as ``ScanEvent/lost(_:)`` if still tracked by the active scan —
-    /// it may have already been re-sighted or the scan may have already ended.
+    /// Reports `peripheral` as ``ScanEvent/lost(_:)`` if the active scan still tracks it. It
+    /// does nothing if the scan sighted the peripheral again or already ended.
     private func handleLoss(of peripheral: PeripheralIdentifier) {
         guard let scan = activeScan else { return }
         guard let discovery = scan.discoveries.removeValue(forKey: peripheral.uuid) else { return }
@@ -3922,31 +3944,33 @@ public actor Central {
         scan.continuation.yield(.lost(discovery))
     }
 
-    /// Finishes the active scan's stream cleanly (no error) after its `timeout:` elapses.
-    /// Synchronously triggers ``finishActiveScan()`` via the stream's `onTermination`.
+    /// Finishes the active scan's stream cleanly after its `timeout:` elapses. The stream's
+    /// `onTermination` then triggers ``finishActiveScan()``.
     private func timeoutActiveScan() {
         guard activeScan != nil else { return }
         log("Scan timed out", level: .info, category: "scan")
         activeScan?.continuation.finish()
     }
 
-    /// Finishes the active scan's stream by throwing `error`, if a scan is active. Called
-    /// when the radio leaves `.poweredOn` (wired into ``failAllPendingOperations(error:)``)
-    /// and, on iOS, when a backgrounding guard fires.
+    /// Finishes the active scan's stream with `error`, if a scan is active. It runs when the
+    /// radio leaves `.poweredOn` (through ``failAllPendingOperations(error:)``) and, on iOS,
+    /// when a backgrounding guard fires.
     private func failActiveScan(_ error: BLESwiftError) {
         guard activeScan != nil else { return }
         log("Failing active scan: \(error)", level: .warning, category: "scan")
         activeScan?.continuation.finish(throwing: error)
     }
 
-    /// The single cleanup path for an ended scan: cancels every loss timer and the timeout
-    /// task, removes the backgrounding observer (iOS), stops the hardware scan (only if
-    /// still `.poweredOn`), and clears ``activeScan``/``isScanning``.
+    /// The single cleanup path for a scan that ended. It:
+    /// - Cancels every loss timer and the timeout task.
+    /// - Removes the backgrounding observer (iOS).
+    /// - Stops the hardware scan, only if the radio is still `.poweredOn`.
+    /// - Clears ``activeScan`` and ``isScanning``.
     ///
-    /// Called from two places: the `onTermination` handler installed by
-    /// ``scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``, and
-    /// `teardownScanNow`, which `findFirst` uses to tear down its scan deterministically.
-    /// Idempotent (guards on ``activeScan`` non-`nil`).
+    /// The `onTermination` handler of
+    /// ``scan(services:allowDuplicates:rssiThreshold:lossTimeout:timeout:)`` calls it, and so
+    /// does `teardownScanNow`, which `findFirst` uses for a deterministic teardown. It is
+    /// idempotent: it guards on a non-`nil` ``activeScan``.
     private func finishActiveScan() {
         guard let scan = activeScan else { return }
         activeScan = nil
@@ -3970,27 +3994,29 @@ public actor Central {
         log("Scan stopped", level: .info, category: "scan")
     }
 
-    /// Scans with `filter` and returns the first matching ``Discovery``, stopping the scan.
+    /// Scans with `filter` and returns the first matching ``Discovery``. It stops the scan.
     ///
-    /// The scan is fully torn down — `isScanning` is `false` — before this returns or
+    /// The scan is fully torn down (`isScanning` is `false`) before this function returns or
     /// throws, on every exit path: success, timeout, error, and task cancellation.
     ///
     /// - Parameters:
-    ///   - filter: The match criteria — see ``scan(filter:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``.
-    ///   - timeout: How long to wait for a match before throwing
-    ///     ``BLESwiftError/timedOut``. `nil` (the default) waits indefinitely —
-    ///     passing a value is recommended: an unfiltered radio left scanning is exactly
-    ///     what Apple discourages.
-    /// - Returns: The first ``Discovery`` matching `filter`.
-    /// - Throws: ``BLESwiftError/timedOut`` when `timeout` elapses (or the scan's stream
-    ///   ends without a match), ``BLESwiftError/alreadyScanning`` if a scan is already
-    ///   active, `CancellationError` on task cancellation, or whatever error ends the scan
-    ///   (e.g. ``BLESwiftError/bluetoothUnavailable``).
+    ///   - filter: The match criteria. See
+    ///     ``scan(filter:allowDuplicates:rssiThreshold:lossTimeout:timeout:)``.
+    ///   - timeout: How long to wait for a match before the call throws
+    ///     ``BLESwiftError/timedOut``. The default `nil` waits without a limit. Pass a value,
+    ///     because Apple discourages an unfiltered scan that stays on.
+    /// - Returns: The first ``Discovery`` that matches `filter`.
+    /// - Throws: One of these errors:
+    ///   - ``BLESwiftError/timedOut`` when `timeout` elapses, or the scan's stream ends
+    ///     without a match.
+    ///   - ``BLESwiftError/alreadyScanning`` if a scan is already active.
+    ///   - `CancellationError` on task cancellation.
+    ///   - Any error that ends the scan (for example ``BLESwiftError/bluetoothUnavailable``).
     public func findFirst(matching filter: ScanFilter, timeout: Duration? = nil) async throws -> Discovery {
-        // `scan` claims `activeScan` synchronously on success and leaves it untouched when
-        // it refuses (`.alreadyScanning`) — so `activeScan` changing across the call
-        // identifies the scan that is OURS to tear down (`nil` when the refusal path ran:
-        // someone else's scan must survive the error path below).
+        // On success, `scan` claims `activeScan` synchronously. When it refuses
+        // (`.alreadyScanning`), it leaves `activeScan` untouched. So a change of `activeScan`
+        // across the call identifies the scan that is OURS to tear down. It is `nil` after a
+        // refusal, because someone else's scan must survive the error path below.
         let previous = activeScan
         let stream = scan(filter: filter)
         let ourScan = activeScan !== previous ? activeScan : nil
@@ -4002,7 +4028,7 @@ public actor Central {
                         return discovery
                     }
                 }
-                // The stream ended (e.g. an inner timeout) without a match.
+                // The stream ended (for example an inner timeout) without a match.
                 throw BLESwiftError.timedOut
             }
             teardownScanNow(ourScan)
@@ -4013,45 +4039,43 @@ public actor Central {
         }
     }
 
-    /// Synchronously tears down `scan` if it is still the active one — the deterministic
-    /// counterpart to the `onTermination`-driven ``finishActiveScan()`` hop, which runs via
-    /// `queue.async` and can land *after* a `findFirst` caller has already resumed.
-    /// Finishing the continuation first makes the pending hop's `finishActiveScan()` a
-    /// guarded no-op. Idempotent; a `nil` or superseded `scan` is ignored.
+    /// Synchronously tears down `scan` if it is still the active scan. It is the deterministic
+    /// counterpart to the ``finishActiveScan()`` hop that `onTermination` drives through
+    /// `queue.async`, which can land *after* a `findFirst` caller has resumed. After this
+    /// function, that pending hop is a guarded no-op. It is idempotent and ignores a `nil` or
+    /// superseded `scan`.
     private func teardownScanNow(_ scan: ActiveScan?) {
         guard let scan, activeScan === scan else { return }
         scan.continuation.finish()
         finishActiveScan()
     }
 
-    /// Connects to a peripheral by bare `UUID`, optionally falling back to a scan — the
-    /// "saved device" flow: persist a peripheral's ``PeripheralIdentifier/uuid``, then
-    /// reconnect to it on a later launch in one call.
+    /// Connects to a peripheral by a saved `UUID`, with an optional fallback to a scan.
     ///
-    /// Tries ``knownPeripherals(withIdentifiers:)`` first (no radio). If CoreBluetooth no
-    /// longer knows `identifier` and `fallbackScan` is non-`nil`, runs
-    /// ``findFirst(matching:timeout:)`` and connects to whatever it finds — which may be a
-    /// peripheral with a *different* UUID than `identifier` (CoreBluetooth reassigns UUIDs;
-    /// matching by name/service when the saved UUID has gone stale is the point of the
-    /// fallback). Read the returned ``Peripheral/id`` for the current identity.
+    /// The function first tries ``knownPeripherals(withIdentifiers:)``, which does not use
+    /// the radio. If CoreBluetooth no longer knows `identifier` and `fallbackScan` is
+    /// non-`nil`, it runs ``findFirst(matching:timeout:)`` and connects to the result. That
+    /// peripheral can have a *different* UUID. Save the returned ``Peripheral/id`` again.
+    /// See <doc:Scanning#Saved-devices>.
     ///
     /// - Parameters:
     ///   - identifier: The saved peripheral `UUID` to resolve.
-    ///   - fallbackScan: Match criteria for a rescue scan when `identifier` is no longer
-    ///     known. `nil` (the default) disables the fallback.
-    ///   - reconnect: What to do if this connection is later lost unexpectedly. Defaults to
+    ///   - fallbackScan: Match criteria for a fallback scan when `identifier` is no longer
+    ///     known. The default `nil` disables the fallback.
+    ///   - reconnect: What to do if the connection is lost unexpectedly later. The default is
     ///     ``ReconnectPolicy/never``.
-    ///   - timeout: Applied to EACH phase separately — the fallback scan gets `timeout`,
-    ///     then the connect attempt gets `timeout` again; it is not a shared budget.
-    ///     Defaults to 15 seconds; `nil` waits indefinitely.
-    ///   - compatibility: Accommodations for peripherals that misreport their GATT
-    ///     database — see ``GATTCompatibility``. Defaults to ``GATTCompatibility/strict``;
-    ///     applies to this connection only.
-    /// - Returns: A ``Peripheral`` handle once connected.
-    /// - Throws: ``BLESwiftError/unexpectedPeripheral(_:)`` when `identifier` is unknown
-    ///   and `fallbackScan` is `nil`; ``BLESwiftError/timedOut`` when the fallback scan
-    ///   finds no match in time; otherwise whatever
-    ///   ``connect(_:timeout:reconnect:warningOptions:compatibility:)`` throws.
+    ///   - timeout: Applies to each phase separately: the fallback scan gets `timeout`, and
+    ///     then the connect attempt gets `timeout` again. The default is 15 seconds. `nil`
+    ///     waits without a limit.
+    ///   - compatibility: Accommodations for peripherals that report their GATT database
+    ///     incorrectly. The default is ``GATTCompatibility/strict``. It applies to this
+    ///     connection only.
+    /// - Returns: A ``Peripheral`` handle for the connection.
+    /// - Throws: One of these errors:
+    ///   - ``BLESwiftError/unexpectedPeripheral(_:)`` when `identifier` is unknown and
+    ///     `fallbackScan` is `nil`.
+    ///   - ``BLESwiftError/timedOut`` when the fallback scan finds no match in time.
+    ///   - Any error that ``connect(_:timeout:reconnect:warningOptions:compatibility:)`` throws.
     public func connect(
         identifier: UUID,
         fallbackScan: ScanFilter? = nil,
@@ -4072,11 +4096,12 @@ public actor Central {
     }
 
     #if os(iOS)
-    /// Installs a `UIApplication.didEnterBackgroundNotification` observer that fails the
-    /// scan per Apple's background-scanning restrictions, if needed. A no-op otherwise.
+    /// Installs a `UIApplication.didEnterBackgroundNotification` observer that fails the scan
+    /// if Apple's background-scanning restrictions require it. If `allowDuplicates` is false
+    /// and services are present, it installs nothing.
     ///
-    /// Hops back into actor isolation via `queue.async` + `assumeIsolated` — not `Task { }`
-    /// — since the notification handler can fire on an arbitrary thread.
+    /// The observer re-enters actor isolation through `queue.async` and `assumeIsolated`, not
+    /// `Task { }`, because the notification handler can fire on an arbitrary thread.
     private func installBackgroundGuardIfNeeded(scan: ActiveScan, allowDuplicates: Bool, missingServices: Bool) {
         guard allowDuplicates || missingServices else { return }
 
@@ -4102,26 +4127,26 @@ public actor Central {
     // MARK: - Background restoration
 
     #if os(iOS)
-    /// Returns a stream of every ``RestorationEvent``, replaying every event buffered since
-    /// this `Central` was created to the first consumer, in order — restoration happens
-    /// during app launch, typically before any consumer has subscribed.
+    /// Returns a stream of every ``RestorationEvent``. It replays to the first consumer, in
+    /// order, every event since this `Central` was created. Restoration happens at launch,
+    /// usually before any consumer subscribes.
     ///
-    /// Events appear only when ``Configuration/restoration`` was set.
+    /// Events appear only when ``Configuration/restoration`` is set.
     public func restorationEvents() -> AsyncStream<RestorationEvent> {
         restorationBroadcaster.stream()
     }
     #else
-    /// Internal mirror of the iOS-only public `restorationEvents()` — see the dual-access
-    /// note in `RestorationConfiguration.swift`. Reachable off-iOS only via `@testable`.
+    /// Internal mirror of the iOS-only public `restorationEvents()`. See the dual-access note
+    /// in `RestorationConfiguration.swift`. Off iOS, only `@testable` can reach it.
     func restorationEvents() -> AsyncStream<RestorationEvent> {
         restorationBroadcaster.stream()
     }
     #endif
 
-    /// Reacts to a radio state change on behalf of restoration: `.poweredOn` completes a
-    /// staged restoration or closes the startup window if nothing is pending; any other
-    /// state fails a staged restoration with ``BLESwiftError/bluetoothUnavailable`` and
-    /// emits ``RestorationEvent/failedToRestoreConnection(_:error:)`` for each.
+    /// Reacts to a radio state change for restoration. On `.poweredOn`, it completes a staged
+    /// restoration, or closes the startup window if nothing is pending. For any other state,
+    /// it fails a staged restoration with ``BLESwiftError/bluetoothUnavailable`` and emits
+    /// ``RestorationEvent/failedToRestoreConnection(_:error:)`` for each failure.
     private func handleRestorationStateChange(_ newState: CentralState) {
         if newState == .poweredOn {
             if let pending = pendingRestoration {
@@ -4138,20 +4163,23 @@ public actor Central {
                 }
                 log("Restoration failed: Bluetooth unavailable", level: .warning, category: "restore")
             }
-            // In-flight `restorationTasks` are not touched here: the radio loss fails each
-            // one on its own; `closeStartupWindowIfIdle()` below closes the window only once
-            // every entry has resolved.
+            // Do not touch the `restorationTasks` in progress. The radio loss fails each one on
+            // its own, and `closeStartupWindowIfIdle()` closes the window only after every entry
+            // resolves.
             closeStartupWindowIfIdle()
         }
     }
 
-    /// Routes `.poweredOn` restoration: restored-*connected* → adopted as a live session;
-    /// restored-*connecting* → its own manual re-connect task; restored-*disconnecting*/
-    /// *disconnected* → ``RestorationEvent/failedToRestoreConnection(_:error:)``. The startup
-    /// window closes once every outcome has resolved.
+    /// Routes `.poweredOn` restoration:
+    /// - A restored-*connected* peripheral is adopted as a live session.
+    /// - A restored-*connecting* peripheral gets its own manual reconnect task.
+    /// - A restored-*disconnecting* or *disconnected* peripheral gets
+    ///   ``RestorationEvent/failedToRestoreConnection(_:error:)``.
     ///
-    /// - Warning: The `disconnecting`/`disconnected` paths have no known way to recreate or
-    ///   test on real hardware.
+    /// The startup window closes after every outcome resolves.
+    ///
+    /// - Warning: No known way exists to reproduce or test the `disconnecting` and
+    ///   `disconnected` paths on real hardware.
     private func routeRestoredPeripherals(_ restored: RestoredState) {
         if restored.peripherals.isEmpty {
             log("No peripherals to restore", level: .info, category: "restore")
@@ -4172,11 +4200,11 @@ public actor Central {
         closeStartupWindowIfIdle()
     }
 
-    /// Adopts a restored-*connected* peripheral as a live session — no CoreBluetooth
-    /// connection work needed. GATT operations work immediately; `.connected` is emitted on
+    /// Adopts a restored-*connected* peripheral as a live session. No CoreBluetooth connection
+    /// work is needed, so GATT operations work immediately. It emits `.connected` on
     /// ``connectionEvents()``.
     ///
-    /// Policy is ``ReconnectPolicy/never`` — no `connect` call existed to specify one.
+    /// The policy is ``ReconnectPolicy/never``, because no `connect` call specified one.
     private func adoptRestoredConnection(_ identifier: PeripheralIdentifier) {
         guard connections[identifier] == nil else {
             restorationBroadcaster.yield(.failedToRestoreConnection(identifier, error: BLESwiftError.duplicateConnect(identifier)))
@@ -4189,8 +4217,8 @@ public actor Central {
             return
         }
 
-        // Wire event delivery before the session goes live. Idempotent with the early
-        // wiring `handle(_: CentralEvent)`'s `.willRestoreState` case performs.
+        // Set up event delivery before the session goes live. This is idempotent with the early
+        // setup in the `.willRestoreState` case of `handle(_: CentralEvent)`.
         target.eventHandler = { [weak self] event in
             guard let self else { return }
             self.assumeIsolated(onQueue: self.queue) { $0.handle(event, from: identifier) }
@@ -4206,9 +4234,9 @@ public actor Central {
         restorationBroadcaster.yield(.restoredConnection(identifier))
     }
 
-    /// Issues the manual re-connect for a restored-*connecting* peripheral — CoreBluetooth
-    /// restores the attempt's existence but never completes it, so BLESwift must connect
-    /// explicitly, with a default 15 s timeout configurable via ``RestorationConfiguration``.
+    /// Issues the manual reconnect for a restored-*connecting* peripheral. CoreBluetooth
+    /// restores the attempt but does not complete it, so BLESwift must connect explicitly. The
+    /// default timeout is 15 s. ``RestorationConfiguration`` can change it.
     private func startRestorationConnect(_ identifier: PeripheralIdentifier) {
         let timeout = configuration.restoration?.connectingTimeout ?? .seconds(15)
         log("Restored peripheral \(identifier) was connecting — issuing manual re-connect (timeout: \(timeout))", level: .info, category: "restore")
@@ -4217,19 +4245,18 @@ public actor Central {
         }
     }
 
-    /// The body of one ``restorationTasks`` entry: one manual connect attempt for
-    /// `identifier`, always followed by removing its own entry and closing the startup
-    /// window if idle.
+    /// The body of one ``restorationTasks`` entry. It makes one manual connect attempt for
+    /// `identifier`, then removes its own entry and closes the startup window if idle.
     ///
-    /// Calls ``establishConnection(identifier:policy:timeout:warningOptions:)`` directly
-    /// rather than `connect(...)` — the public method's `pendingRestoration` guard exists to
-    /// fence *user* calls out of this window.
+    /// It calls ``establishConnection(identifier:policy:timeout:warningOptions:)`` directly and
+    /// not `connect(...)`, because the public method's `pendingRestoration` guard keeps *user*
+    /// calls out of this window.
     private func runRestorationConnect(identifier: PeripheralIdentifier, timeout: Duration) async {
-        // Expiration-vs-routing race guard: this task's body runs a hop after being spawned
-        // — if the startup background task expired in that gap, this is the one place that
-        // still needs to fail the connect with its full timeout despite the window being closed.
+        // Guard against a race between expiration and routing. This task's body runs one hop
+        // after it starts. If the startup background task expired in that gap, this is the one
+        // place that must still fail the connect, even though the window is closed.
         guard startupWindowOpen else {
-            // Silent when cancelled: teardown, not an expiration to report.
+            // Silent when cancelled, because a cancel is a teardown and not an expiration.
             if !Task.isCancelled {
                 log("Startup window closed before the restoration connect could start — failing restoration for \(identifier)", level: .warning, category: "restore")
                 restorationBroadcaster.yield(.failedToRestoreConnection(identifier, error: BLESwiftError.startupBackgroundTaskExpired))
@@ -4239,8 +4266,8 @@ public actor Central {
         }
 
         do {
-            // Reserve the slot synchronously — throws `.duplicateConnect` if a user
-            // `connect(id)` for this same restored id landed first.
+            // Reserve the slot synchronously. This throws `.duplicateConnect` if a user
+            // `connect(id)` for the same restored id arrived first.
             try reserveConnectingSlot(
                 identifier: identifier,
                 policy: .never,
@@ -4264,10 +4291,9 @@ public actor Central {
         closeStartupWindowIfIdle()
     }
 
-    /// Reacts to iOS expiring the startup background task before restoration finished:
-    /// every pending restoration operation fails with
-    /// ``BLESwiftError/startupBackgroundTaskExpired`` — a staged-but-unrouted
-    /// ``pendingRestoration``, and every in-flight ``restorationTasks`` entry.
+    /// Reacts when iOS expires the startup background task before restoration finished. A
+    /// staged but unrouted ``pendingRestoration`` and every ``restorationTasks`` entry in
+    /// progress fail with ``BLESwiftError/startupBackgroundTaskExpired``.
     private func handleStartupBackgroundTaskExpiration() {
         guard startupWindowOpen else { return }
         log("Startup background task expired during restoration", level: .warning, category: "restore")
@@ -4279,26 +4305,26 @@ public actor Central {
             }
         }
 
-        // Snapshot keys first — never iterate a map while mutating it.
+        // Snapshot the keys first. Never iterate a map while changing it.
         for identifier in Array(restorationTasks.keys) {
-            // Each task's own catch removes its own entry once cancelled; the window is
-            // closed unconditionally below regardless.
+            // Each task's own catch removes its entry after the cancel. The code below closes the
+            // window unconditionally.
             failPendingConnect(for: identifier, error: BLESwiftError.startupBackgroundTaskExpired)
         }
 
         endStartupBackgroundTask()
     }
 
-    /// Closes the startup restoration window once every restoration outcome has resolved.
-    /// Safe to call speculatively — a no-op while anything is pending.
+    /// Closes the startup restoration window after every restoration outcome resolves. It does
+    /// nothing while anything is pending, so it is safe to call at any time.
     private func closeStartupWindowIfIdle() {
         guard pendingRestoration == nil, restorationTasks.isEmpty else { return }
         endStartupBackgroundTask()
     }
 
-    /// Closes the startup restoration window: ends the platform background task (see
-    /// `StartupBackgroundTaskRunning`) exactly once. Idempotent via ``startupWindowOpen``;
-    /// a no-op whenever restoration was never enabled.
+    /// Closes the startup restoration window and ends the platform background task (see
+    /// `StartupBackgroundTaskRunning`) exactly once. ``startupWindowOpen`` makes it idempotent.
+    /// It does nothing if restoration was never enabled.
     private func endStartupBackgroundTask() {
         guard startupWindowOpen else { return }
         startupWindowOpen = false
@@ -4308,8 +4334,8 @@ public actor Central {
 
     // MARK: - Logging
 
-    /// Writes `message` to ``configuration``'s `swift-log` `Logger` — BLESwift's single
-    /// internal log call site.
+    /// Writes `message` to the `swift-log` `Logger` of ``configuration``. It is BLESwift's
+    /// single internal log call site.
     private func log(_ message: @autoclosure () -> Logger.Message, level: Logger.Level, category: String) {
         configuration.logger.log(level: level, message(), metadata: ["category": .string(category)])
     }
@@ -4317,46 +4343,45 @@ public actor Central {
 
 // MARK: - Connection state machine
 
-/// `Central`'s internal per-peripheral connection state machine — file-private for the
-/// associated structs' visibility. ``Central/connectionState(of:)`` projects it into the
-/// public ``ConnectionState``. No `.idle` case: absence of a ``Central/connections`` entry
-/// IS idle.
+/// The internal connection state machine of `Central` for each peripheral. It is file-private,
+/// like its associated structs. ``Central/connectionState(of:)`` projects it into the public
+/// ``ConnectionState``. It has no `.idle` case. No ``Central/connections`` entry means idle.
 private enum PeripheralPhase {
     /// A connection attempt is in progress.
     case connecting(Connecting)
-    /// Connected.
+    /// The peripheral is connected.
     case connected(Session)
-    /// Disconnecting — either an explicit `disconnect(_:)` is in
-    /// flight, or `cancelAllOperations` cancelled a pending connection attempt.
+    /// The peripheral is disconnecting, after an explicit `disconnect(_:)` or after
+    /// `cancelAllOperations` cancelled a pending connection attempt.
     case disconnecting(Disconnecting)
 }
 
-/// One independent auto-reconnect loop, tracked per peripheral in
-/// ``Central/reconnectLoops``. Pairs the loop's `Task` with the generation it was spawned
-/// with — see ``Central/clearReconnectLoopIfCurrent(id:generation:)``.
+/// One auto-reconnect loop of a peripheral, tracked in ``Central/reconnectLoops``. It pairs
+/// the loop's `Task` with the generation that it started with. See
+/// ``Central/clearReconnectLoopIfCurrent(id:generation:)``.
 private struct ReconnectLoop {
     var task: Task<Void, Never>
     var generation: UInt64
 }
 
-/// The GATT operation a ``GATTCompatibility`` bypass skipped a property check for — one
-/// third of a ``CompatWarnKey``.
+/// The GATT operation for which a ``GATTCompatibility`` bypass skipped a property check, as
+/// part of a ``CompatWarnKey``.
 private enum CompatOperation: Hashable {
     case read
     case write
     case notify
 }
 
-/// One (peripheral, characteristic, operation) triple `Central.warnedCompatBypass` tracks
-/// for the once-per-triple compatibility-bypass warning.
+/// One (peripheral, characteristic, operation) triple. `Central.warnedCompatBypass` uses it
+/// to log a compatibility-bypass warning once for each triple.
 private struct CompatWarnKey: Hashable {
     let peripheral: PeripheralIdentifier
     let characteristic: CharacteristicIdentifier
     let operation: CompatOperation
 }
 
-/// State for a connection attempt in progress. Holds the single pending connect
-/// continuation for this peripheral and the two-phase cancel's `stopping` flag.
+/// State of a connection attempt in progress. It holds the peripheral's pending connect
+/// continuation and the `stopping` flag of the two-phase cancel.
 private struct Connecting {
     let identifier: PeripheralIdentifier
     let peripheral: any PeripheralRemote
@@ -4364,24 +4389,24 @@ private struct Connecting {
     let timeout: Duration?
     let warningOptions: WarningOptions
     let compatibility: GATTCompatibility
-    /// Whether the connect was requested with ANCS required (iOS-only effect; always
-    /// `false` elsewhere). Carried so reconnect attempts reuse it.
+    /// Whether the connect required ANCS. It has an effect on iOS only and is always `false`
+    /// elsewhere. Reconnect attempts reuse it.
     let requiresANCS: Bool
-    /// The pending connect continuation. `nil` when reserved-but-unattached (between
-    /// `reserveConnectingSlot` writing this entry and `awaitConnect` attaching its
-    /// continuation) or once taken (resumed and cleared). Resumed exactly once, by
-    /// `Central.handleTermination(identifier:error:)` — never directly by whatever requests
-    /// cancellation.
+    /// The pending connect continuation. It is `nil` when the slot is reserved but not
+    /// attached (between `reserveConnectingSlot`, which writes this entry, and `awaitConnect`,
+    /// which attaches the continuation), and after it is taken, resumed, and cleared.
+    /// `Central.handleTermination(identifier:error:)` resumes it exactly once. A cancellation
+    /// request never resumes it directly.
     var continuation: CheckedContinuation<Peripheral, Error>?
-    /// Non-`nil` once cancellation (task cancellation, timeout, `cancelAllOperations`) has
-    /// been requested for this attempt — the error `continuation` will eventually resume
-    /// with, once CoreBluetooth confirms.
+    /// Non-`nil` after a cancellation (task cancellation, timeout, or `cancelAllOperations`)
+    /// was requested for this attempt. It is the error that `continuation` resumes with after
+    /// CoreBluetooth confirms.
     var stopping: Error?
 }
 
-/// State for one established connection. Also holds every piece of GATT bookkeeping — so
-/// disconnect cleanup drops it structurally along with the rest of the connection, and
-/// multi-peripheral isolation falls out for free.
+/// State of one established connection, including all of its GATT bookkeeping. The disconnect
+/// cleanup drops the bookkeeping together with the connection, and peripherals stay isolated
+/// from each other at no extra cost.
 private struct Session {
     let identifier: PeripheralIdentifier
     let peripheral: any PeripheralRemote
@@ -4389,12 +4414,11 @@ private struct Session {
     let timeout: Duration?
     let warningOptions: WarningOptions
     let compatibility: GATTCompatibility
-    /// See `Connecting.requiresANCS` — carried onto the session so an unexpected
-    /// disconnect's reconnect loop reuses it.
+    /// See `Connecting.requiresANCS`. The session carries it, so the reconnect loop reuses it.
     let requiresANCS: Bool
 
-    // Explicit because the synthesized memberwise init is private (nextWaiterTokenValue is
-    // a private stored property), which makes it inaccessible at the file-scope call site.
+    // The init is explicit because the synthesized memberwise init is private
+    // (`nextWaiterTokenValue` is a private stored property) and so not accessible at file scope.
     init(
         identifier: PeripheralIdentifier,
         peripheral: any PeripheralRemote,
@@ -4415,109 +4439,113 @@ private struct Session {
 
     // MARK: - GATT
 
-    /// Per-characteristic FIFO tail-chain — see `Central.runOnFIFO(identifier:characteristic:operation:)`.
+    /// Per-characteristic FIFO tail chain. See
+    /// `Central.runOnFIFO(identifier:characteristic:operation:)`.
     var fifoTails: [CharacteristicIdentifier: Task<Void, Never>] = [:]
 
-    /// The RSSI-only counterpart to ``fifoTails``: `readRSSI()` has no owning
-    /// characteristic, so it is serialized via a single tail instead of a per-characteristic
-    /// map. See `Central.runRSSISerialized(identifier:operation:)`.
+    /// The RSSI counterpart to ``fifoTails``. `readRSSI()` has no characteristic, so it uses a
+    /// single tail and not a per-characteristic map. See
+    /// `Central.runRSSISerialized(identifier:operation:)`.
     var rssiTail: Task<Void, Never>?
 
-    /// The single pending read continuation per characteristic. Single-slot, guaranteed by
-    /// ``fifoTails``. Take-then-resume.
+    /// The pending read continuation of each characteristic. Only one slot exists, because
+    /// ``fifoTails`` guarantees it. The code removes the continuation and then resumes it.
     var pendingReads: [CharacteristicIdentifier: CheckedContinuation<Data, Error>] = [:]
 
-    /// The single pending write continuation for each characteristic currently being
-    /// written (`.withResponse` only — `.withoutResponse` synthesizes completion
-    /// immediately and never registers here). See ``pendingReads``.
+    /// The pending write continuation of each characteristic that is being written
+    /// (`.withResponse` only). `.withoutResponse` completes immediately and never registers
+    /// here. See ``pendingReads``.
     var pendingWrites: [CharacteristicIdentifier: CheckedContinuation<Void, Error>] = [:]
 
-    /// The single pending notify-state-change continuation per characteristic. Resumes with
+    /// The pending notify-state-change continuation of each characteristic. It resumes with
     /// the resulting `isNotifying` value.
     var pendingNotifyStateChanges: [CharacteristicIdentifier: CheckedContinuation<Bool, Error>] = [:]
 
-    /// The single pending RSSI-read continuation, if any. Single-slot, guaranteed by
-    /// ``rssiTail``.
+    /// The single pending RSSI-read continuation, if any. Only one slot exists, because
+    /// ``rssiTail`` guarantees it.
     var pendingRSSIRead: CheckedContinuation<Int, Error>?
 
-    /// Pending service-discovery waiters, keyed by a monotonic token — **not** by service:
-    /// `didDiscoverServices(error:)` carries no service identifier, so every waiter is
-    /// resumed on every completion and independently re-checks its own service afterward.
-    /// Tokened so a single cancelled waiter can be removed without disturbing others.
+    /// Pending service-discovery waiters, keyed by an increasing token and **not** by service.
+    /// `didDiscoverServices(error:)` carries no service identifier, so every waiter resumes on
+    /// every completion and then checks its own service again. The token lets the code remove
+    /// a single cancelled waiter and leave the others.
     var pendingDiscoverServices: [UInt64: CheckedContinuation<Void, Error>] = [:]
 
     /// Pending characteristic-discovery waiters, keyed by service (which
-    /// `didDiscoverCharacteristics(service:error:)` does carry) and then by per-waiter token.
+    /// `didDiscoverCharacteristics(service:error:)` does carry) and then by waiter token.
     var pendingDiscoverCharacteristics: [ServiceIdentifier: [UInt64: CheckedContinuation<Void, Error>]] = [:]
 
-    /// Pending waiters for `.isReadyToSendWriteWithoutResponse`. Not keyed by characteristic
-    /// — CoreBluetooth's readiness signal is peripheral-wide.
+    /// Pending waiters for `.isReadyToSendWriteWithoutResponse`. They are not keyed by
+    /// characteristic, because CoreBluetooth's readiness signal is peripheral-wide.
     var pendingWriteWithoutResponseReady: [UInt64: CheckedContinuation<Void, Error>] = [:]
 
-    /// The single pending descriptor-read continuation per descriptor. Single-slot,
-    /// guaranteed by the parent characteristic's FIFO lane.
+    /// The pending descriptor-read continuation of each descriptor. Only one slot exists,
+    /// because the parent characteristic's FIFO lane guarantees it.
     var pendingDescriptorReads: [DescriptorIdentifier: CheckedContinuation<Data, Error>] = [:]
 
-    /// The single pending descriptor-write continuation for each descriptor currently being
-    /// written (descriptor writes are always with-response). See ``pendingDescriptorReads``.
+    /// The pending descriptor-write continuation of each descriptor that is being written
+    /// (descriptor writes are always with-response). See ``pendingDescriptorReads``.
     var pendingDescriptorWrites: [DescriptorIdentifier: CheckedContinuation<Void, Error>] = [:]
 
-    /// Pending descriptor-discovery waiters, keyed by characteristic and then by per-waiter
-    /// token.
+    /// Pending descriptor-discovery waiters, keyed by characteristic and then by waiter token.
     var pendingDiscoverDescriptors: [CharacteristicIdentifier: [UInt64: CheckedContinuation<Void, Error>]] = [:]
 
     // MARK: - GATT enumeration cache
 
-    /// Whether a full-graph service enumeration has completed for this connection. Unlike
-    /// targeted discovery, "list all services" has no single identifier to re-check, so this
-    /// flag serves as the cache. Reset to `false` on `didModifyServices`.
+    /// Whether a full service enumeration has completed for this connection. Targeted
+    /// discovery can check an identifier, but "list all services" has none, so this flag is the
+    /// cache. It resets to `false` on `didModifyServices`.
     var didEnumerateServices = false
 
-    /// Whether ``GATTCompatibility/DiscoveryMode/all``'s one-time `discoverServices(nil)`
-    /// has run for this connection — the cache keeping `.all` at exactly one unfiltered
-    /// discovery per connection.
+    /// Whether the one-time `discoverServices(nil)` of ``GATTCompatibility/DiscoveryMode/all``
+    /// has run for this connection. It limits `.all` to one unfiltered discovery for each
+    /// connection.
     var didDiscoverAllServices = false
 
-    /// Services whose characteristics have been fully enumerated for this connection.
-    /// Invalidated entries removed on `didModifyServices`.
+    /// Services whose characteristics are fully enumerated for this connection.
+    /// `didModifyServices` removes invalidated entries.
     var enumeratedCharacteristicServices: Set<ServiceIdentifier> = []
 
-    /// Characteristics whose descriptors have been fully enumerated for this connection.
+    /// Characteristics whose descriptors are fully enumerated for this connection.
     var enumeratedDescriptorCharacteristics: Set<CharacteristicIdentifier> = []
 
     // MARK: - Notifications
 
-    /// The active notification subscription for each characteristic currently being
-    /// listened to. Lives inside `Session` so disconnect cleanup drops it structurally.
+    /// The active notification subscription of each characteristic that is listened to. It
+    /// lives inside `Session`, so the disconnect cleanup drops it.
     var notificationSubscriptions: [CharacteristicIdentifier: NotificationSubscription] = [:]
 
-    /// The per-subscriber pump task for each `Peripheral.notifications(for:policy:survivesReconnect:)`
-    /// subscriber — a ledgered `Task { }` site (see `Central.startNotificationPump(peripheral:characteristic:token:survivesReconnect:deliver:finish:)`).
+    /// The pump task of each subscriber of
+    /// `Peripheral.notifications(for:policy:survivesReconnect:)`. It is a ledgered `Task { }`
+    /// site (see
+    /// `Central.startNotificationPump(peripheral:characteristic:token:survivesReconnect:deliver:finish:)`).
     var notificationPumps: [UUID: Task<Void, Never>] = [:]
 
-    /// Tokens registered with `survivesReconnect: true` — intersected with each
-    /// subscription's `subscriberTokens` at disconnect time to decide who parks in
-    /// `Central.dormantNotifications` rather than finishing.
+    /// Tokens registered with `survivesReconnect: true`. At a disconnect, the code intersects
+    /// them with each subscription's `subscriberTokens`. The result decides which tokens park
+    /// in `Central.dormantNotifications` and which finish.
     var notificationSurvivorTokens: Set<UUID> = []
 
-    /// The in-flight re-arm task for this session's reconnect, if any — a ledgered `Task`
-    /// site (see `Central.rearmDormantNotifications(_:)`); cancelled by
-    /// `Central.failPendingGATTContinuations(for:error:)`.
+    /// The re-arm task in progress after this session's reconnect, if any. It is a ledgered
+    /// `Task` site (see `Central.rearmDormantNotifications(_:)`).
+    /// `Central.failPendingGATTContinuations(for:error:)` cancels it.
     var rearmTask: Task<Void, Never>?
 
     // MARK: - L2CAP
 
-    /// Pending L2CAP channel-open waiters, keyed by the same monotonic token as the GATT
-    /// discovery waiters. FIFO-matched: a `didOpenL2CAPChannel` resolves the oldest waiter.
+    /// Pending L2CAP channel-open waiters, keyed by the same increasing token as the GATT
+    /// discovery waiters. They match in FIFO order: a `didOpenL2CAPChannel` resolves the
+    /// oldest waiter.
     var pendingL2CAPOpens: [UInt64: CheckedContinuation<any L2CAPChannelRemote, Error>] = [:]
 
-    /// Every open L2CAP channel's transport, keyed by its `L2CAPChannel` handle's
-    /// registration token. Torn down by disconnect cleanup or an explicit `L2CAPChannel.close()`.
+    /// The transport of every open L2CAP channel, by the registration token of its
+    /// `L2CAPChannel` handle. The disconnect cleanup or an explicit `L2CAPChannel.close()`
+    /// tears it down.
     var l2capChannels: [UUID: any L2CAPChannelRemote] = [:]
 
-    /// The single `Session`-building shape for every **adoption** path — the peripheral is
-    /// already connected, so no `connect` call exists to have specified a policy or timeout.
-    /// Policy is ``ReconnectPolicy/never``.
+    /// Builds the `Session` for every **adoption** path. The peripheral is already connected,
+    /// so no `connect` call specified a policy or timeout. The policy is
+    /// ``ReconnectPolicy/never``.
     static func adopted(
         identifier: PeripheralIdentifier,
         peripheral: any PeripheralRemote,
@@ -4536,65 +4564,67 @@ private struct Session {
     /// Backs ``nextGATTWaiterToken()``.
     private var nextWaiterTokenValue: UInt64 = 0
 
-    /// Hands out a fresh, monotonically increasing token identifying one GATT waiter —
-    /// letting a single cancelled waiter be removed by key without disturbing others.
+    /// Returns a new, increasing token that identifies one GATT waiter, so the code can remove
+    /// a single cancelled waiter by key and leave the others.
     mutating func nextGATTWaiterToken() -> UInt64 {
         defer { nextWaiterTokenValue += 1 }
         return nextWaiterTokenValue
     }
 }
 
-/// One characteristic's active notification subscription: the raw-`Data` multicast every
-/// subscriber shares, plus the refcount driving `setNotifyValue`'s lifecycle.
+/// The active notification subscription of one characteristic. It has the raw-`Data`
+/// multicast that every subscriber shares, and the reference count that drives the
+/// `setNotifyValue` lifecycle.
 private struct NotificationSubscription {
-    /// The raw-`Data` multicast: decode happens per caller, in each subscriber's own decode
-    /// layer, so one subscriber's decode failure can't affect the others.
+    /// The raw-`Data` multicast. Each subscriber decodes in its own decode layer, so one
+    /// subscriber's decode failure cannot affect the others.
     let broadcaster = ThrowingBroadcaster<Data>()
 
-    /// One token per live subscriber. A token set (not a bare count) so release is
-    /// idempotent — a stray double-release can't underflow the refcount.
+    /// One token for each live subscriber. A token set and not a bare count makes the release
+    /// idempotent, so a double release cannot underflow the reference count.
     var subscriberTokens: Set<UUID> = []
 
-    /// Whether the `setNotifyValue(true)` handshake has completed. Notifications received
-    /// before confirmation are still multicast; late joiners await this instead of racing it.
+    /// Whether the `setNotifyValue(true)` handshake has completed. Notifications that arrive
+    /// before the confirmation are still multicast. Late joiners wait for this flag.
     var enableConfirmed = false
 
-    /// Joiners suspended waiting for ``enableConfirmed``, keyed by subscriber token.
-    /// Take-then-resume.
+    /// Joiners that wait for ``enableConfirmed``, by subscriber token. The code removes a
+    /// waiter and then resumes it.
     var enableWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
 }
 
-/// One peripheral's notification subscriptions parked between an unexpected disconnect
-/// and a successful auto-reconnect — see `Central.dormantNotifications`.
+/// The notification subscriptions of one peripheral, parked between an unexpected disconnect
+/// and a successful auto-reconnect. See `Central.dormantNotifications`.
 private struct DormantNotifications {
-    /// The error the disconnect carried; surviving streams finish with it if the reconnect
-    /// never succeeds.
+    /// The disconnect's error. The surviving streams finish with it if the reconnect never
+    /// succeeds.
     let disconnectError: Error
-    /// Per characteristic, the surviving subscriber tokens and each token's parked pump
-    /// continuation.
+    /// For each characteristic, the surviving subscriber tokens and the parked pump
+    /// continuation of each token.
     var characteristics: [CharacteristicIdentifier: DormantSubscription]
-    /// Surviving pump tasks by token, so a typed-stream termination during the gap can
-    /// cancel one; moved back into `Session.notificationPumps` on re-arm.
+    /// Surviving pump tasks by token, so that a typed stream's termination during the gap can
+    /// cancel one. On re-arm, the code moves them back into `Session.notificationPumps`.
     var pumps: [UUID: Task<Void, Never>]
 }
 
-/// One characteristic's parked survivors — see ``DormantNotifications``.
+/// The parked survivors of one characteristic. See ``DormantNotifications``.
 private struct DormantSubscription {
     /// The surviving subscriber tokens.
     var tokens: Set<UUID>
-    /// Continuations of pumps parked in `Central.awaitResubscription(identifier:characteristic:token:)`,
-    /// keyed by token. Take-then-resume.
+    /// Continuations of pumps parked in
+    /// `Central.awaitResubscription(identifier:characteristic:token:)`, by token. The code
+    /// removes a continuation and then resumes it.
     var waiters: [UUID: CheckedContinuation<AsyncThrowingStream<Data, Error>, Error>] = [:]
 }
 
-/// A single-consumer box around an `AsyncThrowingStream` iterator, letting
-/// `Central.performFlush(peripheral:characteristic:quietPeriod:)` re-`await` `next()` inside
-/// successive `withTimeout` races — whose `@Sendable` closures can't capture a mutable local
-/// iterator directly.
+/// A single-consumer box around an `AsyncThrowingStream` iterator. It lets
+/// `Central.performFlush(peripheral:characteristic:quietPeriod:)` call `await next()` again
+/// in successive `withTimeout` races, whose `@Sendable` closures cannot capture a mutable
+/// local iterator.
 ///
-/// `iterator` is `nonisolated(unsafe)` (not a type-wide `@unchecked Sendable`, which stays
-/// grep-forbidden) because access is strictly sequential by construction: each
-/// `withTimeout` window fully completes before the next begins.
+/// `iterator` is `nonisolated(unsafe)`. The type is not `@unchecked Sendable`, which a grep
+/// check forbids. Access is strictly sequential by construction: each `withTimeout` window
+/// completes before the next begins.
 private final class SequentialAccessIterator<Element: Sendable>: Sendable {
     nonisolated(unsafe) private var iterator: AsyncThrowingStream<Element, Error>.Iterator
 
@@ -4602,26 +4632,25 @@ private final class SequentialAccessIterator<Element: Sendable>: Sendable {
         self.iterator = stream.makeAsyncIterator()
     }
 
-    /// Advances the boxed iterator. Callers must uphold the strictly-sequential access
-    /// contract described on this type.
+    /// Advances the boxed iterator. Callers must keep the strictly sequential access that the
+    /// type documents.
     func next() async throws -> Element? {
         try await iterator.next()
     }
 }
 
-/// State while disconnecting — either an explicit `disconnect` call (`continuation`
-/// non-`nil`) or `cancelAllOperations` cancelling a pending connect attempt (`nil`).
+/// State while disconnecting, after an explicit `disconnect` call (`continuation` is
+/// non-`nil`) or after `cancelAllOperations` cancelled a pending connect attempt (`nil`).
 private struct Disconnecting {
     let identifier: PeripheralIdentifier
     let peripheral: any PeripheralRemote
-    /// The `disconnect()` call's own continuation, if this
-    /// `Disconnecting` was entered that way.
+    /// The `disconnect()` call's continuation, if an explicit disconnect entered this state.
     var continuation: CheckedContinuation<Void, Error>?
-    /// A connect attempt's continuation, carried over if `disconnect`/`cancelAllOperations`
-    /// interrupted a `.connecting` phase — resolved (with `connectFailureReason`) alongside
-    /// `continuation` once cleanup runs.
+    /// The connect attempt's continuation, carried over if `disconnect` or
+    /// `cancelAllOperations` interrupted a `.connecting` phase. With `continuation`, it
+    /// resolves (with `connectFailureReason`) when the cleanup runs.
     var connectContinuation: CheckedContinuation<Peripheral, Error>?
-    /// The error `connectContinuation` resolves with — `.explicitDisconnect` for
-    /// `disconnect`, or `cancelAllOperations(error:)`'s caller-supplied error.
+    /// The error that `connectContinuation` resolves with: `.explicitDisconnect` for
+    /// `disconnect`, or the error from `cancelAllOperations(error:)`.
     let connectFailureReason: Error
 }

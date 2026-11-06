@@ -9,8 +9,8 @@ import BLESwiftProvider
 import Dispatch
 import Foundation
 
-// Line-buffer stdout so the "listening on …" line reaches a redirected log
-// (a pipe or file) immediately; scripts wait on that line for readiness.
+// Line-buffer stdout, so the "listening on …" line reaches a redirected log (a pipe or a file)
+// immediately. Scripts wait on that line to know that the provider is ready.
 setlinebuf(stdout)
 
 let arguments = Array(CommandLine.arguments.dropFirst())
@@ -34,10 +34,9 @@ configuration.codec = options.codec
 configuration.passthrough = options.passthrough
 configuration.log = { print($0) }
 
-// A fixture that cannot be read or decoded exits `66` (`EX_NOINPUT`) with the underlying
-// error printed. Every UUID string in the document is validated while decoding — a typo like
-// `"zzzz"` arrives here as a `DecodingError` naming the key it sits under, rather than
-// trapping the provider inside `ServiceIdentifier`.
+// If a fixture cannot be read or decoded, print the underlying error and exit with `66`
+// (`EX_NOINPUT`). Decoding validates every UUID string, so a typo such as `"zzzz"` arrives here
+// as a `DecodingError` that names its key and does not trap inside `ServiceIdentifier`.
 for path in options.fixturePaths {
     do {
         let document = try FixtureDocument.load(from: URL(fileURLWithPath: path))
@@ -48,8 +47,8 @@ for path in options.fixturePaths {
     }
 }
 
-// The link authenticates nobody, so a listener that is not on loopback is worth one line at
-// startup — it is serving the Mac's radio to anything that can reach the port.
+// The link does not authenticate any client. If the listener is not on loopback, print one
+// warning line. Such a listener gives the Mac's radio to anything that can reach the port.
 if let warning = ProviderCommandLine.nonLoopbackWarning(for: options.endpoint) {
     FileHandle.standardError.write(Data("\(warning)\n".utf8))
 }
@@ -59,8 +58,8 @@ let provider = Provider(configuration: configuration)
 Task {
     do {
         try await provider.start()
-        // The bound port, not the requested one: `--listen host:0` asks the system to pick,
-        // and the line scripts wait on has to name the port they can actually dial.
+        // Print the bound port, not the requested port: `--listen host:0` asks the system to
+        // select one, and scripts must be able to dial the port in the line.
         let bound = LinkEndpoint(host: options.endpoint.host, port: await provider.port)
         print(
             "bleswift-provider listening on \(bound) "
@@ -68,8 +67,8 @@ Task {
                 + "fixtures: \(configuration.fixtures.count) device(s))"
         )
     } catch let error as ProviderFixtureError {
-        // A fixture the provider cannot host is a bad input, not a failed bind: exits `66`
-        // (`EX_NOINPUT`) with the loaded documents, the way an unreadable one does.
+        // A fixture that the provider cannot host is a bad input, not a failed bind. Exit with
+        // `66` (`EX_NOINPUT`), as for an unreadable fixture.
         FileHandle.standardError.write(Data("bleswift-provider: \(error)\n".utf8))
         exit(66)
     } catch {
@@ -78,8 +77,8 @@ Task {
     }
 }
 
-// SIGINT for a terminal Ctrl-C, SIGTERM for a plain `kill` from a script; both run
-// `provider.stop()` so every client's link is closed before the process goes away.
+// SIGINT is for Ctrl-C in a terminal. SIGTERM is for a plain `kill` from a script. Both run
+// `provider.stop()`, so the provider closes each client's link before the process ends.
 let signalSources = [SIGINT, SIGTERM].map { signal -> DispatchSourceSignal in
     Foundation.signal(signal, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: signal, queue: .main)

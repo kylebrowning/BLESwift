@@ -60,9 +60,9 @@ struct IdentifierTests {
 
     // MARK: - CBUUID parity (T1.3 BINDING requirement)
 
-    /// A corpus of valid UUID strings covering every accepted shape (4-hex short form,
-    /// 8-hex long-short form, 36-char dashed 128-bit form) in both upper- and lowercase,
-    /// plus a couple of real Bluetooth SIG UUIDs.
+    /// A corpus of valid UUID strings. It covers every accepted form (the 4-hex short form, the
+    /// 8-hex long-short form, and the 36-character dashed 128-bit form), uppercase and lowercase,
+    /// and some real Bluetooth SIG UUIDs.
     private static let validCorpus: [String] = [
         "180D", "180d", "2A37", "2a37",
         "0000180D", "0000180d", "FFFFFFFF", "ffffffff",
@@ -83,22 +83,19 @@ struct IdentifierTests {
         #expect(pureResult == cbResult)
     }
 
-    // NOTE — invalid-corpus trapping behavior (manually verified, not runtime-tested):
-    // Swift Testing has no facility to catch a `preconditionFailure` trap, so the invalid
-    // corpus below is NOT exercised by an automated test — each was manually verified
-    // (interactively, via a scratch executable) to trap identically to
-    // `CBUUID(string:)`'s own ObjC-exception-based trap ("String <x> does not represent a
-    // valid UUID"), for both `ServiceIdentifier(uuid:)`/`CharacteristicIdentifier(uuid:)`
-    // and `CBUUID(string:)`:
-    //   - "" (empty string)
-    //   - "18" (too short — not 4, 8, or 36 characters)
-    //   - "180D0" (5 characters)
-    //   - "ZZZZ" (4 characters, non-hex)
-    //   - "6E400001B5A3F393E0A9E50E24DCCA9E" (32 hex characters, no dashes — CBUUID
-    //     rejects this exact form, verified against the real SDK during T1 planning)
-    //   - "6E400001-B5A3-F393-E0A9-E50E24DCCA9" (35 characters — one short)
-    //   - "GE400001-B5A3-F393-E0A9-E50E24DCCA9E" (36 characters, non-hex digit at a hex
-    //     position)
-    //   - "6E400001XB5A3-F393-E0A9-E50E24DCCA9E" (36 characters, wrong character at a
-    //     dash position)
+    // NOTE: The tests do not run the invalid corpus, because Swift Testing cannot catch a
+    // `preconditionFailure` trap. A person verified each string interactively with a scratch
+    // executable. Each traps as `CBUUID(string:)` does, with an ObjC exception ("String <x> does
+    // not represent a valid UUID"), for `ServiceIdentifier(uuid:)`,
+    // `CharacteristicIdentifier(uuid:)`, and `CBUUID(string:)`. The strings are:
+    // - "" (empty string)
+    // - "18" (too short: not 4, 8, or 36 characters)
+    // - "180D0" (5 characters)
+    // - "ZZZZ" (4 characters, not hex)
+    // - "6E400001B5A3F393E0A9E50E24DCCA9E" (32 hex characters, no dashes). The real SDK's CBUUID
+    //   rejects this exact form.
+    // - "6E400001-B5A3-F393-E0A9-E50E24DCCA9" (35 characters, one too few)
+    // - "GE400001-B5A3-F393-E0A9-E50E24DCCA9E" (36 characters, a non-hex digit at a hex position)
+    // - "6E400001XB5A3-F393-E0A9-E50E24DCCA9E" (36 characters, a wrong character at a dash
+    //   position)
 }

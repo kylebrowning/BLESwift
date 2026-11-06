@@ -8,9 +8,9 @@ import Foundation
 import Network
 import BLESwiftCompat17
 
-/// TCP parameters shared by ``LinkConnection`` and ``LinkListener``.
+/// TCP parameters that ``LinkConnection`` and ``LinkListener`` share.
 enum LinkTransportParameters {
-    /// TCP with Nagle disabled — a link carries small, latency-sensitive notifications.
+    /// TCP with Nagle disabled. A link carries small notifications that need low latency.
     static func tcp() -> NWParameters {
         let parameters = NWParameters.tcp
         if let options = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
@@ -19,20 +19,21 @@ enum LinkTransportParameters {
         return parameters
     }
 
-    /// Which family's loopback address a host names.
+    /// The family of a loopback address.
     enum Loopback {
         case ipv4
         case ipv6
     }
 
-    /// The loopback address `host` names, or `nil` when it names something else — in which
-    /// case a listener binds every interface rather than loopback alone.
+    /// The loopback address family that `host` names, or `nil` if `host` names something else. In
+    /// that case a listener binds every interface.
     ///
-    /// Recognized: `localhost` — which a ``LinkEndpoint`` normalizes away before a listener
-    /// ever sees it, and which is kept here only for a host string that reached this type by
-    /// another route — anything in `127.0.0.0/8` (the whole block, not just
-    /// `127.0.0.1` — `127.0.0.2` is as much this machine as `127.0.0.1` is), and the IPv6
-    /// loopback `::1`, bracketed or not, since `[::1]` is how it is written beside a port.
+    /// These hosts are recognized:
+    ///
+    /// - `localhost`. A ``LinkEndpoint`` normalizes it before a listener sees it, so this case
+    ///   matters only for a host string that arrived by another route.
+    /// - Anything in `127.0.0.0/8`, not only `127.0.0.1`.
+    /// - The IPv6 loopback `::1`, with or without brackets.
     static func loopback(_ host: String) -> Loopback? {
         switch host {
         case "localhost":
@@ -44,7 +45,7 @@ enum LinkTransportParameters {
         }
     }
 
-    /// `true` when `host` names the loopback interface, in which case a listener binds only there.
+    /// Whether `host` names the loopback interface. In that case a listener binds only there.
     static func isLoopback(_ host: String) -> Bool {
         loopback(host) != nil
     }
@@ -53,39 +54,40 @@ enum LinkTransportParameters {
     private static func isIPv4Loopback(_ host: String) -> Bool {
         let parts = host.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 4, parts[0] == "127" else { return false }
-        // `UInt8.init` alone would accept a signed `"+1"`, so the digits are checked too.
+        // `UInt8.init` alone would accept a signed `"+1"`, so also check the digits.
         return parts.allSatisfy { part in
             !part.isEmpty && part.allSatisfy(\.isASCII) && part.allSatisfy(\.isNumber) && UInt8(part) != nil
         }
     }
 }
 
-/// Why a ``LinkListener`` refused to do something.
+/// The reason why a ``LinkListener`` refused an action.
 public enum LinkListenerError: Error, Equatable, Sendable {
-    /// ``LinkListener/start()`` was called more than once on the same listener.
+    /// The caller called ``LinkListener/start()`` more than once on the same listener.
     case alreadyStarted
 }
 
 /// Accepts framed message connections on a TCP port.
 ///
-/// Each accepted connection is wrapped in a ``LinkConnection``, started, and handed to
-/// ``onConnection`` on the `queue` supplied at initialization. Binding to a loopback host —
-/// any `127.x.y.z`, or `::1` (bracketed or not), which binds the IPv6 loopback — restricts the
-/// listener to the loopback interface; any other host binds every interface on the port.
+/// The listener wraps each accepted connection in a ``LinkConnection``, starts it, and gives it to
+/// ``onConnection`` on the `queue` from the initializer.
 ///
-/// A ``LinkEndpoint`` stores `localhost` as `127.0.0.1`, so a listener and a client handed the
-/// same host string always agree on which loopback family they are on — the name itself
-/// resolves to both.
+/// If the host is a loopback host, the listener binds to the loopback interface only. A loopback
+/// host is any `127.x.y.z` or `::1`, with or without brackets. `::1` binds the IPv6 loopback.
+/// Any other host binds every interface on the port.
+///
+/// A ``LinkEndpoint`` stores `localhost` as `127.0.0.1`, so a listener and a client that get the
+/// same host string always use the same loopback family.
 public final class LinkListener: Sendable {
 
-    /// Everything mutable, guarded by one lock.
+    /// All mutable state. One lock guards it.
     private struct Storage {
         var onConnection: (@Sendable (LinkConnection) -> Void)?
         var port: UInt16 = 0
         var startContinuation: CheckedContinuation<Void, any Error>?
         var didStart = false
-        /// Set once the awaiting task is cancelled, so a `start()` that has not yet stored its
-        /// continuation fails immediately rather than waiting on a listener already cancelled.
+        /// Set when the awaiting task is cancelled. A `start()` that has not yet stored its
+        /// continuation then fails at once.
         var isCancelled = false
     }
 
@@ -94,15 +96,16 @@ public final class LinkListener: Sendable {
     private let queue: DispatchQueue
     private let storage = Mutex(Storage())
 
-    /// Creates a listener for `endpoint`. Use port `0` to have the system pick a free port, then
-    /// read ``port`` after ``start()`` returns. Throws if the parameters or port are rejected.
+    /// Creates a listener for `endpoint`. For a system-chosen free port, use port `0` and read
+    /// ``port`` after ``start()`` returns. Throws if the system rejects the parameters or the
+    /// port.
     public init(endpoint: LinkEndpoint, codec: LinkCodec, queue: DispatchQueue) throws {
         let parameters = LinkTransportParameters.tcp()
         let port = NWEndpoint.Port(rawValue: endpoint.port) ?? .any
         switch LinkTransportParameters.loopback(endpoint.host) {
         case .some(let family):
-            // `requiredLocalEndpoint` already names the port; passing it to `on:` as well is
-            // rejected as EINVAL, so the loopback path binds through the parameters alone.
+            // `requiredLocalEndpoint` already names the port. A port that is also passed to `on:`
+            // gives EINVAL, so the loopback path binds through the parameters only.
             let host: NWEndpoint.Host = family == .ipv6 ? .ipv6(.loopback) : .ipv4(.loopback)
             parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)
             self.listener = try NWListener(using: parameters)
@@ -113,29 +116,28 @@ public final class LinkListener: Sendable {
         self.queue = queue
     }
 
-    /// Called on `queue` with each accepted connection, already started.
+    /// Called on `queue` with each accepted connection. The connection is already started.
     public var onConnection: (@Sendable (LinkConnection) -> Void)? {
         get { storage.withLock { $0.onConnection } }
         set { storage.withLock { $0.onConnection = newValue } }
     }
 
-    /// The port the listener is bound to. Valid only after ``start()`` has returned; `0` before
-    /// that.
+    /// The bound port. The value is `0` until ``start()`` returns.
     public var port: UInt16 { storage.withLock { $0.port } }
 
-    /// Starts listening and returns once the port is bound, so ``port`` is valid on return.
+    /// Starts to listen. Returns when the port is bound, so ``port`` is valid on return.
     ///
-    /// **Cancellable.** Cancelling the awaiting task cancels the listener and fails this call
-    /// with `CancellationError`, including when the task was already cancelled on the way in —
-    /// binding is otherwise the one step of provider startup with nothing to interrupt it, and
-    /// a caller racing a bind against a timeout would be left holding a listener it never
-    /// learned about. The resumption is one-shot, so a cancellation landing alongside the
-    /// listener's own `.ready` or `.failed` is harmless.
+    /// **This function is cancellable.** If the awaiting task is cancelled, including a task that
+    /// was already cancelled when it called, the listener is cancelled and this call fails with
+    /// `CancellationError`. Without this, a caller that races the bind against a timeout would
+    /// keep a listener that it does not know about. The resumption is one-shot, so a cancellation
+    /// that arrives with the listener's `.ready` or `.failed` does no harm.
     ///
-    /// - Throws: ``LinkListenerError/alreadyStarted`` if the listener was already started,
-    ///   `CancellationError` if the awaiting task is cancelled, or the `NWError` reported by
-    ///   the listener if it fails or has to wait to bind — a port already in use is a failure
-    ///   here, never something to sit and retry.
+    /// - Throws:
+    ///   - ``LinkListenerError/alreadyStarted`` if the listener was already started.
+    ///   - `CancellationError` if the awaiting task is cancelled.
+    ///   - The `NWError` that the listener reports if it fails or must wait to bind. A port that
+    ///     is in use is a failure. The function does not wait and retry.
     public func start() async throws {
         try storage.withLock { storage in
             guard !storage.didStart else { throw LinkListenerError.alreadyStarted }
@@ -151,9 +153,9 @@ public final class LinkListener: Sendable {
     /// Binds the listener and suspends until it is ready, fails, or is cancelled.
     private func bind() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-            // A task cancelled before this ran already had `onCancel` fire against an empty
-            // continuation slot; nothing would ever resume this one, so it is failed here
-            // instead — and the listener is not started at all.
+            // If the task was cancelled before this code ran, `onCancel` already fired against an
+            // empty continuation slot and nothing would resume this continuation. Fail it here.
+            // The listener does not start.
             let wasCancelled = storage.withLock { storage -> Bool in
                 guard !storage.isCancelled else { return true }
                 storage.startContinuation = continuation
@@ -185,8 +187,8 @@ public final class LinkListener: Sendable {
                         return storage.startContinuation
                     }?.resume()
                 case .waiting(let error):
-                    // Binding is one-shot: a port already in use must fail `start()` rather than
-                    // leave the caller awaiting a retry that may never succeed.
+                    // The bind is one-shot. If the port is in use, `start()` must fail and not wait
+                    // for a retry that may never succeed.
                     self.resumeStart(throwing: error as NSError)
                 case .failed(let error):
                     self.resumeStart(throwing: error as NSError)
@@ -200,21 +202,22 @@ public final class LinkListener: Sendable {
         }
     }
 
-    /// Cancels the listener and fails a pending ``start()`` with `CancellationError`. Safe
-    /// before the continuation exists: the flag makes ``bind()`` fail on sight.
+    /// Cancels the listener and fails a pending ``start()`` with `CancellationError`. It is safe
+    /// to call before the continuation exists, because the flag makes ``bind()`` fail at once.
     private func cancelStart() {
         storage.withLock { $0.isCancelled = true }
         resumeStart(throwing: CancellationError())
     }
 
-    /// Stops listening. Already-accepted connections are unaffected. Idempotent.
+    /// Stops the listener. Connections that it already accepted stay open. Repeated calls have no
+    /// effect.
     public func cancel() {
         listener.cancel()
     }
 
     // MARK: - Internals
 
-    /// Fails a pending ``start()``, if one is still waiting, and tears the listener down.
+    /// Fails a pending ``start()``, if one is waiting, and tears down the listener.
     private func resumeStart(throwing error: some Error) {
         listener.cancel()
         storage.withLock { storage -> CheckedContinuation<Void, any Error>? in

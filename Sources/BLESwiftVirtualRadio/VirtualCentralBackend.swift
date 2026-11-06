@@ -8,108 +8,101 @@ import Dispatch
 import Foundation
 import BLESwiftCompat17
 
-/// A `CentralManaging` served by a ``VirtualRadio`` instead of CoreBluetooth
-/// — hand one to `Central(backend:queue:)` and the resulting `Central` talks to the radio's
-/// virtual devices with no hardware involved.
+/// A `CentralManaging` that a ``VirtualRadio`` serves instead of CoreBluetooth.
+/// Give one to `Central(backend:queue:)`. The resulting `Central` talks to the radio's virtual
+/// devices. No hardware is necessary.
 ///
-/// Any number of backends may share one radio; each registers under its own session
-/// identifier, so scans, connections, and subscriptions never leak between them.
+/// Any number of backends can share one radio. Each registers under its own session identifier, so
+/// scans, connections, and subscriptions never leak between backends.
 ///
-/// **Concurrency — queue-confined, not lock-protected.** Every stored property is
-/// `nonisolated(unsafe)` and touched only on ``queue``, which every `CentralManaging`
-/// method asserts at entry. Work reaches the radio actor through one serial chain of
-/// `Task`s rooted in this backend's attachment (see `enqueue(_:)`) and every event is
-/// delivered back with `queue.async`, never inline — the delivery contract
-/// `CentralManaging` requires.
+/// **Concurrency: the queue confines the state. A lock does not protect it.**
+/// Every stored property is `nonisolated(unsafe)` and code touches it only on ``queue``. Every
+/// `CentralManaging` method asserts this at entry. Work reaches the radio actor through one serial
+/// chain of `Task`s, rooted in the backend's attachment. See `enqueue(_:)`. The backend delivers
+/// every event back with `queue.async`, never inline, as `CentralManaging` requires.
 public final class VirtualCentralBackend: CentralManaging, Sendable {
 
-    /// The queue every method and event delivery is confined to.
+    /// The queue that confines every method and every event delivery.
     public let queue: DispatchQueue
 
-    /// This backend's identity to the radio. Also the `Subscriber` id that
-    /// device handlers see for traffic originating here.
+    /// The identity of this backend to the radio. It is also the `Subscriber` id that device
+    /// handlers see for traffic that starts here.
     public let sessionID = UUID()
 
     private let radio: VirtualRadio
 
     nonisolated(unsafe) private var _eventHandler: ((CentralEvent) -> Void)?
 
-    /// The remote vended for each identifier this backend has been asked for, so the same
-    /// instance is returned every time — the object the radio's events are routed to.
+    /// The remote that the backend vended for each identifier. The backend returns the same
+    /// instance each time, and the radio routes its events to it.
     ///
-    /// **Bounded, least recently vended first.** The same cap, for the same reason, as the
-    /// sighting history above and the provider session's own remote table: a long-lived
-    /// backend asked for identifier after identifier would otherwise grow one remote per
-    /// identifier ever named, for the life of the process. Only a remote that is
-    /// `.disconnected` — nothing connecting, connected, or disconnecting — is ever dropped;
-    /// anything else is still carrying a live connection whose events must reach the very
-    /// instance the caller is holding, so it is kept however old it is. Forgetting one costs
-    /// a caller nothing: retrieving that identifier again mints a fresh remote, and
-    /// ``connect(_:options:requiresANCS:)`` re-files a remote the cap evicted rather than
-    /// ignoring it.
+    /// **Bounded. The least recently vended remote leaves first.**
+    /// Without a cap, a long-lived backend asked for identifier after identifier would grow one
+    /// remote for each identifier ever named.
+    ///
+    /// The backend drops only a `.disconnected` remote (nothing connecting, connected, or
+    /// disconnecting). Any other remote carries a live connection, and its events must reach the
+    /// instance that the caller holds, so the backend keeps it however old it is.
+    ///
+    /// A caller loses nothing when the backend forgets a remote. If the caller retrieves that
+    /// identifier again, the backend creates a new remote. ``connect(_:options:requiresANCS:)``
+    /// files an evicted remote again and does not ignore it.
     nonisolated(unsafe) private var _remotes: [UUID: VirtualPeripheralRemote] = [:]
 
-    /// ``_remotes``' keys in least-recently-vended order, which is what the cap evicts from.
+    /// The keys of ``_remotes`` in least-recently-vended order. The cap evicts from the start of
+    /// this list.
     nonisolated(unsafe) private var _remoteOrder: [UUID] = []
 
     /// How many remotes ``_remotes`` keeps.
     private let maximumRemotes: Int
 
-    /// The remote table's default size, used by the public initializer. Tests override it to
-    /// force eviction without naming a thousand identifiers.
+    /// The default size of the remote table. Tests override it to force eviction.
     package static let defaultMaximumRemotes = 1024
 
     nonisolated(unsafe) private var _announcedState = false
 
-    /// Identifiers this backend has reported a sighting for. A device removed from the radio
-    /// after being seen stays retrievable exactly as CoreBluetooth keeps vending a
-    /// `CBPeripheral` for a peer it has scanned; the connect attempt is what then fails.
+    /// The identifiers for which this backend reported a sighting. A device that the radio removed
+    /// after the sighting stays retrievable. CoreBluetooth also keeps vending a `CBPeripheral` for
+    /// a peer that it scanned, and the connect attempt then fails.
     ///
-    /// **Bounded, oldest first.** Of the two ways to keep a long-lived session's sighting
-    /// history from growing without limit — pruning identifiers the radio no longer knows, or
-    /// capping the history — this takes the cap, because pruning is the one that changes
-    /// behavior: a removed device would stop being retrievable, which is exactly the
-    /// CoreBluetooth-shaped property the set exists to provide. The cap only forgets sightings
-    /// ``maximumDiscovered`` devices old, which no client can still be holding an identifier
-    /// from that it has not also connected to.
+    /// **Bounded. The oldest sighting leaves first.** The code caps the history. It does not prune
+    /// identifiers that the radio no longer knows, because that would make a removed device
+    /// unretrievable. The cap forgets only sightings that are ``maximumDiscovered`` devices old. A
+    /// client cannot still hold an identifier from such an old sighting unless it also connected to
+    /// that device.
     nonisolated(unsafe) private var _discovered: Set<UUID> = []
 
-    /// The order ``_discovered`` was filled in, so the cap can drop the oldest sighting.
+    /// The order in which ``_discovered`` was filled. The cap drops the oldest sighting.
     nonisolated(unsafe) private var _discoveryOrder: [UUID] = []
 
     /// How many sightings ``_discovered`` remembers.
     private let maximumDiscovered: Int
 
-    /// The sighting history's default size, used by the public initializer. Tests override it
-    /// to force eviction without reporting a thousand sightings.
+    /// The default size of the sighting history. Tests override it to force eviction.
     package static let defaultMaximumDiscovered = 1024
 
-    /// The serial chain of radio work, rooted in this backend's attachment. Swift guarantees
-    /// no ordering between independent `Task`s, so a `scan` and the `stopScan` right behind it
-    /// could otherwise reach the actor in either order — leaving a duplicate-reporting
-    /// repeater running for a scan that has already been stopped.
+    /// The serial chain of radio work, rooted in the backend's attachment. Swift gives no ordering
+    /// between independent `Task`s. Without the chain, a `scan` and the `stopScan` after it could
+    /// reach the actor in either order, and a duplicate-reporting repeater would keep running for a
+    /// stopped scan.
     nonisolated(unsafe) private var _work: Task<Void, Never>!
 
-    /// The authorization status this backend reports: always `.allowedAlways`.
+    /// The authorization status that this backend reports. It is always `.allowedAlways`.
     ///
-    /// Constant, not settable — a virtual radio is never gated by the system's Bluetooth
-    /// permission, and a `static` setter would be process-wide state no one backend owns.
-    /// A test that needs a denied backend uses `BLESwiftTestSupport`'s fakes, whose
-    /// `bluetoothAuthorization` is scripted for exactly that.
+    /// The value is constant and not settable, because the system's Bluetooth permission never
+    /// gates a virtual radio. A test that needs a denied backend uses the fakes of
+    /// `BLESwiftTestSupport`, whose `bluetoothAuthorization` is scripted.
     public static var bluetoothAuthorization: BluetoothAuthorization { .allowedAlways }
 
-    /// Creates a backend served by `radio` and confined to `queue`.
+    /// Creates a backend that `radio` serves and that `queue` confines.
     ///
-    /// ``radioState`` is `CentralState.poweredOn` from construction; the
-    /// matching `didUpdateState` is delivered once, when a non-`nil` ``eventHandler`` is
-    /// first attached — mirroring CoreBluetooth, which reports its state only through the
-    /// delegate.
+    /// ``radioState`` is `CentralState.poweredOn` from construction. The matching `didUpdateState`
+    /// arrives once, when code first attaches a non-`nil` ``eventHandler``.
     ///
     /// - Parameters:
-    ///   - radio: The radio hosting the virtual devices to serve.
-    ///   - queue: The queue every method and event delivery is confined to — the same
-    ///     queue the owning `Central` is constructed with. Must be serial
-    ///     (`DispatchQueue(label:)` is).
+    ///   - radio: The radio that hosts the virtual devices to serve.
+    ///   - queue: The queue that confines every method and event delivery. It must be serial and be
+    ///     the queue that the owning `Central` uses.
     public convenience init(radio: VirtualRadio, queue: DispatchQueue) {
         self.init(
             radio: radio,
@@ -119,14 +112,13 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         )
     }
 
-    /// Creates a backend whose sighting history holds at most `maximumDiscovered`
-    /// identifiers and whose remote table holds at most `maximumRemotes` — the designated
-    /// initializer, for tests that cannot report ``defaultMaximumDiscovered`` sightings or
-    /// name ``defaultMaximumRemotes`` identifiers to force an eviction.
+    /// Creates a backend whose sighting history holds at most `maximumDiscovered` identifiers and
+    /// whose remote table holds at most `maximumRemotes`. This is the designated initializer. Tests
+    /// use it to force an eviction.
     ///
     /// - Parameters:
-    ///   - radio: The radio hosting the virtual devices to serve.
-    ///   - queue: The queue every method and event delivery is confined to.
+    ///   - radio: The radio that hosts the virtual devices to serve.
+    ///   - queue: The queue that confines every method and event delivery.
     ///   - maximumDiscovered: How many sightings to remember.
     ///   - maximumRemotes: How many peripheral remotes to keep.
     package init(
@@ -140,34 +132,34 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         self.maximumDiscovered = maximumDiscovered
         self.maximumRemotes = maximumRemotes
         let session = sessionID
-        // Weak, so the radio's registration never keeps this backend alive; the strong
-        // reference the hop takes lasts only as long as the delivery itself.
+        // The reference is weak, so the radio's registration never keeps this backend alive. The
+        // hop's strong reference lasts only as long as the delivery.
         let sink: @Sendable (CentralEvent) -> Void = { [weak self] event in
             guard let self else { return }
             self.queue.async { self.deliver(event) }
         }
-        // The root of the chain: nothing this backend asks of the radio can outrun the
-        // attachment that gives the radio somewhere to answer.
+        // The root of the chain. Nothing that this backend asks of the radio can outrun the
+        // attachment.
         _work = Task { [radio] in
             await radio.attach(session: session, centralSink: sink)
         }
     }
 
-    /// Detaches from the radio, immediately and then again behind whatever work is still
-    /// queued.
+    /// Detaches from the radio twice: once immediately, and once behind the work still queued.
     ///
-    /// The first detach is unconditional and comes *before* the chain is awaited: it is what
-    /// cancels a duplicate-reporting scan repeater, and a chain still waiting on a radio
-    /// answer that never comes would otherwise leave that repeater running for the life of
-    /// the process. The second detach covers the opposite order — a chain whose `attach` had
-    /// not run yet would re-register the session behind the first detach — and is free when
-    /// the session is already gone, since `detach` is idempotent.
+    /// The first detach is unconditional and comes *before* the code awaits the chain. It cancels a
+    /// duplicate-reporting scan repeater. Without it, a chain that waits on a radio answer that
+    /// never comes would leave that repeater running for the life of the process.
     ///
-    /// Every remote's delayed connect attempt is cancelled too, on ``queue``: the attempt
-    /// has not reached the radio, so the detach drops nothing for it, and left running its
-    /// sleep would hold the remote for the rest of a delay that no backend will ever answer.
+    /// The second detach covers the opposite order. A chain whose `attach` did not run yet would
+    /// register the session again behind the first detach. It costs nothing when the session is
+    /// already gone, because `detach` is idempotent.
     ///
-    /// Reading `_work` and `_remotes` off-queue is safe here: `deinit` runs only once every
+    /// The code also cancels every remote's delayed connect attempt, on ``queue``. The attempt did
+    /// not reach the radio, so the detach drops nothing for it. Its sleep would otherwise hold the
+    /// remote for the rest of a delay that no backend will answer.
+    ///
+    /// It is safe to read `_work` and `_remotes` off-queue here. `deinit` runs only after every
     /// reference is gone, and every queued delivery holds one.
     deinit {
         let radio = self.radio
@@ -184,8 +176,8 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// Appends `body` to the serial chain of radio work, so it runs after the attachment and
-    /// after every operation queued before it. Must be called on ``queue``.
+    /// Appends `body` to the serial chain of radio work, so it runs after the attachment and every
+    /// earlier operation. Call this method on ``queue``.
     private func enqueue(_ body: @escaping @Sendable () async -> Void) {
         dispatchPrecondition(condition: .onQueue(queue))
         let previous = _work
@@ -195,13 +187,11 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// Suspends until every piece of radio work queued so far has run — the chain's tail
-    /// at the moment this reads it, on ``queue``. Deliveries the chain hopped onto the queue
-    /// are not awaited; a caller that needs them flushed runs an empty block on the queue
-    /// after this returns.
+    /// Suspends until every piece of radio work queued so far has run. This is the chain's tail at
+    /// the moment this method reads it on ``queue``. It does not await the deliveries that the
+    /// chain hopped onto the queue. To flush them, run an empty block on the queue afterward.
     ///
-    /// Not API: a test hook, for asserting on what a race left behind once both sides of
-    /// it have run.
+    /// This is a test hook, not API. A test uses it to assert on what a race left behind.
     package func waitForPendingWork() async {
         let work = await withCheckedContinuation { (continuation: CheckedContinuation<Task<Void, Never>?, Never>) in
             queue.async { continuation.resume(returning: self._work) }
@@ -209,11 +199,12 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         await work?.value
     }
 
-    /// Delivers `event` to ``eventHandler``. Must be called on ``queue``.
+    /// Delivers `event` to ``eventHandler``. Call this method on ``queue``.
     ///
-    /// A disconnect also settles the affected remote's ``BLESwiftCore/PeripheralRemote/connectionState``
-    /// first, so it never reports `.connected` to a handler reacting to its own disconnect —
-    /// this is the path a radio-initiated disconnect (a removed device) arrives on.
+    /// A disconnect first settles the affected remote's
+    /// ``BLESwiftCore/PeripheralRemote/connectionState``, so the remote never reports `.connected`
+    /// to a handler that reacts to its own disconnect. A radio-initiated disconnect, such as a
+    /// device removal, arrives on this path.
     private func deliver(_ event: CentralEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
         if case .didDisconnect(let peripheral, _) = event {
@@ -225,8 +216,8 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         _eventHandler?(event)
     }
 
-    /// Records a sighting of `identifier`, forgetting the oldest one once the history is
-    /// full. Must be called on ``queue``.
+    /// Records a sighting of `identifier` and forgets the oldest sighting when the history is full.
+    /// Call this method on ``queue``.
     private func remember(_ identifier: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard _discovered.insert(identifier).inserted else { return }
@@ -235,8 +226,8 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         _discovered.remove(_discoveryOrder.removeFirst())
     }
 
-    /// The remote for `identifier`, created on first use and reused until the cap forgets
-    /// it. Must be called on ``queue``.
+    /// The remote for `identifier`. It is created on first use and reused until the cap forgets it.
+    /// Call this method on ``queue``.
     private func remote(for identifier: UUID) -> VirtualPeripheralRemote {
         dispatchPrecondition(condition: .onQueue(queue))
         if let existing = _remotes[identifier] {
@@ -254,10 +245,9 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         return created
     }
 
-    /// Files `remote` under its identifier, evicting a stale one first so the insert this is
-    /// about to make cannot itself be what the cap drops — a remote nothing has connected yet
-    /// is disconnected, which is exactly what the cap considers droppable. Must be called on
-    /// ``queue``.
+    /// Files `remote` under its identifier. It evicts a stale remote first, so the cap cannot drop
+    /// the remote being added. A remote that was never connected is `.disconnected`, so the cap can
+    /// drop it. Call this method on ``queue``.
     private func file(_ remote: VirtualPeripheralRemote) {
         dispatchPrecondition(condition: .onQueue(queue))
         evictStaleRemotes(reserving: _remotes[remote.identifier] == nil ? 1 : 0)
@@ -265,8 +255,8 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         touch(remote.identifier)
     }
 
-    /// Moves `identifier` to the most-recently-vended end of ``_remoteOrder``. Must be called
-    /// on ``queue``.
+    /// Moves `identifier` to the most-recently-vended end of ``_remoteOrder``. Call this method on
+    /// ``queue``.
     private func touch(_ identifier: UUID) {
         dispatchPrecondition(condition: .onQueue(queue))
         if let index = _remoteOrder.firstIndex(of: identifier) {
@@ -275,13 +265,13 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         _remoteOrder.append(identifier)
     }
 
-    /// Drops the least recently vended disconnected remotes until the table is back within
-    /// ``maximumRemotes``, detaching each one's event handler on the way out so nothing that
-    /// still holds it can deliver into a backend that has forgotten it. A remote in any other
-    /// connection state is left alone however old it is. Must be called on ``queue``.
+    /// Drops the least recently vended disconnected remotes until the table is within
+    /// ``maximumRemotes``. It detaches each dropped remote's event handler, so nothing that still
+    /// holds the remote can deliver into a backend that forgot it. It never touches a remote in
+    /// another connection state. Call this method on ``queue``.
     ///
-    /// - Parameter reserving: How many slots the caller is about to fill, kept free on top of
-    ///   the entries already in the table.
+    /// - Parameter reserving: How many slots the caller is about to fill. The method keeps them
+    ///   free.
     private func evictStaleRemotes(reserving: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         let limit = maximumRemotes - reserving
@@ -304,9 +294,8 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
 
     // MARK: - CentralManaging
 
-    /// Receives every `CentralEvent` this backend produces, on ``queue``.
-    /// The first non-`nil` attachment also triggers the one-shot
-    /// `didUpdateState(.poweredOn)`.
+    /// Receives every `CentralEvent` that this backend produces, on ``queue``. The first non-`nil`
+    /// attachment also triggers the one-shot `didUpdateState(.poweredOn)`.
     public var eventHandler: ((CentralEvent) -> Void)? {
         get {
             dispatchPrecondition(condition: .onQueue(queue))
@@ -321,15 +310,15 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// Always `CentralState.poweredOn` — a virtual radio is never off.
+    /// Always `CentralState.poweredOn`. A virtual radio is never off.
     public var radioState: CentralState {
         dispatchPrecondition(condition: .onQueue(queue))
         return .poweredOn
     }
 
-    /// Starts a radio scan. Every advertising device matching `services` is reported once
-    /// immediately; with `options.allowDuplicates`, matching devices are re-reported once
-    /// per second until ``stopScan()``.
+    /// Starts a radio scan. The backend reports every advertising device that matches `services`
+    /// once, immediately. With `options.allowDuplicates`, it reports matching devices again once
+    /// each second until ``stopScan()``.
     public func scanForPeripherals(withServices services: [ServiceIdentifier]?, options: ScanOptions) {
         dispatchPrecondition(condition: .onQueue(queue))
         enqueue { [radio, sessionID] in
@@ -345,64 +334,38 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// Connects to a virtual device. Succeeds for any registered device, advertising or
-    /// not; an unregistered identifier fails with ``VirtualRadio/unknownDeviceError``, and a
-    /// device with a connection failure armed (``VirtualDeviceHandle/failConnections(with:times:)``)
-    /// fails with that error, delivered unchanged as `didFailToConnect`.
+    /// Connects to a virtual device, advertising or not. The backend delivers the outcome as
+    /// `didConnect` or `didFailToConnect`, never inline.
     ///
-    /// **What happens depends on the remote's current `connectionState`:**
-    /// - `.disconnected`: the attempt goes to the radio, and `didConnect` or
-    ///   `didFailToConnect` reports its outcome.
-    /// - `.connected`: nothing goes to the radio and nothing changes; `didConnect` is
-    ///   delivered (hopped, never inline). The caller asked to be connected and is, and must
-    ///   not be left waiting on an attempt the radio would only have answered "still so".
-    /// - `.connecting`: a no-op. The pending attempt's own `didConnect` or
-    ///   `didFailToConnect` answers both requests.
-    /// - `.disconnecting`: nothing goes to the radio and the state is left alone;
-    ///   `didFailToConnect` with ``connectWhileDisconnectingError`` is delivered (hopped),
-    ///   **after the in-progress cancel's `didDisconnect`**: it goes through the serial
-    ///   chain, behind the cancel's step, so the two never arrive in the other order — which
-    ///   they could when the failure was posted from this turn and the cancel's step raced
-    ///   it. The caller sees the remote settle `.disconnected` first and the attempt refused
-    ///   second, and can ask again then. `BLESwiftProvider`'s `CentralSession` discards the
-    ///   peripheral's per-connection state — pending writes, L2CAP bridges — on the
-    ///   `didDisconnect`; the `didFailToConnect` behind it finds nothing left to discard.
+    /// - An unregistered identifier fails with ``VirtualRadio/unknownDeviceError``.
+    /// - A device with an armed failure (``VirtualDeviceHandle/failConnections(with:times:)``)
+    ///   fails with that error, unchanged.
+    /// - A device with a connect delay (``VirtualLatency/connect``) sleeps first. A cancel during
+    ///   the sleep withdraws the attempt.
     ///
-    /// A connect that reached the radio for a remote already connected was what let a forced
-    /// disconnect racing it strand the radio with a connection no remote stood behind. A
-    /// `Central` only ever connects a `.disconnected` remote — it reserves its slot only once
-    /// the previous connection's termination event has arrived — so the three other cases
-    /// matter only to a consumer driving the backend directly.
-    ///
-    /// **A device with a connect delay** (``VirtualLatency/connect``) sleeps it out *before*
-    /// the attempt is enqueued, on a task the remote holds as its `pendingConnect`, never in
-    /// the serial chain: a ``cancelPeripheralConnection(_:)`` queued behind a delayed attempt
-    /// would otherwise wait out the whole delay and then see a spurious `didConnect`. Once
-    /// the sleep ends the task hops onto ``queue`` and, only if the attempt is still the
-    /// current one, the remote is still `.connecting`, and nothing has cancelled it in
-    /// between, enqueues the very same connect body an undelayed attempt takes at once —
-    /// with every one of its guards. The radio sees nothing of the attempt until then: an
-    /// armed connection failure is consumed when the attempt lands, after the delay, and a
-    /// forced disconnect during the delay finds no connection and does nothing. A device
-    /// without a delay takes the undelayed path unchanged.
+    /// The remote's `connectionState` decides the result. `.disconnected` sends the attempt to the
+    /// radio. `.connected` delivers `didConnect` and changes nothing. `.connecting` does nothing,
+    /// and the pending attempt answers both requests. `.disconnecting` delivers `didFailToConnect`
+    /// with ``connectWhileDisconnectingError``, after the cancel's `didDisconnect`. See
+    /// <doc:InProcessMocking#Driving-the-backend-directly>.
     public func connect(_ peripheral: any PeripheralRemote, options: WarningOptions?, requiresANCS: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
-        // **A remote the cap evicted is re-filed rather than refused.** The table is bounded,
-        // so a caller holding a remote retrieved long enough ago can find its entry gone by
-        // the time it connects, and dropping the request would leave that caller waiting for
-        // a `didConnect` nothing was ever going to send. The test is on the remote's *owner*,
-        // which no eviction changes; a remote belonging to another backend is still ignored.
+        // **A remote that the cap evicted is filed again, not refused.** A caller that holds a
+        // remote retrieved long ago can find its entry gone. Dropping the request would leave that
+        // caller waiting for a `didConnect` that nothing sends. The test is on the remote's
+        // *owner*, which eviction never changes. A remote that belongs to another backend is still
+        // ignored.
         //
-        // A remote this backend has since *replaced* for the same identifier is a different
-        // matter: the radio's events for that identifier go to the newer object, so connecting
-        // the older one could never complete. It is failed rather than dropped, so the caller
-        // is not left on its connect timeout for an outcome already settled.
+        // A remote that this backend later *replaced* for the same identifier is different. The
+        // radio sends that identifier's events to the newer object, so the older remote could never
+        // complete a connect. The code fails it, so the caller does not wait for its connect
+        // timeout.
         guard let remote = peripheral as? VirtualPeripheralRemote, remote.isOwned(by: sessionID) else { return }
         if let filed = _remotes[remote.identifier] {
             guard filed === remote else {
-                // Hopped, never inline: `connect(_:options:requiresANCS:)` is called
-                // synchronously by the consumer, and the seam forbids re-entering its handler
-                // from inside its own call.
+                // Hopped, never inline. The consumer calls `connect(_:options:requiresANCS:)`
+                // synchronously, and the seam forbids re-entry into its handler from inside that
+                // call.
                 queue.async { [self] in
                     deliver(.didFailToConnect(remote.peripheralIdentifier, error: Self.stalePeripheralHandleError))
                 }
@@ -418,10 +381,10 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         case .connecting:
             return
         case .disconnecting:
-            // Through the chain, not a bare `queue.async` from this turn: the cancel's own
-            // `didDisconnect` is posted from its chain step, which can finish its radio round
-            // trip before or after this turn ends — so a failure posted from here raced it.
-            // Behind that step, the failure always follows the `didDisconnect`.
+            // Go through the chain, not a bare `queue.async` from this turn. The cancel posts its
+            // `didDisconnect` from its chain step, which can finish before or after this turn ends.
+            // A failure posted from here would race it. Behind that step, the failure always
+            // follows.
             enqueue { [queue] in
                 queue.async { [self] in
                     deliver(.didFailToConnect(remote.peripheralIdentifier, error: Self.connectWhileDisconnectingError))
@@ -432,29 +395,29 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             break
         }
         remote.setConnectionState(.connecting)
-        // Nothing should be pending on a `.disconnected` remote — every path that settles one
-        // clears it. A stale task's hop would be refused by the token anyway; the cancel is
-        // for its sleeper, which would otherwise sit on the clock — counted by a
-        // `ManualClock` — until a deadline nobody is waiting on.
+        // Nothing should be pending on a `.disconnected` remote, because every path that settles
+        // one clears it. The token already refuses a stale task's hop. The cancel removes that
+        // task's sleeper, which a `ManualClock` would otherwise count until a deadline that nobody
+        // waits on.
         remote.cancelPendingConnect()
         let attempt = remote.beginConnectAttempt()
         let device = remote.identifier
-        // Read synchronously, on this queue, from the mirror the radio keeps for exactly this
-        // decision: whether the attempt sleeps first cannot wait on an actor hop.
+        // Read the delay synchronously, on this queue, from the mirror that the radio keeps. The
+        // decision whether the attempt sleeps first cannot wait on an actor hop.
         let delay = radio.connectLatencies.withLock { $0[device] ?? .zero }
         guard delay > .zero else {
             enqueueConnect(of: remote, attempt: attempt)
             return
         }
         remote.pendingConnect = Task { [weak self, clock = radio.clock, queue] in
-            // A cancelled sleep — the attempt was withdrawn, or the backend went away — ends
-            // the attempt here; the cancel has already settled the remote and said so.
+            // A cancelled sleep ends the attempt. The attempt was withdrawn or the backend went
+            // away, and the cancel already settled and reported the remote.
             do { try await clock.sleep(for: delay) } catch { return }
             guard let self else { return }
             queue.async {
-                // This attempt's task is cleared on every exit, so a hop that applies nothing
-                // never leaves a stale task behind for a later cancel to find; a newer
-                // attempt's task is not this hop's to clear.
+                // Clear this attempt's task on every exit, so a hop that applies nothing never
+                // leaves a stale task for a later cancel. A newer attempt's task is not this hop's
+                // to clear.
                 let wasPending = remote.pendingConnect != nil && remote.connectAttempt == attempt
                 if wasPending { remote.pendingConnect = nil }
                 guard wasPending, remote.connectionState == .connecting else { return }
@@ -463,27 +426,25 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// Appends `remote`'s connect attempt `attempt` to the serial chain — the body of
-    /// ``connect(_:options:requiresANCS:)`` for a `.disconnected` remote, taken at once by an
-    /// undelayed attempt and once its delay has run out by a delayed one. Must be called on
-    /// ``queue``.
+    /// Appends connect attempt `attempt` of `remote` to the serial chain. This is the body of
+    /// ``connect(_:options:requiresANCS:)`` for a `.disconnected` remote. An undelayed attempt
+    /// takes it at once, and a delayed attempt after its delay. Call this method on ``queue``.
     private func enqueueConnect(of remote: VirtualPeripheralRemote, attempt: UInt64) {
         dispatchPrecondition(condition: .onQueue(queue))
         let device = remote.identifier
         enqueue { [radio, sessionID, queue] in
-            // Connect-and-name in one actor hop: a second hop for the name could observe a
-            // `remove()` that landed in between and rename a live connection to `nil`.
+            // Connect and name in one actor hop. A second hop for the name could see a `remove()`
+            // that landed in between and rename a live connection to `nil`.
             let outcome = await radio.connect(session: sessionID, device: device) { event in
                 queue.async { remote.deliver(event) }
             }
             queue.async { [self] in
-                // Only the current attempt's hop applies anything. A forced disconnect
-                // landing between the radio call and this hop settles the remote and the
-                // consumer connects again at once — a `Central` reconnecting, or the
-                // provider's `CentralSession` re-sending a link client's connect — so this
-                // hop would otherwise mark the *new* attempt's `.connecting` remote
-                // `.connected` with the old attempt's answer (or fail it with the old
-                // attempt's armed failure) while the radio holds nothing. See
+                // Only the current attempt's hop applies anything. A forced disconnect can land
+                // between the radio call and this hop and settle the remote, and the consumer (a
+                // reconnecting `Central`, or the provider's `CentralSession` resending a link
+                // client's connect) can then connect again at once. Without the guard, this hop
+                // would mark the *new* attempt's `.connecting` remote `.connected`, or fail it,
+                // with the old attempt's answer. The radio would hold nothing. See
                 // `VirtualPeripheralRemote.connectAttempt`.
                 guard remote.connectAttempt == attempt else { return }
                 if let failure = outcome.error {
@@ -491,20 +452,19 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
                     deliver(.didFailToConnect(remote.peripheralIdentifier, error: failure))
                 } else {
                     // A disconnect that already settled the remote wins, even with no newer
-                    // attempt behind it. The radio's `connect` returned success on the actor,
-                    // but this hop is enqueued only afterwards — and a forced disconnect (or
-                    // a removal) landing on the actor in between enqueues its `didDisconnect`
-                    // first. `deliver` then set the remote `.disconnected` and the consumer
-                    // failed its connect; marking the remote `.connected` here on top left it
-                    // connected with no radio connection behind it, and a later cancel
-                    // delivered nothing. A cancel in between sets `.disconnecting`, not
+                    // attempt. The radio's `connect` returned success on the actor, but this hop is
+                    // enqueued afterward. A forced disconnect or a removal can land in between and
+                    // enqueue its `didDisconnect` first. `deliver` then sets the remote
+                    // `.disconnected` and the consumer fails its connect. Marking it `.connected`
+                    // here would leave a remote with no radio connection, and a later cancel would
+                    // deliver nothing. A cancel in between sets `.disconnecting`, not
                     // `.disconnected`, so a cancel queued behind a connect still gets its
                     // `didConnect` and then its `didDisconnect`.
                     guard remote.connectionState != .disconnected else { return }
                     remote.updateName(outcome.name)
-                    // Before `.connected` and `didConnect`: a handler that sizes its chunks
-                    // from `maximumWriteValueLength(for:)` inside its connect callback must see
-                    // the negotiated value, not last connection's.
+                    // Run before `.connected` and `didConnect`. A handler that sizes its chunks
+                    // from `maximumWriteValueLength(for:)` in its connect callback must see the
+                    // negotiated value, not the last connection's.
                     remote.updateMaximumWriteWithoutResponseLength(outcome.maximumWriteWithoutResponseLength)
                     remote.setConnectionState(.connected)
                     deliver(.didConnect(remote.peripheralIdentifier))
@@ -513,12 +473,12 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// The error a connect fails with when the remote it was handed is no longer the one this
-    /// backend has filed for that identifier.
+    /// The error that a connect fails with when the remote it received is no longer the remote that
+    /// this backend filed for that identifier.
     ///
-    /// Code 8, not 7: 7 is already `BLESwiftProvider`'s `CentralSession.l2capCreditRejected`
-    /// in this same `BLESwiftProvider` domain, and two distinct failures sharing a code
-    /// cannot be told apart by a caller that switches on it.
+    /// The code is 8, not 7, because 7 is already `CentralSession.l2capCreditRejected` in the same
+    /// `BLESwiftProvider` domain. A caller that switches on the code can then tell the failures
+    /// apart.
     public static var stalePeripheralHandleError: NSError {
         NSError(
             domain: "BLESwiftProvider",
@@ -527,11 +487,11 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         )
     }
 
-    /// The error a connect fails with when the remote it was handed is `.disconnecting` — a
-    /// ``cancelPeripheralConnection(_:)`` is in flight and will settle it `.disconnected`.
+    /// The error that a connect fails with when the remote it received is `.disconnecting`. A
+    /// ``cancelPeripheralConnection(_:)`` is in flight and will settle the remote `.disconnected`.
     /// See ``connect(_:options:requiresANCS:)``.
     ///
-    /// Code 11: 1 through 10 are taken across the `BLESwiftProvider` domain.
+    /// The code is 11, because the `BLESwiftProvider` domain already uses 1 through 10.
     public static var connectWhileDisconnectingError: NSError {
         NSError(
             domain: "BLESwiftProvider",
@@ -540,45 +500,20 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         )
     }
 
-    /// Cancels a connection, delivering `didDisconnect` with no error — CoreBluetooth
-    /// reports an explicit cancellation as an error-free disconnect.
+    /// Cancels a connection and delivers `didDisconnect` with no error, as CoreBluetooth does for
+    /// an explicit cancel.
     ///
-    /// **A no-op on a remote that is already disconnected**, exactly as
-    /// `CBCentralManager.cancelPeripheralConnection(_:)` is: it delivers nothing for a
-    /// peripheral that is neither connected nor connecting. Answered anyway, this fabricated a
-    /// second `didDisconnect` — so a cancel racing a radio-initiated disconnect (a device
-    /// removed from under it) reported the peripheral gone twice here and once on device.
+    /// - A remote that is already disconnected: nothing happens.
+    /// - A connection that a forced ``VirtualDeviceHandle/disconnect(_:error:)`` or a removal
+    ///   dropped first: this call removes nothing and delivers nothing. The forced event owns the
+    ///   `didDisconnect`.
+    /// - An attempt that still sleeps out its connect delay: the attempt never reaches the radio.
+    ///   The remote becomes `.disconnecting`, then `.disconnected` with `didDisconnect(nil)`. A
+    ///   `connect` in between fails with ``connectWhileDisconnectingError``.
+    /// - An attempt that an armed failure already failed: nothing follows `didFailToConnect`.
     ///
-    /// **The race runs both ways, and the radio's answer settles the other direction.** The
-    /// entry guard covers a radio-initiated disconnect that landed *before* this call; one
-    /// that lands *after* it — a forced ``VirtualDeviceHandle/disconnect(_:error:)`` or a
-    /// removal reaching the actor between this call and the `radio.disconnect` it queued —
-    /// owns the `didDisconnect`: the radio has already dropped the connection, so this call
-    /// removes nothing and delivers nothing, and the forced event settles the remote when it
-    /// arrives on the queue — which may be after this call's answer, since the radio holds
-    /// it behind the device's in-flight subscription reports. So the continuation delivers
-    /// only when the radio reports that *this* call removed the connection. Delivered
-    /// regardless, it sent a second `didDisconnect(nil)` behind the radio's, and if the
-    /// consumer had reconnected in between it overwrote the remote's `.connecting` with
-    /// `.disconnected`: `Central` then failed the reconnect while the radio's `didConnect`
-    /// left the remote connected. A cancel racing an armed connection failure is the same
-    /// shape — the failed connect settled the remote and sent `didFailToConnect`, and
-    /// nothing may follow it.
-    ///
-    /// **A cancel that catches an attempt still sleeping out its connect delay never reaches
-    /// the radio.** The attempt has not either, so the radio holds nothing for it: a
-    /// `radio.disconnect` would remove nothing and, per the rule above, deliver nothing, and
-    /// the caller would wait on a `didDisconnect` that never came. Instead the sleep is
-    /// cancelled, the attempt's token invalidated (the one bump a non-connect makes — see
-    /// `VirtualPeripheralRemote.invalidateConnectAttempt()`), and the remote takes the same
-    /// shape as behind an undelayed cancel: `.disconnecting` now, `.disconnected` and
-    /// `didDisconnect(nil)` on the hop. Settled `.disconnected` here instead, a `connect`
-    /// issued in the same turn started a new delayed attempt that the hop's `deliver` then
-    /// marked `.disconnected` from under — its own hop found it no longer `.connecting`, and
-    /// the caller waited on an answer that never came. Through `.disconnecting`, that
-    /// `connect` fails with ``connectWhileDisconnectingError``, exactly as it does behind an
-    /// undelayed cancel, and nothing can bump the token or change the state before the hop
-    /// lands, so the hop needs no guard of its own.
+    /// The backend delivers `didDisconnect` only when this call removed the connection. See
+    /// <doc:InProcessMocking#Cancelling-a-connection>.
     public func cancelPeripheralConnection(_ peripheral: any PeripheralRemote) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let remote = peripheral as? VirtualPeripheralRemote, remote === _remotes[remote.identifier] else { return }
@@ -588,10 +523,9 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
             remote.invalidateConnectAttempt()
             remote.setConnectionState(.disconnecting)
             queue.async { [self] in
-                // Unguarded by design: while `.disconnecting`, no connect takes a token and no
-                // path changes the state, so this hop is the only one that can settle it —
-                // and `deliver(_:)` is what settles it, as it does on every `didDisconnect`,
-                // so this hop sets nothing itself.
+                // No guard, by design. While the remote is `.disconnecting`, no connect takes a
+                // token and no path changes the state, so this hop is the only one that can settle
+                // it. `deliver(_:)` settles it, as on every `didDisconnect`.
                 deliver(.didDisconnect(remote.peripheralIdentifier, error: nil))
             }
             return
@@ -608,26 +542,26 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// Returns one remote per requested identifier this backend actually knows — a device
-    /// currently registered on the radio, or one this backend has reported a sighting for.
-    /// **Identifiers it does not know are omitted, not vended as placeholders**, exactly as
-    /// CoreBluetooth omits a `UUID` its stack has never seen.
+    /// Returns one remote for each requested identifier that this backend knows: a device that is
+    /// registered on the radio now, or one for which this backend reported a sighting. **The method
+    /// omits unknown identifiers. It does not vend placeholders.** CoreBluetooth also omits a
+    /// `UUID` that its stack has never seen.
     ///
-    /// That omission is what makes this backend safe to compose: `BLESwiftProvider`'s
-    /// `CompositeCentral` resolves an identifier against every child and keeps the first
-    /// answer, so a backend that vended a remote for *any* `UUID` would shadow every sibling
-    /// and make a real (or injected) peripheral unreachable.
+    /// This makes the backend safe to compose. `BLESwiftProvider`'s `CompositeCentral` resolves an
+    /// identifier against every child and keeps the first answer. A backend that vended a remote
+    /// for *any* `UUID` would shadow every sibling, and a real or injected peripheral would be
+    /// unreachable.
     ///
-    /// A remote is created on first use and the same instance is returned for the life of
-    /// this backend, so a `Central` attaching an event handler to a retrieved peripheral is
-    /// attaching it to the object the radio's events are routed to.
+    /// The backend creates a remote on first use and returns the same instance for its life. A
+    /// `Central` that attaches an event handler to a retrieved peripheral thus attaches it to the
+    /// object that the radio routes its events to.
     public func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [any PeripheralRemote] {
         dispatchPrecondition(condition: .onQueue(queue))
         return identifiers.compactMap { identifier in
-            // Read live from the radio, never from a pushed snapshot: a device registered a
-            // moment ago must be retrievable *now*, without waiting for an actor hop and a
-            // queue hop to deliver the news — the provider's own sessions register a device
-            // and connect to it in one synchronous flow.
+            // Read the device list live from the radio, not from a pushed snapshot. A device
+            // registered a moment ago must be retrievable *now*, without an actor hop and a queue
+            // hop. The provider's sessions register a device and connect to it in one synchronous
+            // flow.
             guard radio.knownDeviceIDs.withLock({ $0.contains(identifier) }) || _discovered.contains(identifier) else {
                 return nil
             }
@@ -642,20 +576,18 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
         }
     }
 
-    /// Always empty — "connected to the system by another app" has no meaning for an
-    /// in-process radio, whose connections all belong to this backend.
+    /// Always empty. An in-process radio has no connections that another app holds.
     public func retrieveConnectedPeripherals(withServices services: [ServiceIdentifier]) -> [any PeripheralRemote] {
         dispatchPrecondition(condition: .onQueue(queue))
         return []
     }
 
-    /// A no-op — the virtual radio produces no system connection events, exactly as
-    /// CoreBluetooth on macOS does not.
+    /// Does nothing. The virtual radio produces no system connection events.
     public func registerForConnectionEvents(services: [ServiceIdentifier]?, peripherals: [UUID]?) {
         dispatchPrecondition(condition: .onQueue(queue))
     }
 
-    /// A no-op, for the same reason as ``registerForConnectionEvents(services:peripherals:)``.
+    /// Does nothing, for the same reason as ``registerForConnectionEvents(services:peripherals:)``.
     public func unregisterForConnectionEvents() {
         dispatchPrecondition(condition: .onQueue(queue))
     }

@@ -5,16 +5,16 @@
 
 /// A value-type definition of one service in a hosted GATT database.
 ///
-/// Build a service (with its ``GATTCharacteristic``s) and hand it to
-/// `PeripheralHost/add(_:)`; it is compiled to a `CBMutableService` (and
-/// `CBMutableCharacteristic`s) **inside the actor's CoreBluetooth seam**, never here.
+/// Build a service (with its ``GATTCharacteristic`` values) and pass it to
+/// `PeripheralHost/add(_:)`. The actor compiles it to a `CBMutableService` (and
+/// `CBMutableCharacteristic` values) inside its CoreBluetooth seam, never here.
 public struct GATTService: Sendable, Hashable {
 
     /// The service's identifier.
     public let identifier: ServiceIdentifier
 
-    /// Whether this is a primary service (`true`) or a secondary service included by
-    /// another (`false`).
+    /// Whether this is a primary service (`true`) or a secondary service that another service
+    /// includes (`false`).
     public let isPrimary: Bool
 
     /// The characteristics this service hosts.

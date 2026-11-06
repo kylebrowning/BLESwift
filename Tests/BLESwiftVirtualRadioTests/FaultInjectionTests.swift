@@ -12,14 +12,13 @@ import Testing
 import CoreBluetooth
 #endif
 
-/// Fault injection through `VirtualDeviceHandle` (#67), each kind observed through a real
-/// `Central`: the error that reaches the caller carries the domain and code the fault was
-/// armed with.
+/// Fault injection through `VirtualDeviceHandle`. A real `Central` observes each kind of fault. The
+/// error that reaches the caller has the domain and code that the fault was armed with.
 @Suite("Fault injection")
 struct FaultInjectionTests {
 
-    /// `CBError.peerRemovedPairingInformation`, built by hand so the suite runs where
-    /// CoreBluetooth does not exist.
+    /// `CBError.peerRemovedPairingInformation`, built by hand so the suite runs where CoreBluetooth
+    /// does not exist.
     private static let peerRemovedPairingInformation = NSError(domain: "CBErrorDomain", code: 14)
 
     // MARK: - Connection failures
@@ -61,8 +60,8 @@ struct FaultInjectionTests {
         let id = PeripheralIdentifier(uuid: device.descriptor.identifier, name: nil)
         let (central, _, _) = await RecordingDevice.central(on: radio, label: "FaultInjectionTests.failTwice")
 
-        // `connect` counts down `.some(2)` to `.some(1)` and disarms at `.some(1)`, so both
-        // steps of the countdown are crossed before the attempt that succeeds.
+        // `connect` counts down from `.some(2)` to `.some(1)` and disarms at `.some(1)`. The test
+        // crosses both steps before the attempt that succeeds.
         await handle.failConnections(with: Self.peerRemovedPairingInformation, times: 2)
         for attempt in 1...2 {
             let failure = await RecordingDevice.failure { try await central.connect(id) }
@@ -125,7 +124,7 @@ struct FaultInjectionTests {
         let (central, backend, queue) = await RecordingDevice.central(on: radio, label: "FaultInjectionTests.forcedDisconnect")
         let peripheral = try await central.connect(id)
 
-        // Two subscriptions, each armed before the drop: both must be reported back.
+        // Two subscriptions, each armed before the drop. The radio must report both.
         let controlStream = Task { () -> Error? in
             do {
                 for try await _ in peripheral.notifications(for: RecordingDevice.control) as AsyncThrowingStream<Data, Error> {}
@@ -161,12 +160,12 @@ struct FaultInjectionTests {
         #expect((await controlStream.value as NSError?)?.code == 7)
         #expect((await measurementStream.value as NSError?)?.code == 7)
 
-        // The handler heard both unsubscribes.
+        // The handler saw both unsubscribes.
         #expect(await RecordingDevice.first(of: handler.subscriptions) == false)
         #expect(await RecordingDevice.first(of: handler.subscriptions) == false)
         #expect(await handler.subscriptionLog.map(\.isSubscribed) == [true, true, false, false])
 
-        // The Central and the remote agree the link is gone.
+        // The Central and the remote agree that the link is gone.
         #expect(await RecordingDevice.isDisconnected(central, id))
         let remoteState = await RecordingDevice.onQueue(queue) {
             backend.retrievePeripherals(withIdentifiers: [id.uuid]).first?.connectionState
@@ -222,8 +221,8 @@ struct FaultInjectionTests {
         #expect(dropped)
         #expect(await RecordingDevice.isDisconnected(centralA, id))
 
-        // B's read is served from the same actor that just dropped A, so its success proves
-        // the radio still holds B's connection.
+        // The actor that just dropped A serves B's read. Its success proves that the radio still
+        // holds B's connection.
         #expect(await RecordingDevice.isConnected(centralB, id))
         #expect(try await peripheralB.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
     }
@@ -243,7 +242,7 @@ struct FaultInjectionTests {
         await handle.setATTError(.insufficientEncryption, for: RecordingDevice.measurement)
         await handle.setATTError(.insufficientEncryption, for: RecordingDevice.control)
 
-        // A static-value characteristic fails too: the injected answer precedes the database.
+        // A static-value characteristic fails too. The injected answer comes before the database.
         let read = await RecordingDevice.failure { try await peripheral.read(from: RecordingDevice.measurement) as Data }
         #expect(read?.domain == "CBATTErrorDomain")
         #expect(read?.code == ATTError.insufficientEncryption.rawValue)
@@ -252,11 +251,11 @@ struct FaultInjectionTests {
         #expect(write?.domain == "CBATTErrorDomain")
         #expect(write?.code == ATTError.insufficientEncryption.rawValue)
 
-        // No response, no error: the write reaches the handler as if nothing were armed.
+        // No response and no error: the write reaches the handler as if nothing were armed.
         try await peripheral.write(Data([2]), to: RecordingDevice.control, type: .withoutResponse)
         #expect(await RecordingDevice.first(of: handler.writes) == Data([2]))
 
-        // Enabling notifications fails, and the handler never hears of it.
+        // Enabling notifications fails and the handler never sees it.
         let subscribe = await RecordingDevice.failure { () async throws -> Data? in
             for try await value in peripheral.notifications(for: RecordingDevice.control) as AsyncThrowingStream<Data, Error> {
                 return value
@@ -267,7 +266,7 @@ struct FaultInjectionTests {
         #expect(subscribe?.code == ATTError.insufficientEncryption.rawValue)
         #expect(await handler.subscriptionLog.isEmpty)
 
-        // Cleared, everything is served again.
+        // After the clear, the radio serves everything again.
         await handle.setATTError(nil, for: RecordingDevice.measurement)
         await handle.setATTError(nil, for: RecordingDevice.control)
         #expect(try await peripheral.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
@@ -299,12 +298,14 @@ struct FaultInjectionTests {
         try await peripheral.write(Data([9]), to: RecordingDevice.control)
         #expect(await handler.written == [Data([9])])
 
-        // Dynamic, so the handler's `.success` is what the read would otherwise return.
+        // The characteristic is dynamic. Without the fault, the read returns the handler's
+        // `.success`.
         let read = await RecordingDevice.failure { try await peripheral.read(from: RecordingDevice.control) as Data }
         #expect(read?.domain == "CBATTErrorDomain")
         #expect(read?.code == ATTError.insufficientAuthentication.rawValue)
 
-        // Clearing only `.read` on a characteristic that has nothing else armed clears it.
+        // The characteristic has no other armed fault, so clearing `.read` makes the read succeed
+        // again.
         await handle.setATTError(nil, for: RecordingDevice.control, operations: .read)
         #expect(try await peripheral.read(from: RecordingDevice.control) as Data == Data([0xD1]))
     }
@@ -327,28 +328,28 @@ struct FaultInjectionTests {
         await stale.setATTError(.insufficientEncryption, for: RecordingDevice.measurement)
         #expect(try await peripheral.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
 
-        // The disconnect, had it landed, would have reached the `Central` before this read,
-        // which would then throw `notConnected` without asking the radio (a read that did reach
-        // the radio would be refused with `ATTError.invalidHandle`, surfaced as a
-        // `CBATTErrorDomain` code 1 error).
+        // If the disconnect had arrived, it would have reached the `Central` before this read. The
+        // `Central` would throw `notConnected` and not ask the radio. A read that reached the radio
+        // gets `ATTError.invalidHandle`, which the `Central` reports as a `CBATTErrorDomain` error
+        // with code 1.
         await stale.disconnect()
         #expect(try await peripheral.read(from: RecordingDevice.measurement) as Data == RecordingDevice.measurementValue)
         #expect(await RecordingDevice.isConnected(central, id))
     }
 }
 
-/// A forced disconnect racing a consumer's own cancel, and a cancel queued behind an armed
-/// connection failure: whichever reaches the radio first settles the remote, and the other
-/// must deliver nothing on top.
+/// A forced disconnect that races a consumer's cancel, and a cancel that waits in the queue behind
+/// an armed connection failure. The first one to reach the radio settles the remote. The other must
+/// deliver nothing more.
 @Suite("Fault injection — races with cancelPeripheralConnection")
 struct FaultInjectionRaceTests {
 
-    /// Every `CentralEvent` a backend delivered, read and written on the backend's queue only.
+    /// Every `CentralEvent` that a backend delivered. Only the backend's queue reads and writes it.
     private final class EventLog: @unchecked Sendable {
         var events: [CentralEvent] = []
     }
 
-    /// `backend`'s remote for `device`, with `log` attached as the event handler.
+    /// The remote of `backend` for `device`, with `log` attached as the event handler.
     private static func attach(_ backend: VirtualCentralBackend, log: EventLog, device: UUID, on queue: DispatchQueue) async -> VirtualPeripheralRemote {
         await RecordingDevice.onQueue(queue) {
             backend.eventHandler = { log.events.append($0) }
@@ -356,7 +357,7 @@ struct FaultInjectionRaceTests {
         }
     }
 
-    /// Runs every piece of radio work `backend` has queued, then flushes its deliveries.
+    /// Runs all radio work that `backend` has queued, then flushes its deliveries.
     private static func drain(_ backend: VirtualCentralBackend, on queue: DispatchQueue) async {
         await backend.waitForPendingWork()
         await RecordingDevice.onQueue(queue) {}
@@ -407,8 +408,9 @@ struct FaultInjectionRaceTests {
                 log.events.removeAll()
                 backend.connect(remote, options: nil, requiresANCS: false)
             }
-            // Not awaited behind the connect: the point is to land on the actor anywhere
-            // between the connect's radio call and its hop back to the queue.
+            // The test does not await the disconnect behind the connect. The disconnect lands on
+            // the actor at any point between the connect's radio call and its hop back to the
+            // queue.
             await handle.disconnect()
             await Self.drain(backend, on: queue)
 
@@ -430,8 +432,8 @@ struct FaultInjectionRaceTests {
         }
     }
 
-    /// Drains `backend` until a drain produces no new events, bounded: a handler that
-    /// re-connects from inside a delivery enqueues more work behind each drain.
+    /// Drains `backend` until a drain produces no new events, up to a limit. A handler that
+    /// reconnects from inside a delivery queues more work behind each drain.
     private static func drainUntilSettled(_ backend: VirtualCentralBackend, log: EventLog, on queue: DispatchQueue) async -> Bool {
         for _ in 0..<10 {
             let before = await RecordingDevice.onQueue(queue) { log.events.count }
@@ -453,8 +455,8 @@ struct FaultInjectionRaceTests {
         let remote = await RecordingDevice.onQueue(queue) {
             backend.retrievePeripherals(withIdentifiers: [device.descriptor.identifier]).first as! VirtualPeripheralRemote
         }
-        // Mimics the provider's `CentralSession` re-sending a link client's connect: every
-        // disconnect that carries an error is answered with a new connect, synchronously,
+        // Mimics the provider's `CentralSession` when it sends a link client's connect again. The
+        // handler answers every disconnect that carries an error with a new connect, synchronously,
         // from inside the delivery.
         await RecordingDevice.onQueue(queue) {
             backend.eventHandler = { event in
@@ -481,8 +483,8 @@ struct FaultInjectionRaceTests {
                 #expect(!(previous == "didConnect" && next == "didConnect"), "iteration \(iteration): \(order)")
             }
 
-            // Back to `.disconnected` for the next iteration; the cancel's error-free
-            // `didDisconnect` triggers no reconnect.
+            // Back to `.disconnected` for the next iteration. The cancel's `didDisconnect` has no
+            // error, so it does not trigger a reconnect.
             await RecordingDevice.onQueue(queue) { backend.cancelPeripheralConnection(remote) }
             #expect(await Self.drainUntilSettled(backend, log: log, on: queue))
             #expect(await RecordingDevice.onQueue(queue) { remote.connectionState } == .disconnected)
@@ -577,13 +579,17 @@ struct FaultInjectionRaceTests {
         let log = EventLog()
         let remote = await Self.attach(backend, log: log, device: device.descriptor.identifier, on: queue)
 
-        // Both shapes of the turn, alternating. Unstalled, the turn posts the connect's
-        // failure microseconds after the cancel enqueued its chain step — the shape where a
-        // failure posted from the turn itself came first. Stalled — a `usleep` standing in
-        // for the queue's thread being preempted mid-turn on a loaded machine — the cancel's
-        // step finishes its radio round trip and posts its `didDisconnect` before the turn
-        // goes on. The failure follows the `didDisconnect` either way, because it is posted
-        // from the chain, behind the cancel's step, never from the turn.
+        // The test alternates between two shapes of the turn:
+        //
+        // - Unstalled: the turn reaches the connect failure a few microseconds after the cancel
+        //   queues its chain step. Before the fix, the turn posted the failure itself and the
+        //   failure came first.
+        // - Stalled: a `usleep` simulates a preempted queue thread under high load. The cancel's
+        //   step finishes its radio round trip and posts its `didDisconnect` before the turn
+        //   continues.
+        //
+        // In both shapes the failure follows the `didDisconnect`. The chain posts the failure
+        // behind the cancel's step. The turn never posts it.
         var orders: Set<[String]> = []
         for iteration in 0..<300 {
             await RecordingDevice.onQueue(queue) { backend.connect(remote, options: nil, requiresANCS: false) }
@@ -612,9 +618,9 @@ struct FaultInjectionRaceTests {
         let log = EventLog()
         let remote = await Self.attach(backend, log: log, device: device.descriptor.identifier, on: queue)
 
-        // The cancel finds the remote `.connecting` and marks it `.disconnecting` — not
-        // `.disconnected` — so the connect's late hop still applies, and the cancel's own
-        // answer follows it: the order a `Central` whose connect timed out relies on.
+        // The cancel finds the remote `.connecting` and marks it `.disconnecting`, not
+        // `.disconnected`. The late connect hop still applies, and the cancel's answer follows it.
+        // A `Central` whose connect timed out relies on this order.
         await RecordingDevice.onQueue(queue) {
             backend.connect(remote, options: nil, requiresANCS: false)
             backend.cancelPeripheralConnection(remote)
@@ -646,8 +652,8 @@ struct FaultInjectionRaceTests {
         let log = EventLog()
         let remote = await Self.attach(backend, log: log, device: device.descriptor.identifier, on: queue)
 
-        // Deterministic, not a race: both calls land on the queue in one turn, so the cancel
-        // is always queued behind the failed connect in the chain.
+        // Deterministic, not a race: both calls arrive on the queue in one turn, so the cancel is
+        // always queued behind the failed connect in the chain.
         await handle.failConnections(with: NSError(domain: "CBErrorDomain", code: 14), times: 1)
         await RecordingDevice.onQueue(queue) {
             backend.connect(remote, options: nil, requiresANCS: false)
@@ -669,20 +675,20 @@ struct FaultInjectionRaceTests {
     }
 }
 
-/// A forced disconnect's `didDisconnect` must not reach the `Central` until the handler
-/// has been told about every dropped subscription — otherwise a reconnecting `Central`
-/// re-subscribes while the old unsubscribes are still in flight, and the handler's log
-/// shows a live subscriber leaving.
+/// The `didDisconnect` of a forced disconnect must not reach the `Central` until the handler has
+/// been told about every dropped subscription. Otherwise a reconnecting `Central` subscribes again
+/// while the old unsubscribes are in flight, and the handler's log shows a live subscriber that
+/// leaves.
 @Suite("Fault injection — forced disconnect ordering")
 struct ForcedDisconnectOrderingTests {
 
-    /// A handler whose unsubscribe does not return until the test releases it, so the test
-    /// controls exactly when the radio's forced disconnect finishes reporting.
+    /// A handler whose unsubscribe does not return until the test releases it. The test controls
+    /// when the radio's forced disconnect finishes its reports.
     private actor GatedHandler: VirtualDeviceHandler {
         private(set) var log: [Bool] = []
         let subscriptions: AsyncStream<Bool>
         private let subscriptionsContinuation: AsyncStream<Bool>.Continuation
-        /// Yields once the unsubscribe is suspended on the gate.
+        /// Yields when the unsubscribe is suspended on the gate.
         let blocked: AsyncStream<Void>
         private let blockedContinuation: AsyncStream<Void>.Continuation
         private let gate: AsyncStream<Void>
@@ -701,9 +707,9 @@ struct ForcedDisconnectOrderingTests {
             .success(())
         }
 
-        /// Logged on completion, not arrival: what a hosted `PeripheralHost` acts on is the
-        /// unsubscribe it has finished handling, so the log records the order the handler
-        /// *finished* each change in.
+        /// Logged on completion, not on arrival. A hosted `PeripheralHost` acts on an unsubscribe
+        /// only after the handler finishes it, so the log records the order in which the handler
+        /// finished each change.
         func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {
             if !isSubscribed {
                 blockedContinuation.yield(())
@@ -733,18 +739,18 @@ struct ForcedDisconnectOrderingTests {
         let drop = Task { await handle.disconnect() }
         _ = await RecordingDevice.first(of: handler.blocked)
 
-        // The unsubscribe is suspended. Flush the Central's queue: anything the radio sent
-        // it before awaiting the handler has now been handled.
+        // The unsubscribe is suspended. Flush the Central's queue so everything the radio sent
+        // before it awaited the handler is handled.
         await RecordingDevice.onQueue(queue) {}
         if await RecordingDevice.isConnected(central, id) {
             release.yield(())
             #expect(await RecordingDevice.first(of: handler.subscriptions) == false)
             #expect(await RecordingDevice.first(of: handler.subscriptions) == true)
         } else {
-            // The Central already heard the disconnect while the unsubscribe was still in
-            // flight — the misordering under test. Let it finish re-subscribing before the
-            // unsubscribe returns, so the ordering lands in the log instead of being hidden
-            // by how quickly the release wins the race.
+            // The Central already saw the disconnect while the unsubscribe was in flight. This
+            // wrong order is what the test checks. Let the Central finish the new subscribe before
+            // the unsubscribe returns, so the order appears in the log. A quick release that wins
+            // the race would hide it.
             #expect(await RecordingDevice.first(of: handler.subscriptions) == true)
             release.yield(())
             #expect(await RecordingDevice.first(of: handler.subscriptions) == false)
@@ -752,7 +758,7 @@ struct ForcedDisconnectOrderingTests {
         await drop.value
         #expect(await handler.log == [true, false, true])
 
-        // Teardown unsubscribes once more; finish the gate so that one is never held.
+        // Teardown unsubscribes once more. Finish the gate so it never holds that unsubscribe.
         release.finish()
         stream.cancel()
         try await central.disconnect(id)
@@ -774,9 +780,9 @@ struct ForcedDisconnectOrderingTests {
         }
         #expect(await RecordingDevice.first(of: handler.subscriptions) == true)
 
-        // The same device — same identifier, same handler instance — registered again while
-        // the Central is connected and subscribed. The identifier never leaves the radio, so
-        // the Central's reconnect lands on the new registration at once.
+        // The same device (same identifier, same handler instance) is registered again while the
+        // Central is connected and subscribed. The identifier never leaves the radio, so the
+        // Central's reconnect reaches the new registration immediately.
         let reregister = Task { await radio.register(device) }
         _ = await RecordingDevice.first(of: handler.blocked)
 

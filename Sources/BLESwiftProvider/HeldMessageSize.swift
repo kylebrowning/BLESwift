@@ -7,24 +7,23 @@
 import BLESwiftLink
 import Foundation
 
-/// What one message costs the provider while it is *held* rather than served — the accounting
-/// behind ``PendingConnections/maximumQueuedBytes``.
+/// What one message costs the provider while it *holds* the message and does not serve it. This
+/// is the accounting for ``PendingConnections/maximumQueuedBytes``.
 ///
-/// This is a memory bound, not a wire measurement: it counts the variable-length payloads a
-/// client can put on the wire, which are the only parts of a message it can make large, plus a
-/// fixed overhead so a backlog of tiny messages is charged for too rather than being free.
+/// This is a memory bound, not a wire measurement. It counts the variable-length payloads, which
+/// are the only parts of a message that a client can make large. It adds a fixed overhead, so a
+/// backlog of small messages is not free.
 extension LinkMessage {
 
-    /// What every held message costs before its payload, standing in for the scalar fields
-    /// and the array box the message itself occupies.
+    /// What every held message costs before its payload: the scalar fields and the array box.
     static let heldOverhead = 64
 
-    /// What holding this message costs against the provider's pre-handshake backlog cap.
+    /// What this message costs against the provider's backlog cap before the handshake.
     var heldByteCount: Int {
         LinkMessage.heldOverhead + heldPayloadByteCount
     }
 
-    /// The bytes this message's variable-length fields keep alive.
+    /// The bytes that the variable-length fields of this message keep alive.
     private var heldPayloadByteCount: Int {
         switch self {
         case .clientHello(let hello):
@@ -33,8 +32,8 @@ extension LinkMessage {
             return request.heldPayloadByteCount
         case .hostRequest(let request):
             return request.heldPayloadByteCount
-        // A provider is never sent an event or a server hello. One that arrived would be
-        // routed to the handshake and refused there, so it is only ever charged the overhead.
+        // A client never sends an event or a server hello. If one arrives, the handshake refuses
+        // it, so it costs only the overhead.
         case .serverHello, .centralEvent, .hostEvent:
             return 0
         }
@@ -43,7 +42,7 @@ extension LinkMessage {
 
 extension CentralRequest {
 
-    /// The bytes this request's variable-length fields keep alive.
+    /// The bytes that the variable-length fields of this request keep alive.
     var heldPayloadByteCount: Int {
         switch self {
         case .scan(let services, _):
@@ -60,7 +59,7 @@ extension CentralRequest {
             return value.count
         case .l2capData(_, let data):
             return data.count
-        // Everything else is a handful of scalars and identifiers, which the overhead covers.
+        // Each other request is a few scalars and identifiers. The overhead covers them.
         case .stopScan, .connect, .cancelConnection, .unregisterForConnectionEvents, .readValue,
              .setNotifyValue, .discoverDescriptors, .readDescriptor, .readRSSI, .openL2CAPChannel,
              .l2capCredit, .l2capClose:
@@ -71,7 +70,7 @@ extension CentralRequest {
 
 extension HostRequest {
 
-    /// The bytes this request's variable-length fields keep alive.
+    /// The bytes that the variable-length fields of this request keep alive.
     var heldPayloadByteCount: Int {
         switch self {
         case .startAdvertising(let localName, let services):
@@ -90,7 +89,7 @@ extension HostRequest {
 
 extension WireGATTService {
 
-    /// The bytes this service's UUID strings and characteristic values keep alive.
+    /// The bytes that the UUID strings and characteristic values of this service keep alive.
     var heldPayloadByteCount: Int {
         uuid.utf8.count + characteristics.reduce(0) { $0 + $1.uuid.utf8.count + ($1.value?.count ?? 0) }
     }
@@ -98,13 +97,12 @@ extension WireGATTService {
 
 extension LinkMessage {
 
-    /// The bytes an optional list of UUID strings keeps alive.
+    /// The bytes that an optional list of UUID strings keeps alive.
     fileprivate static func byteCount(of strings: [String]?) -> Int {
         strings?.reduce(0) { $0 + $1.utf8.count } ?? 0
     }
 
-    /// The bytes an optional list of identifiers keeps alive — sixteen apiece, a `UUID`'s
-    /// whole storage.
+    /// The bytes that an optional list of identifiers keeps alive. A `UUID` takes 16 bytes.
     fileprivate static func byteCount(of identifiers: [UUID]?) -> Int {
         (identifiers?.count ?? 0) * 16
     }

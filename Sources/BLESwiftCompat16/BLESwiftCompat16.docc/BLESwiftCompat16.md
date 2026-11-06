@@ -4,9 +4,17 @@ The back-deployment tier that lets BLESwift run on iOS 16, macOS 13, watchOS 9, 
 
 ## Overview
 
-Below the 17 tier (iOS 17, macOS 14, watchOS 10, tvOS 17, visionOS 1) there is no `DispatchSerialQueue`, no `asUnownedSerialExecutor()`, and no `Actor.assumeIsolated`. This module supplies ``SerialQueueExecutor`` (a `SerialExecutor` over a serial `DispatchQueue`), ``QueueExecutor`` (which picks the real `DispatchSerialQueue` executor on the 17 tier and later, and ``SerialQueueExecutor`` below it), and `assumeIsolated(onQueue:_:)`. ``ExecutorPolicy`` is a test-only knob that forces the 16-tier executor everywhere. It is an implementation detail of BLESwift, not a product.
+BLESwiftCompat16 is an implementation detail of BLESwift. It is not a product. Do not import it in your app.
 
-The procedure for deleting this module when BLESwift's floor is raised to the 17 tier is in the "Back-deployment" article of the BLESwift documentation. It is kept there alone, so that the steps cannot drift between two copies.
+Below the 17 tier (iOS 17, macOS 14, watchOS 10, tvOS 17, visionOS 1), the system has no `DispatchSerialQueue`, no `asUnownedSerialExecutor()`, and no `Actor.assumeIsolated`. This module supplies these replacements:
+
+- ``SerialQueueExecutor`` is a `SerialExecutor` over a serial `DispatchQueue`.
+- ``QueueExecutor`` uses the `DispatchSerialQueue` executor on the 17 tier and later. Below the 17 tier, it uses ``SerialQueueExecutor``.
+- `assumeIsolated(onQueue:_:)` replaces `Actor.assumeIsolated`.
+
+``ExecutorPolicy`` is for tests only. It forces the 16-tier executor on every platform.
+
+The steps to delete this module when BLESwift raises its minimum platform to the 17 tier are in the "Back-deployment" article of the BLESwift documentation. That article is the only copy of the steps.
 
 ## Topics
 
