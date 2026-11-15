@@ -159,6 +159,7 @@ extension VirtualRadio {
             guard let session = sessions[sessionID], session.connections.contains(device) else { continue }
             sessions[sessionID]?.connections.remove(device)
             sessions[sessionID]?.peripheralSinks.removeValue(forKey: device)
+            failL2CAPChannels(device: device, sessions: [sessionID])
             dropped.append((subscriber(sessionID, device: device), dropSubscriptions(session: sessionID, device: device)))
             sinks.append(session.centralSink)
         }

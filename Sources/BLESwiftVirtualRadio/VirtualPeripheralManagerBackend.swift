@@ -20,6 +20,16 @@ package protocol HostedDeviceRemoving {
     func removeHostedDevice()
 }
 
+/// A peripheral-role backend that can publish an L2CAP channel on a PSM that the caller selects.
+/// A composite uses it to publish the PSM of one child on another child. The completion is the
+/// same `PeripheralHostEvent/didPublishL2CAPChannel(psm:error:)` event as for
+/// `L2CAPPublishing/publishL2CAPChannel(requiresEncryption:)`.
+package protocol FixedPSMPublishing {
+
+    /// Publishes an L2CAP channel on `psm`. Call this method on the queue of the backend.
+    func publishL2CAPChannel(requiresEncryption: Bool, psm: L2CAPPSM)
+}
+
 
 /// A `PeripheralManaging` that a ``VirtualRadio`` serves instead of CoreBluetooth. Give one to
 /// `PeripheralHost(backend:queue:)`. The host becomes a virtual device on that radio, and any
@@ -47,7 +57,7 @@ package protocol HostedDeviceRemoving {
 /// Registration on the radio is asynchronous. The backend runs every operation that needs the
 /// device handle on a serial `Task` chain that begins with the registration. A call before the
 /// device exists is neither lost nor reordered.
-public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDeviceRemoving, Sendable {
+public final class VirtualPeripheralManagerBackend: L2CAPPublishing, FixedPSMPublishing, HostedDeviceRemoving, Sendable {
 
     /// The queue that confines every method and every event delivery.
     public let queue: DispatchQueue
@@ -367,6 +377,55 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
         return true
     }
 
+    // MARK: - L2CAPPublishing
+
+    /// Publishes an L2CAP channel on the lowest free PSM of the hosted device. The backend
+    /// delivers `didPublishL2CAPChannel(psm:error:)` after the radio applies it. The virtual
+    /// radio has no link encryption, so it ignores `requiresEncryption`.
+    public func publishL2CAPChannel(requiresEncryption: Bool) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        publish(psm: nil)
+    }
+
+    /// Publishes an L2CAP channel on `psm`. If the hosted device already published `psm`, the
+    /// publish fails with `BLESwiftProvider` code 13. The radio ignores `requiresEncryption`.
+    package func publishL2CAPChannel(requiresEncryption: Bool, psm: L2CAPPSM) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        publish(psm: psm)
+    }
+
+    /// Unpublishes `psm`. The backend delivers `didUnpublishL2CAPChannel(psm:error:)` after the
+    /// radio applies it. A PSM that is not published fails with `BLESwiftProvider` code 12.
+    /// Channels that are already open stay open.
+    public func unpublishL2CAPChannel(_ psm: L2CAPPSM) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        enqueue({ [weak self] handle in
+            let removed = await handle.unpublishL2CAP(psm)
+            self?.deliverOffQueue(.didUnpublishL2CAPChannel(
+                psm: psm,
+                error: removed ? nil : VirtualRadio.l2capNotPublishedError(psm)
+            ))
+        }, ifRemoved: { [weak self] in
+            self?.deliverOffQueue(.didUnpublishL2CAPChannel(psm: psm, error: Self.removedError))
+        })
+    }
+
+    /// The shared body of both publish calls. Call this method on ``queue``.
+    private func publish(psm: L2CAPPSM?) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        enqueue({ [weak self] handle in
+            let result = await handle.publishL2CAP(psm: psm)
+            switch result {
+            case .success(let published):
+                self?.deliverOffQueue(.didPublishL2CAPChannel(psm: published, error: nil))
+            case .failure(let error):
+                self?.deliverOffQueue(.didPublishL2CAPChannel(psm: nil, error: error))
+            }
+        }, ifRemoved: { [weak self] in
+            self?.deliverOffQueue(.didPublishL2CAPChannel(psm: nil, error: Self.removedError))
+        })
+    }
+
     /// Detaches ``eventHandler`` from off ``queue``, by hopping onto the queue. The hosted device
     /// stays on the radio, and the backend refuses a request that arrives in this state.
     package func detachEventHandlerForTesting() async {
@@ -381,7 +440,7 @@ public final class VirtualPeripheralManagerBackend: PeripheralManaging, HostedDe
 
     /// The error that an operation reports when it was queued after the hosted device was removed.
     /// Without it, the caller would wait for a completion that can never arrive.
-    private static var removedError: NSError {
+    static var removedError: NSError {
         NSError(
             domain: "BLESwiftProvider",
             code: 5,
@@ -536,5 +595,17 @@ actor VirtualHostedDeviceHandler: VirtualDeviceHandler {
         _ = sink?(isSubscribed
             ? .didSubscribe(central: central, characteristic: characteristic)
             : .didUnsubscribe(central: central, characteristic: characteristic))
+    }
+}
+
+extension VirtualHostedDeviceHandler: VirtualL2CAPAccepting {
+
+    /// Gives the channel to the host as `didOpenL2CAPChannel(channel:central:error:)`. If no
+    /// handler is attached to receive it, the method closes the channel, so it does not leak.
+    func acceptL2CAPChannel(_ channel: any L2CAPChannelRemote, psm: L2CAPPSM, from central: Subscriber) async {
+        guard let sink, sink(.didOpenL2CAPChannel(channel: channel, central: central.id, error: nil)) else {
+            channel.close(error: nil)
+            return
+        }
     }
 }
