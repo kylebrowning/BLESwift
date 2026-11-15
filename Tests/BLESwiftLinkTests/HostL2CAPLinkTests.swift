@@ -703,7 +703,9 @@ struct HostL2CAPLinkTests {
 
     @Test("A refused client that stays connected is closed by the handshake deadline")
     func refusedClientIsClosedByTheDeadline() async throws {
-        let provider = try await makeProvider(handshakeTimeout: .milliseconds(200))
+        // The deadline is long enough for a Thread Sanitizer build. A short deadline can close the
+        // connection before the client sends its hello, and then no refusal arrives.
+        let provider = try await makeProvider(handshakeTimeout: .seconds(1))
         let connection = LinkConnection.connect(
             to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             codec: .binaryPropertyList,
@@ -736,13 +738,13 @@ struct HostL2CAPLinkTests {
         #expect(answer.withLock { $0?.accepted } == false)
         #expect(openAtRefusal.withLock { $0 } == true)
         // The refusal does not close the connection. Only the deadline does.
-        if ContinuousClock.now - start < .milliseconds(150) {
+        if ContinuousClock.now - start < .milliseconds(750) {
             #expect(!ended.withLock { $0 })
         }
 
         await waitFor(timeout: .seconds(5)) { ended.withLock { $0 } }
         #expect(ended.withLock { $0 })
-        #expect(ContinuousClock.now - start >= .milliseconds(200))
+        #expect(ContinuousClock.now - start >= .seconds(1))
         connection.onStateChange = nil
         connection.onMessage = nil
         connection.cancel()
