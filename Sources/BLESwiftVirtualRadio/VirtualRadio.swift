@@ -159,6 +159,24 @@ public actor VirtualRadio {
     var devices: [UUID: DeviceState] = [:]
     var sessions: [UUID: Session] = [:]
 
+    /// The L2CAP PSMs that each device published, by device. ``retire(_:)`` clears the entry of
+    /// a device. See `publishL2CAP(device:generation:psm:)`.
+    var publishedL2CAP: [UUID: Set<L2CAPPSM>] = [:]
+
+    /// One open L2CAP channel: the session that opened it, and the central end of its pair. A
+    /// ``VirtualL2CAPChannel/fail(_:)`` on this end reaches both ends. The `token` identifies
+    /// the record for the drop that follows the close of its pair.
+    struct ChannelRecord {
+        let token: UUID
+        let session: UUID
+        let channel: VirtualL2CAPChannel
+    }
+
+    /// The open L2CAP channels of each device. The radio fails them with
+    /// ``peripheralDisconnectedError`` when their connection ends. See
+    /// `failL2CAPChannels(device:sessions:)`.
+    var l2capChannels: [UUID: [ChannelRecord]] = [:]
+
     /// Stamps every registration, so the radio can tell a handle from a handle of the same
     /// identifier that was registered again later. The value is monotonic across the radio and
     /// never reused. Read it as an identity, not a count.
@@ -497,8 +515,9 @@ public actor VirtualRadio {
         let disconnected: [@Sendable (CentralEvent) -> Void]
     }
 
-    /// Takes the registration of `device` off every actor table: the device, its subscriptions, and
-    /// each session's connection and sink for it. This is the shared body of
+    /// Takes the registration of `device` off every actor table: the device, its subscriptions, its
+    /// published L2CAP PSMs, and each session's connection and sink for it. It fails every open
+    /// L2CAP channel of the device with ``peripheralDisconnectedError``. This is the shared body of
     /// ``remove(device:generation:)`` and a new ``register(_:advertising:)``.
     ///
     /// The method is synchronous, so a caller can settle the tables (and, for a re-registration,
@@ -509,6 +528,10 @@ public actor VirtualRadio {
     private func retire(_ device: UUID) -> Retirement? {
         guard let state = devices.removeValue(forKey: device) else { return nil }
         let subscriptions = self.subscriptions.removeValue(forKey: device) ?? [:]
+        // The published PSMs and the open channels belong to this registration. A successor
+        // starts with none.
+        publishedL2CAP.removeValue(forKey: device)
+        failL2CAPChannels(device: device, sessions: nil)
         let identifier = PeripheralIdentifier(uuid: device, name: state.descriptor.name)
         var disconnected: [@Sendable (CentralEvent) -> Void] = []
         for sessionID in Array(sessions.keys) {
@@ -690,13 +713,17 @@ public actor VirtualRadio {
     }
 
     /// Detaches a backend. The radio cancels its scan and drops its connections, per-device sinks,
-    /// and subscriptions: the whole session record. The radio reports each dropped subscription to
+    /// and subscriptions: the whole session record. It fails the session's open L2CAP channels
+    /// with ``peripheralDisconnectedError``. The radio reports each dropped subscription to
     /// its device's handler as an unsubscribe, from that device's report chain. This method returns
     /// after the radio delivers every one of them, except for a call from inside a subscription
     /// report. See ``isReporting``.
     func detach(session: UUID) async {
         guard let removed = sessions.removeValue(forKey: session) else { return }
         removed.scanner?.repeater?.cancel()
+        for device in Array(l2capChannels.keys) {
+            failL2CAPChannels(device: device, sessions: [session])
+        }
         var dropped: [(device: UUID, handler: any VirtualDeviceHandler, central: Subscriber, characteristics: [CharacteristicIdentifier])] = []
         for device in removed.connections {
             guard let handler = devices[device]?.handler else { continue }
@@ -872,7 +899,8 @@ public actor VirtualRadio {
     /// Disconnects `session` from `device`. The radio drops its subscriptions and reports each of
     /// them to the device's handler as an unsubscribe. The backend delivers the resulting
     /// `didDisconnect` itself, as CoreBluetooth's `cancelPeripheralConnection(_:)` does, and only
-    /// when this call ended the connection.
+    /// when this call ended the connection. The radio also fails the session's open L2CAP
+    /// channels on the device with ``peripheralDisconnectedError``.
     ///
     /// - Returns: Whether the radio removed a connection.
     ///   - The value is `false` when the session was not connected to the device: it never was, or
@@ -891,6 +919,7 @@ public actor VirtualRadio {
         // The sink goes with the connection. The backend delivers the `didDisconnect` itself, so
         // nothing is left to route through the sink.
         sessions[session]?.peripheralSinks.removeValue(forKey: device)
+        failL2CAPChannels(device: device, sessions: [session])
         let dropped = dropSubscriptions(session: session, device: device)
         if let handler = devices[device]?.handler {
             let central = subscriber(session, device: device)
@@ -1004,7 +1033,7 @@ public actor VirtualRadio {
     /// gate, a stale remote could still read and write, and could plant a subscription that no
     /// ``disconnect(session:device:)`` or ``detach(session:)`` would clean up, because neither
     /// walks a device that the session is not recorded as connected to.
-    private func isConnected(session: UUID, to device: UUID) -> Bool {
+    func isConnected(session: UUID, to device: UUID) -> Bool {
         sessions[session]?.connections.contains(device) == true
     }
 

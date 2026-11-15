@@ -47,7 +47,7 @@ if await SimulatorLink.isProviderReachable() {
 On the Mac, run the provider from a checkout of your package:
 
 ```sh
-swift run bleswift-provider [--passthrough] [--fixture file.json …] [--listen host:port] [--json]
+swift run bleswift-provider [--passthrough] [--fixture file.json …] [--listen host:port] [--json] [--verbose]
 ```
 
 | Flag | Meaning |
@@ -56,12 +56,64 @@ swift run bleswift-provider [--passthrough] [--fixture file.json …] [--listen 
 | `--fixture <path>` | Load a fixture document and host its devices. Repeatable. |
 | `--listen <host:port>` | Where to listen. Defaults to `BLESWIFT_LINK`, then `127.0.0.1:45541`. Use a literal address. The provider and the client both change `localhost` to `127.0.0.1`, so that the two ends use the same loopback family. |
 | `--json` | Encode outgoing messages as JSON instead of the binary property list default. |
+| `--verbose` | Log one line for each link message in each direction. Each line has the number of the connection, `<-` or `->`, and a summary of the message. The provider cuts a long summary to 240 characters and adds an ellipsis. A summary shows a data value only as its byte count. The connection number `N` in `link N` is not the session number that `status` shows. When a session opens, the log has the line `link N is <role> session M`. |
 
 The virtual radio always exists. `--passthrough` adds the Mac's radio. It does not replace the virtual radio. A hosted `PeripheralHost` is visible to other clients in both modes.
 
 Use passthrough when a simulator build must talk to real hardware. Passthrough needs a signed build of the provider with the Bluetooth entitlement. macOS gates CoreBluetooth on the app-sandbox Bluetooth entitlement and on TCC approval. A bare `swift run` binary can lose access to the radio. The virtual radio needs no entitlement, no approval, and no hardware.
 
 If the Mac's radio is off, the virtual radio still serves clients. The real radio joins when it powers on. A hosted `PeripheralHost` publishes its services and advertises on the radios that are on. It does not wait for a radio that is off, unauthorized, or resetting. So `add` and `startAdvertising` complete, and notifications continue, with Bluetooth off. When the Mac's radio powers on, the provider publishes the current services to it and restarts the advertisement. No reconnect is necessary.
+
+### Checking a running provider
+
+To see what a provider serves, run `status`:
+
+```sh
+swift run bleswift-provider status [--listen host:port] [--json]
+```
+
+```
+bleswift-provider at 127.0.0.1:45541
+passthrough: on
+fixture devices: 2
+sessions: 2
+  1  central     MyApp (iPhone 17)
+  3  peripheral  Advertiser
+```
+
+`--listen` and `BLESWIFT_LINK` select the provider, as they do for the provider itself. `--json` prints the status as JSON with sorted keys. The command exits with one of these codes:
+
+- `0` when the provider answers.
+- `69` when no provider answers. The command prints `no provider at` and the endpoint.
+- `76` when the provider rejects the request. A provider that is older than the tool rejects it or closes the connection.
+
+A Swift program can get the same snapshot with `ProviderStatusClient.fetch(endpoint:codec:timeout:)` from `BLESwiftProvider`.
+
+### Running the provider at login
+
+To run the provider without a terminal, install it as a launch agent:
+
+```sh
+bleswift-provider install-agent --passthrough --fixture /path/to/hrm.json
+```
+
+`install-agent` takes the same options as the provider. Before it writes the agent, it does these checks:
+
+1. It parses the options. An unknown option or a bad value exits with code `64`.
+2. It refuses a `--listen` host that is not a loopback host, with code `64`.
+3. It finds its own executable. If `install-agent` cannot find the executable, it exits with code `70`. Then run it with a full path.
+4. It makes each `--fixture` path absolute against the current directory, and loads each fixture. If a fixture does not load, `install-agent` exits with code `66` and writes no agent.
+
+Then `install-agent` writes `~/Library/LaunchAgents/com.kylebrowning.bleswift-provider.plist` and loads it with `launchctl`. The agent runs with your options in the order that you gave them, with the absolute fixture paths. If you did not give `--listen`, `install-agent` adds `--listen` with the endpoint that it checked, which is `127.0.0.1:45541`. If `launchctl` cannot load the agent, `install-agent` removes the plist and exits with code `70`. It starts at login and writes its output to `~/Library/Logs/bleswift-provider.log`. If the provider exits with an error, `launchd` starts it again, with a minimum of 30 seconds between two starts. If the provider exits normally, it stays stopped.
+
+- The agent always has an explicit `--listen`, and `--listen` wins over `BLESWIFT_LINK`. So the agent ignores `BLESWIFT_LINK`. To use a different port, give `--listen`.
+- The agent runs the executable at the path that you used, and it does not resolve symbolic links. Install the provider at a fixed path. If the path is in a `.build` directory, `install-agent` prints a warning, because a clean of that directory breaks the agent.
+
+To remove the agent, run `bleswift-provider uninstall-agent`. If the command cannot remove the agent file, it exits with code `74`.
+
+### Real Bluetooth and the entitlement
+
+Three features use the Mac's real Bluetooth radio: `--passthrough`, `capture`, and an agent that you install with one of them. macOS gives Bluetooth access to the responsible process. When you run the provider in Terminal, Terminal is that process. An agent has no terminal, so the provider itself must have access. Use a release build of the provider that is signed with the Bluetooth entitlement. The release script in `Scripts/release` makes this build.
 
 ## Declaring virtual devices with a fixture
 
@@ -122,6 +174,35 @@ An offset inside the value returns the value from that offset. An offset equal t
 
 `Scripts/e2e/fixtures/hrm.json` in the repository is a ready-made copy of the document above.
 
+## Capturing a fixture from real devices
+
+`capture` records real devices as a fixture document. Then you can serve a copy of a device that you do not always have near you.
+
+```sh
+swift run bleswift-provider capture [--duration <seconds>] [--name <text>]… [--service <uuid>]… [--all] [--output <path>]
+```
+
+The command scans with the Mac's radio for `--duration` seconds. The default is 10 seconds, and the maximum is 86400 seconds (one day). If the radio is not powered on after 5 seconds, or if the scan fails, the command exits with code `69`. After the scan, the command prints a numbered table of the devices to standard error. The strongest signal is first. Each row has the RSSI, the name, the advertised services, and whether the device is connectable.
+
+These options select the devices:
+
+- `--name` keeps a device whose advertised local name or peripheral name contains the text. Case does not matter.
+- `--service` keeps a device that advertises the service UUID.
+- `--all` captures every device in the table.
+
+You can give `--name` and `--service` more than one time. A device must match one value of each kind that you give. If you give `--all`, `--name`, or `--service`, the command captures every device in the table. If you give none of them, the command asks which devices to capture, for example `1,3` or `all`. An empty answer captures nothing. In a run that has no terminal, give one of these options. If no device matches, the command exits with code `1`.
+
+For each selected device, the command does these steps:
+
+1. If the device is connectable, it connects, with a limit of 10 seconds.
+2. It discovers all services and their characteristics.
+3. It reads each characteristic that has the `read` property, with a limit of 5 seconds for each read. A failed read gives no value and a warning.
+4. It disconnects.
+
+If the device is not connectable, or the connection fails, the document has the advertisement only. The command prints a warning.
+
+The command writes the document to standard output, or to the `--output` path. The document uses the format of the fixture section above. Each device gets a new random `id`, not the identifier that the Mac sees. Thus, under `--passthrough`, a captured device does not have the same identifier as the real device. The document has no `permissions`, so the provider derives them when it loads the document. Every captured service is primary, because service discovery finds only primary services. Review the document before you share it. A read value can contain data that identifies a person.
+
 ## Declaring virtual devices in Swift
 
 For a device that must *behave*, for example compute its answers, notify on a timer, or reject writes, register your own `VirtualDevice`. Depend on the `BLESwiftProvider` library. This is a complete executable:
@@ -180,6 +261,12 @@ To use a virtual radio in your own process, without a provider, see the `BLESwif
 
 A `PeripheralHost` that is served over the link is a device on the virtual radio of the provider. A `Central` in another client can find it with a scan. So two simulator apps, or two instances of one app, can talk with no hardware and no entitlements. One app advertises. The other scans, connects, reads, writes, and subscribes.
 
+The two apps can also use L2CAP. The host publishes a channel with ``PeripheralHost/publishL2CAPChannel(requiresEncryption:)``. The central opens the PSM with ``Peripheral/openL2CAPChannel(psm:timeout:)``. The host receives the channel from ``PeripheralHost/incomingL2CAPChannels()``. The provider relays the bytes with the same credit-based flow control in both directions. If the link of the host drops, the central's ``L2CAPChannel/incomingData`` stream throws.
+
+With `--passthrough`, a published PSM goes on the virtual radio and on the Mac's real radio. The host stays ``CentralState/poweredOn`` while the virtual radio is on. If only the Mac's radio turns off and on again, the host sees no state change, and the provider does not publish the PSM again on the real radio. Real centrals then cannot reach the PSM. To make it reachable again, call ``PeripheralHost/unpublishL2CAPChannel(_:)`` and then ``PeripheralHost/publishL2CAPChannel(requiresEncryption:)``.
+
+Peripheral-role L2CAP needs protocol version 2 of the link. The app and the provider must use the same version. Update the app and `bleswift-provider` together. A provider refuses a client of another version.
+
 `Scripts/sim-to-sim-e2e.sh` runs this flow with two booted simulators and the `BLESwiftExplorer` sample app. The provider binds an ephemeral loopback port. `BLESWIFT_LINK` gives that port to both apps. The script runs locally. It also runs on every push to `main` and on every same-repository pull request, on the self-hosted CI runner of the project. See `Scripts/e2e/README.md` for the topology, the environment overrides, and the checks to make when the test fails.
 
 ## Security and performance
@@ -200,7 +287,7 @@ These differences are deliberate and tested. Read them before you decide that th
 - **No state restoration.** `Central.restorationEvents()` and `PeripheralHost.restorationEvents()` never deliver `willRestore`. ``Central/stopAndExtractState()`` and ``PeripheralHost/stopAndExtractState()`` throw ``BLESwiftError/stopped`` on a link backend. There is no `CBCentralManager` to return.
 - **No ANCS.** The provider is a macOS process, and ANCS is an iOS feature. In both modes, `requiresANCS:` has no effect, and `Peripheral.ancsAuthorized` is always `false`.
 - **System connection events.** `Central.connectionEventRegistration(services:peripherals:)` does nothing against the Mac's real radio, because macOS has no `registerForConnectionEvents(options:)`. The virtual radio does not create these events.
-- **No L2CAP on the virtual radio.** ``Peripheral/openL2CAPChannel(psm:timeout:)`` against a virtual device fails with an `NSError` in the `BLESwiftProvider` domain, code `3`. L2CAP works only in `--passthrough` mode, against a real peripheral.
+- **L2CAP on the virtual radio has no encryption and no link timing.** A `PeripheralHost` publishes a PSM with ``PeripheralHost/publishL2CAPChannel(requiresEncryption:)``, and a `Central` opens it with ``Peripheral/openL2CAPChannel(psm:timeout:)``. The virtual radio ignores `requiresEncryption`. It gives PSMs from `0x0080` up. An open to a PSM that the device did not publish fails with an `NSError` in the `BLESwiftProvider` domain, code `12`. A publish that cannot get its PSM fails with code `13`. A writer waits while the reader has 256 KiB or more that it has not taken. A write that starts below the limit adds all its bytes.
 - **`knownPeripherals(withIdentifiers:)` accepts every identifier.** The call is synchronous, so the link cannot ask the provider. It returns a placeholder ``Peripheral`` for every identifier, even for unknown ones. This lets `Central.connect(identifier:)` reach a peripheral that the passthrough radio remembers from an earlier run. An unknown identifier fails at connect with `didFailToConnect` and an `NSError` in the `BLESwiftProvider` domain, code `1`.
 - **No flow control toward your client.** The link limits what a hosted `PeripheralHost` pushes, with an application-level window. This is why `PeripheralHost/updateValue(_:for:onSubscribed:)` can wait. Nothing limits the other direction. A provider delivers each notification as fast as its backend produces it, as CoreBluetooth does. A client that does not drain its notification stream collects the values in the transport. The peripheral does not slow down.
 - **A dropped link empties a hosted `PeripheralHost`.** The provider's session owns the GATT database and the advertising state of the device. Both are lost when the link drops. This is the same as a CoreBluetooth power cycle. On the next `.poweredOn`, call `add(_:)` and `startAdvertising(_:)` again. The provider replays nothing. The device identifier does not change for the life of the `PeripheralHost`. A central that saved the `PeripheralIdentifier` can connect again after the host publishes again.

@@ -8,7 +8,10 @@ import Foundation
 /// Constants for the whole wire protocol.
 public enum LinkProtocol {
     /// The protocol version of this build. Increase it for each incompatible message change.
-    public static let version = 1
+    ///
+    /// Version 2 adds peripheral-role L2CAP channels. An app and a provider must use the same
+    /// version.
+    public static let version = 2
 }
 
 /// Flow-control windows that both ends of the link share.

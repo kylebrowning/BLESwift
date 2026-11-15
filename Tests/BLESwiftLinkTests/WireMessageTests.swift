@@ -79,6 +79,18 @@ struct WireMessageTests {
         .hostEvent(.didSubscribe(central: WireSubscriber(id: id, maximumUpdateValueLength: 20), characteristic: WireCharacteristicRef(characteristic))),
         .hostEvent(.didUnsubscribe(central: WireSubscriber(id: id, maximumUpdateValueLength: 20), characteristic: WireCharacteristicRef(characteristic))),
         .hostEvent(.updateValueDelivered(sequence: 2)),
+        .hostRequest(.publishL2CAPChannel(requiresEncryption: true)),
+        .hostRequest(.unpublishL2CAPChannel(psm: 0x80)),
+        .hostRequest(.l2capData(channel: 1, data: Data([9]))),
+        .hostRequest(.l2capCredit(channel: 1, bytes: 512)),
+        .hostRequest(.l2capClose(channel: 1)),
+        .hostEvent(.didPublishL2CAPChannel(psm: 0x80, error: nil)),
+        .hostEvent(.didPublishL2CAPChannel(psm: nil, error: err)),
+        .hostEvent(.didUnpublishL2CAPChannel(psm: 0x80, error: err)),
+        .hostEvent(.didOpenL2CAPChannel(channel: 1, psm: 0x80, central: id)),
+        .hostEvent(.l2capData(channel: 1, data: Data([10]))),
+        .hostEvent(.l2capCredit(channel: 1, bytes: 3)),
+        .hostEvent(.l2capClosed(channel: 1, error: nil)),
     ]
 
     @Test("Every message round-trips through every codec", arguments: LinkCodec.allCases)

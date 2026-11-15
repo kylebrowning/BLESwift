@@ -280,13 +280,13 @@ struct L2CAPLinkTests {
         // channel's id.
         let staleBytes = Data([0xDE, 0xAD])
         await onSessionQueue(session) {
-            session.sendFromPump(.l2capData(channel: 7, data: staleBytes), channel: 7, open: stale)
+            session.relay.sendFromPump(.data(staleBytes), channel: 7, open: stale)
         }
         // The live bridge's own send bounds the wait. The queue is serial and the connection writes
         // in order, so a frame that arrives after this send was never sent at all.
         let liveBytes = Data([0xC0, 0xFF, 0xEE])
         await onSessionQueue(session) {
-            session.sendFromPump(.l2capData(channel: 7, data: liveBytes), channel: 7, open: live)
+            session.relay.sendFromPump(.data(liveBytes), channel: 7, open: live)
         }
         await waitFor(timeout: .seconds(5)) {
             client.events.contains(.l2capData(channel: 7, data: liveBytes))

@@ -29,11 +29,14 @@ import Logging
 ///   becomes `false`. The manager reports each subscriber as gone with `didUnsubscribe`.
 /// - ``updateValue(_:for:onSubscribed:)`` returns `false` when `LinkFlowControl.updateValueWindow`
 ///   pushes wait for an acknowledgement. `readyToUpdateSubscribers` reopens the window.
+/// - The manager publishes L2CAP channels through the provider. Each channel that a central
+///   opens arrives as a `LinkL2CAPChannel`. If the link drops, each channel closes with
+///   `LinkError.providerDisconnected`.
 /// - Call every member on ``queue``.
 ///
 /// For the full rules, see <doc:BLESwiftSimulatorLink#Radio-state-and-dropped-links> and
 /// <doc:BLESwiftSimulatorLink#Notification-back-pressure>.
-public final class LinkPeripheralManager: PeripheralManaging, Sendable {
+public final class LinkPeripheralManager: L2CAPPublishing, Sendable {
 
     /// The queue to which the code confines every request, state update, and event delivery.
     /// The owning `PeripheralHost` must be constructed with the same queue.
@@ -123,6 +126,20 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
     /// same unacknowledgeable state that a drop leaves, and the connection that answers it
     /// clears it in the same way.
     nonisolated(unsafe) private var _isAwaitingReconnect = true
+
+    /// The L2CAP channels that remote centrals opened to this host, by the id that the provider
+    /// gave each one. The channel's own close removes its entry. A `l2capClosed` from the
+    /// provider and a dropped link also remove entries.
+    nonisolated(unsafe) private var _channels: [UInt32: LinkL2CAPChannel] = [:]
+
+    /// The provider events that this manager refuses. Each one drops the session, as a malformed
+    /// identifier does.
+    enum ProtocolViolation: Error, Equatable {
+        /// An L2CAP event named PSM 0, which no published channel can have.
+        case zeroPSM
+        /// The provider opened a second channel under an id that is already open.
+        case duplicateChannel(UInt32)
+    }
 
     /// Creates a peripheral manager that controls the provider at `endpoint`, and starts dialing
     /// it at once. Reconnection is automatic, at `retryInterval`.
@@ -333,6 +350,61 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         return true
     }
 
+    // MARK: - L2CAPPublishing
+
+    /// Asks the provider's host to publish an L2CAP channel. The completion arrives as
+    /// `didPublishL2CAPChannel(psm:error:)`, with the PSM that the provider selected.
+    public func publishL2CAPChannel(requiresEncryption: Bool) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        send(.publishL2CAPChannel(requiresEncryption: requiresEncryption))
+    }
+
+    /// Asks the provider's host to unpublish `psm`. The completion arrives as
+    /// `didUnpublishL2CAPChannel(psm:error:)`.
+    public func unpublishL2CAPChannel(_ psm: L2CAPPSM) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        send(.unpublishL2CAPChannel(psm: psm.rawValue))
+    }
+
+    /// The number of L2CAP channels that this manager holds. Read it on ``queue``.
+    ///
+    /// This is a test hook. A test uses it to assert that a close or a dropped link left no
+    /// channel behind.
+    package var channelCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _channels.count
+    }
+
+    /// Creates the client half of the host-side channel `identifier`. Its frames go on the link
+    /// as host requests. Its own close also removes it from ``_channels``. Call it on ``queue``.
+    private func makeChannel(_ identifier: UInt32, psm: L2CAPPSM) -> LinkL2CAPChannel {
+        dispatchPrecondition(condition: .onQueue(queue))
+        // The closure hops onto `queue`, because a channel's methods run wherever its consumer
+        // is. `LinkCentral.registerChannel` does the same.
+        //
+        // A provider gives ids from 1 again after a reconnect, so an id alone does not name a
+        // channel. The hop sends a frame only while this channel is the one filed under the id.
+        // A frame from a channel of an earlier link would otherwise reach the channel that now
+        // has its id. The box holds the channel weakly, because the channel holds this closure.
+        let owner = WeakChannel()
+        let channel = LinkL2CAPChannel(channel: identifier, psm: psm, sendFrame: { [weak self] frame in
+            guard let self else { return }
+            queue.async { [self] in
+                guard let current = _channels[identifier], current === owner.channel else { return }
+                if case .close = frame { _channels.removeValue(forKey: identifier) }
+                send(frame.hostRequest(channel: identifier))
+            }
+        })
+        owner.channel = channel
+        return channel
+    }
+
+    /// A weak reference to one channel. ``makeChannel(_:psm:)`` sets it once, on ``queue``,
+    /// before any frame can hop, and the hop reads it on ``queue``.
+    private final class WeakChannel: Sendable {
+        nonisolated(unsafe) weak var channel: LinkL2CAPChannel?
+    }
+
     // MARK: - Sending
 
     /// Sends `request` over the link. Call it on ``queue``.
@@ -373,6 +445,13 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
         }
         if _outstandingUpdates.count >= LinkFlowControl.updateValueWindow { _wasBlockedAtDrop = true }
         _outstandingUpdates.removeAll()
+        // The provider that relayed the channels is gone. Close each one before the state change,
+        // as `LinkCentral` does.
+        let doomed = _channels
+        _channels.removeAll()
+        for channel in doomed.values {
+            channel.remoteClosed(error: LinkError.providerDisconnected.nsError)
+        }
         guard _radioState != .unsupported else { return }
         _radioState = .unsupported
         deliver(.didUpdateState(.unsupported))
@@ -476,15 +555,53 @@ public final class LinkPeripheralManager: PeripheralManaging, Sendable {
             if wasFull, _outstandingUpdates.count < LinkFlowControl.updateValueWindow {
                 deliver(.readyToUpdateSubscribers)
             }
+
+        case .didPublishL2CAPChannel(let psm, let error):
+            guard psm != 0 else { throw ProtocolViolation.zeroPSM }
+            deliver(.didPublishL2CAPChannel(psm: psm.map(L2CAPPSM.init), error: error?.nsError))
+
+        case .didUnpublishL2CAPChannel(let psm, let error):
+            guard psm != 0 else { throw ProtocolViolation.zeroPSM }
+            deliver(.didUnpublishL2CAPChannel(psm: L2CAPPSM(psm), error: error?.nsError))
+
+        case .didOpenL2CAPChannel(let identifier, let psm, let central):
+            guard psm != 0 else { throw ProtocolViolation.zeroPSM }
+            // A second channel under a live id would make the first one unreachable. This is a
+            // protocol violation, as `CentralSession` treats a duplicate open.
+            guard _channels[identifier] == nil else { throw ProtocolViolation.duplicateChannel(identifier) }
+            let channel = makeChannel(identifier, psm: L2CAPPSM(psm))
+            _channels[identifier] = channel
+            deliver(.didOpenL2CAPChannel(channel: channel, central: central, error: nil))
+
+        case .l2capData(let identifier, let data):
+            // The channel can have closed locally, so a frame for an unknown id is ignored. A
+            // throw drops the session: the frame was larger than the agreed chunk size.
+            try _channels[identifier]?.receive(data)
+
+        case .l2capCredit(let identifier, let bytes):
+            _channels[identifier]?.addCredit(bytes: bytes)
+
+        case .l2capClosed(let identifier, let error):
+            guard let channel = _channels.removeValue(forKey: identifier) else { return }
+            channel.remoteClosed(error: error?.nsError)
         }
     }
 
     /// Delivers `event` to ``eventHandler`` asynchronously on ``queue``, as the seam's
     /// never-inline delivery contract requires.
+    ///
+    /// If no handler is attached when the hop runs, an opened channel has no owner. The manager
+    /// then closes it, so the provider and the central do not wait on it.
     private func deliver(_ event: PeripheralHostEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
         queue.async { [self] in
-            _eventHandler?(event)
+            guard let handler = _eventHandler else {
+                if case .didOpenL2CAPChannel(let channel?, _, _) = event {
+                    channel.close(error: nil)
+                }
+                return
+            }
+            handler(event)
         }
     }
 }

@@ -372,13 +372,13 @@ public final class LinkCentral: CentralManaging, Sendable {
         // The send closure hops onto `queue`, because a channel's methods run wherever its
         // consumer is. The closure is also the point where the code deregisters a channel after
         // a client-initiated close, which the provider answers with no event of its own.
-        let channel = LinkL2CAPChannel(channel: identifier, psm: psm) { [weak self] request in
+        let channel = LinkL2CAPChannel(channel: identifier, psm: psm, sendFrame: { [weak self] frame in
             guard let self else { return }
             queue.async { [self] in
-                if case .l2capClose(let closing) = request { _channels.removeValue(forKey: closing) }
-                send(request)
+                if case .close = frame { _channels.removeValue(forKey: identifier) }
+                send(frame.centralRequest(channel: identifier))
             }
-        }
+        })
         _channels[identifier] = ChannelEntry(channel: channel, peripheral: peripheral)
         return channel
     }

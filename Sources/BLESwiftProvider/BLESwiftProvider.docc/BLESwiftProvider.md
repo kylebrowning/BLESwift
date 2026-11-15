@@ -30,12 +30,24 @@ The virtual radio (`VirtualRadio`, `VirtualDevice`, `VirtualCentralBackend`, and
 - The composite keeps no map from a peripheral to a backend. `connect`, `cancelPeripheralConnection`, and `respond(to:value:error:)` go to every child. A child that does not know the peripheral or the token ignores the call.
 - A child whose radio state is not `CentralState/poweredOn` takes no part. The composite logs each skipped child once.
 - CoreBluetooth drops a scan that it receives while it is not powered on. So ``CompositeCentral`` remembers the current scan and the current registration for connection events. It issues both again to a child that changes to `poweredOn`. `stopScan()` and `unregisterForConnectionEvents()` forget what they undo.
-- ``CompositePeripheralManager`` publishes its current services again and restarts the advertisement on a child that comes back. Thus `--passthrough` uses the Mac's radio as soon as the user turns it on.
+- ``CompositePeripheralManager`` publishes its current services again and restarts the advertisement on a child that comes back. Thus `--passthrough` uses the Mac's radio as soon as the user turns it on. It does not publish L2CAP PSMs again on a child that comes back. See <doc:#L2CAP-channels>.
 - When a child leaves `poweredOn`, the composite settles what that child still owed and discards its FIFO.
 
 ### Completions
 
 `add(_:)` and `startAdvertising(_:)` report once for each child. The composite waits for every powered-on child. Then it emits one `didAddService` or `didStartAdvertising` with the first non-`nil` error. A skipped child counts as complete at once. If no child is powered on, both calls complete with ``CompositePeripheralManager/noPoweredOnBackendError``. The composite forwards every other event unchanged, with two exceptions. It replaces `didUpdateState` with its computed state, and it drops `willRestoreState`.
+
+### L2CAP channels
+
+``CompositePeripheralManager`` publishes one PSM on every powered-on child that can publish. Exactly one `didPublishL2CAPChannel` follows each call, in call order.
+
+- A real `CBPeripheralManager` leads and selects the PSM. Each virtual child then publishes the same PSM. If no real child is on, the first virtual child selects the PSM, and the other virtual children publish it.
+- If a virtual child already holds the PSM (`BLESwiftProvider` code 13), the PSM stays on the real child, and the real child selects another PSM. The composite tries at most four PSMs. When the publish completes, it unpublishes the PSMs that conflicted on the real child.
+- If a child fails in another way, or four PSMs conflict, the composite unpublishes the PSM on the children that published it and reports the first error.
+- An unpublish goes to every powered-on child that holds the PSM. One `didUnpublishL2CAPChannel` follows, with the first error. A child that fails still holds the PSM, so a later unpublish reaches it again.
+- A child that powers off drops its PSMs and its share of the calls in flight. A child that comes back does not publish the PSMs again. To make a PSM reachable on that child, unpublish it and publish it again.
+- A child answer that matches no call is stale. The composite drops it. If the answer is a successful publish, the composite unpublishes that PSM on the child.
+- The composite forwards each channel that a central opens unchanged.
 
 ### Notification pushes
 
@@ -53,6 +65,10 @@ The virtual radio (`VirtualRadio`, `VirtualDevice`, `VirtualCentralBackend`, and
 - ``ProviderConfiguration``
 - ``ProviderCommandLine``
 - ``ProviderFixtureError``
+
+### Status
+
+- ``ProviderStatusClient``
 
 ### Backends
 

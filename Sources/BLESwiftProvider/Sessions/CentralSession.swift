@@ -160,9 +160,15 @@ final class CentralSession: Sendable {
     nonisolated(unsafe) var pendingOpens: [UUID: [PendingOpen]] = [:]
     nonisolated(unsafe) private var isClosed = false
 
+    /// The relay that bridges this session's open L2CAP channels. It is internal so that
+    /// `CentralSession+L2CAP.swift` can give it the channels that open.
+    let relay: L2CAPChannelRelay
+
     /// The L2CAP channels that this session bridges, keyed by the id that the client allocated.
-    /// It is internal so that `CentralSession+L2CAP.swift` can service them.
-    nonisolated(unsafe) var channels: [UInt32: OpenChannel] = [:]
+    /// The relay holds them. Read it on ``queue``.
+    var channels: [UInt32: OpenChannel] {
+        relay.channels
+    }
 
     /// Creates a session that serves `connection` from `backend`.
     ///
@@ -199,6 +205,10 @@ final class CentralSession: Sendable {
         self.maximumRemotes = maximumRemotes
         self.label = "central session \(ordinal)"
         self.log = log
+        // The relay calls `send` on `queue`, as ``send(_:)`` requires.
+        self.relay = L2CAPChannelRelay(queue: queue, log: log) { [connection] channel, frame in
+            connection.send(.centralEvent(CentralSession.event(for: frame, channel: channel)))
+        }
         queue.async { [self] in
             guard !isClosed else { return }
             // Nothing can precede the hello on the wire, so it goes out from here, ahead of every
@@ -511,7 +521,7 @@ final class CentralSession: Sendable {
         guard pendingWrites[identifier]?.isEmpty ?? true, pendingOpens[identifier]?.isEmpty ?? true else {
             return false
         }
-        return !channels.values.contains { $0.peripheral == identifier }
+        return !channels.values.contains { $0.owner == identifier }
     }
 
     /// The write maximum to put on the wire for `peripheral`, given what the backend reported.
@@ -779,7 +789,7 @@ final class CentralSession: Sendable {
         pendingOpens.removeValue(forKey: peripheral)
         // The client tears down its own halves when it sees the disconnect. Closing the
         // backend's ends here stops their pumps and releases the transports.
-        closeChannels(matching: { $0.peripheral == peripheral })
+        closeChannels(matching: { $0.owner == peripheral })
     }
 
     /// Writes one event to the link. Call it on ``queue``. It is internal so that the L2CAP

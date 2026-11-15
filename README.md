@@ -125,12 +125,31 @@ The provider has a virtual radio. The virtual radio does not need hardware, enti
 approval. A `PeripheralHost` in a simulator becomes a device on the virtual radio, so
 **two simulators can communicate**. `Scripts/sim-to-sim-e2e.sh` tests this. You can run it
 locally. CI also runs it on each push to `main` and on each pull request from this repository.
+The two simulators can also use L2CAP channels. One app publishes a PSM, and the other app
+opens it.
 
 The `--passthrough` option also gives access to the real radio of your Mac. For this option,
 the provider build must be signed and must have the Bluetooth entitlement.
 
+The provider also has tools. `capture` records real devices as a fixture document. `status`
+shows the sessions of a running provider. `install-agent` runs the provider at login.
+`--verbose` logs each link message.
+
 For fixtures, virtual devices in code, and the differences from CoreBluetooth, read the
 [Running in the iOS Simulator](Sources/BLESwift/BLESwift.docc/SimulatorSupport.md) article.
+
+### Installing the provider
+
+To install the provider with Homebrew, run `brew install kylebrowning/tap/bleswift-provider`.
+This command works from the next release. Until then, or if you prefer to build from source,
+run `swift run bleswift-provider`.
+
+### What the simulator link can do
+
+- It supports the central role and the peripheral role in the simulator.
+- It connects several simulators to one virtual radio at the same time.
+- It serves fixtures from a JSON file or from Swift code.
+- It gives central-role clients access to the real radio of your Mac with `--passthrough`.
 
 ### Mocking Bluetooth in-process
 

@@ -158,4 +158,20 @@ extension CBPeripheralManager: PeripheralManaging {
     }
 }
 
+/// `CBPeripheralManager` conforms to ``L2CAPPublishing``. The completions arrive through
+/// ``PeripheralManagerDelegateProxy``.
+extension CBPeripheralManager: L2CAPPublishing {
+
+    /// Forwards to the native `publishL2CAPChannel(withEncryption:)`.
+    public func publishL2CAPChannel(requiresEncryption: Bool) {
+        publishL2CAPChannel(withEncryption: requiresEncryption)
+    }
+
+    /// Converts the ``L2CAPPSM`` to a `CBL2CAPPSM` and forwards to the native
+    /// `unpublishL2CAPChannel(_:)`, a separate overload that takes a `CBL2CAPPSM`.
+    public func unpublishL2CAPChannel(_ psm: L2CAPPSM) {
+        unpublishL2CAPChannel(CBL2CAPPSM(psm.rawValue))
+    }
+}
+
 #endif

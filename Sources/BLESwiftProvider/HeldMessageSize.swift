@@ -32,9 +32,9 @@ extension LinkMessage {
             return request.heldPayloadByteCount
         case .hostRequest(let request):
             return request.heldPayloadByteCount
-        // A client never sends an event or a server hello. If one arrives, the handshake refuses
-        // it, so it costs only the overhead.
-        case .serverHello, .centralEvent, .hostEvent:
+        // A client never sends an event, a server hello, or a status. If one arrives, the
+        // handshake refuses it, so it costs only the overhead.
+        case .serverHello, .centralEvent, .hostEvent, .providerStatus:
             return 0
         }
     }
@@ -81,7 +81,10 @@ extension HostRequest {
             return value?.count ?? 0
         case .updateValue(_, let value, _, let centrals):
             return value.count + LinkMessage.byteCount(of: centrals)
-        case .stopAdvertising, .removeAllServices:
+        case .l2capData(_, let data):
+            return data.count
+        case .stopAdvertising, .removeAllServices, .publishL2CAPChannel, .unpublishL2CAPChannel,
+             .l2capCredit, .l2capClose:
             return 0
         }
     }
