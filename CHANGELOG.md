@@ -66,6 +66,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A client with a different protocol version now always receives the provider's refusal and
   its reason. Before, the provider closed the connection at once, and the refusal was
   sometimes lost.
+- `Peripheral.openL2CAPChannel(psm:timeout:)` now gives each open its own result. Before
+  this fix, the late result of a cancelled or timed-out open went to the next open. That open
+  then got a channel for a different PSM or a different call's error. Now `Central` closes a
+  late channel for a cancelled open.
+- A pending L2CAP open now fails when the peripheral disconnects. Before this fix, the open
+  waited forever. `cancelAllOperations(error:)` now also fails a pending L2CAP open with
+  `BLESwiftError.cancelled`.
+- `stopAndExtractState()` now throws `BLESwiftError.stopped` while an L2CAP open is pending.
+  This includes a cancelled open whose result has not arrived. The new owner of the manager
+  would otherwise get that result.
+- If the task of `Peripheral.openL2CAPChannel(psm:timeout:)` is cancelled when the channel
+  arrives, `Central` now closes the channel and throws `BLESwiftError.operationCancelled`.
 
 ## [3.1.0] - 2026-11-01
 

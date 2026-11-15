@@ -23,6 +23,12 @@ extension Peripheral {
     ///   - ``BLESwiftError/timedOut``.
     ///   - ``BLESwiftError/operationCancelled``.
     ///   - ``BLESwiftError/l2capOpenFailed``.
+    ///   - ``BLESwiftError/explicitDisconnect``, if you disconnect the peripheral during the
+    ///     open.
+    ///   - ``BLESwiftError/unexpectedDisconnect``, if the peripheral disconnects during the
+    ///     open.
+    ///   - ``BLESwiftError/cancelled``, if you call ``Central/cancelAllOperations(error:)``
+    ///     during the open.
     ///   - The error that CoreBluetooth reports for a failed open.
     public func openL2CAPChannel(psm: L2CAPPSM, timeout: Duration? = nil) async throws -> L2CAPChannel {
         let central = try resolveCentral()
