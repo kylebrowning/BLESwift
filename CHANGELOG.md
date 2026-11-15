@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to a PSM that is not published fails with code 12. A publish that cannot get its PSM fails
   with code 13.
 
+- A CoreBluetooth L2CAP channel now gives out its `incomingData` stream once. A second read of
+  `L2CAPChannel.incomingData` or `IncomingL2CAPChannel.incomingData` returns a stream that
+  finishes at once. The virtual radio and the simulator link already work this way. The
+  stream keeps the channel open while you read it, and a channel that you release closes.
+
 ### Fixed
 
 - A client with a different protocol version now always receives the provider's refusal and
