@@ -117,20 +117,18 @@ final class Broadcaster<Element: Sendable>: Sendable {
         }
     }
 
-    /// Whether at least one subscribed stream is live. A stream stops being live when its
-    /// consuming task is cancelled or its iterator deinitializes. It is `false` after
-    /// ``finish()``. The value is a snapshot: a stream can terminate immediately after the read.
-    var hasConsumers: Bool {
-        box.withLock { !$0.continuations.isEmpty }
-    }
-
     /// Fans `element` out to every subscribed stream. As ``ReplayMode`` specifies, it also
     /// records the element for future subscribers. It does nothing after ``finish()``.
     ///
     /// The replay bookkeeping runs under the lock. The fan-out runs *outside* it. A yield to a
     /// continuation that was removed meanwhile is harmless, because `AsyncStream` drops values
     /// after termination.
-    func yield(_ element: Element) {
+    ///
+    /// - Returns: The number of streams that took the element (`.enqueued`). A stream that
+    ///   terminated, or dropped the element because of its buffering policy, does not count. A
+    ///   stream that exists and is not iterated yet counts, because it buffers the element.
+    @discardableResult
+    func yield(_ element: Element) -> Int {
         // `continuation.yield` takes the consuming task's status lock. A concurrent cancellation
         // of that task holds the status lock and then enters `box.withLock` through
         // `onTermination`. Yielding under the lock would invert the lock order and deadlock.
@@ -153,9 +151,13 @@ final class Broadcaster<Element: Sendable>: Sendable {
             return Array(state.continuations.values)
         }
 
+        var enqueued = 0
         for continuation in targets {
-            continuation.yield(element)
+            if case .enqueued = continuation.yield(element) {
+                enqueued += 1
+            }
         }
+        return enqueued
     }
 
     /// Finishes every subscribed stream. A stream that is created later finishes immediately

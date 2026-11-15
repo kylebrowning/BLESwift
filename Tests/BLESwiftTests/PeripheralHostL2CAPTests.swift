@@ -77,9 +77,23 @@ private final class ScriptedPublisher: L2CAPPublishing, Sendable {
     func respond(to token: RequestToken, value: Data?, error: ATTError?) {}
     func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool { true }
 
+    /// When `true`, a publish delivers nothing until the test calls ``deliver(_:)``. Set it on
+    /// ``queue``.
+    nonisolated(unsafe) var holdsPublishes = false
+    nonisolated(unsafe) private var _publishCalls = 0
+
     func publishL2CAPChannel(requiresEncryption: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
+        _publishCalls += 1
+        guard !holdsPublishes else { return }
         queue.async { [self] in _eventHandler?(.didPublishL2CAPChannel(psm: L2CAPPSM(0x0080), error: nil)) }
+    }
+
+    /// The number of publish calls so far.
+    func publishCalls() async -> Int {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Int, Never>) in
+            queue.async { [self] in continuation.resume(returning: _publishCalls) }
+        }
     }
 
     nonisolated(unsafe) private var _unpublishCalls = 0
@@ -369,6 +383,88 @@ struct PeripheralHostL2CAPTests {
 
         #expect(await channel.onQueue { channel.isClosed })
         #expect(await channel.onQueue { channel.closeError == nil })
+    }
+
+    @Test("An incoming channel is closed when every stream was released, and kept when a stream that is not iterated yet exists")
+    func incomingChannelCountsTakenStreams() async throws {
+        let (host, fake, queue) = await makePoweredOnHost()
+
+        // A stream that the code created and released takes nothing.
+        do {
+            let released = await host.incomingL2CAPChannels()
+            withExtendedLifetime(released) {}
+        }
+        let first = FakeL2CAPChannel(psm: L2CAPPSM(0x0080), queue: queue)
+        fake.simulateIncomingL2CAPChannel(first, central: UUID())
+        await fake.onQueue {}
+        #expect(await first.onQueue { first.isClosed })
+
+        // A stream that exists and is not iterated yet takes the channel and buffers it.
+        let waiting = await host.incomingL2CAPChannels()
+        let second = FakeL2CAPChannel(psm: L2CAPPSM(0x0080), queue: queue)
+        fake.simulateIncomingL2CAPChannel(second, central: UUID())
+        await fake.onQueue {}
+        #expect(await second.onQueue { !second.isClosed })
+        var iterator = waiting.makeAsyncIterator()
+        #expect(await iterator.next()?.psm == L2CAPPSM(0x0080))
+    }
+
+    @Test("An incoming channel is closed when its only consumer stopped iterating")
+    func incomingChannelAfterConsumerStopped() async throws {
+        let (host, fake, queue) = await makePoweredOnHost()
+        let stream = await host.incomingL2CAPChannels()
+        let consumer = Task {
+            for await _ in stream {}
+        }
+        consumer.cancel()
+        _ = await consumer.value
+
+        let channel = FakeL2CAPChannel(psm: L2CAPPSM(0x0080), queue: queue)
+        fake.simulateIncomingL2CAPChannel(channel, central: UUID())
+        await fake.onQueue {}
+        #expect(await channel.onQueue { channel.isClosed })
+    }
+
+    @Test("A failed unpublish that power-off already failed does not restore the PSM")
+    func lateFailedUnpublishDoesNotRestore() async throws {
+        let (host, backend) = await makeScriptedHost()
+        let psm = try await host.publishL2CAPChannel()
+        let unpublish = Task { try await host.unpublishL2CAPChannel(psm) }
+        await waitFor { await backend.unpublishCalls() == 1 }
+        backend.deliver(.didUpdateState(.poweredOff))
+        await #expect(throws: BLESwiftError.bluetoothUnavailable) { try await unpublish.value }
+
+        // The backend answers late, with an error that would restore the PSM for a live call.
+        backend.deliver(.didUnpublishL2CAPChannel(psm: psm, error: NSError(domain: "BLESwiftTests", code: 5)))
+        backend.deliver(.didUpdateState(.poweredOn))
+        await backend.flush()
+
+        await #expect(throws: BLESwiftError.invalidArgument("PSM \(psm.rawValue) is not published")) {
+            try await host.unpublishL2CAPChannel(psm)
+        }
+    }
+
+    @Test("A failed unpublish of a cancelled publish does not restore the PSM")
+    func failedAutoUnpublishDoesNotRestore() async throws {
+        let (host, backend) = await makeScriptedHost()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            backend.queue.async { backend.holdsPublishes = true; continuation.resume() }
+        }
+        let publish = Task { try await host.publishL2CAPChannel() }
+        await waitFor { await backend.publishCalls() == 1 }
+        publish.cancel()
+        await #expect(throws: BLESwiftError.operationCancelled) { _ = try await publish.value }
+
+        // The publish of the cancelled call succeeds, so the host unpublishes the PSM by itself.
+        backend.deliver(.didPublishL2CAPChannel(psm: L2CAPPSM(0x0080), error: nil))
+        await waitFor { await backend.unpublishCalls() == 1 }
+        #expect(await backend.unpublishCalls() == 1)
+        backend.deliver(.didUnpublishL2CAPChannel(psm: L2CAPPSM(0x0080), error: NSError(domain: "BLESwiftTests", code: 5)))
+        await backend.flush()
+
+        await #expect(throws: BLESwiftError.invalidArgument("PSM \(0x0080) is not published")) {
+            try await host.unpublishL2CAPChannel(L2CAPPSM(0x0080))
+        }
     }
 
     @Test("stopAndExtractState() finishes the incoming-channel streams")

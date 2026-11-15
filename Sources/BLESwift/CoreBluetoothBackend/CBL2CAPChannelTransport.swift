@@ -3,6 +3,7 @@
 //  BLESwift
 //
 
+import BLESwiftCompat17
 import BLESwiftCore
 import CoreBluetooth
 import Foundation
@@ -16,15 +17,17 @@ import Foundation
 /// ``pumpQueue`` with `CFReadStreamSetDispatchQueue` and `CFWriteStreamSetDispatchQueue`, so
 /// GCD drives them off the actor.
 ///
-/// ## Sendable by queue confinement (no locks, no `@unchecked`)
+/// ## Sendable by queue confinement (no `@unchecked`)
 /// Every mutable stored property is `nonisolated(unsafe)` and code touches it **only** on
-/// ``pumpQueue``. A `dispatchPrecondition` guards each entry point, and ``write(_:)`` and
+/// ``pumpQueue``, or in `deinit`. The one exception is the stream that ``inbound()`` gives out,
+/// which a `Mutex` guards. A `dispatchPrecondition` guards each entry point, and ``write(_:)`` and
 /// ``close(error:)`` hop on with `pumpQueue.async`. This is a narrow confinement and not a
 /// type-wide `@unchecked Sendable`, which a grep check forbids.
 ///
 /// ## Deterministic teardown
 /// ``close(error:)`` hops onto ``pumpQueue``, closes and unschedules both streams, finishes
-/// the inbound stream, and fails any queued write. It is idempotent.
+/// the inbound stream, and fails any queued write. It is idempotent. If the owner releases the
+/// transport and its inbound stream without a close, `deinit` does the same work.
 final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegate {
 
     let psm: L2CAPPSM
@@ -38,9 +41,14 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
     nonisolated(unsafe) private let inputStream: InputStream
     nonisolated(unsafe) private let outputStream: OutputStream
 
-    /// The single inbound stream for the `L2CAPChannel` handle. Code calls `yield` and `finish`
-    /// on the continuation only from ``pumpQueue``.
-    private let inboundStream: AsyncThrowingStream<Data, Error>
+    /// The single inbound stream, until ``inbound()`` gives it out. After that, only the
+    /// consumer holds the stream, so a consumer that releases the stream also releases this
+    /// transport. A consumer calls ``inbound()`` from any isolation domain, so a `Mutex` guards
+    /// this one value. Every other property stays confined to the pump.
+    private let vendableStream: Mutex<AsyncThrowingStream<Data, Error>?>
+
+    /// The continuation of the inbound stream. Code calls `yield` and `finish` on it only from
+    /// ``pumpQueue``, or from `deinit`, where no other reference exists.
     private let inboundContinuation: AsyncThrowingStream<Data, Error>.Continuation
 
     /// One queued outbound write that waits for delivery, which can be partial. Confined to
@@ -76,10 +84,35 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
         self.outputStream = outputStream
         self.underlyingChannel = underlyingChannel
         let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
-        self.inboundStream = stream
+        self.vendableStream = Mutex(stream)
         self.inboundContinuation = continuation
         super.init()
         start()
+    }
+
+    /// Makes the streams safe when the last reference to the transport goes, so a dropped
+    /// channel neither hangs its peer nor leaks the `CBL2CAPChannel`.
+    ///
+    /// No pump block can run now, because each block holds the transport. A stream event that
+    /// CoreBluetooth still delivers finds a `nil` delegate, because a stream holds its delegate
+    /// weakly. So this code can touch the pump state off ``pumpQueue``. It releases the
+    /// `CBL2CAPChannel` last.
+    deinit {
+        guard !closed else { return }
+        inputStream.delegate = nil
+        outputStream.delegate = nil
+        CFReadStreamSetDispatchQueue(inputStream as CFReadStream, nil)
+        CFWriteStreamSetDispatchQueue(outputStream as CFWriteStream, nil)
+        if opened {
+            inputStream.close()
+            outputStream.close()
+        }
+        inboundContinuation.finish()
+        for job in writeQueue {
+            job.continuation.resume(throwing: BLESwiftError.l2capChannelClosed)
+        }
+        writeQueue.removeAll()
+        underlyingChannel = nil
     }
 
     /// Creates a transport from a `CBL2CAPChannel` that just opened. The delegate proxy uses it.
@@ -109,8 +142,24 @@ final class CBL2CAPChannelTransport: NSObject, L2CAPChannelRemote, StreamDelegat
 
     // MARK: - L2CAPChannelRemote
 
+    /// The inbound stream. The first call gives out the one stream. Every later call returns a
+    /// stream that finishes at once, as for the other transports.
+    ///
+    /// The stream holds this transport until the stream terminates: it finishes, or its consumer
+    /// releases it. So a consumer that still reads keeps the channel open, and a channel whose
+    /// stream and handle are both released goes through `deinit`.
     func inbound() -> AsyncThrowingStream<Data, Error> {
-        inboundStream
+        let stream = vendableStream.withLock { stored -> AsyncThrowingStream<Data, Error>? in
+            defer { stored = nil }
+            return stored
+        }
+        guard let stream else {
+            return AsyncThrowingStream { $0.finish() }
+        }
+        inboundContinuation.onTermination = { [self] _ in
+            withExtendedLifetime(self) {}
+        }
+        return stream
     }
 
     func write(_ data: Data) async throws {

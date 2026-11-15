@@ -500,6 +500,11 @@ public actor PeripheralHost {
     ///   - ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled. If the
     ///     publish then succeeds, the host unpublishes the PSM immediately.
     ///   - The error that the backend reports if the publish fails.
+    ///
+    /// - Note: The host pairs each publish result with the oldest call that waits. When the radio
+    ///   leaves `.poweredOn`, the host fails every waiting call. A backend that delivers a publish
+    ///   result after such a power cycle can thus pair the result with a new call. CoreBluetooth
+    ///   and the virtual radio do not deliver a result that late.
     public func publishL2CAPChannel(requiresEncryption: Bool = false) async throws -> L2CAPPSM {
         guard let manager else { throw BLESwiftError.stopped }
         guard let publisher = manager as? any L2CAPPublishing else {
@@ -577,7 +582,8 @@ public actor PeripheralHost {
     /// Each subscriber receives the same ``IncomingL2CAPChannel``. Its
     /// ``IncomingL2CAPChannel/incomingData`` stream has a single consumer, so let only one
     /// subscriber read it. If a channel opens while no subscriber exists, the host closes the
-    /// channel.
+    /// channel. A stream that you create and do not iterate or release counts as a subscriber,
+    /// because it buffers each channel. Release a stream that you do not read.
     public func incomingL2CAPChannels() -> AsyncStream<IncomingL2CAPChannel> {
         incomingL2CAPBroadcaster.stream()
     }
@@ -773,17 +779,19 @@ public actor PeripheralHost {
     /// Removes and resumes the oldest pending unpublish of `psm` (FIFO by token). An unpublish
     /// event with no waiter does nothing.
     ///
-    /// A failed unpublish puts `psm` back in ``publishedPSMs``, because the channel is still
-    /// published. The exception is the `BLESwiftProvider` code 12 error, which says that the
-    /// backend has no channel on `psm`.
+    /// A failed unpublish that resumes a live waiter puts `psm` back in ``publishedPSMs``,
+    /// because the channel is still published. The exception is the `BLESwiftProvider` code 12
+    /// error, which says that the backend has no channel on `psm`. An event with no live waiter
+    /// never puts `psm` back: a radio state change already failed the call, the call was
+    /// cancelled, or the host unpublished a cancelled publish by itself.
     private func resumeNextPendingUnpublish(_ psm: L2CAPPSM, error: NSError?) {
-        if let error, !(error.domain == "BLESwiftProvider" && error.code == 12) {
-            publishedPSMs.insert(psm)
-        }
         guard var waiters = pendingUnpublishes[psm],
               let token = waiters.keys.min(),
               let continuation = waiters.removeValue(forKey: token) else { return }
         pendingUnpublishes[psm] = waiters.isEmpty ? nil : waiters
+        if let error, !(error.domain == "BLESwiftProvider" && error.code == 12) {
+            publishedPSMs.insert(psm)
+        }
         if let error {
             continuation.resume(throwing: error)
         } else {
@@ -799,22 +807,22 @@ public actor PeripheralHost {
     }
 
     /// Yields a channel that a remote central opened to every ``incomingL2CAPChannels()``
-    /// subscriber. If no subscriber exists, it closes the channel, so the channel does not
-    /// leak. An event with an error, or without a channel or a central, has no host-side
-    /// waiter, so the host drops it.
+    /// subscriber. If no subscriber took the channel, it closes the channel, so the channel
+    /// does not leak. An event with an error, or without a channel or a central, has no
+    /// host-side waiter, so the host drops it and closes any channel that it carries.
     private func deliverIncomingL2CAPChannel(_ channel: (any L2CAPChannelRemote)?, central: UUID?, error: NSError?) {
         guard error == nil, let channel, let central else {
             log("Ignoring a failed L2CAP channel open: \(error.map { "\($0)" } ?? "no channel")", level: .debug, category: "l2cap")
             channel?.close(error: nil)
             return
         }
-        guard incomingL2CAPBroadcaster.hasConsumers else {
+        let taken = incomingL2CAPBroadcaster.yield(IncomingL2CAPChannel(remote: channel, central: central))
+        guard taken > 0 else {
             log("Closing L2CAP channel \(channel.psm) from \(central), because nothing consumes incomingL2CAPChannels()", level: .debug, category: "l2cap")
             channel.close(error: nil)
             return
         }
         log("Central \(central) opened L2CAP channel \(channel.psm)", level: .info, category: "l2cap")
-        incomingL2CAPBroadcaster.yield(IncomingL2CAPChannel(remote: channel, central: central))
     }
 
     /// Fails every pending advertise, add-service, readiness, publish, and unpublish

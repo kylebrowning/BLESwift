@@ -427,28 +427,55 @@ struct VirtualL2CAPTests {
         #expect(atCentral.1 == .finished)
     }
 
-    @Test("A host-side handler with no listener closes a channel that a central opens")
+    /// A handler that keeps every channel that it receives, and then gives the channel to a
+    /// `VirtualHostedDeviceHandler` whose sink reports that no listener is attached. The kept
+    /// reference means that only `acceptL2CAPChannel` can close the channel.
+    private actor KeepingHostedHandler: VirtualL2CAPAccepting {
+        let inner = VirtualHostedDeviceHandler(clock: ContinuousClock())
+        private(set) var kept: [any L2CAPChannelRemote] = []
+
+        func attachNoListener() async {
+            await inner.attach { _ in false }
+        }
+
+        func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> {
+            await inner.read(characteristic, offset: offset, from: central)
+        }
+
+        func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> {
+            await inner.write(entries, from: central)
+        }
+
+        func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {
+            await inner.subscriptionChanged(characteristic, central: central, isSubscribed: isSubscribed)
+        }
+
+        func acceptL2CAPChannel(_ channel: any L2CAPChannelRemote, psm: L2CAPPSM, from central: Subscriber) async {
+            kept.append(channel)
+            await inner.acceptL2CAPChannel(channel, psm: psm, from: central)
+        }
+    }
+
+    @Test("A hosted handler with no listener closes a channel that a central opens")
     func hostedHandlerWithoutListenerClosesTheChannel() async throws {
         let radio = VirtualRadio()
-        let queue = DispatchQueue(label: "VirtualL2CAPTests.nosink")
-        // No `PeripheralHost` attaches an event handler, so the hosted handler has no listener.
-        let backend = VirtualPeripheralManagerBackend(radio: radio, queue: queue)
-        var generation: UInt64?
-        let deadline = ContinuousClock.now + .seconds(5)
-        while generation == nil, ContinuousClock.now < deadline {
-            generation = await radio.generation(of: backend.identifier)
-            if generation == nil { try? await Task.sleep(for: .milliseconds(5)) }
-        }
-        let current = try #require(generation)
-        _ = await radio.publishL2CAP(device: backend.identifier, generation: current, psm: Self.psm)
+        let handler = KeepingHostedHandler()
+        await handler.attachNoListener()
+        let handle = await radio.register(VirtualDevice(
+            descriptor: VirtualDeviceDescriptor(advertisement: AdvertisementData(isConnectable: true)),
+            handler: handler
+        ))
+        _ = try await handle.publishL2CAPChannel(psm: Self.psm)
         let session = UUID()
         await radio.attach(session: session, centralSink: { _ in })
-        _ = await radio.connect(session: session, device: backend.identifier, sink: { _ in })
+        _ = await radio.connect(session: session, device: handle.identifier, sink: { _ in })
 
-        let central = try await radio.openL2CAP(session: session, device: backend.identifier, psm: Self.psm).get()
+        let central = try await radio.openL2CAP(session: session, device: handle.identifier, psm: Self.psm).get()
 
+        // The test handler still holds the host end, so the close came from the hosted handler.
+        #expect(await handler.kept.count == 1)
         #expect(await Self.drain(central.inbound()).1 == .finished)
-        withExtendedLifetime(backend) {}
+        #expect(await handler.kept.count == 1)
     }
 
     @Test("A handler that publishes through its handle receives a channel from a Central, and echoes", .timeLimit(.minutes(1)))

@@ -146,24 +146,25 @@ extension VirtualRadio {
             return .failure(Self.l2capNotPublishedError(psm))
         }
         let (central, host) = VirtualL2CAPChannel.pair(psm: psm)
-        l2capChannels[device, default: []].append(ChannelRecord(session: session, channel: central))
-        let identity = ObjectIdentifier(central)
+        let token = UUID()
+        l2capChannels[device, default: []].append(ChannelRecord(token: token, session: session, channel: central))
         // The pair closes on any thread, outside this actor, so the handler hops in with a task.
         // The radio has no queue of its own to hop onto. The handler holds the radio weakly and
-        // holds no end of the pair, because the pair's shared state holds the handler.
+        // holds no end of the pair, because the pair's shared state holds the handler. It names
+        // the record by its token, which no later record can reuse.
         central.onPairClosed { [weak self] in
             guard let self else { return }
-            Task { await self.dropL2CAPRecord(device: device, channel: identity) }
+            Task { await self.dropL2CAPRecord(device: device, token: token) }
         }
         await accepting.acceptL2CAPChannel(host, psm: psm, from: subscriber(session, device: device))
         return .success(central)
     }
 
-    /// Drops the record of the channel whose central end is `channel`, after its pair closed.
-    /// It does nothing if a teardown already dropped the record.
-    func dropL2CAPRecord(device: UUID, channel: ObjectIdentifier) {
+    /// Drops the record with `token`, after its pair closed. It does nothing if a teardown
+    /// already dropped the record.
+    func dropL2CAPRecord(device: UUID, token: UUID) {
         guard var records = l2capChannels[device] else { return }
-        records.removeAll { ObjectIdentifier($0.channel) == channel }
+        records.removeAll { $0.token == token }
         l2capChannels[device] = records.isEmpty ? nil : records
     }
 

@@ -164,8 +164,10 @@ public actor VirtualRadio {
     var publishedL2CAP: [UUID: Set<L2CAPPSM>] = [:]
 
     /// One open L2CAP channel: the session that opened it, and the central end of its pair. A
-    /// ``VirtualL2CAPChannel/fail(_:)`` on this end reaches both ends.
+    /// ``VirtualL2CAPChannel/fail(_:)`` on this end reaches both ends. The `token` identifies
+    /// the record for the drop that follows the close of its pair.
     struct ChannelRecord {
+        let token: UUID
         let session: UUID
         let channel: VirtualL2CAPChannel
     }
