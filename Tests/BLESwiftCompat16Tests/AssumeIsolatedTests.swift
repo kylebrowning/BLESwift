@@ -3,9 +3,21 @@
 //  BLESwiftCompat16Tests
 //
 
+import Darwin
 import Dispatch
 import Testing
 @_spi(Testing) import BLESwiftCompat16
+
+/// `true` when this test process runs under Thread Sanitizer.
+///
+/// TSan does not intercept `dispatch_async_swift_job`. The Swift runtime uses that function to
+/// run the jobs of an actor whose executor is a `DispatchSerialQueue`. Thus TSan does not see that
+/// the queue runs those jobs in order, and it reports a false race between a queue callback and a
+/// later actor job. The hand-written 16-tier executor uses `queue.async`, which TSan intercepts.
+private let threadSanitizerIsActive: Bool = {
+    // `RTLD_DEFAULT` is `-2` on Darwin.
+    dlsym(UnsafeMutableRawPointer(bitPattern: -2), "__tsan_init") != nil
+}()
 
 /// Bound through `QueueExecutor`, as `Central` and `PeripheralHost` are. `forceCompat16` defaults
 /// to the 16-tier `SerialQueueExecutor`. If it is `false`, the actor takes the production path,
@@ -47,7 +59,12 @@ struct AssumeIsolatedTests {
     /// Runs under both executors: the forced 16-tier executor, and the production executor on the
     /// 17 tier and later (`DispatchSerialQueue`'s executor). Central's delegate callbacks take this
     /// path on every current OS.
-    @Test("callbacks from the queue interleave in order with actor calls", arguments: [true, false])
+    /// Under Thread Sanitizer, the test runs only the 16-tier executor. See
+    /// `threadSanitizerIsActive`. The plain test run still covers both executors.
+    @Test(
+        "callbacks from the queue interleave in order with actor calls",
+        arguments: threadSanitizerIsActive ? [true] : [true, false]
+    )
     func ordering(forceCompat16: Bool) async {
         let queue = DispatchQueue(label: "compat16.tests.order")
         let recorder = Recorder(queue: queue, forceCompat16: forceCompat16)
