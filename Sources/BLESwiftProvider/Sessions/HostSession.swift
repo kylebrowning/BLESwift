@@ -411,6 +411,15 @@ final class HostSession: Sendable {
             // State restoration belongs to the provider process. See the `willRestoreState` case
             // in `CentralSession`.
             break
+
+        case .didPublishL2CAPChannel, .didUnpublishL2CAPChannel:
+            // The link protocol does not carry peripheral-role L2CAP yet.
+            break
+
+        case .didOpenL2CAPChannel(let channel, _, _):
+            // The link protocol does not carry peripheral-role L2CAP yet. Close the channel, so
+            // that it does not leak.
+            channel?.close(error: nil)
         }
     }
 

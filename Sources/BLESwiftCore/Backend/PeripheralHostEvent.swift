@@ -46,4 +46,20 @@ public enum PeripheralHostEvent: Sendable {
     /// Mirrors `peripheralManager(_:willRestoreState:)`. The proxy has already converted the state
     /// to the `Sendable` ``RestoredPeripheralState``.
     case willRestoreState(RestoredPeripheralState)
+
+    /// Publishing an L2CAP channel finished or failed. Mirrors
+    /// `peripheralManager(_:didPublishL2CAPChannel:error:)`. If the publish succeeds, `psm` is
+    /// the published PSM and `error` is `nil`. If the publish fails, `psm` is `nil` and `error`
+    /// describes the failure. See ``L2CAPPublishing``.
+    case didPublishL2CAPChannel(psm: L2CAPPSM?, error: NSError?)
+
+    /// Removing a published L2CAP channel finished or failed. Mirrors
+    /// `peripheralManager(_:didUnpublishL2CAPChannel:error:)`.
+    case didUnpublishL2CAPChannel(psm: L2CAPPSM, error: NSError?)
+
+    /// A remote central opened an L2CAP channel to a published PSM, or the open failed. Mirrors
+    /// `peripheralManager(_:didOpen:error:)`. If the open succeeds, `channel` is the open
+    /// transport, `central` is the identifier of the peer, and `error` is `nil`. This identifier
+    /// is the same value as ``Subscriber/id`` for that central.
+    case didOpenL2CAPChannel(channel: (any L2CAPChannelRemote)?, central: UUID?, error: NSError?)
 }

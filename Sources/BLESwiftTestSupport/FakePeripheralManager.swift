@@ -8,8 +8,8 @@ import Dispatch
 import Foundation
 import BLESwiftCompat17
 
-/// A scriptable stand-in for `CBPeripheralManager` that conforms to `PeripheralManaging`. It is the
-/// peripheral-role counterpart of ``FakeCentral``.
+/// A scriptable stand-in for `CBPeripheralManager` that conforms to `PeripheralManaging` and
+/// `L2CAPPublishing`. It is the peripheral-role counterpart of ``FakeCentral``.
 ///
 /// You cannot instantiate or script `CBPeripheralManager` in tests. `FakePeripheralManager` lets
 /// you drive the shim protocol's call sites and script the events that a real manager delivers
@@ -24,7 +24,7 @@ import BLESwiftCompat17
 /// - ``onQueue(_:)`` is the one permitted door for off-queue code.
 ///
 /// `static var bluetoothAuthorization` is the exception. A `Mutex` backs it.
-public final class FakePeripheralManager: PeripheralManaging, Sendable {
+public final class FakePeripheralManager: L2CAPPublishing, Sendable {
 
     /// A recorded call to ``respond(to:value:error:)``.
     public struct RespondCall: Sendable, Equatable {
@@ -68,6 +68,19 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
     nonisolated(unsafe) private var _onAddService: ((GATTService) -> Void)?
     nonisolated(unsafe) private var _onRespond: ((RespondCall) -> Void)?
     nonisolated(unsafe) private var _onUpdateValue: ((UpdateValueCall) -> Void)?
+    nonisolated(unsafe) private var _publishBehavior: PublishBehavior = .succeed(L2CAPPSM(0x0080))
+    nonisolated(unsafe) private var _publishL2CAPChannelCalls: [Bool] = []
+    nonisolated(unsafe) private var _unpublishL2CAPChannelCalls: [L2CAPPSM] = []
+
+    /// What ``publishL2CAPChannel(requiresEncryption:)`` does.
+    public enum PublishBehavior: Sendable {
+        /// Delivers a successful `.didPublishL2CAPChannel` with this PSM asynchronously.
+        case succeed(L2CAPPSM)
+        /// Delivers a failed `.didPublishL2CAPChannel` with this error asynchronously.
+        case fail(NSError)
+        /// Delivers nothing. Call ``simulatePublishResult(psm:error:)`` to complete the publish.
+        case hold
+    }
 
     private static let authorizationBox = Mutex<BluetoothAuthorization>(.allowedAlways)
 
@@ -221,7 +234,45 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         set { dispatchPrecondition(condition: .onQueue(queue)); _onUpdateValue = newValue }
     }
 
+    /// What the next ``publishL2CAPChannel(requiresEncryption:)`` calls do. The default is
+    /// `.succeed(L2CAPPSM(0x0080))`. Configure it with ``onQueue(_:)``.
+    public var publishBehavior: PublishBehavior {
+        get { dispatchPrecondition(condition: .onQueue(queue)); return _publishBehavior }
+        set { dispatchPrecondition(condition: .onQueue(queue)); _publishBehavior = newValue }
+    }
+
+    /// The `requiresEncryption` argument of each ``publishL2CAPChannel(requiresEncryption:)``
+    /// call, in order.
+    public var publishL2CAPChannelCalls: [Bool] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _publishL2CAPChannelCalls
+    }
+
+    /// The PSM of each ``unpublishL2CAPChannel(_:)`` call, in order.
+    public var unpublishL2CAPChannelCalls: [L2CAPPSM] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return _unpublishL2CAPChannelCalls
+    }
+
     // MARK: - Simulation (off-queue safe; hop onto queue themselves)
+
+    /// Simulates the completion of a publish that ``PublishBehavior/hold`` holds. It delivers
+    /// `.didPublishL2CAPChannel(psm:error:)` asynchronously on ``queue``.
+    public func simulatePublishResult(psm: L2CAPPSM?, error: NSError?) {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            deliver(.didPublishL2CAPChannel(psm: psm, error: error))
+        }
+    }
+
+    /// Simulates a remote central that opens `channel` to a published PSM. It delivers
+    /// `.didOpenL2CAPChannel(channel:central:error:)` asynchronously on ``queue``.
+    public func simulateIncomingL2CAPChannel(_ channel: any L2CAPChannelRemote, central: UUID) {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            deliver(.didOpenL2CAPChannel(channel: channel, central: central, error: nil))
+        }
+    }
 
     /// Simulates a radio state change. It then delivers `.didUpdateState(_:)` asynchronously on
     /// ``queue``.
@@ -384,6 +435,39 @@ public final class FakePeripheralManager: PeripheralManaging, Sendable {
         _updateValueCalls.append(call)
         _onUpdateValue?(call)
         return returned
+    }
+
+    // MARK: - L2CAPPublishing
+
+    /// Records the call and completes it as ``publishBehavior`` specifies.
+    public func publishL2CAPChannel(requiresEncryption: Bool) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _publishL2CAPChannelCalls.append(requiresEncryption)
+        switch _publishBehavior {
+        case .succeed(let psm):
+            queue.async { [self] in
+                dispatchPrecondition(condition: .onQueue(queue))
+                deliver(.didPublishL2CAPChannel(psm: psm, error: nil))
+            }
+        case .fail(let error):
+            queue.async { [self] in
+                dispatchPrecondition(condition: .onQueue(queue))
+                deliver(.didPublishL2CAPChannel(psm: nil, error: error))
+            }
+        case .hold:
+            break
+        }
+    }
+
+    /// Records the call and delivers a successful `.didUnpublishL2CAPChannel(psm:error:)`
+    /// asynchronously on ``queue``.
+    public func unpublishL2CAPChannel(_ psm: L2CAPPSM) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _unpublishL2CAPChannelCalls.append(psm)
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            deliver(.didUnpublishL2CAPChannel(psm: psm, error: nil))
+        }
     }
 
     private func deliver(_ event: PeripheralHostEvent) {

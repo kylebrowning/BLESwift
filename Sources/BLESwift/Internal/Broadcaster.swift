@@ -117,6 +117,13 @@ final class Broadcaster<Element: Sendable>: Sendable {
         }
     }
 
+    /// Whether at least one subscribed stream is live. A stream stops being live when its
+    /// consuming task is cancelled or its iterator deinitializes. It is `false` after
+    /// ``finish()``. The value is a snapshot: a stream can terminate immediately after the read.
+    var hasConsumers: Bool {
+        box.withLock { !$0.continuations.isEmpty }
+    }
+
     /// Fans `element` out to every subscribed stream. As ``ReplayMode`` specifies, it also
     /// records the element for future subscribers. It does nothing after ``finish()``.
     ///
