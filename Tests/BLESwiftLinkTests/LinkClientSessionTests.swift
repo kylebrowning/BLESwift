@@ -147,7 +147,9 @@ struct LinkClientSessionTests {
                 continue
             }
             defer { listener.cancel() }
-            await waitFor(timeout: .seconds(1)) { session.isConnected }
+            // Without the burst, the next retry comes 1.5 s after the listener starts. A 1.4 s limit
+            // still proves the burst, and it gives a Thread Sanitizer build time to connect.
+            await waitFor(timeout: .milliseconds(1400)) { session.isConnected }
             #expect(session.isConnected)
             session.stop()
             return
