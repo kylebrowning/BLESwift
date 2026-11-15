@@ -32,9 +32,9 @@ extension LinkMessage {
             return request.heldPayloadByteCount
         case .hostRequest(let request):
             return request.heldPayloadByteCount
-        // A client never sends an event or a server hello. If one arrives, the handshake refuses
-        // it, so it costs only the overhead.
-        case .serverHello, .centralEvent, .hostEvent:
+        // A client never sends an event, a server hello, or a status. If one arrives, the
+        // handshake refuses it, so it costs only the overhead.
+        case .serverHello, .centralEvent, .hostEvent, .providerStatus:
             return 0
         }
     }

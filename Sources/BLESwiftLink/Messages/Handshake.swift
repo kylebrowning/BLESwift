@@ -13,6 +13,10 @@ public enum LinkRole: String, Codable, Sendable, CaseIterable {
     /// The client uses `HostRequest` and `HostWireEvent`. It controls a remote
     /// `PeripheralHost`.
     case peripheral
+    /// The client asks for a ``ProviderStatus`` snapshot. The provider sends an accepted
+    /// `ServerHello`, then one `providerStatus` message. The client then closes the connection.
+    /// If the client does not close it, the provider cancels it after its handshake timeout.
+    case monitor
 }
 
 /// The first message that a client sends after it connects. It identifies the client to the

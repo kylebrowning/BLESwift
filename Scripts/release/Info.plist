@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.kylebrowning.bleswift-provider</string>
+    <key>CFBundleName</key>
+    <string>bleswift-provider</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>bleswift-provider gives simulator apps access to this Mac's Bluetooth radio.</string>
+</dict>
+</plist>

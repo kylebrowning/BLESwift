@@ -35,3 +35,7 @@ Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/*
 !Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/xcschemes/
 Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/xcschemes/*
 !Examples/BLESwiftExplorer/BLESwiftExplorer.xcodeproj/xcshareddata/xcschemes/BLESwiftExplorer.xcscheme
+
+# Provider release script output
+dist/
+.build-release/

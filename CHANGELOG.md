@@ -23,6 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `VirtualDeviceHandle.publishL2CAPChannel(psm:)` and
   `VirtualDeviceHandle.unpublishL2CAPChannel(_:)`, so a device that you register in code can
   publish and unpublish an L2CAP channel.
+- `bleswift-provider --verbose` and `ProviderConfiguration.logTraffic`. The provider writes one
+  log line for each link message in each direction. `LinkConnection.onTraffic`,
+  `LinkTrafficDirection`, and `LinkMessage.trafficSummary` support the log.
+- `bleswift-provider status`. It prints the sessions of a running provider, or JSON with
+  `--json`. The new `LinkRole.monitor`, `ProviderStatus`, and `LinkMessage.providerStatus`
+  carry the status. `ProviderStatusClient` and `ProviderStatusError` get it from Swift.
+- `bleswift-provider install-agent` and `uninstall-agent`. They install and remove a launch
+  agent that runs the provider at login. The agent must listen on loopback.
+- `bleswift-provider capture`. It scans with the Mac's Bluetooth and writes a fixture
+  document for the devices that you select.
+- `ProviderCommandLine.parseCommand(_:environment:)`, `ProviderCommandLine.Command`,
+  `StatusOptions`, `CaptureOptions`, `ParseError.invalidValue(flag:value:)`, and
+  `ProviderCommandLine.Options.verbose`.
+- `Scripts/release/release-provider.sh`, a script that builds a universal `bleswift-provider`
+  binary with an embedded Info.plist, signs it with the Bluetooth entitlement, and notarizes it.
+  The script also writes a zip file and a Homebrew formula from `bleswift-provider.rb.template`.
+  The script does not upload any file.
 
 ### Changed
 
@@ -39,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `L2CAPChannel.incomingData` or `IncomingL2CAPChannel.incomingData` returns a stream that
   finishes at once. The virtual radio and the simulator link already work this way. The
   stream keeps the channel open while you read it, and a channel that you release closes.
+- `LinkRole.monitor`, `LinkMessage.providerStatus`, and
+  `ProviderCommandLine.ParseError.invalidValue(flag:value:)` are new enum cases. An exhaustive
+  `switch` over one of these enums outside this package does not compile until you add the new
+  case or a `default` case.
 
 ### Fixed
 
