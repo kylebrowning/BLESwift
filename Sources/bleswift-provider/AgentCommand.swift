@@ -91,6 +91,10 @@ enum AgentCommand {
         let bootstrap = launchctl(["bootstrap", domain, propertyListPath])
         guard bootstrap.status == 0 else {
             printError("bleswift-provider: launchctl bootstrap failed: \(bootstrap.standardError)")
+            // Remove the new plist. Otherwise launchd loads an agent that did not start at the
+            // next login, after the command reported a failure.
+            try? FileManager.default.removeItem(atPath: propertyListPath)
+            printError("bleswift-provider: removed \(propertyListPath)")
             return 70
         }
         print("installed the launch agent at \(propertyListPath)")

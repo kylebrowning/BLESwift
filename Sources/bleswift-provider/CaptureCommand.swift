@@ -23,7 +23,7 @@ enum CaptureCommand {
     ///   - `1` if no device matches.
     ///   - `64` (`EX_USAGE`) for a bad selection, or for a non-interactive run without
     ///     `--all`, `--name`, or `--service`.
-    ///   - `69` (`EX_UNAVAILABLE`) if Bluetooth is not powered on.
+    ///   - `69` (`EX_UNAVAILABLE`) if Bluetooth is not powered on, or if the scan fails.
     ///   - `73` (`EX_CANTCREAT`) if the output cannot be written.
     static func run(_ options: ProviderCommandLine.CaptureOptions) async -> Int32 {
         let central = Central()
