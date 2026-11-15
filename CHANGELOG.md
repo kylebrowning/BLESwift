@@ -35,7 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On the virtual radio, an L2CAP open no longer fails with `BLESwiftProvider` code 3. An open
   to a PSM that is not published fails with code 12. A publish that cannot get its PSM fails
   with code 13.
-
 - A CoreBluetooth L2CAP channel now gives out its `incomingData` stream once. A second read of
   `L2CAPChannel.incomingData` or `IncomingL2CAPChannel.incomingData` returns a stream that
   finishes at once. The virtual radio and the simulator link already work this way. The
