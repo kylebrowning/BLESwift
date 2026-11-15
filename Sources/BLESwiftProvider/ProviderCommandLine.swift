@@ -142,7 +142,7 @@ public enum ProviderCommandLine {
 
     /// The options of the `capture` subcommand.
     public struct CaptureOptions: Sendable, Equatable {
-        /// How long to scan. The default is ten seconds.
+        /// How long to scan. The default is ten seconds. The maximum is one day.
         public var duration: Duration
         /// The values of `--name`, in argument order. A device matches if its name contains one
         /// of them. Case does not matter.
@@ -278,7 +278,9 @@ public enum ProviderCommandLine {
             switch argument {
             case "--duration":
                 let value = try flagValue(after: &index, in: arguments)
-                guard let seconds = Double(value), seconds.isFinite, seconds > 0 else {
+                // `Duration.seconds(_:)` traps on a value that is too large, so limit the value
+                // to one day.
+                guard let seconds = Double(value), seconds.isFinite, seconds > 0, seconds <= 86_400 else {
                     throw ParseError.invalidValue(flag: argument, value: value)
                 }
                 options.duration = .seconds(seconds)
@@ -331,7 +333,7 @@ public enum ProviderCommandLine {
         --json                 Print the status as JSON.
       capture                Scan for real devices with this Mac's Bluetooth and write a
                               fixture document for them.
-        --duration <seconds>   How long to scan. Defaults to 10.
+        --duration <seconds>   How long to scan. Defaults to 10. The maximum is 86400.
         --name <text>          Keep devices whose name contains the text. Repeatable.
         --service <uuid>       Keep devices that advertise the service. Repeatable.
         --all                  Capture every listed device. Do not ask.

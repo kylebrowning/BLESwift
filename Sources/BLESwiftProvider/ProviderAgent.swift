@@ -28,10 +28,45 @@ public enum ProviderAgent {
             "Label": label,
             "ProgramArguments": [executable] + arguments,
             "RunAtLoad": true,
-            "KeepAlive": true,
+            // Start the provider again only after a failure. A provider that exits with
+            // status 0 stays stopped.
+            "KeepAlive": ["SuccessfulExit": false],
+            // Wait at least 30 seconds between two starts, so a provider that fails at once does
+            // not start in a tight loop.
+            "ThrottleInterval": 30,
             "StandardOutPath": logPath,
             "StandardErrorPath": logPath,
         ]
+    }
+
+    /// `arguments` with each `--fixture` path made absolute against `currentDirectory`. Every
+    /// other argument stays as given, in order.
+    ///
+    /// The agent does not run in the current directory of `install-agent`, so a relative path
+    /// would not resolve.
+    ///
+    /// - Parameters:
+    ///   - arguments: Serve arguments that ``ProviderCommandLine/parse(_:environment:)`` accepts.
+    ///   - currentDirectory: The current directory of the process.
+    /// - Returns: The arguments for the agent.
+    package static func absoluteFixtureArguments(_ arguments: [String], currentDirectory: String) -> [String] {
+        let base = URL(fileURLWithPath: currentDirectory, isDirectory: true)
+        var result: [String] = []
+        var index = arguments.startIndex
+        while index < arguments.endIndex {
+            let argument = arguments[index]
+            result.append(argument)
+            // A value-taking flag consumes the next argument. Only the value of `--fixture`
+            // changes.
+            if argument == "--fixture" || argument == "--listen" {
+                index = arguments.index(after: index)
+                guard index < arguments.endIndex else { break }
+                let value = arguments[index]
+                result.append(argument == "--fixture" ? URL(fileURLWithPath: value, relativeTo: base).standardized.path : value)
+            }
+            index = arguments.index(after: index)
+        }
+        return result
     }
 
     /// The error to print when the agent would listen on `endpoint`, or `nil` if `endpoint` is

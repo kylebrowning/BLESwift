@@ -177,7 +177,8 @@ package struct FixtureCapture: Sendable {
     /// - Parameters:
     ///   - candidates: The devices to record, in table order.
     ///   - warn: Receives one line for each problem, such as a failed read.
-    /// - Returns: One ``BLESwiftLink/FixtureDevice`` for each candidate, in the same order.
+    /// - Returns: One ``BLESwiftLink/FixtureDevice`` for each candidate, in the same order. Each
+    ///   device has a new random `id`, not the identifier of the peripheral.
     package func inspect(_ candidates: [Candidate], warn: @Sendable (String) -> Void) async -> FixtureDocument {
         var devices: [FixtureDevice] = []
         for candidate in candidates {
@@ -190,7 +191,9 @@ package struct FixtureCapture: Sendable {
     private func inspect(_ candidate: Candidate, warn: @Sendable (String) -> Void) async -> FixtureDevice {
         let label = candidate.name ?? candidate.peripheral.uuid.uuidString
         var device = FixtureDevice(
-            id: candidate.peripheral.uuid,
+            // Use a new identifier, not the CoreBluetooth one. Under `--passthrough`, the real
+            // device and the fixture device could otherwise have the same identifier.
+            id: UUID(),
             name: candidate.name,
             advertisedServices: (candidate.advertisement.serviceUUIDs ?? []).map(\.uuidString),
             manufacturerData: candidate.advertisement.manufacturerData

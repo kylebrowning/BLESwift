@@ -97,10 +97,15 @@ To run the provider without a terminal, install it as a launch agent:
 bleswift-provider install-agent --passthrough --fixture /path/to/hrm.json
 ```
 
-`install-agent` takes the same options as the provider and checks them first. It writes `~/Library/LaunchAgents/com.kylebrowning.bleswift-provider.plist` and loads it with `launchctl`. The agent starts at login, starts again if it exits, and writes its output to `~/Library/Logs/bleswift-provider.log`.
+`install-agent` takes the same options as the provider. Before it writes the agent, it does these checks:
 
-- Give each fixture as an absolute path. The agent does not run in your current directory.
-- The agent must listen on loopback. `install-agent` refuses a `--listen` host that is not a loopback host.
+1. It parses the options. An unknown option or a bad value exits with code `64`.
+2. It refuses a `--listen` host that is not a loopback host, with code `64`.
+3. It finds its own executable. If `install-agent` cannot find the executable, it exits with code `70`. Then run it with a full path.
+4. It makes each `--fixture` path absolute against the current directory, and loads each fixture. If a fixture does not load, `install-agent` exits with code `66` and writes no agent.
+
+Then `install-agent` writes `~/Library/LaunchAgents/com.kylebrowning.bleswift-provider.plist` and loads it with `launchctl`. The agent runs with your options in the order that you gave them, with the absolute fixture paths. It starts at login and writes its output to `~/Library/Logs/bleswift-provider.log`. If the provider exits with an error, `launchd` starts it again, with a minimum of 30 seconds between two starts. If the provider exits normally, it stays stopped.
+
 - The agent does not read `BLESWIFT_LINK`. To use a different port, give `--listen`.
 - The agent runs the executable at the path that you used, and it does not resolve symbolic links. Install the provider at a fixed path. If the path is in a `.build` directory, `install-agent` prints a warning, because a clean of that directory breaks the agent.
 
@@ -177,7 +182,7 @@ An offset inside the value returns the value from that offset. An offset equal t
 swift run bleswift-provider capture [--duration <seconds>] [--name <text>]… [--service <uuid>]… [--all] [--output <path>]
 ```
 
-The command scans with the Mac's radio for `--duration` seconds. The default is 10 seconds. If the radio is not powered on after 5 seconds, the command exits with code `69`. After the scan, the command prints a numbered table of the devices to standard error. The strongest signal is first. Each row has the RSSI, the name, the advertised services, and whether the device is connectable.
+The command scans with the Mac's radio for `--duration` seconds. The default is 10 seconds, and the maximum is 86400 seconds (one day). If the radio is not powered on after 5 seconds, the command exits with code `69`. After the scan, the command prints a numbered table of the devices to standard error. The strongest signal is first. Each row has the RSSI, the name, the advertised services, and whether the device is connectable.
 
 These options select the devices:
 
@@ -196,7 +201,7 @@ For each selected device, the command does these steps:
 
 If the device is not connectable, or the connection fails, the document has the advertisement only. The command prints a warning.
 
-The command writes the document to standard output, or to the `--output` path. The document uses the format of the fixture section above. `id` is the peripheral identifier that the Mac sees. The document has no `permissions`, so the provider derives them when it loads the document. Every captured service is primary, because service discovery finds only primary services. Review the document before you share it. A read value can contain data that identifies a person.
+The command writes the document to standard output, or to the `--output` path. The document uses the format of the fixture section above. Each device gets a new random `id`, not the identifier that the Mac sees. Thus, under `--passthrough`, a captured device does not have the same identifier as the real device. The document has no `permissions`, so the provider derives them when it loads the document. Every captured service is primary, because service discovery finds only primary services. Review the document before you share it. A read value can contain data that identifies a person.
 
 ## Declaring virtual devices in Swift
 

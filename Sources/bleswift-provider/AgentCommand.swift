@@ -31,9 +31,10 @@ enum AgentCommand {
     ///
     /// - Parameters:
     ///   - options: The parsed serve options. The function uses them to check the endpoint.
-    ///   - arguments: The serve arguments, exactly as given. The agent runs with them.
+    ///   - arguments: The serve arguments, as given. The agent runs with them, with each
+    ///     `--fixture` path made absolute.
     /// - Returns: The exit status. It is `0` on success, `64` (`EX_USAGE`) for a non-loopback
-    ///   endpoint, and `70` (`EX_SOFTWARE`) if the executable is not found, the file cannot be
+    ///   endpoint, `66` (`EX_NOINPUT`) for a fixture that does not load, and `70` (`EX_SOFTWARE`) if the executable is not found, the file cannot be
     ///   written, or `launchctl bootstrap` fails.
     static func install(options: ProviderCommandLine.Options, arguments: [String]) -> Int32 {
         if let error = ProviderAgent.endpointError(for: options.endpoint) {
@@ -51,7 +52,19 @@ enum AgentCommand {
         if let warning = ProviderAgent.buildDirectoryWarning(for: executable) {
             printError(warning)
         }
-        let plist = ProviderAgent.propertyList(executable: executable, arguments: arguments, logPath: logPath)
+        let currentDirectory = FileManager.default.currentDirectoryPath
+        let base = URL(fileURLWithPath: currentDirectory, isDirectory: true)
+        // Load each fixture now, so that a bad path fails here and not in the unattended agent.
+        for path in options.fixturePaths {
+            do {
+                _ = try FixtureDocument.load(from: URL(fileURLWithPath: path, relativeTo: base).standardized)
+            } catch {
+                printError("bleswift-provider: failed to load fixture \(path): \(error)")
+                return 66
+            }
+        }
+        let agentArguments = ProviderAgent.absoluteFixtureArguments(arguments, currentDirectory: currentDirectory)
+        let plist = ProviderAgent.propertyList(executable: executable, arguments: agentArguments, logPath: logPath)
         do {
             let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
             let url = URL(fileURLWithPath: propertyListPath)

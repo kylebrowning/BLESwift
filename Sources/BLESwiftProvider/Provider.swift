@@ -406,8 +406,14 @@ public actor Provider {
         Task { [weak self, weak connection] in
             try? await Task.sleep(for: timeout)
             guard let self, let connection else { return }
-            guard self.pending.withLock({ $0.isClaimable(connection) }) else { return }
-            self.configuration.log?("releasing a connection that sent no client hello within \(timeout)")
+            guard let didRouteHello = self.pending.withLock({ $0.unclaimedHelloState(connection) }) else { return }
+            // A monitor connection sent its hello but is never claimed. It reaches this point
+            // only if the client did not close it after it read the status.
+            if didRouteHello {
+                self.configuration.log?("closing a monitor connection that stayed open")
+            } else {
+                self.configuration.log?("releasing a connection that sent no client hello within \(timeout)")
+            }
             connection.cancel()
         }
     }
@@ -863,6 +869,15 @@ struct PendingConnections {
     func isClaimable(_ connection: LinkConnection) -> Bool {
         guard let entry = entries[ObjectIdentifier(connection)] else { return false }
         return !entry.isTerminated && !entry.isClaimed
+    }
+
+    /// Whether the table routed a hello for `connection`, if the connection is still claimable.
+    ///
+    /// - Returns: `nil` if ``isClaimable(_:)`` is `false`. Otherwise, whether the first message
+    ///   of the connection went to the handshake.
+    func unclaimedHelloState(_ connection: LinkConnection) -> Bool? {
+        guard isClaimable(connection) else { return nil }
+        return entries[ObjectIdentifier(connection)]?.didRouteHello
     }
 
     /// Claims `connection` for a completed handshake.

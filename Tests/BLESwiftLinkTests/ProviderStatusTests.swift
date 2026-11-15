@@ -144,17 +144,19 @@ struct ProviderStatusTests {
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
         configuration.handshakeTimeout = .milliseconds(200)
+        let lines = Mutex<[String]>([])
+        configuration.log = { line in lines.withLock { $0.append(line) } }
         let provider = Provider(configuration: configuration)
         try await provider.start()
-        let status = Mutex(false)
-        let closed = Mutex(false)
+        let status = Mutex<ContinuousClock.Instant?>(nil)
+        let closed = Mutex<ContinuousClock.Instant?>(nil)
         let connection = LinkConnection.connect(
             to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
             codec: .binaryPropertyList,
             queue: DispatchQueue(label: "status.open")
         )
         connection.onMessage = { message in
-            if case .providerStatus = message { status.withLock { $0 = true } }
+            if case .providerStatus = message { status.withLock { $0 = .now } }
         }
         connection.onStateChange = { [weak connection] state in
             switch state {
@@ -165,15 +167,20 @@ struct ProviderStatusTests {
                     clientName: "open-monitor"
                 )))
             case .cancelled, .failed:
-                closed.withLock { $0 = true }
+                closed.withLock { $0 = .now }
             case .idle, .connecting:
                 break
             }
         }
         connection.start()
-        await waitFor(timeout: .seconds(5)) { closed.withLock { $0 } }
-        #expect(status.withLock { $0 })
-        #expect(closed.withLock { $0 })
+        await waitFor(timeout: .seconds(5)) { closed.withLock { $0 } != nil }
+        let statusTime = try #require(status.withLock { $0 })
+        let closeTime = try #require(closed.withLock { $0 })
+        // The provider does not close a monitor connection after the status. Only the deadline
+        // closes it, 200 ms after the connection opened.
+        #expect(closeTime - statusTime >= .milliseconds(150))
+        #expect(lines.withLock { $0 }.contains("closing a monitor connection that stayed open"))
+        #expect(!lines.withLock { $0 }.contains { $0.hasPrefix("releasing a connection that sent no client hello") })
         #expect(await provider.sessionCount == 0)
         await provider.stop()
     }

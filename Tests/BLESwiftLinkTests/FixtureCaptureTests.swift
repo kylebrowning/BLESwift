@@ -93,6 +93,15 @@ struct FixtureCaptureTests {
         ])
     }
 
+    /// Checks that the device ids of `document` are unique and are not any of `peripherals`.
+    /// Then returns the ids, so that the caller can compare the rest of the document.
+    private static func checkIdentifiers(of document: FixtureDocument, peripherals: [UUID]) -> [UUID] {
+        let ids = document.devices.map(\.id)
+        #expect(Set(ids).count == ids.count)
+        #expect(Set(ids).isDisjoint(with: peripherals))
+        return ids
+    }
+
     /// `document` with its services and characteristics sorted by UUID. The order of discovery
     /// on a virtual radio is unspecified, so the tests compare sorted documents.
     private static func sortedByUUID(_ document: FixtureDocument) -> FixtureDocument {
@@ -133,12 +142,17 @@ struct FixtureCaptureTests {
         let warnings = Warnings()
         let document = await capture.inspect(candidates) { warnings.append($0) }
 
-        #expect(Self.sortedByUUID(document) == Self.expectedDocument(identifier: identifier, measurementValue: Data([0, 72])))
+        let id = try #require(Self.checkIdentifiers(of: document, peripherals: [identifier]).first)
+        #expect(Self.sortedByUUID(document) == Self.expectedDocument(identifier: id, measurementValue: Data([0, 72])))
+        // Two captures of the same peripheral get two different ids.
+        let twice = await capture.inspect(candidates + candidates) { warnings.append($0) }
+        #expect(twice.devices.count == 2)
+        _ = Self.checkIdentifiers(of: twice, peripherals: [identifier])
         #expect(warnings.all.isEmpty)
         // The encoded form loads back. The load derives the permissions from the properties.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        var loaded = Self.expectedDocument(identifier: identifier, measurementValue: Data([0, 72]))
+        var loaded = Self.expectedDocument(identifier: id, measurementValue: Data([0, 72]))
         loaded.devices[0].services[0].characteristics[0].permissions = [.readable]
         loaded.devices[0].services[0].characteristics[1].permissions = [.writeable]
         #expect(try Self.sortedByUUID(FixtureDocument.parse(encoder.encode(document))) == loaded)
@@ -157,7 +171,8 @@ struct FixtureCaptureTests {
         let warnings = Warnings()
         let document = await capture.inspect(candidates) { warnings.append($0) }
 
-        #expect(Self.sortedByUUID(document) == Self.expectedDocument(identifier: identifier, measurementValue: nil))
+        let id = try #require(Self.checkIdentifiers(of: document, peripherals: [identifier]).first)
+        #expect(Self.sortedByUUID(document) == Self.expectedDocument(identifier: id, measurementValue: nil))
         #expect(warnings.all.count == 1)
         #expect(warnings.all.first?.contains("2A37") == true)
     }

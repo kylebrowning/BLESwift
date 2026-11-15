@@ -65,7 +65,7 @@ struct ProviderCommandTests {
             all: true,
             outputPath: "out.json"
         )))
-        for bad in ["0", "-1", "inf", "nan", "ten"] {
+        for bad in ["0", "-1", "inf", "nan", "ten", "1e30", "86401"] {
             #expect(throws: CommandLine.ParseError.invalidValue(flag: "--duration", value: bad)) {
                 try CommandLine.parseCommand(["capture", "--duration", bad], environment: [:])
             }
@@ -121,12 +121,33 @@ struct ProviderCommandTests {
         #expect(plist["Label"] as? String == "com.kylebrowning.bleswift-provider")
         #expect(plist["ProgramArguments"] as? [String] == ["/opt/homebrew/bin/bleswift-provider", "--passthrough"])
         #expect(plist["RunAtLoad"] as? Bool == true)
-        #expect(plist["KeepAlive"] as? Bool == true)
+        let keepAlive = try #require(plist["KeepAlive"] as? [String: Bool])
+        #expect(keepAlive == ["SuccessfulExit": false])
+        #expect(plist["ThrottleInterval"] as? Int == 30)
         #expect(plist["StandardOutPath"] as? String == "/Users/someone/Library/Logs/bleswift-provider.log")
         #expect(plist["StandardErrorPath"] as? String == "/Users/someone/Library/Logs/bleswift-provider.log")
-        #expect(plist.count == 6)
+        #expect(plist.count == 7)
         // The dictionary must serialize as a property list.
         _ = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+    }
+
+    @Test("A one-day duration is the maximum")
+    func maximumDuration() throws {
+        let command = try CommandLine.parseCommand(["capture", "--duration", "86400"], environment: [:])
+        #expect(command == .capture(CommandLine.CaptureOptions(duration: .seconds(86_400))))
+    }
+
+    @Test("The agent gets absolute fixture paths and every other argument as given")
+    func agentFixturePathsAreAbsolute() {
+        let arguments = [
+            "--fixture", "fixtures/hrm.json", "--passthrough",
+            "--listen", "127.0.0.1:9", "--fixture", "/abs/other.json", "--fixture", "../up.json",
+        ]
+        #expect(ProviderAgent.absoluteFixtureArguments(arguments, currentDirectory: "/work/repo") == [
+            "--fixture", "/work/repo/fixtures/hrm.json", "--passthrough",
+            "--listen", "127.0.0.1:9", "--fixture", "/abs/other.json", "--fixture", "/work/up.json",
+        ])
+        #expect(ProviderAgent.absoluteFixtureArguments([], currentDirectory: "/work") == [])
     }
 
     @Test("The agent must listen on loopback")
