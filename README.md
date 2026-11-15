@@ -15,7 +15,7 @@ Add BLESwift to the dependencies in your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/kylebrowning/BLESwift.git", from: "3.1.0")
+    .package(url: "https://github.com/kylebrowning/BLESwift.git", from: "3.2.0")
 ]
 ```
 
@@ -140,9 +140,8 @@ For fixtures, virtual devices in code, and the differences from CoreBluetooth, r
 
 ### Installing the provider
 
-To install the provider with Homebrew, run `brew install kylebrowning/tap/bleswift-provider`.
-This command works from the next release. Until then, or if you prefer to build from source,
-run `swift run bleswift-provider`.
+To build the provider from source, run `swift run bleswift-provider`. A signed binary and a
+Homebrew formula (`brew install kylebrowning/tap/bleswift-provider`) are not published yet.
 
 ### What the simulator link can do
 
