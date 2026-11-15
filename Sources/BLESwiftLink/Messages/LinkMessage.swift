@@ -24,6 +24,9 @@ public enum LinkMessage: Codable, Sendable, Equatable {
 
     /// A `peripheral`-role event from the provider to the client.
     case hostEvent(HostWireEvent)
+
+    /// The provider's state, for a ``LinkRole/monitor`` client.
+    case providerStatus(ProviderStatus)
 }
 
 extension LinkMessage {

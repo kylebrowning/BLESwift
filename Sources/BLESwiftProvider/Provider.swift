@@ -27,6 +27,8 @@ import BLESwiftCompat17
 ///   ``VirtualCentralBackend``.
 /// - A `.peripheral` client gets a `HostSession`. The session drives a
 ///   ``VirtualPeripheralManagerBackend``.
+/// - A `.monitor` client gets no session. The provider sends it one ``BLESwiftLink/ProviderStatus``.
+///   The client closes the connection. ``ProviderStatusClient`` is such a client.
 ///
 /// If ``ProviderConfiguration/passthrough`` is set, the provider combines each backend with the
 /// host's real CoreBluetooth. Each session runs on a serial queue that the provider creates for
@@ -63,6 +65,10 @@ public actor Provider {
 
     /// The live sessions of both roles, keyed by their connection.
     private var sessions: [ObjectIdentifier: any ProviderSession] = [:]
+
+    /// The status entry of each live session, keyed by its connection. This table always has the
+    /// same keys as ``sessions``. A ``LinkRole/monitor`` client gets these entries.
+    private var sessionInfo: [ObjectIdentifier: ProviderStatus.Session] = [:]
 
     /// The handles of the fixture devices that ``start()`` registered, keyed by device id.
     private var fixtures: [UUID: VirtualDeviceHandle] = [:]
@@ -344,6 +350,7 @@ public actor Provider {
             session.close()
         }
         sessions.removeAll()
+        sessionInfo.removeAll()
         for handle in fixtures.values {
             await handle.remove()
         }
@@ -423,6 +430,10 @@ public actor Provider {
     /// `ServerHello` as its first frame. Thus the hello still comes before every event on the
     /// wire, and no window exists in which a request has no destination.
     ///
+    /// A ``BLESwiftLink/LinkRole/monitor`` hello does not claim the connection and opens no
+    /// session. The method sends the accepted hello and the status. The client closes the
+    /// connection. If it does not, the handshake deadline cancels the connection.
+    ///
     /// - Important: This method must not suspend. It claims the connection, installs its
     ///   session, and hands over its messages in one uninterrupted actor step. Thus a
     ///   termination is seen in only two ways: entirely before the claim, which then fails, or
@@ -461,15 +472,26 @@ public actor Provider {
             connection.cancel()
             return
         }
-        // Only an accepted handshake claims the connection. From here, its session owns the
-        // messages, and the entry routes them to the session, not back to this method.
-        guard pending.withLock({ $0.claim(connection) }) else { return }
         let accepted = ServerHello(
             protocolVersion: LinkProtocol.version,
             accepted: true,
             reason: nil,
             providerName: configuration.providerName
         )
+        // A monitor client gets a snapshot and no session. The provider does not claim the
+        // connection and does not cancel it. An immediate cancel can drop the status frame
+        // before it reaches the socket. The client closes the connection after it reads the
+        // status. If the client does not close it, the handshake deadline cancels it. The entry
+        // stays in `pending` until the terminal state releases it.
+        if hello.role == .monitor {
+            connection.send(.serverHello(accepted))
+            connection.send(.providerStatus(statusSnapshot()))
+            configuration.log?("answered a status request from \(hello.clientName)")
+            return
+        }
+        // Only an accepted handshake claims the connection. From here, its session owns the
+        // messages, and the entry routes them to the session, not back to this method.
+        guard pending.withLock({ $0.claim(connection) }) else { return }
         // Install the session's handler in the connection's entry. Replay what arrived behind
         // the hello, in order, before delivering any newer message.
         //
@@ -498,6 +520,9 @@ public actor Provider {
                 log: configuration.log,
                 maximumRemotes: configuration.maximumRemotesPerCentralSession
             )
+            sessionInfo[key] = ProviderStatus.Session(
+                ordinal: sessionOrdinal, role: .central, clientName: hello.clientName
+            )
             configuration.log?("opened central session \(sessionOrdinal) for \(hello.clientName)")
         case .peripheral:
             sessionOrdinal += 1
@@ -520,8 +545,26 @@ public actor Provider {
                 install: install,
                 log: configuration.log
             )
+            sessionInfo[key] = ProviderStatus.Session(
+                ordinal: sessionOrdinal, role: .peripheral, clientName: hello.clientName
+            )
             configuration.log?("opened host session \(sessionOrdinal) for \(hello.clientName)")
+        case .monitor:
+            // The branch above the claim handles monitor clients.
+            assertionFailure("a monitor hello returns before the claim")
+            connection.cancel()
+            return
         }
+    }
+
+    /// The state of this provider, for a ``BLESwiftLink/LinkRole/monitor`` client.
+    private func statusSnapshot() -> ProviderStatus {
+        ProviderStatus(
+            providerName: configuration.providerName,
+            passthrough: configuration.passthrough,
+            fixtureDeviceCount: fixtures.count,
+            sessions: sessionInfo.values.sorted { $0.ordinal < $1.ordinal }
+        )
     }
 
     /// The identity under which to host a peripheral client's device. It is the identity in the
@@ -550,6 +593,7 @@ public actor Provider {
     private func handleTermination(of connection: LinkConnection) {
         let key = ObjectIdentifier(connection)
         pending.withLock { $0.release(connection) }
+        sessionInfo.removeValue(forKey: key)
         guard let session = sessions.removeValue(forKey: key) else { return }
         session.close()
         configuration.log?("closed \(session.label)")
