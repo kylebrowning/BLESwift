@@ -16,6 +16,18 @@ import Foundation
 import BLESwiftCompat17
 import Testing
 
+/// A copyable box around a `Mutex`, so a test helper can return it in a tuple and take it as a
+/// parameter. A `Mutex` is noncopyable.
+private final class Log<Value: Sendable>: Sendable {
+    private let box: Mutex<Value>
+
+    init(_ value: Value) { box = Mutex(value) }
+
+    func withLock<Result>(_ body: (inout Value) -> Result) -> Result {
+        box.withLock { body(&$0) }
+    }
+}
+
 /// Peripheral-role L2CAP over the link. A ``LinkPeripheralManager`` drives a `PeripheralHost`
 /// that publishes a channel, and a ``LinkCentral`` drives a `Central` that opens it. Both dial
 /// one ``Provider``. Raw clients send what no honest client sends. The composite tests publish
@@ -26,9 +38,10 @@ struct HostL2CAPLinkTests {
     // MARK: - Rigs
 
     /// A provider that listens on a system-assigned loopback port.
-    private func makeProvider() async throws -> Provider {
+    private func makeProvider(handshakeTimeout: Duration? = nil) async throws -> Provider {
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        if let handshakeTimeout { configuration.handshakeTimeout = handshakeTimeout }
         let provider = Provider(configuration: configuration)
         try await provider.start()
         return provider
@@ -195,11 +208,18 @@ struct HostL2CAPLinkTests {
 
         rig.hostLink.dropLinkForTesting()
 
+        // The provider closes the host's end with `LinkError.providerDisconnected`. The central's
+        // end is the peer of that close, so it throws the closed-channel error.
         let error = try await bounded { await reader.value }
-        #expect(error != nil)
+        let central = try #require(error as NSError?)
+        let closed = BLESwiftError.l2capChannelClosed as NSError
+        #expect(central.domain == closed.domain)
+        #expect(central.code == closed.code)
         // The host's own end closes with the link error.
         let hostError = try await bounded { await hostReader.value }
-        #expect((hostError as NSError?)?.domain == LinkError.domain)
+        let disconnected = LinkError.providerDisconnected.nsError
+        #expect((hostError as NSError?)?.domain == disconnected.domain)
+        #expect((hostError as NSError?)?.code == disconnected.code)
         await tearDown(rig)
     }
 
@@ -280,7 +300,7 @@ struct HostL2CAPLinkTests {
 
     /// A raw host that published a channel, and a central on the provider's own radio that opened
     /// it. The raw host's channel id is 1.
-    private func makeHostileRig(_ label: String) async throws -> (Provider, RawHost, L2CAPChannel, Central) {
+    private func makeHostileRig(_ label: String) async throws -> (Provider, RawHost, L2CAPChannel, (Central, Peripheral)) {
         let provider = try await makeProvider()
         let raw = RawHost(port: await provider.port, label: label)
         await waitFor(timeout: .seconds(5)) { raw.events.contains(.didUpdateState(.poweredOn)) }
@@ -304,7 +324,7 @@ struct HostL2CAPLinkTests {
         await waitFor(timeout: .seconds(5)) {
             raw.events.contains { if case .didOpenL2CAPChannel(1, 0x0080, _) = $0 { return true } else { return false } }
         }
-        return (provider, raw, channel, central)
+        return (provider, raw, channel, (central, peripheral))
     }
 
     @Test("A host frame for an unknown channel id is ignored, and the session stays", .timeLimit(.minutes(1)))
@@ -337,9 +357,13 @@ struct HostL2CAPLinkTests {
             raw.events.contains { if case .l2capClosed(1, let error) = $0 { return error?.code == 7 } else { return false } }
         }
         #expect(raw.events.contains { if case .l2capClosed(1, let error) = $0 { return error?.code == 7 } else { return false } })
-        // The central's end finishes, because the provider closed the host's end.
+        // The central's end finishes cleanly, because the provider closed the host's end.
         let inbound = channel.incomingData
-        _ = try? await bounded { for try await _ in inbound {} }
+        let finished = try await bounded { () -> Bool in
+            for try await _ in inbound {}
+            return true
+        }
+        #expect(finished)
         #expect(await provider.sessionCount == 1)
 
         raw.shutdown()
@@ -419,6 +443,371 @@ struct HostL2CAPLinkTests {
         #expect(psm == L2CAPPSM(0x0080))
         #expect(await real.onQueue { real.publishL2CAPChannelCalls }.isEmpty)
         #expect(await radio.publishedL2CAP[virtual.identifier] == [L2CAPPSM(0x0080)])
+    }
+
+    @Test("A real child that powers off during a publish fails the publish, and the next publish uses the virtual child")
+    func compositePowerDownDuringPublish() async throws {
+        let (host, real, virtual, radio) = await makeCompositeHost("composite.l2cap.powerdown", realState: .poweredOn)
+        await real.onQueue { real.publishBehavior = .hold }
+
+        let publish = Task { try await host.publishL2CAPChannel() }
+        await waitFor(timeout: .seconds(5)) { await real.onQueue { real.publishL2CAPChannelCalls.count == 1 } }
+        real.simulateStateChange(.poweredOff)
+
+        do {
+            _ = try await bounded { try await publish.value }
+            Issue.record("expected the publish to fail")
+        } catch {
+            let expected = BLESwiftError.l2capPublishFailed as NSError
+            #expect((error as NSError).domain == expected.domain)
+            #expect((error as NSError).code == expected.code)
+        }
+        #expect(try await host.publishL2CAPChannel() == L2CAPPSM(0x0080))
+        #expect(await radio.publishedL2CAP[virtual.identifier] == [L2CAPPSM(0x0080)])
+    }
+
+    /// A composite of a real fake child and a virtual child that a test drives directly. The
+    /// returned log records every event that the composite emits.
+    private func makeComposite(_ label: String) async -> (CompositePeripheralManager, FakePeripheralManager, VirtualPeripheralManagerBackend, VirtualRadio, Log<[PeripheralHostEvent]>, DispatchQueue) {
+        let radio = VirtualRadio()
+        let queue = DispatchQueue(label: label)
+        let real = FakePeripheralManager(queue: queue, state: .poweredOn)
+        let virtual = VirtualPeripheralManagerBackend(radio: radio, queue: queue)
+        let composite = CompositePeripheralManager(backends: [real, virtual], queue: queue)
+        let log = Log<[PeripheralHostEvent]>([])
+        await Self.onQueue(queue) {
+            composite.eventHandler = { event in
+                switch event {
+                case .didPublishL2CAPChannel, .didUnpublishL2CAPChannel: log.withLock { $0.append(event) }
+                default: break
+                }
+            }
+        }
+        await waitFor(timeout: .seconds(5)) { await radio.generation(of: virtual.identifier) != nil }
+        return (composite, real, virtual, radio, log, queue)
+    }
+
+    private static func onQueue<T: Sendable>(_ queue: DispatchQueue, _ body: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async { continuation.resume(returning: body()) }
+        }
+    }
+
+    /// The publish completions in `log`, as PSM values. A failed publish is `nil`.
+    private static func publishes(_ log: Log<[PeripheralHostEvent]>) -> [UInt16?] {
+        log.withLock { events in
+            events.compactMap {
+                guard case .didPublishL2CAPChannel(let psm, _) = $0 else { return nil }
+                return .some(psm?.rawValue)
+            }
+        }
+    }
+
+    /// The unpublish completions in `log`, as error codes. A success is `nil`.
+    private static func unpublishes(_ log: Log<[PeripheralHostEvent]>) -> [Int?] {
+        log.withLock { events in
+            events.compactMap {
+                guard case .didUnpublishL2CAPChannel(_, let error) = $0 else { return nil }
+                return .some(error?.code)
+            }
+        }
+    }
+
+    @Test("Two publishes on a composite complete in call order")
+    func compositePublishesInOrder() async throws {
+        let (composite, real, _, _, log, queue) = await makeComposite("composite.l2cap.order")
+        await real.onQueue { real.publishBehavior = .hold }
+        await Self.onQueue(queue) {
+            composite.publishL2CAPChannel(requiresEncryption: false)
+            composite.publishL2CAPChannel(requiresEncryption: false)
+        }
+        real.simulatePublishResult(psm: L2CAPPSM(0x0090), error: nil)
+        real.simulatePublishResult(psm: L2CAPPSM(0x0091), error: nil)
+
+        await waitFor(timeout: .seconds(5)) { Self.publishes(log).count == 2 }
+        #expect(Self.publishes(log) == [0x0090, 0x0091])
+    }
+
+    @Test("An unpublish over two holders reaches both and completes once")
+    func compositeUnpublishesEveryHolder() async throws {
+        let (composite, real, virtual, radio, log, queue) = await makeComposite("composite.l2cap.holders")
+        await real.onQueue { real.publishBehavior = .succeed(L2CAPPSM(0x0085)) }
+        await Self.onQueue(queue) { composite.publishL2CAPChannel(requiresEncryption: false) }
+        await waitFor(timeout: .seconds(5)) { Self.publishes(log).count == 1 }
+        #expect(await radio.publishedL2CAP[virtual.identifier] == [L2CAPPSM(0x0085)])
+
+        await Self.onQueue(queue) { composite.unpublishL2CAPChannel(L2CAPPSM(0x0085)) }
+        await waitFor(timeout: .seconds(5)) { Self.unpublishes(log).count == 1 }
+        // Give a second completion every chance to arrive. There must be none. This is a
+        // negative assertion, so a short wait is the only bound.
+        try? await Task.sleep(for: .milliseconds(100))
+        await Self.onQueue(queue) {}
+
+        #expect(Self.unpublishes(log) == [nil])
+        #expect(await real.onQueue { real.unpublishL2CAPChannelCalls } == [L2CAPPSM(0x0085)])
+        #expect(await radio.publishedL2CAP[virtual.identifier] == nil)
+    }
+
+    @Test("A child that fails an unpublish still holds the PSM, so a second unpublish reaches it")
+    func compositeFailedUnpublishKeepsTheHolder() async throws {
+        let (composite, real, virtual, radio, log, queue) = await makeComposite("composite.l2cap.failedunpublish")
+        await real.onQueue { real.publishBehavior = .succeed(L2CAPPSM(0x0085)) }
+        await Self.onQueue(queue) { composite.publishL2CAPChannel(requiresEncryption: false) }
+        await waitFor(timeout: .seconds(5)) { Self.publishes(log).count == 1 }
+        // Take the PSM off the virtual device behind the composite's back, so the virtual child's
+        // unpublish fails with code 12.
+        let generation = try #require(await radio.generation(of: virtual.identifier))
+        #expect(await radio.unpublishL2CAP(device: virtual.identifier, generation: generation, psm: L2CAPPSM(0x0085)) == .unpublished)
+
+        await Self.onQueue(queue) { composite.unpublishL2CAPChannel(L2CAPPSM(0x0085)) }
+        await waitFor(timeout: .seconds(5)) { Self.unpublishes(log).count == 1 }
+        #expect(Self.unpublishes(log) == [12])
+
+        // The real child succeeded, so only the virtual child still holds the PSM.
+        await Self.onQueue(queue) { composite.unpublishL2CAPChannel(L2CAPPSM(0x0085)) }
+        await waitFor(timeout: .seconds(5)) { Self.unpublishes(log).count == 2 }
+        #expect(Self.unpublishes(log) == [12, 12])
+        #expect(await real.onQueue { real.unpublishL2CAPChannelCalls } == [L2CAPPSM(0x0085)])
+    }
+
+    // MARK: - Handshake deadline
+
+    @Test("A refused client that stays connected is closed by the handshake deadline")
+    func refusedClientIsClosedByTheDeadline() async throws {
+        let provider = try await makeProvider(handshakeTimeout: .milliseconds(200))
+        let connection = LinkConnection.connect(
+            to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "host.l2cap.deadline")
+        )
+        let answer = Mutex<ServerHello?>(nil)
+        let ended = Mutex(false)
+        connection.onStateChange = { [weak connection] state in
+            switch state {
+            case .ready:
+                connection?.send(.clientHello(ClientHello(protocolVersion: 1, role: .peripheral, clientName: "stays")))
+            case .failed, .cancelled:
+                ended.withLock { $0 = true }
+            default:
+                break
+            }
+        }
+        // The client reads the refusal and does not close the connection.
+        connection.onMessage = { message in
+            guard case .serverHello(let hello) = message else { return }
+            answer.withLock { $0 = hello }
+        }
+        connection.start()
+
+        await waitFor(timeout: .seconds(5)) { ended.withLock { $0 } }
+        #expect(answer.withLock { $0?.accepted } == false)
+        #expect(ended.withLock { $0 })
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+        await provider.stop()
+    }
+
+    // MARK: - Credit cap
+
+    @Test("Repeated full credit grants close a host-side channel with code 7", .timeLimit(.minutes(1)))
+    func hostFullCreditGrantsCloseTheChannel() async throws {
+        let (provider, raw, _, _) = try await makeHostileRig("hostile-fullcredit")
+        raw.send(.l2capCredit(channel: 1, bytes: LinkFlowControl.l2capInitialCredit))
+        raw.send(.l2capCredit(channel: 1, bytes: LinkFlowControl.l2capInitialCredit))
+
+        await waitFor(timeout: .seconds(5)) {
+            raw.events.contains { if case .l2capClosed(1, let error) = $0 { return error?.code == 7 } else { return false } }
+        }
+        #expect(raw.events.contains { if case .l2capClosed(1, let error) = $0 { return error?.code == 7 } else { return false } })
+        #expect(await provider.sessionCount == 1)
+        raw.shutdown()
+        await provider.stop()
+    }
+
+    /// A handler that accepts every channel and keeps it, so the channel stays open.
+    private actor KeepingHandler: VirtualL2CAPAccepting {
+        private var kept: [any L2CAPChannelRemote] = []
+        func read(_ characteristic: CharacteristicIdentifier, offset: Int, from central: Subscriber) async -> Result<Data, ATTError> { .failure(.readNotPermitted) }
+        func write(_ entries: [WriteRequest.Entry], from central: Subscriber) async -> Result<Void, ATTError> { .success(()) }
+        func subscriptionChanged(_ characteristic: CharacteristicIdentifier, central: Subscriber, isSubscribed: Bool) async {}
+        func acceptL2CAPChannel(_ channel: any L2CAPChannelRemote, psm: L2CAPPSM, from central: Subscriber) async {
+            kept.append(channel)
+        }
+    }
+
+    @Test("Repeated full credit grants close a central-side channel with code 7", .timeLimit(.minutes(1)))
+    func centralFullCreditGrantsCloseTheChannel() async throws {
+        let provider = try await makeProvider()
+        let device = UUID()
+        let handle = await provider.radio.register(VirtualDevice(
+            descriptor: VirtualDeviceDescriptor(identifier: device, advertisement: AdvertisementData(isConnectable: true)),
+            handler: KeepingHandler()
+        ))
+        _ = try await handle.publishL2CAPChannel(psm: L2CAPPSM(0x0080))
+
+        let received = Mutex<[CentralWireEvent]>([])
+        let connection = LinkConnection.connect(
+            to: LinkEndpoint(host: "127.0.0.1", port: await provider.port),
+            codec: .binaryPropertyList,
+            queue: DispatchQueue(label: "host.l2cap.centralcredit")
+        )
+        connection.onStateChange = { [weak connection] state in
+            guard case .ready = state else { return }
+            connection?.send(.clientHello(ClientHello(protocolVersion: LinkProtocol.version, role: .central, clientName: "credit")))
+        }
+        connection.onMessage = { message in
+            guard case .centralEvent(let event) = message else { return }
+            received.withLock { $0.append(event) }
+        }
+        connection.start()
+        await waitFor(timeout: .seconds(5)) { received.withLock { $0.contains(.didUpdateState(.poweredOn)) } }
+        connection.send(.centralRequest(.connect(peripheral: device, options: nil, requiresANCS: false)))
+        await waitFor(timeout: .seconds(5)) {
+            received.withLock { $0.contains { if case .didConnect(device, _, _, _) = $0 { return true } else { return false } } }
+        }
+        connection.send(.centralRequest(.openL2CAPChannel(peripheral: device, psm: 0x0080, channel: 1)))
+        await waitFor(timeout: .seconds(5)) {
+            received.withLock { $0.contains(.didOpenL2CAPChannel(peripheral: device, channel: 1, psm: 0x0080, error: nil)) }
+        }
+        #expect(received.withLock { $0.contains(.didOpenL2CAPChannel(peripheral: device, channel: 1, psm: 0x0080, error: nil)) })
+
+        connection.send(.centralRequest(.l2capCredit(channel: 1, bytes: LinkFlowControl.l2capInitialCredit)))
+        connection.send(.centralRequest(.l2capCredit(channel: 1, bytes: LinkFlowControl.l2capInitialCredit)))
+        await waitFor(timeout: .seconds(5)) {
+            received.withLock { $0.contains { if case .l2capClosed(1, let error) = $0 { return error?.code == 7 } else { return false } } }
+        }
+        #expect(received.withLock { $0.contains { if case .l2capClosed(1, let error) = $0 { return error?.code == 7 } else { return false } } })
+
+        connection.onStateChange = nil
+        connection.onMessage = nil
+        connection.cancel()
+        await provider.stop()
+    }
+
+    // MARK: - Channel limit
+
+    @Test("A host session closes a channel that opens past the limit of 64", .timeLimit(.minutes(2)))
+    func hostChannelLimit() async throws {
+        let (provider, raw, first, (central, peripheral)) = try await makeHostileRig("hostile-limit")
+        var channels: [L2CAPChannel] = [first]
+        for _ in 1..<HostSession.maximumHostChannels {
+            channels.append(try await peripheral.openL2CAPChannel(psm: L2CAPPSM(0x0080), timeout: .seconds(5)))
+        }
+        let opens = { raw.events.filter { if case .didOpenL2CAPChannel = $0 { return true } else { return false } }.count }
+        await waitFor(timeout: .seconds(10)) { opens() == HostSession.maximumHostChannels }
+        #expect(opens() == HostSession.maximumHostChannels)
+
+        // One more. The session closes it at once and does not tell the client.
+        let extra = try await peripheral.openL2CAPChannel(psm: L2CAPPSM(0x0080), timeout: .seconds(5))
+        let inbound = extra.incomingData
+        let finished = try await bounded { () -> Bool in
+            for try await _ in inbound {}
+            return true
+        }
+        #expect(finished)
+        #expect(opens() == HostSession.maximumHostChannels)
+        withExtendedLifetime(channels) {}
+        withExtendedLifetime(central) {}
+
+        raw.shutdown()
+        await provider.stop()
+    }
+
+    // MARK: - LinkPeripheralManager refusals
+
+    /// A link manager over a scripted provider. The log records every radio state and every
+    /// channel that the manager delivers.
+    private func makeScriptedLink(_ label: String) async throws -> (ScriptedHostProvider, LinkPeripheralManager, DispatchQueue, Log<[CentralState]>, Log<[any L2CAPChannelRemote]>) {
+        let provider = try ScriptedHostProvider()
+        try await provider.start()
+        let queue = DispatchQueue(label: label)
+        let link = LinkPeripheralManager(
+            endpoint: provider.endpoint,
+            queue: queue,
+            clientName: label,
+            codec: .json,
+            retryInterval: .milliseconds(50)
+        )
+        let states = Log<[CentralState]>([])
+        let channels = Log<[any L2CAPChannelRemote]>([])
+        await Self.onQueue(queue) {
+            link.eventHandler = { event in
+                switch event {
+                case .didUpdateState(let state): states.withLock { $0.append(state) }
+                case .didOpenL2CAPChannel(let channel?, _, _): channels.withLock { $0.append(channel) }
+                default: break
+                }
+            }
+        }
+        await waitFor(timeout: .seconds(5)) { states.withLock { $0.contains(.poweredOn) } }
+        return (provider, link, queue, states, channels)
+    }
+
+    /// Whether the link dropped after it first powered on.
+    private static func dropped(_ states: Log<[CentralState]>) -> Bool {
+        states.withLock { states in
+            guard let on = states.firstIndex(of: .poweredOn) else { return false }
+            return states[on...].contains(.unsupported)
+        }
+    }
+
+    @Test("LinkPeripheralManager drops the session for an L2CAP event with PSM 0")
+    func linkRefusesPSMZero() async throws {
+        let (provider, link, _, states, _) = try await makeScriptedLink("link.l2cap.psmzero")
+        defer { provider.stop() }
+        provider.emit(.didOpenL2CAPChannel(channel: 1, psm: 0, central: UUID()))
+        await waitFor(timeout: .seconds(5)) { Self.dropped(states) }
+        #expect(Self.dropped(states))
+        withExtendedLifetime(link) {}
+    }
+
+    @Test("LinkPeripheralManager drops the session for a duplicate channel id, and closes the first channel")
+    func linkRefusesDuplicateChannel() async throws {
+        let (provider, link, queue, states, channels) = try await makeScriptedLink("link.l2cap.duplicate")
+        defer { provider.stop() }
+        provider.emit(.didOpenL2CAPChannel(channel: 1, psm: 0x0080, central: UUID()))
+        await waitFor(timeout: .seconds(5)) { channels.withLock { $0.count } == 1 }
+        let first = try #require(channels.withLock { $0.first })
+        let inbound = first.inbound()
+
+        provider.emit(.didOpenL2CAPChannel(channel: 1, psm: 0x0080, central: UUID()))
+        await waitFor(timeout: .seconds(5)) { Self.dropped(states) }
+        #expect(Self.dropped(states))
+        #expect(channels.withLock { $0.count } == 1)
+        let failure = try await bounded { () -> Int? in
+            do {
+                for try await _ in inbound {}
+                return nil
+            } catch {
+                return (error as NSError).code
+            }
+        }
+        #expect(failure == LinkError.providerDisconnected.code)
+        #expect(await Self.onQueue(queue) { link.channelCount } == 0)
+    }
+
+    @Test("LinkPeripheralManager ignores frames for an unknown channel id")
+    func linkIgnoresUnknownChannel() async throws {
+        let (provider, link, queue, states, _) = try await makeScriptedLink("link.l2cap.unknown")
+        defer { provider.stop() }
+        provider.emit(.l2capData(channel: 9, data: Data([1])))
+        provider.emit(.l2capCredit(channel: 9, bytes: 1))
+        provider.emit(.l2capClosed(channel: 9, error: nil))
+        // A publish answer behind the frames shows that the manager handled them.
+        let published = Mutex(false)
+        await Self.onQueue(queue) {
+            let previous = link.eventHandler
+            link.eventHandler = { event in
+                if case .didPublishL2CAPChannel = event { published.withLock { $0 = true } }
+                previous?(event)
+            }
+        }
+        provider.emit(.didPublishL2CAPChannel(psm: 0x0080, error: nil))
+        await waitFor(timeout: .seconds(5)) { published.withLock { $0 } }
+        #expect(published.withLock { $0 })
+        #expect(!Self.dropped(states))
+        #expect(await Self.onQueue(queue) { link.channelCount } == 0)
     }
 }
 #endif

@@ -116,6 +116,7 @@ Task {
 - The host does not track open channels. The channel closes when the central disconnects, when Bluetooth turns off, or when either side calls close.
 - ``PeripheralHost/unpublishL2CAPChannel(_:)`` removes the PSM. Channels that are already open stay open.
 - When the radio leaves ``CentralState/poweredOn``, the radio drops every published PSM. Publish again after power returns.
+- With the simulator link and `--passthrough`, the host stays ``CentralState/poweredOn`` while the virtual radio is on. If only the Mac's radio turns off and on again, the host sees no state change. Real centrals then cannot reach the PSM until you unpublish it and publish again. See <doc:SimulatorSupport>.
 
 ## Tearing down
 

@@ -182,6 +182,8 @@ A `PeripheralHost` that is served over the link is a device on the virtual radio
 
 The two apps can also use L2CAP. The host publishes a channel with ``PeripheralHost/publishL2CAPChannel(requiresEncryption:)``. The central opens the PSM with ``Peripheral/openL2CAPChannel(psm:timeout:)``. The host receives the channel from ``PeripheralHost/incomingL2CAPChannels()``. The provider relays the bytes with the same credit-based flow control in both directions. If the link of the host drops, the central's ``L2CAPChannel/incomingData`` stream throws.
 
+With `--passthrough`, a published PSM goes on the virtual radio and on the Mac's real radio. The host stays ``CentralState/poweredOn`` while the virtual radio is on. If only the Mac's radio turns off and on again, the host sees no state change, and the provider does not publish the PSM again on the real radio. Real centrals then cannot reach the PSM. To make it reachable again, call ``PeripheralHost/unpublishL2CAPChannel(_:)`` and then ``PeripheralHost/publishL2CAPChannel(requiresEncryption:)``.
+
 Peripheral-role L2CAP needs protocol version 2 of the link. The app and the provider must use the same version. Update the app and `bleswift-provider` together. A provider refuses a client of another version.
 
 `Scripts/sim-to-sim-e2e.sh` runs this flow with two booted simulators and the `BLESwiftExplorer` sample app. The provider binds an ephemeral loopback port. `BLESWIFT_LINK` gives that port to both apps. The script runs locally. It also runs on every push to `main` and on every same-repository pull request, on the self-hosted CI runner of the project. See `Scripts/e2e/README.md` for the topology, the environment overrides, and the checks to make when the test fails.

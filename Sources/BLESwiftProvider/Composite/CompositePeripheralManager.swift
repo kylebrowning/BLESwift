@@ -645,9 +645,12 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
     /// Unpublishes `psm` on every powered-on child that holds it. One
     /// `didUnpublishL2CAPChannel(psm:error:)` follows, with the first error. If no child holds
     /// `psm`, the completion carries `BLESwiftProvider` code 12.
+    ///
+    /// A child stops holding `psm` only when it answers without an error. A child that fails
+    /// still holds it, so a later unpublish reaches that child again.
     public func unpublishL2CAPChannel(_ psm: L2CAPPSM) {
         dispatchPrecondition(condition: .onQueue(queue))
-        let holders = (_psmHolders.removeValue(forKey: psm) ?? []).filter { isOnline($0) }
+        let holders = (_psmHolders[psm] ?? []).filter { isOnline($0) }
         guard !holders.isEmpty else {
             queue.async { [self] in
                 dispatchPrecondition(condition: .onQueue(queue))
@@ -755,6 +758,10 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
         }
         guard case .batch(let id) = _unpublishWaits[index].removeFirst(),
               let position = _unpublishBatches.firstIndex(where: { $0.id == id }) else { return }
+        if error == nil {
+            _psmHolders[psm]?.remove(index)
+            if _psmHolders[psm]?.isEmpty == true { _psmHolders.removeValue(forKey: psm) }
+        }
         _unpublishBatches[position].owing.remove(index)
         if _unpublishBatches[position].error == nil { _unpublishBatches[position].error = error }
         flushL2CAP()

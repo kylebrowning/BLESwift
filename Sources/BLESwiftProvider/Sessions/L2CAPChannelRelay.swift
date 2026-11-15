@@ -95,13 +95,15 @@ final class OpenChannel: Sendable {
     ///
     /// - Parameter bytes: The credit to add. It is already known to be in range. See
     ///   ``L2CAPChannelRelay/grantCredit(_:to:)``.
-    /// - Returns: `false` if the addition overflowed. No honest peer can cause this. The caller
-    ///   closes the channel and does not continue with a wrapped window.
+    /// - Returns: `false` if the window would grow past
+    ///   ``BLESwiftLink/LinkFlowControl/l2capInitialCredit``, or the addition overflowed. The
+    ///   client returns only the credit that the provider used, so no honest peer can cause this.
+    ///   The caller closes the channel and does not continue with a window that is too large.
     func grant(_ bytes: Int) -> Bool {
         enum Outcome { case overflow, granted(CheckedContinuation<Void, Never>?) }
         let outcome = credit.withLock { credit -> Outcome in
             let sum = credit.available.addingReportingOverflow(bytes)
-            guard !sum.overflow else { return .overflow }
+            guard !sum.overflow, sum.partialValue <= LinkFlowControl.l2capInitialCredit else { return .overflow }
             credit.available = sum.partialValue
             guard let waiter = credit.waiter, credit.available >= credit.waitingFor else { return .granted(nil) }
             credit.available -= credit.waitingFor
@@ -396,7 +398,9 @@ final class L2CAPChannelRelay: Sendable {
     /// The pump checks for cancellation *before* the hop, and a teardown can land in between: it
     /// drops the id, and the id can go to another channel before this code runs. Without the
     /// check, the old bridge's bytes would go on the wire under an id that is no longer its own.
-    private func sendFromPump(_ frame: Frame, channel: UInt32, open: OpenChannel) {
+    /// The method is internal so that a test can drive it with a bridge that the relay has
+    /// already dropped.
+    func sendFromPump(_ frame: Frame, channel: UInt32, open: OpenChannel) {
         queue.async { [self] in
             guard isCurrent(channel, open) else { return }
             send(channel, frame)

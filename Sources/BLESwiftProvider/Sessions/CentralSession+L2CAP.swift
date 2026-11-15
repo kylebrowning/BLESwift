@@ -143,22 +143,5 @@ extension CentralSession {
     func closeChannels(matching predicate: (OpenChannel) -> Bool) {
         relay.closeChannels(matching: predicate)
     }
-
-    // MARK: - Off-queue completions
-
-    /// Sends one event for `channel` from off the queue, with the relay's identity check. It
-    /// first hops onto ``CentralSession/queue``, which is serial, so the frames keep their order.
-    ///
-    /// The check matters because a teardown can land between the pump's cancellation check and
-    /// this hop: it drops the id, and the id can go to another channel before this code runs.
-    /// Without the check, the old bridge's bytes would go on the wire under an id that is no
-    /// longer its own. The relay's pump makes the same check. This method is internal so that a
-    /// test can drive the check with a bridge that the session has already dropped.
-    func sendFromPump(_ event: CentralWireEvent, channel: UInt32, open: OpenChannel) {
-        queue.async { [self] in
-            guard relay.isCurrent(channel, open) else { return }
-            send(event)
-        }
-    }
 }
 #endif
