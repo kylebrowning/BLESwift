@@ -33,17 +33,21 @@ enum AgentCommand {
     ///   - options: The parsed serve options. The function uses them to check the endpoint.
     ///   - arguments: The serve arguments, exactly as given. The agent runs with them.
     /// - Returns: The exit status. It is `0` on success, `64` (`EX_USAGE`) for a non-loopback
-    ///   endpoint, and `70` (`EX_SOFTWARE`) if the file cannot be written or
-    ///   `launchctl bootstrap` fails.
+    ///   endpoint, and `70` (`EX_SOFTWARE`) if the executable is not found, the file cannot be
+    ///   written, or `launchctl bootstrap` fails.
     static func install(options: ProviderCommandLine.Options, arguments: [String]) -> Int32 {
         if let error = ProviderAgent.endpointError(for: options.endpoint) {
             printError(error)
             return 64
         }
-        let executable = ProviderAgent.executablePath(
+        guard let executable = ProviderAgent.executablePath(
             argument: CommandLine.arguments[0],
-            currentDirectory: FileManager.default.currentDirectoryPath
-        )
+            currentDirectory: FileManager.default.currentDirectoryPath,
+            searchPath: ProcessInfo.processInfo.environment["PATH"]
+        ) else {
+            printError("bleswift-provider: cannot find the bleswift-provider executable; run install-agent with a full path")
+            return 70
+        }
         if let warning = ProviderAgent.buildDirectoryWarning(for: executable) {
             printError(warning)
         }

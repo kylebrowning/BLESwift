@@ -144,14 +144,46 @@ struct ProviderCommandTests {
 
     @Test("The executable path is absolute and keeps symbolic links")
     func executablePath() {
-        #expect(ProviderAgent.executablePath(argument: "/opt/homebrew/bin/bleswift-provider", currentDirectory: "/tmp")
-            == "/opt/homebrew/bin/bleswift-provider")
-        #expect(ProviderAgent.executablePath(argument: ".build/debug/bleswift-provider", currentDirectory: "/work/repo")
-            == "/work/repo/.build/debug/bleswift-provider")
-        #expect(ProviderAgent.executablePath(argument: "./bin/../bin/tool", currentDirectory: "/work")
-            == "/work/bin/tool")
+        #expect(ProviderAgent.executablePath(
+            argument: "/opt/homebrew/bin/bleswift-provider", currentDirectory: "/tmp", searchPath: nil
+        ) == "/opt/homebrew/bin/bleswift-provider")
+        #expect(ProviderAgent.executablePath(
+            argument: ".build/debug/bleswift-provider", currentDirectory: "/work/repo", searchPath: nil
+        ) == "/work/repo/.build/debug/bleswift-provider")
+        #expect(ProviderAgent.executablePath(
+            argument: "./bin/../bin/tool", currentDirectory: "/work", searchPath: nil
+        ) == "/work/bin/tool")
         #expect(ProviderAgent.buildDirectoryWarning(for: "/work/repo/.build/debug/bleswift-provider") != nil)
         #expect(ProviderAgent.buildDirectoryWarning(for: "/opt/homebrew/bin/bleswift-provider") == nil)
+    }
+
+    @Test("A bare executable name resolves through PATH, in order, without resolving links")
+    func executablePathSearchesPATH() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent("agent-path-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: root) }
+        let empty = root.appendingPathComponent("empty")
+        let plain = root.appendingPathComponent("plain")
+        let first = root.appendingPathComponent("first")
+        let second = root.appendingPathComponent("second")
+        for directory in [empty, plain, first, second] {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        // A file that is not executable does not match.
+        fileManager.createFile(atPath: plain.appendingPathComponent("tool").path, contents: Data())
+        let real = second.appendingPathComponent("tool")
+        fileManager.createFile(atPath: real.path, contents: Data(), attributes: [.posixPermissions: 0o755])
+        // The first match is a symbolic link. The function keeps the link.
+        let link = first.appendingPathComponent("tool")
+        try fileManager.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let searchPath = [empty, plain, first, second].map(\.path).joined(separator: ":")
+        let found = ProviderAgent.executablePath(argument: "tool", currentDirectory: "/", searchPath: searchPath)
+        #expect(found == URL(fileURLWithPath: link.path).standardized.path)
+        #expect(ProviderAgent.executablePath(
+            argument: "tool", currentDirectory: "/", searchPath: [empty, plain].map(\.path).joined(separator: ":")
+        ) == nil)
+        #expect(ProviderAgent.executablePath(argument: "tool", currentDirectory: "/", searchPath: nil) == nil)
     }
 }
 #endif

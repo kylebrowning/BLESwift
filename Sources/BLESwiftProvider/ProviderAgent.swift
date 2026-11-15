@@ -23,7 +23,7 @@ public enum ProviderAgent {
     ///   - arguments: The serve arguments, exactly as the user gave them.
     ///   - logPath: The absolute path of the file for standard output and standard error.
     /// - Returns: The keys for `PropertyListSerialization`.
-    public static func propertyList(executable: String, arguments: [String], logPath: String) -> [String: Any] {
+    package static func propertyList(executable: String, arguments: [String], logPath: String) -> [String: Any] {
         [
             "Label": label,
             "ProgramArguments": [executable] + arguments,
@@ -42,31 +42,49 @@ public enum ProviderAgent {
     ///
     /// - Parameter endpoint: The endpoint on which the agent would listen.
     /// - Returns: One line to print, or `nil`.
-    public static func endpointError(for endpoint: LinkEndpoint) -> String? {
+    package static func endpointError(for endpoint: LinkEndpoint) -> String? {
         guard !endpoint.isLoopback else { return nil }
         return "bleswift-provider: the agent runs unattended, so it must listen on loopback, not \(endpoint)"
     }
 
-    /// The absolute path of the executable that `argument` names.
+    /// The absolute path of the executable that `argument` names, or `nil` if no file matches.
     ///
-    /// The function makes a relative path absolute against `currentDirectory`. It does not
-    /// resolve symbolic links. Thus the agent keeps a Homebrew link such as
-    /// `/opt/homebrew/bin/bleswift-provider`, and a Homebrew upgrade does not break it.
+    /// - If `argument` contains a `/`, the function makes it absolute against
+    ///   `currentDirectory`.
+    /// - If `argument` is a bare name, the function searches the directories of `searchPath` in
+    ///   order. It returns the first executable file with that name. A shell runs a command from
+    ///   `PATH` with a bare `argv[0]`.
+    ///
+    /// The function does not resolve symbolic links. Thus the agent keeps a Homebrew link such
+    /// as `/opt/homebrew/bin/bleswift-provider`, and a Homebrew upgrade does not break it.
     ///
     /// - Parameters:
     ///   - argument: The first command-line argument, `argv[0]`.
     ///   - currentDirectory: The current directory of the process.
-    /// - Returns: The absolute path.
-    public static func executablePath(argument: String, currentDirectory: String) -> String {
+    ///   - searchPath: The value of `PATH`, with directories separated by `:`.
+    /// - Returns: The absolute path, or `nil`.
+    package static func executablePath(argument: String, currentDirectory: String, searchPath: String?) -> String? {
         let base = URL(fileURLWithPath: currentDirectory, isDirectory: true)
-        return URL(fileURLWithPath: argument, relativeTo: base).standardized.path
+        guard !argument.contains("/") else {
+            return URL(fileURLWithPath: argument, relativeTo: base).standardized.path
+        }
+        for directory in (searchPath ?? "").split(separator: ":", omittingEmptySubsequences: true) {
+            let folder = URL(fileURLWithPath: String(directory), isDirectory: true, relativeTo: base)
+            let candidate = folder.appendingPathComponent(argument).standardized.path
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: candidate, isDirectory: &isDirectory),
+                  !isDirectory.boolValue,
+                  FileManager.default.isExecutableFile(atPath: candidate) else { continue }
+            return candidate
+        }
+        return nil
     }
 
     /// The warning to print when `executablePath` is inside a build directory, or `nil`.
     ///
     /// - Parameter executablePath: The absolute path of the executable.
     /// - Returns: One line to print, or `nil`.
-    public static func buildDirectoryWarning(for executablePath: String) -> String? {
+    package static func buildDirectoryWarning(for executablePath: String) -> String? {
         guard executablePath.contains("/.build/") else { return nil }
         return "bleswift-provider: warning: the agent runs \(executablePath). "
             + "The agent will break when you clean the build directory."
