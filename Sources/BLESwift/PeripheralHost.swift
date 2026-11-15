@@ -115,10 +115,18 @@ public actor PeripheralHost {
 
     // MARK: - L2CAP state
 
-    /// In-flight continuations of ``publishL2CAPChannel(requiresEncryption:)``, by token. Each
-    /// `.didPublishL2CAPChannel` resumes the lowest token (FIFO), because the backend sends one
-    /// event for each call, in call order. A cancelled waiter removes exactly itself.
-    private var pendingPublishes: [UInt64: CheckedContinuation<L2CAPPSM, Error>] = [:]
+    /// One ``publishL2CAPChannel(requiresEncryption:)`` call that waits for its event. A
+    /// cancelled call keeps its entry with a `nil` continuation, so the queue still pairs each
+    /// event with the call that caused it.
+    private struct PendingPublish {
+        let token: UInt64
+        var continuation: CheckedContinuation<L2CAPPSM, Error>?
+    }
+
+    /// The publish calls that wait for their events, oldest first. The backend sends one
+    /// `.didPublishL2CAPChannel` for each call, in call order. Each event thus takes the oldest
+    /// entry. A cancel leaves its entry in place as a tombstone and does not remove it.
+    private var pendingPublishes: [PendingPublish] = []
 
     /// Allocator for the increasing tokens of ``pendingPublishes`` and ``pendingUnpublishes``.
     private var nextL2CAPToken: UInt64 = 0
@@ -505,7 +513,7 @@ public actor PeripheralHost {
                 let token = self.nextL2CAPToken
                 self.nextL2CAPToken += 1
                 assignedToken.withLock { $0 = token }
-                self.pendingPublishes[token] = continuation
+                self.pendingPublishes.append(PendingPublish(token: token, continuation: continuation))
                 self.log("Publishing an L2CAP channel (encryption: \(requiresEncryption))", level: .info, category: "l2cap")
                 publisher.publishL2CAPChannel(requiresEncryption: requiresEncryption)
             },
@@ -530,7 +538,9 @@ public actor PeripheralHost {
     ///   - ``BLESwiftError/bluetoothUnavailable`` if the radio leaves `.poweredOn` during the
     ///     wait.
     ///   - ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled.
-    ///   - The error that the backend reports if the unpublish fails.
+    ///   - The error that the backend reports if the unpublish fails. The PSM then stays
+    ///     published, and you can try again. The exception is `BLESwiftProvider` code 12, which
+    ///     says that the backend has no channel on the PSM.
     public func unpublishL2CAPChannel(_ psm: L2CAPPSM) async throws {
         guard let manager else { throw BLESwiftError.stopped }
         guard publishedPSMs.contains(psm), let publisher = manager as? any L2CAPPublishing else {
@@ -725,12 +735,13 @@ public actor PeripheralHost {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Removes and resumes the oldest pending publish (FIFO by token). On an error, it resumes
-    /// with the error unchanged. If no waiter is pending, the caller cancelled. Then a
-    /// successful publish is unpublished at once, and the host ignores the unpublish event.
+    /// Takes the oldest pending publish and resumes it. On an error, it resumes with the error
+    /// unchanged. If the entry is a tombstone, its caller cancelled. If no entry is left, a
+    /// radio state change already failed the call. In both cases a successful publish is
+    /// unpublished at once, and the host ignores the unpublish event.
     private func resumeNextPendingPublish(psm: L2CAPPSM?, error: NSError?) {
-        guard let token = pendingPublishes.keys.min(),
-              let continuation = pendingPublishes.removeValue(forKey: token) else {
+        let entry = pendingPublishes.isEmpty ? nil : pendingPublishes.removeFirst()
+        guard let continuation = entry?.continuation else {
             if error == nil, let psm {
                 log("Unpublishing L2CAP channel \(psm), because its publish has no waiter", level: .debug, category: "l2cap")
                 (manager as? any L2CAPPublishing)?.unpublishL2CAPChannel(psm)
@@ -750,14 +761,25 @@ public actor PeripheralHost {
         }
     }
 
+    /// Resumes the cancelled publish `token` with ``BLESwiftError/operationCancelled``. The
+    /// entry stays in the queue as a tombstone, because the backend still sends its event.
     private func cancelPendingPublish(token: UInt64) {
-        guard let continuation = pendingPublishes.removeValue(forKey: token) else { return }
+        guard let index = pendingPublishes.firstIndex(where: { $0.token == token }),
+              let continuation = pendingPublishes[index].continuation else { return }
+        pendingPublishes[index].continuation = nil
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
     /// Removes and resumes the oldest pending unpublish of `psm` (FIFO by token). An unpublish
     /// event with no waiter does nothing.
+    ///
+    /// A failed unpublish puts `psm` back in ``publishedPSMs``, because the channel is still
+    /// published. The exception is the `BLESwiftProvider` code 12 error, which says that the
+    /// backend has no channel on `psm`.
     private func resumeNextPendingUnpublish(_ psm: L2CAPPSM, error: NSError?) {
+        if let error, !(error.domain == "BLESwiftProvider" && error.code == 12) {
+            publishedPSMs.insert(psm)
+        }
         guard var waiters = pendingUnpublishes[psm],
               let token = waiters.keys.min(),
               let continuation = waiters.removeValue(forKey: token) else { return }
@@ -783,6 +805,7 @@ public actor PeripheralHost {
     private func deliverIncomingL2CAPChannel(_ channel: (any L2CAPChannelRemote)?, central: UUID?, error: NSError?) {
         guard error == nil, let channel, let central else {
             log("Ignoring a failed L2CAP channel open: \(error.map { "\($0)" } ?? "no channel")", level: .debug, category: "l2cap")
+            channel?.close(error: nil)
             return
         }
         guard incomingL2CAPBroadcaster.hasConsumers else {
@@ -814,7 +837,7 @@ public actor PeripheralHost {
         }
         let publishes = pendingPublishes
         pendingPublishes.removeAll()
-        for continuation in publishes.values {
+        for continuation in publishes.compactMap(\.continuation) {
             continuation.resume(throwing: error)
         }
         let unpublishes = pendingUnpublishes

@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - L2CAP channels on the virtual radio. A `Central` can open a channel to a PSM that a hosted
   device published. A custom device handler accepts channels if it conforms to
   `VirtualL2CAPAccepting`. The radio ignores `requiresEncryption`.
+- `VirtualDeviceHandle.publishL2CAPChannel(psm:)` and
+  `VirtualDeviceHandle.unpublishL2CAPChannel(_:)`, so a device that you register in code can
+  publish and unpublish an L2CAP channel.
 
 ### Changed
 

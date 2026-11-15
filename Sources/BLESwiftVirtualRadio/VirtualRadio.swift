@@ -1031,7 +1031,7 @@ public actor VirtualRadio {
     /// gate, a stale remote could still read and write, and could plant a subscription that no
     /// ``disconnect(session:device:)`` or ``detach(session:)`` would clean up, because neither
     /// walks a device that the session is not recorded as connected to.
-    private func isConnected(session: UUID, to device: UUID) -> Bool {
+    func isConnected(session: UUID, to device: UUID) -> Bool {
         sessions[session]?.connections.contains(device) == true
     }
 

@@ -228,12 +228,17 @@ final class PeripheralManagerDelegateProxy: NSObject, CBPeripheralManagerDelegat
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didOpen channel: CBL2CAPChannel?, error: Error?) {
         // Wrap the raw `CBL2CAPChannel` in BLESwift's transport at this seam, as the central
-        // proxy does. The identifier of the peer is the central's `Subscriber.id`.
-        forward(.didOpenL2CAPChannel(
-            channel: channel.map(CBL2CAPChannelTransport.init(channel:)),
-            central: channel?.peer.identifier,
-            error: error as NSError?
-        ))
+        // proxy does. The identifier of the peer is the central's `Subscriber.id`. On a failure,
+        // make no transport, because nothing would close it.
+        if let channel, error == nil {
+            forward(.didOpenL2CAPChannel(
+                channel: CBL2CAPChannelTransport(channel: channel),
+                central: channel.peer.identifier,
+                error: nil
+            ))
+        } else {
+            forward(.didOpenL2CAPChannel(channel: nil, central: channel?.peer.identifier, error: error as NSError?))
+        }
     }
 
     // MARK: - Forwarding

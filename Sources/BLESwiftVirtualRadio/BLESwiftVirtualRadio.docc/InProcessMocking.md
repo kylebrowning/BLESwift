@@ -243,4 +243,28 @@ The radio is a test harness. It does not simulate the radio link. These limits a
 - RSSI is a constant. See ``VirtualRadio/rssi``.
 - There are no system-connected peripherals. Nothing is connected before your code connects it.
 - Writes without response and notifications have the limit ``VirtualRadio/maximumWriteWithoutResponseLength``. Responses have the limit ``VirtualRadio/maximumValueLength``. Hardware has the same ATT limits.
-- L2CAP channels work. A `PeripheralHost` over a ``VirtualPeripheralManagerBackend`` publishes a PSM, and a `Central` on the same radio opens it. Your own handler can accept channels if it conforms to ``VirtualL2CAPAccepting``. The radio ignores `requiresEncryption`, because it has no link encryption. A disconnect, a removal, or a detach fails each open channel with ``VirtualRadio/peripheralDisconnectedError``.
+- L2CAP channels work. A `PeripheralHost` over a ``VirtualPeripheralManagerBackend`` publishes a PSM, and a `Central` on the same radio opens it. The radio ignores `requiresEncryption`, because it has no link encryption. A disconnect, a removal, or a detach fails each open channel with ``VirtualRadio/peripheralDisconnectedError``.
+
+### Serving L2CAP from your own handler
+
+A device that you register in code can accept L2CAP channels. Make its handler conform to ``VirtualL2CAPAccepting``, and publish a PSM with ``VirtualDeviceHandle/publishL2CAPChannel(psm:)``. Each channel that a central opens to the PSM arrives in ``VirtualL2CAPAccepting/acceptL2CAPChannel(_:psm:from:)``. Read the channel from a task, so the call returns promptly:
+
+```swift
+actor EchoHandler: VirtualL2CAPAccepting {
+    func acceptL2CAPChannel(_ channel: any L2CAPChannelRemote, psm: L2CAPPSM, from central: Subscriber) async {
+        Task {
+            for try await chunk in channel.inbound() {
+                try await channel.write(chunk)
+            }
+        }
+    }
+    // The GATT requirements of `VirtualDeviceHandler` go here.
+}
+
+let handle = await radio.register(VirtualDevice(descriptor: descriptor, handler: EchoHandler()))
+let psm = try await handle.publishL2CAPChannel()
+// A Central on `radio` can now open `psm`.
+try await handle.unpublishL2CAPChannel(psm)
+```
+
+``VirtualDeviceHandle/unpublishL2CAPChannel(_:)`` throws an `NSError` in the `BLESwiftProvider` domain: code 12 if the device did not publish the PSM, and code 5 if the device is gone. Channels that are already open stay open. If the last reference to one end of a channel goes, that end closes the channel.

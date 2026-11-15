@@ -395,16 +395,19 @@ public final class VirtualPeripheralManagerBackend: L2CAPPublishing, FixedPSMPub
     }
 
     /// Unpublishes `psm`. The backend delivers `didUnpublishL2CAPChannel(psm:error:)` after the
-    /// radio applies it. A PSM that is not published fails with `BLESwiftProvider` code 12.
-    /// Channels that are already open stay open.
+    /// radio applies it. A PSM that is not published fails with `BLESwiftProvider` code 12. If
+    /// the hosted device is gone, the unpublish fails with code 5. Channels that are already open
+    /// stay open.
     public func unpublishL2CAPChannel(_ psm: L2CAPPSM) {
         dispatchPrecondition(condition: .onQueue(queue))
         enqueue({ [weak self] handle in
-            let removed = await handle.unpublishL2CAP(psm)
-            self?.deliverOffQueue(.didUnpublishL2CAPChannel(
-                psm: psm,
-                error: removed ? nil : VirtualRadio.l2capNotPublishedError(psm)
-            ))
+            let error: NSError?
+            switch await handle.unpublishL2CAP(psm) {
+            case .unpublished: error = nil
+            case .notPublished: error = VirtualRadio.l2capNotPublishedError(psm)
+            case .removed: error = Self.removedError
+            }
+            self?.deliverOffQueue(.didUnpublishL2CAPChannel(psm: psm, error: error))
         }, ifRemoved: { [weak self] in
             self?.deliverOffQueue(.didUnpublishL2CAPChannel(psm: psm, error: Self.removedError))
         })

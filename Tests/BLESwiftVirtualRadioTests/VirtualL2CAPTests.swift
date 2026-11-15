@@ -139,7 +139,8 @@ struct VirtualL2CAPTests {
             try await central.write(Data([0x01]))
             await finished.set()
         }
-        try await Task.sleep(for: .milliseconds(50))
+        await Self.waitFor { central.waitingWriterCount == 1 }
+        #expect(central.waitingWriterCount == 1)
         #expect(await finished.value == false)
 
         var inbound = host.inbound().makeAsyncIterator()
@@ -151,16 +152,20 @@ struct VirtualL2CAPTests {
 
     @Test("A cancelled waiting write throws .operationCancelled", .timeLimit(.minutes(1)))
     func cancelledWriteThrows() async throws {
-        let (central, _) = VirtualL2CAPChannel.pair(psm: Self.psm)
+        // Keep the host end alive. A dropped end closes the pair.
+        let (central, host) = VirtualL2CAPChannel.pair(psm: Self.psm)
         try await central.write(Data(repeating: 0, count: Self.limit))
 
         let blocked = Task { try await central.write(Data([1])) }
-        try await Task.sleep(for: .milliseconds(20))
+        await Self.waitFor { central.waitingWriterCount == 1 }
+        #expect(central.waitingWriterCount == 1)
         blocked.cancel()
 
         await #expect(throws: BLESwiftError.operationCancelled) {
             try await blocked.value
         }
+        #expect(central.waitingWriterCount == 0)
+        withExtendedLifetime(host) {}
     }
 
     @Test("A graceful close by either end finishes both inbounds cleanly after the buffered data", arguments: [0, 1])
@@ -171,7 +176,8 @@ struct VirtualL2CAPTests {
         // A writer that waits at the limit throws when the pair closes.
         try await central.write(Data(repeating: 0, count: Self.limit))
         let blocked = Task { try await central.write(Data([9])) }
-        try await Task.sleep(for: .milliseconds(20))
+        await Self.waitFor { central.waitingWriterCount == 1 }
+        #expect(central.waitingWriterCount == 1)
 
         (closer == 0 ? central : host).close(error: nil)
 
@@ -216,7 +222,8 @@ struct VirtualL2CAPTests {
         try await central.write(Data([1]))
         try await host.write(Data(repeating: 0, count: Self.limit))
         let blocked = Task { try await host.write(Data([9])) }
-        try await Task.sleep(for: .milliseconds(20))
+        await Self.waitFor { host.waitingWriterCount == 1 }
+        #expect(host.waitingWriterCount == 1)
 
         central.fail(VirtualRadio.peripheralDisconnectedError)
 
@@ -243,8 +250,8 @@ struct VirtualL2CAPTests {
 
         #expect(await handle.publishL2CAP(psm: nil) == .success(L2CAPPSM(0x0080)))
         #expect(await handle.publishL2CAP(psm: nil) == .success(L2CAPPSM(0x0081)))
-        #expect(await handle.unpublishL2CAP(L2CAPPSM(0x0080)))
-        #expect(await handle.unpublishL2CAP(L2CAPPSM(0x0080)) == false)
+        #expect(await handle.unpublishL2CAP(L2CAPPSM(0x0080)) == .unpublished)
+        #expect(await handle.unpublishL2CAP(L2CAPPSM(0x0080)) == .notPublished)
         #expect(await handle.publishL2CAP(psm: nil) == .success(L2CAPPSM(0x0080)))
         #expect(await handle.publishL2CAP(psm: nil) == .success(L2CAPPSM(0x0082)))
     }
@@ -325,11 +332,13 @@ struct VirtualL2CAPTests {
         _ = await handle.publishL2CAP(psm: Self.psm)
         let central = try await radio.openL2CAP(session: session, device: handle.identifier, psm: Self.psm).get()
         var accepted = handler.channels.makeAsyncIterator()
-        _ = try #require(await accepted.next())
+        // Keep the host end alive. A dropped end closes the pair.
+        let host = try #require(await accepted.next())
 
         await handle.remove()
 
         #expect(await Self.drain(central.inbound()).1 == .failed(Self.disconnected))
+        withExtendedLifetime(host) {}
         #expect(await radio.publishedL2CAP[handle.identifier] == nil)
         #expect(await radio.l2capChannels[handle.identifier] == nil)
     }
@@ -340,7 +349,8 @@ struct VirtualL2CAPTests {
         _ = await handle.publishL2CAP(psm: Self.psm)
         let central = try await radio.openL2CAP(session: session, device: handle.identifier, psm: Self.psm).get()
         var accepted = handler.channels.makeAsyncIterator()
-        _ = try #require(await accepted.next())
+        // Keep the host end alive. A dropped end closes the pair.
+        let host = try #require(await accepted.next())
 
         let successor = await radio.register(VirtualDevice(
             descriptor: VirtualDeviceDescriptor(identifier: handle.identifier, advertisement: AdvertisementData(isConnectable: true)),
@@ -349,6 +359,162 @@ struct VirtualL2CAPTests {
 
         #expect(await Self.drain(central.inbound()).1 == .failed(Self.disconnected))
         #expect(await successor.publishL2CAP(psm: nil) == .success(L2CAPPSM(0x0080)))
+        withExtendedLifetime(host) {}
+    }
+
+    @Test("A detach fails the session's open channels with the disconnect error")
+    func detachFailsChannels() async throws {
+        let (radio, handle, handler, session) = await Self.connectedRadio()
+        _ = await handle.publishL2CAP(psm: Self.psm)
+        let central = try await radio.openL2CAP(session: session, device: handle.identifier, psm: Self.psm).get()
+        var accepted = handler.channels.makeAsyncIterator()
+        let host = try #require(await accepted.next())
+
+        await radio.detach(session: session)
+
+        #expect(await Self.drain(central.inbound()).1 == .failed(Self.disconnected))
+        #expect(await Self.drain(host.inbound()).1 == .failed(Self.disconnected))
+        #expect(await radio.l2capChannels[handle.identifier] == nil)
+    }
+
+    @Test("A forced disconnect fails the open channels with the disconnect error")
+    func forcedDisconnectFailsChannels() async throws {
+        let (radio, handle, handler, session) = await Self.connectedRadio()
+        _ = await handle.publishL2CAP(psm: Self.psm)
+        let central = try await radio.openL2CAP(session: session, device: handle.identifier, psm: Self.psm).get()
+        var accepted = handler.channels.makeAsyncIterator()
+        let host = try #require(await accepted.next())
+
+        await handle.disconnect(error: NSError(domain: "VirtualL2CAPTests", code: 99))
+
+        // The channel fails with the disconnect error of the radio, not with the error of the
+        // forced disconnect.
+        #expect(await Self.drain(central.inbound()).1 == .failed(Self.disconnected))
+        #expect(await Self.drain(host.inbound()).1 == .failed(Self.disconnected))
+        #expect(await radio.l2capChannels[handle.identifier] == nil)
+    }
+
+    @Test("A closed pair drops its record on the radio")
+    func closedPairDropsItsRecord() async throws {
+        let (radio, handle, handler, session) = await Self.connectedRadio()
+        _ = await handle.publishL2CAP(psm: Self.psm)
+        let central = try await radio.openL2CAP(session: session, device: handle.identifier, psm: Self.psm).get()
+        var accepted = handler.channels.makeAsyncIterator()
+        let host = try #require(await accepted.next())
+        #expect(await radio.l2capChannels[handle.identifier]?.count == 1)
+
+        host.close(error: nil)
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while await radio.l2capChannels[handle.identifier] != nil, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await radio.l2capChannels[handle.identifier] == nil)
+        withExtendedLifetime(central) {}
+    }
+
+    @Test("A dropped host end closes the pair, so the central end's inbound finishes")
+    func droppedEndClosesThePair() async throws {
+        var pair: (central: VirtualL2CAPChannel, host: VirtualL2CAPChannel)? = VirtualL2CAPChannel.pair(psm: Self.psm)
+        let central = try #require(pair?.central)
+        try await pair?.host.write(Data([5]))
+
+        // Drop the last reference to the host end, with no close.
+        pair = nil
+
+        let atCentral = await Self.drain(central.inbound())
+        #expect(atCentral.0 == Data([5]))
+        #expect(atCentral.1 == .finished)
+    }
+
+    @Test("A host-side handler with no listener closes a channel that a central opens")
+    func hostedHandlerWithoutListenerClosesTheChannel() async throws {
+        let radio = VirtualRadio()
+        let queue = DispatchQueue(label: "VirtualL2CAPTests.nosink")
+        // No `PeripheralHost` attaches an event handler, so the hosted handler has no listener.
+        let backend = VirtualPeripheralManagerBackend(radio: radio, queue: queue)
+        var generation: UInt64?
+        let deadline = ContinuousClock.now + .seconds(5)
+        while generation == nil, ContinuousClock.now < deadline {
+            generation = await radio.generation(of: backend.identifier)
+            if generation == nil { try? await Task.sleep(for: .milliseconds(5)) }
+        }
+        let current = try #require(generation)
+        _ = await radio.publishL2CAP(device: backend.identifier, generation: current, psm: Self.psm)
+        let session = UUID()
+        await radio.attach(session: session, centralSink: { _ in })
+        _ = await radio.connect(session: session, device: backend.identifier, sink: { _ in })
+
+        let central = try await radio.openL2CAP(session: session, device: backend.identifier, psm: Self.psm).get()
+
+        #expect(await Self.drain(central.inbound()).1 == .finished)
+        withExtendedLifetime(backend) {}
+    }
+
+    @Test("A handler that publishes through its handle receives a channel from a Central, and echoes", .timeLimit(.minutes(1)))
+    func handlePublishedHandlerEchoes() async throws {
+        let radio = VirtualRadio()
+        let handler = AcceptingHandler()
+        let handle = await radio.register(VirtualDevice(
+            descriptor: VirtualDeviceDescriptor(name: "Custom", advertisement: AdvertisementData(localName: "Custom", isConnectable: true)),
+            handler: handler
+        ))
+        let psm = try await handle.publishL2CAPChannel()
+        #expect(psm == L2CAPPSM(0x0080))
+
+        // The handler echoes each channel that it receives.
+        let echo = Task {
+            for await channel in handler.channels {
+                for try await chunk in channel.inbound() {
+                    try await channel.write(chunk)
+                }
+            }
+        }
+
+        let queue = DispatchQueue(label: "VirtualL2CAPTests.custom.central")
+        let central = Central(backend: VirtualCentralBackend(radio: radio, queue: queue), queue: queue)
+        await Self.waitFor { central.state == .poweredOn }
+        var found: Discovery?
+        for try await event in await central.scan(services: nil, timeout: .seconds(5)) {
+            if case .discovered(let discovery) = event, discovery.peripheral.name == "Custom" { found = discovery; break }
+        }
+        let peripheral = try await central.connect(try #require(found).peripheral)
+        let channel = try await peripheral.openL2CAPChannel(psm: psm)
+
+        try await channel.write(Data([1, 2, 3]))
+        var inbound = channel.incomingData.makeAsyncIterator()
+        #expect(try await inbound.next() == Data([1, 2, 3]))
+
+        try await handle.unpublishL2CAPChannel(psm)
+        do {
+            try await handle.unpublishL2CAPChannel(psm)
+            Issue.record("expected the second unpublish to fail")
+        } catch {
+            #expect(Self.describe(error) == "BLESwiftProvider.12")
+        }
+        try await central.disconnect(peripheral.id)
+        echo.cancel()
+    }
+
+    @Test("A removed device's handle throws code 5 for a publish and an unpublish")
+    func removedHandleThrowsCodeFive() async throws {
+        let (radio, handle, _, _) = await Self.connectedRadio()
+        defer { withExtendedLifetime(radio) {} }
+        let psm = try await handle.publishL2CAPChannel()
+        await handle.remove()
+
+        do {
+            try await handle.unpublishL2CAPChannel(psm)
+            Issue.record("expected the unpublish to fail")
+        } catch {
+            #expect(Self.describe(error) == "BLESwiftProvider.5")
+        }
+        do {
+            _ = try await handle.publishL2CAPChannel()
+            Issue.record("expected the publish to fail")
+        } catch {
+            #expect(Self.describe(error) == "BLESwiftProvider.5")
+        }
     }
 
     // MARK: - PeripheralHost and Central

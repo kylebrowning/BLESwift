@@ -26,6 +26,7 @@ import BLESwiftCompat17
 /// - ``close(error:)`` with an error is an abort. The caller's own stream throws that error. The
 ///   peer's stream throws ``BLESwiftCore/BLESwiftError/l2capChannelClosed``.
 /// - ``fail(_:)`` is a teardown that the radio starts. Both streams throw the error.
+/// - If the last reference to an end goes, the end closes the pair gracefully.
 ///
 /// Pending writers on both ends throw ``BLESwiftCore/BLESwiftError/l2capChannelClosed`` after a
 /// close, or the error of ``fail(_:)``.
@@ -46,6 +47,13 @@ package final class VirtualL2CAPChannel: L2CAPChannelRemote, Sendable {
         self.side = side
     }
 
+    /// Closes the pair gracefully when the last reference to this end goes, so a dropped end
+    /// never leaves its peer waiting. The ``inbound()`` stream holds its end, so an end that a
+    /// consumer still reads does not go. A pair that is already closed is not changed.
+    deinit {
+        close(error: nil)
+    }
+
     /// Creates the two connected ends of a new channel on `psm`.
     package static func pair(psm: L2CAPPSM) -> (central: VirtualL2CAPChannel, host: VirtualL2CAPChannel) {
         let shared = Shared()
@@ -63,6 +71,27 @@ package final class VirtualL2CAPChannel: L2CAPChannelRemote, Sendable {
         shared.state.withLock { $0.closed }
     }
 
+    /// The number of writes of this end that wait for space in the peer's FIFO. This is a
+    /// snapshot.
+    ///
+    /// This is a test hook, not API. A test waits for a writer to park before it closes, fails,
+    /// or cancels.
+    package var waitingWriterCount: Int {
+        shared.state.withLock { $0.inbounds[peer].writers.count }
+    }
+
+    /// Sets `handler` to run once, when the pair closes or fails. If the pair is already closed,
+    /// `handler` runs at once. The radio uses it to drop its record of the channel. The handler
+    /// must not hold either end strongly, because the shared state holds the handler.
+    package func onPairClosed(_ handler: @escaping @Sendable () -> Void) {
+        let runNow = shared.state.withLock { state -> Bool in
+            guard !state.closed else { return true }
+            state.onClose = handler
+            return false
+        }
+        if runNow { handler() }
+    }
+
     // MARK: - L2CAPChannelRemote
 
     /// The stream of the data that the peer writes. The first call returns the stream. Data that
@@ -77,9 +106,9 @@ package final class VirtualL2CAPChannel: L2CAPChannelRemote, Sendable {
         guard first else {
             return AsyncThrowingStream { $0.finish() }
         }
-        let shared = self.shared
-        let side = self.side
-        return AsyncThrowingStream(unfolding: { try await shared.next(side: side) })
+        // The stream holds this end, so the end does not close in its `deinit` while a consumer
+        // reads.
+        return AsyncThrowingStream(unfolding: { [self] in try await shared.next(side: side) })
     }
 
     /// Adds `data` to the peer's FIFO. It suspends while the peer's FIFO is full.
@@ -189,6 +218,8 @@ extension VirtualL2CAPChannel {
             var closed = false
             /// The allocator for writer tokens.
             var nextToken: UInt64 = 0
+            /// Runs once when the pair closes. See ``VirtualL2CAPChannel/onPairClosed(_:)``.
+            var onClose: (@Sendable () -> Void)?
         }
 
         let state = Mutex(State())
@@ -287,11 +318,13 @@ extension VirtualL2CAPChannel {
 
         /// Closes the pair once. `terminal` gives the end of each inbound. Every waiting writer
         /// throws `writerError()`. A waiting reader with an empty FIFO receives its end at once.
+        /// The close handler runs last, outside the lock.
         func terminate(_ terminal: (Int) -> Terminal, writerError: () -> Error) {
             var resumes: [Resume] = []
-            state.withLock { state in
-                guard !state.closed else { return }
+            let onClose = state.withLock { state -> (@Sendable () -> Void)? in
+                guard !state.closed else { return nil }
                 state.closed = true
+                defer { state.onClose = nil }
                 for index in state.inbounds.indices {
                     state.inbounds[index].terminal = terminal(index)
                     for writer in state.inbounds[index].writers {
@@ -300,8 +333,10 @@ extension VirtualL2CAPChannel {
                     state.inbounds[index].writers.removeAll()
                     Self.settle(&state.inbounds[index], into: &resumes)
                 }
+                return state.onClose
             }
             resumes.forEach { $0.run() }
+            onClose?()
         }
     }
 }
