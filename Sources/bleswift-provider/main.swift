@@ -15,17 +15,36 @@ setlinebuf(stdout)
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 
-let options: ProviderCommandLine.Options
+let command: ProviderCommandLine.Command
 do {
-    options = try ProviderCommandLine.parse(arguments)
+    command = try ProviderCommandLine.parseCommand(arguments)
 } catch {
     FileHandle.standardError.write(Data("bleswift-provider: \(error)\n\n\(ProviderCommandLine.usage)\n".utf8))
     exit(64)
 }
 
-if options.showHelp {
+/// Runs `body` on a task, then exits with the status that it returns. The main queue serves
+/// the task until then.
+func runAndExit(_ body: @escaping @Sendable () async -> Int32) -> Never {
+    Task { exit(await body()) }
+    dispatchMain()
+}
+
+let options: ProviderCommandLine.Options
+switch command {
+case .help:
     print(ProviderCommandLine.usage)
     exit(0)
+case .status(let statusOptions):
+    runAndExit { await StatusCommand.run(statusOptions) }
+case .capture(let captureOptions):
+    runAndExit { await CaptureCommand.run(captureOptions) }
+case .installAgent(let serveOptions, let serveArguments):
+    exit(AgentCommand.install(options: serveOptions, arguments: serveArguments))
+case .uninstallAgent:
+    exit(AgentCommand.uninstall())
+case .serve(let serveOptions):
+    options = serveOptions
 }
 
 var configuration = ProviderConfiguration()
