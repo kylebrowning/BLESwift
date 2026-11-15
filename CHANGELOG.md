@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ProviderCommandLine.parseCommand(_:environment:)`, `ProviderCommandLine.Command`,
   `StatusOptions`, `CaptureOptions`, `ParseError.invalidValue(flag:value:)`, and
   `ProviderCommandLine.Options.verbose`.
+- `Scripts/release/release-provider.sh`, a script that builds a universal `bleswift-provider`
+  binary with an embedded Info.plist, signs it with the Bluetooth entitlement, and notarizes it.
+  The script also writes a zip file and a Homebrew formula from `bleswift-provider.rb.template`.
+  The script does not upload any file.
 
 ### Changed
 

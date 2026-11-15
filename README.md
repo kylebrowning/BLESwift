@@ -136,6 +136,19 @@ shows the sessions of a running provider. `install-agent` runs the provider at l
 For fixtures, virtual devices in code, and the differences from CoreBluetooth, read the
 [Running in the iOS Simulator](Sources/BLESwift/BLESwift.docc/SimulatorSupport.md) article.
 
+### Installing the provider
+
+To install the provider with Homebrew, run `brew install kylebrowning/tap/bleswift-provider`.
+This command works from the next release. Until then, or if you prefer to build from source,
+run `swift run bleswift-provider`.
+
+### What the simulator link can do
+
+- It supports the central role and the peripheral role in the simulator.
+- It connects several simulators to one virtual radio at the same time.
+- It serves fixtures from a JSON file or from Swift code.
+- It gives central-role clients access to the real radio of your Mac with `--passthrough`.
+
 ### Mocking Bluetooth in-process
 
 `BLESwiftVirtualRadio` is the same virtual radio without the provider. It runs inside your
