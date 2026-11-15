@@ -324,11 +324,11 @@ public enum ProviderCommandLine {
 
     Commands:
       (none)                 Serve the link. This is the default. See Options.
-      status                 Print the status of a running provider.
+      status                 Print the status of a running provider. Exits 69 if no
+                              provider answers, and 76 if the provider rejects the request.
         --listen <host:port>   The provider to ask. Defaults to BLESWIFT_LINK if set,
                                 otherwise 127.0.0.1:45541.
         --json                 Print the status as JSON.
-                               Exits 69 if no provider answers, 76 if it rejects the request.
       capture                Scan for real devices with this Mac's Bluetooth and write a
                               fixture document for them.
         --duration <seconds>   How long to scan. Defaults to 10.
