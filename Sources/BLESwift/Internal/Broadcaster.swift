@@ -124,9 +124,11 @@ final class Broadcaster<Element: Sendable>: Sendable {
     /// continuation that was removed meanwhile is harmless, because `AsyncStream` drops values
     /// after termination.
     ///
-    /// - Returns: The number of streams that took the element (`.enqueued`). A stream that
-    ///   terminated, or dropped the element because of its buffering policy, does not count. A
-    ///   stream that exists and is not iterated yet counts, because it buffers the element.
+    /// - Returns: The number of streams that reported `.enqueued`. The count is exact for streams
+    ///   with the `.unbounded` and `.bufferingOldest` policies: a stream that terminated, or a
+    ///   full `.bufferingOldest` stream, does not count. A stream that exists and is not iterated
+    ///   yet counts, because it buffers the element. A full `.bufferingNewest` stream reports
+    ///   `.dropped`, although it took the element and dropped an older one, so it does not count.
     @discardableResult
     func yield(_ element: Element) -> Int {
         // `continuation.yield` takes the consuming task's status lock. A concurrent cancellation

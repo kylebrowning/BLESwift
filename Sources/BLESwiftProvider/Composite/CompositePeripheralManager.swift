@@ -158,8 +158,18 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
         let psm: L2CAPPSM
         /// The children that have not answered.
         var owing: Set<Int>
-        /// The first error that a child reported.
+        /// The first error that a child reported, other than code 12.
         var error: NSError?
+        /// The first code 12 error that a child reported.
+        var notPublished: NSError?
+        /// Whether a child answered without an error.
+        var anySuccess = false
+
+        /// The error of the completion. An error other than code 12 comes first. Code 12 is the
+        /// error only when every child that answered reported code 12.
+        var completionError: NSError? {
+            error ?? (anySuccess ? nil : notPublished)
+        }
     }
 
     /// What one L2CAP completion of a child belongs to. Each child answers its calls in call
@@ -656,8 +666,9 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
     }
 
     /// Unpublishes `psm` on every powered-on child that holds it. One
-    /// `didUnpublishL2CAPChannel(psm:error:)` follows, with the first error. If no child holds
-    /// `psm`, the completion carries `BLESwiftProvider` code 12.
+    /// `didUnpublishL2CAPChannel(psm:error:)` follows. Its error is the first error other than
+    /// `BLESwiftProvider` code 12. It is code 12 only when every child that answered reported
+    /// code 12. If no child holds `psm`, the completion carries code 12.
     ///
     /// A child stops holding `psm` only when it answers without an error. A child that fails
     /// still holds it, so a later unpublish reaches that child again.
@@ -822,7 +833,15 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
             if _psmHolders[psm]?.isEmpty == true { _psmHolders.removeValue(forKey: psm) }
         }
         _unpublishBatches[position].owing.remove(index)
-        if _unpublishBatches[position].error == nil { _unpublishBatches[position].error = error }
+        if let error {
+            if error.domain == "BLESwiftProvider" && error.code == 12 {
+                if _unpublishBatches[position].notPublished == nil { _unpublishBatches[position].notPublished = error }
+            } else if _unpublishBatches[position].error == nil {
+                _unpublishBatches[position].error = error
+            }
+        } else {
+            _unpublishBatches[position].anySuccess = true
+        }
         flushL2CAP()
     }
 
@@ -888,12 +907,28 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
             events.append(.didPublishL2CAPChannel(psm: result.psm, error: result.error))
         }
         for batch in _unpublishBatches where batch.owing.isEmpty {
-            events.append(.didUnpublishL2CAPChannel(psm: batch.psm, error: batch.error))
+            events.append(.didUnpublishL2CAPChannel(psm: batch.psm, error: batch.completionError))
         }
         _unpublishBatches.removeAll { $0.owing.isEmpty }
         // Every table is written, so a handler that calls back from here finds this composite
         // consistent.
         for event in events { _eventHandler?(event) }
+    }
+
+    /// Unpublishes every PSM that a child of this composite holds, on that child, and forgets
+    /// the PSMs. The answers are swallowed as rollbacks. ``HostSession`` calls it when the
+    /// session closes, so a real child does not keep a PSM for a host that is gone. Call it on
+    /// ``queue``.
+    package func unpublishAllL2CAPChannels() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let holders = _psmHolders
+        _psmHolders.removeAll()
+        for (psm, children) in holders {
+            for child in children.sorted() where isOnline(child) {
+                _unpublishWaits[child].append(.rollback)
+                (backends[child] as? any L2CAPPublishing)?.unpublishL2CAPChannel(psm)
+            }
+        }
     }
 
     // MARK: - HostedDeviceRemoving

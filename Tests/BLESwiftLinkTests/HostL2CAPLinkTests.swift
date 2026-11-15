@@ -666,13 +666,37 @@ struct HostL2CAPLinkTests {
 
         await Self.onQueue(queue) { composite.unpublishL2CAPChannel(L2CAPPSM(0x0085)) }
         await waitFor(timeout: .seconds(5)) { Self.unpublishes(log).count == 1 }
-        #expect(Self.unpublishes(log) == [12])
+        // The real child succeeded, so code 12 from the virtual child is not the error.
+        #expect(Self.unpublishes(log) == [nil])
 
-        // The real child succeeded, so only the virtual child still holds the PSM.
+        // Only the virtual child still holds the PSM, and it answers code 12 again. Every child
+        // that answered reported code 12, so code 12 is the error.
         await Self.onQueue(queue) { composite.unpublishL2CAPChannel(L2CAPPSM(0x0085)) }
         await waitFor(timeout: .seconds(5)) { Self.unpublishes(log).count == 2 }
-        #expect(Self.unpublishes(log) == [12, 12])
+        #expect(Self.unpublishes(log) == [nil, 12])
         #expect(await real.onQueue { real.unpublishL2CAPChannelCalls } == [L2CAPPSM(0x0085)])
+    }
+
+    @Test("A retryable unpublish error comes before an earlier code 12")
+    func compositeUnpublishErrorOrder() async throws {
+        let (composite, real, virtual, radio, log, queue) = await makeComposite("composite.l2cap.unpublishorder")
+        await real.onQueue { real.publishBehavior = .succeed(L2CAPPSM(0x0085)) }
+        await Self.onQueue(queue) { composite.publishL2CAPChannel(requiresEncryption: false) }
+        await waitFor(timeout: .seconds(5)) { Self.publishes(log).count == 1 }
+        let generation = try #require(await radio.generation(of: virtual.identifier))
+        #expect(await radio.unpublishL2CAP(device: virtual.identifier, generation: generation, psm: L2CAPPSM(0x0085)) == .unpublished)
+        await real.onQueue { real.unpublishBehavior = .hold }
+
+        await Self.onQueue(queue) { composite.unpublishL2CAPChannel(L2CAPPSM(0x0085)) }
+        // The virtual child answers code 12 first. Then the real child fails with a retryable
+        // error.
+        try? await Task.sleep(for: .milliseconds(100))
+        await Self.onQueue(queue) {}
+        #expect(Self.unpublishes(log).isEmpty)
+        real.simulateUnpublishResult(psm: L2CAPPSM(0x0085), error: NSError(domain: "HostL2CAPLinkTests", code: 5))
+
+        await waitFor(timeout: .seconds(5)) { Self.unpublishes(log).count == 1 }
+        #expect(Self.unpublishes(log) == [5])
     }
 
     // MARK: - Handshake deadline
@@ -925,6 +949,59 @@ struct HostL2CAPLinkTests {
         #expect(published.withLock { $0 })
         #expect(!Self.dropped(states))
         #expect(await Self.onQueue(queue) { link.channelCount } == 0)
+    }
+
+    @Test("LinkPeripheralManager closes an opened channel when no handler is attached")
+    func linkClosesAnUnownedChannel() async throws {
+        let provider = try ScriptedHostProvider()
+        try await provider.start()
+        defer { provider.stop() }
+        let queue = DispatchQueue(label: "link.l2cap.nohandler")
+        let link = LinkPeripheralManager(
+            endpoint: provider.endpoint,
+            queue: queue,
+            clientName: "nohandler",
+            codec: .json,
+            retryInterval: .milliseconds(50)
+        )
+        await waitFor(timeout: .seconds(5)) { link.isProviderConnected }
+        #expect(link.isProviderConnected)
+
+        provider.emit(.didOpenL2CAPChannel(channel: 1, psm: 0x0080, central: UUID()))
+
+        let closed = { provider.requests.withLock { $0.contains(.l2capClose(channel: 1)) } }
+        await waitFor(timeout: .seconds(5)) { closed() }
+        #expect(closed())
+        await waitFor(timeout: .seconds(5)) { await Self.onQueue(queue) { link.channelCount == 0 } }
+        #expect(await Self.onQueue(queue) { link.channelCount } == 0)
+    }
+
+    @Test("A host session over a composite unpublishes the real child's PSMs when it closes", .timeLimit(.minutes(1)))
+    func sessionCloseUnpublishesTheRealChild() async throws {
+        let real = Log<FakePeripheralManager?>(nil)
+        var configuration = ProviderConfiguration()
+        configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
+        configuration.passthrough = true
+        configuration.peripheralManagerBackendFactory = { queue in
+            let fake = FakePeripheralManager(queue: queue, state: .poweredOn)
+            real.withLock { $0 = fake }
+            return fake
+        }
+        let provider = Provider(configuration: configuration)
+        try await provider.start()
+
+        let raw = RawHost(port: await provider.port, label: "composite-close")
+        await waitFor(timeout: .seconds(5)) { raw.events.contains(.didUpdateState(.poweredOn)) }
+        raw.send(.publishL2CAPChannel(requiresEncryption: false))
+        await waitFor(timeout: .seconds(5)) { raw.events.contains(.didPublishL2CAPChannel(psm: 0x0080, error: nil)) }
+        #expect(raw.events.contains(.didPublishL2CAPChannel(psm: 0x0080, error: nil)))
+        let fake = try #require(real.withLock { $0 })
+        #expect(await fake.onQueue { fake.unpublishL2CAPChannelCalls }.isEmpty)
+
+        raw.shutdown()
+        await waitFor(timeout: .seconds(5)) { await fake.onQueue { !fake.unpublishL2CAPChannelCalls.isEmpty } }
+        #expect(await fake.onQueue { fake.unpublishL2CAPChannelCalls } == [L2CAPPSM(0x0080)])
+        await provider.stop()
     }
 }
 #endif

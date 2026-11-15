@@ -131,9 +131,17 @@ public actor PeripheralHost {
     /// Allocator for the increasing tokens of ``pendingPublishes`` and ``pendingUnpublishes``.
     private var nextL2CAPToken: UInt64 = 0
 
-    /// In-flight continuations of ``unpublishL2CAPChannel(_:)``, by PSM and then token. Each
-    /// `.didUnpublishL2CAPChannel` resumes the lowest token for its PSM (FIFO).
-    private var pendingUnpublishes: [L2CAPPSM: [UInt64: CheckedContinuation<Void, Error>]] = [:]
+    /// One ``unpublishL2CAPChannel(_:)`` call that waits for its event. A cancelled call keeps
+    /// its entry with a `nil` continuation, as ``PendingPublish`` does.
+    private struct PendingUnpublish {
+        let token: UInt64
+        var continuation: CheckedContinuation<Void, Error>?
+    }
+
+    /// The unpublish calls that wait for their events, by PSM, oldest first. Each
+    /// `.didUnpublishL2CAPChannel` takes the oldest entry for its PSM. A cancel leaves its entry
+    /// in place as a tombstone.
+    private var pendingUnpublishes: [L2CAPPSM: [PendingUnpublish]] = [:]
 
     /// The PSMs that this host published and did not unpublish. A radio state other than
     /// `.poweredOn` empties it, because the radio drops published channels.
@@ -542,7 +550,8 @@ public actor PeripheralHost {
     ///   - ``BLESwiftError/invalidArgument(_:)`` if `psm` is not published.
     ///   - ``BLESwiftError/bluetoothUnavailable`` if the radio leaves `.poweredOn` during the
     ///     wait.
-    ///   - ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled.
+    ///   - ``BLESwiftError/operationCancelled`` if the calling `Task` is cancelled. The backend
+    ///     still completes the unpublish. If it then fails, the PSM stays published.
     ///   - The error that the backend reports if the unpublish fails. The PSM then stays
     ///     published, and you can try again. The exception is `BLESwiftProvider` code 12, which
     ///     says that the backend has no channel on the PSM.
@@ -561,7 +570,7 @@ public actor PeripheralHost {
                 let token = self.nextL2CAPToken
                 self.nextL2CAPToken += 1
                 assignedToken.withLock { $0 = token }
-                self.pendingUnpublishes[psm, default: [:]][token] = continuation
+                self.pendingUnpublishes[psm, default: []].append(PendingUnpublish(token: token, continuation: continuation))
                 self.log("Unpublishing L2CAP channel \(psm)", level: .info, category: "l2cap")
                 publisher.unpublishL2CAPChannel(psm)
             },
@@ -776,22 +785,22 @@ public actor PeripheralHost {
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
-    /// Removes and resumes the oldest pending unpublish of `psm` (FIFO by token). An unpublish
-    /// event with no waiter does nothing.
+    /// Takes the oldest pending unpublish of `psm` and resumes it. An unpublish event with no
+    /// entry does nothing.
     ///
-    /// A failed unpublish that resumes a live waiter puts `psm` back in ``publishedPSMs``,
-    /// because the channel is still published. The exception is the `BLESwiftProvider` code 12
-    /// error, which says that the backend has no channel on `psm`. An event with no live waiter
-    /// never puts `psm` back: a radio state change already failed the call, the call was
-    /// cancelled, or the host unpublished a cancelled publish by itself.
+    /// A failed unpublish puts `psm` back in ``publishedPSMs`` when the event takes an entry: a
+    /// live call or the tombstone of a cancelled call. The channel is still published in both
+    /// cases. The exception is the `BLESwiftProvider` code 12 error, which says that the backend
+    /// has no channel on `psm`. An event with no entry never puts `psm` back: a radio state
+    /// change already failed the call, or the host unpublished a cancelled publish by itself.
     private func resumeNextPendingUnpublish(_ psm: L2CAPPSM, error: NSError?) {
-        guard var waiters = pendingUnpublishes[psm],
-              let token = waiters.keys.min(),
-              let continuation = waiters.removeValue(forKey: token) else { return }
-        pendingUnpublishes[psm] = waiters.isEmpty ? nil : waiters
+        guard var entries = pendingUnpublishes[psm], !entries.isEmpty else { return }
+        let entry = entries.removeFirst()
+        pendingUnpublishes[psm] = entries.isEmpty ? nil : entries
         if let error, !(error.domain == "BLESwiftProvider" && error.code == 12) {
             publishedPSMs.insert(psm)
         }
+        guard let continuation = entry.continuation else { return }
         if let error {
             continuation.resume(throwing: error)
         } else {
@@ -799,10 +808,12 @@ public actor PeripheralHost {
         }
     }
 
+    /// Resumes the cancelled unpublish `token` with ``BLESwiftError/operationCancelled``. The
+    /// entry stays in the queue as a tombstone, because the backend still sends its event.
     private func cancelPendingUnpublish(_ psm: L2CAPPSM, token: UInt64) {
-        guard var waiters = pendingUnpublishes[psm],
-              let continuation = waiters.removeValue(forKey: token) else { return }
-        pendingUnpublishes[psm] = waiters.isEmpty ? nil : waiters
+        guard let index = pendingUnpublishes[psm]?.firstIndex(where: { $0.token == token }),
+              let continuation = pendingUnpublishes[psm]?[index].continuation else { return }
+        pendingUnpublishes[psm]?[index].continuation = nil
         continuation.resume(throwing: BLESwiftError.operationCancelled)
     }
 
@@ -850,7 +861,7 @@ public actor PeripheralHost {
         }
         let unpublishes = pendingUnpublishes
         pendingUnpublishes.removeAll()
-        for continuation in unpublishes.values.flatMap(\.values) {
+        for continuation in unpublishes.values.flatMap({ $0 }).compactMap(\.continuation) {
             continuation.resume(throwing: error)
         }
     }

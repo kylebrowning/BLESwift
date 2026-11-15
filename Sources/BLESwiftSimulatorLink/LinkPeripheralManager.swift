@@ -589,10 +589,19 @@ public final class LinkPeripheralManager: L2CAPPublishing, Sendable {
 
     /// Delivers `event` to ``eventHandler`` asynchronously on ``queue``, as the seam's
     /// never-inline delivery contract requires.
+    ///
+    /// If no handler is attached when the hop runs, an opened channel has no owner. The manager
+    /// then closes it, so the provider and the central do not wait on it.
     private func deliver(_ event: PeripheralHostEvent) {
         dispatchPrecondition(condition: .onQueue(queue))
         queue.async { [self] in
-            _eventHandler?(event)
+            guard let handler = _eventHandler else {
+                if case .didOpenL2CAPChannel(let channel?, _, _) = event {
+                    channel.close(error: nil)
+                }
+                return
+            }
+            handler(event)
         }
     }
 }

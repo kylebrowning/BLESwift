@@ -71,6 +71,18 @@ public final class FakePeripheralManager: L2CAPPublishing, Sendable {
     nonisolated(unsafe) private var _publishBehavior: PublishBehavior = .succeed(L2CAPPSM(0x0080))
     nonisolated(unsafe) private var _publishL2CAPChannelCalls: [Bool] = []
     nonisolated(unsafe) private var _unpublishL2CAPChannelCalls: [L2CAPPSM] = []
+    nonisolated(unsafe) private var _unpublishBehavior: UnpublishBehavior = .succeed
+
+    /// What ``unpublishL2CAPChannel(_:)`` does.
+    public enum UnpublishBehavior: Sendable {
+        /// Delivers a successful `.didUnpublishL2CAPChannel` asynchronously.
+        case succeed
+        /// Delivers a failed `.didUnpublishL2CAPChannel` with this error asynchronously.
+        case fail(NSError)
+        /// Delivers nothing. Call ``simulateUnpublishResult(psm:error:)`` to complete the
+        /// unpublish.
+        case hold
+    }
 
     /// What ``publishL2CAPChannel(requiresEncryption:)`` does.
     public enum PublishBehavior: Sendable {
@@ -241,6 +253,13 @@ public final class FakePeripheralManager: L2CAPPublishing, Sendable {
         set { dispatchPrecondition(condition: .onQueue(queue)); _publishBehavior = newValue }
     }
 
+    /// What the next ``unpublishL2CAPChannel(_:)`` calls do. The default is `.succeed`.
+    /// Configure it with ``onQueue(_:)``.
+    public var unpublishBehavior: UnpublishBehavior {
+        get { dispatchPrecondition(condition: .onQueue(queue)); return _unpublishBehavior }
+        set { dispatchPrecondition(condition: .onQueue(queue)); _unpublishBehavior = newValue }
+    }
+
     /// The `requiresEncryption` argument of each ``publishL2CAPChannel(requiresEncryption:)``
     /// call, in order.
     public var publishL2CAPChannelCalls: [Bool] {
@@ -262,6 +281,15 @@ public final class FakePeripheralManager: L2CAPPublishing, Sendable {
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
             deliver(.didPublishL2CAPChannel(psm: psm, error: error))
+        }
+    }
+
+    /// Simulates the completion of an unpublish that ``UnpublishBehavior/hold`` holds. It
+    /// delivers `.didUnpublishL2CAPChannel(psm:error:)` asynchronously on ``queue``.
+    public func simulateUnpublishResult(psm: L2CAPPSM, error: NSError?) {
+        queue.async { [self] in
+            dispatchPrecondition(condition: .onQueue(queue))
+            deliver(.didUnpublishL2CAPChannel(psm: psm, error: error))
         }
     }
 
@@ -459,14 +487,19 @@ public final class FakePeripheralManager: L2CAPPublishing, Sendable {
         }
     }
 
-    /// Records the call and delivers a successful `.didUnpublishL2CAPChannel(psm:error:)`
-    /// asynchronously on ``queue``.
+    /// Records the call and completes it as ``unpublishBehavior`` specifies.
     public func unpublishL2CAPChannel(_ psm: L2CAPPSM) {
         dispatchPrecondition(condition: .onQueue(queue))
         _unpublishL2CAPChannelCalls.append(psm)
+        let error: NSError?
+        switch _unpublishBehavior {
+        case .succeed: error = nil
+        case .fail(let failure): error = failure
+        case .hold: return
+        }
         queue.async { [self] in
             dispatchPrecondition(condition: .onQueue(queue))
-            deliver(.didUnpublishL2CAPChannel(psm: psm, error: nil))
+            deliver(.didUnpublishL2CAPChannel(psm: psm, error: error))
         }
     }
 

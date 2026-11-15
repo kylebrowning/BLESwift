@@ -173,8 +173,9 @@ final class HostSession: Sendable {
 
     /// Tears the session down. It closes every host-side L2CAP channel with
     /// `LinkError.providerDisconnected`, so the central at the other end sees an error. It stops
-    /// advertising, empties the hosted GATT database, and takes the hosted device off the radio,
-    /// so any central that is still connected to the device sees the removal. It detaches the
+    /// advertising, empties the hosted GATT database, unpublishes the PSMs of a composite, and
+    /// takes the hosted device off the radio, so any central that is still connected to the
+    /// device sees the removal. It detaches the
     /// backend's event handler and closes the link connection. Repeated calls are safe. It is
     /// safe to call from any thread.
     ///
@@ -189,6 +190,9 @@ final class HostSession: Sendable {
             relay.closeChannels(matching: { _ in true }, error: LinkError.providerDisconnected.nsError)
             backend.stopAdvertising()
             backend.removeAllHostedServices()
+            // A virtual child drops its PSMs with the hosted device. A real child keeps them
+            // until someone unpublishes them, so the composite unpublishes every PSM now.
+            (backend as? CompositePeripheralManager)?.unpublishAllL2CAPChannels()
             (backend as? any HostedDeviceRemoving)?.removeHostedDevice()
             backend.eventHandler = nil
             // Drop the pending updates and do not acknowledge them. The code cancels the

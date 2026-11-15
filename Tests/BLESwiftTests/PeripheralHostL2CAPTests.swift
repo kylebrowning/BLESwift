@@ -444,6 +444,36 @@ struct PeripheralHostL2CAPTests {
         }
     }
 
+    @Test("A cancelled unpublish that then fails restores the PSM, unless the error is code 12")
+    func cancelledUnpublishTombstone() async throws {
+        let (host, fake, _) = await makePoweredOnHost()
+        let psm = try await host.publishL2CAPChannel()
+        await fake.onQueue { fake.unpublishBehavior = .hold }
+
+        // Cancel an unpublish, then let it fail with a retryable error. The PSM is still
+        // published, so the host keeps it.
+        let first = Task { try await host.unpublishL2CAPChannel(psm) }
+        await waitFor { await fake.onQueue { fake.unpublishL2CAPChannelCalls.count == 1 } }
+        first.cancel()
+        await #expect(throws: BLESwiftError.operationCancelled) { try await first.value }
+        fake.simulateUnpublishResult(psm: psm, error: NSError(domain: "BLESwiftTests", code: 5))
+        await fake.onQueue {}
+
+        // Cancel a second unpublish, then let it fail with code 12. Nothing is published, so
+        // the host forgets the PSM.
+        let second = Task { try await host.unpublishL2CAPChannel(psm) }
+        await waitFor { await fake.onQueue { fake.unpublishL2CAPChannelCalls.count == 2 } }
+        second.cancel()
+        await #expect(throws: BLESwiftError.operationCancelled) { try await second.value }
+        fake.simulateUnpublishResult(psm: psm, error: NSError(domain: "BLESwiftProvider", code: 12))
+        await fake.onQueue {}
+
+        await #expect(throws: BLESwiftError.invalidArgument("PSM \(psm.rawValue) is not published")) {
+            try await host.unpublishL2CAPChannel(psm)
+        }
+        #expect(await fake.onQueue { fake.unpublishL2CAPChannelCalls.count } == 2)
+    }
+
     @Test("A failed unpublish of a cancelled publish does not restore the PSM")
     func failedAutoUnpublishDoesNotRestore() async throws {
         let (host, backend) = await makeScriptedHost()

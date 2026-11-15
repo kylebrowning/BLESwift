@@ -11,7 +11,8 @@ import Foundation
 /// a bidirectional byte pipe for transfers that are too large for GATT.
 ///
 /// The host does not track the channel. The radio closes it when the central disconnects, when
-/// Bluetooth turns off, or when either side calls close.
+/// Bluetooth turns off, or when either side calls close. If you release the channel and its
+/// `incomingData` stream, the channel closes.
 ///
 /// - ``incomingData`` is a **single-consumer** `AsyncThrowingStream<Data, Error>`. It finishes
 ///   cleanly if the central closes the channel. It throws if the channel closes on an error.
