@@ -2,9 +2,8 @@ class BleswiftProvider < Formula
   desc "Gives iOS Simulator apps access to Bluetooth through BLESwift"
   homepage "https://github.com/kylebrowning/BLESwift"
   url "https://github.com/kylebrowning/BLESwift/releases/download/__VERSION__/bleswift-provider-__VERSION__-macos.zip"
-  version "__VERSION__"
   sha256 "__SHA256__"
-  license "MIT"
+  license "Apache-2.0"
 
   depends_on macos: :ventura
 

@@ -52,6 +52,13 @@ if [ -z "$version" ]; then
   exit 64
 fi
 
+# The version goes into sed expressions, file names, and the release URL. Accept only a
+# semantic version.
+if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+  echo "error: $version is not a semantic version, for example 3.2.0." >&2
+  exit 64
+fi
+
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_directory/../.." && pwd)"
 cd "$repository_root"
@@ -88,6 +95,9 @@ if [ -z "${DEVELOPER_DIR:-}" ] && [[ "$(xcode-select -p)" == *CommandLineTools ]
   fi
 fi
 
+# Remove the output of an earlier run, so that dist/ holds only the files of this run.
+rm -rf dist
+
 work_directory="$(mktemp -d)"
 trap 'rm -rf "$work_directory"' EXIT
 
@@ -109,20 +119,50 @@ codesign --force --options runtime --timestamp \
   --entitlements "$entitlements" --sign "$identity" "$binary"
 codesign --verify --strict --verbose=2 "$binary"
 
+# Check the binary before it is packed. A wrong flag can give a single-architecture build, and
+# signing can drop the entitlement.
+architectures="$(lipo -archs "$binary")"
+if [[ "$architectures" != *arm64* || "$architectures" != *x86_64* ]]; then
+  echo "error: the binary is not universal. Architectures: $architectures" >&2
+  exit 1
+fi
+if ! codesign -d --entitlements - "$binary" 2>/dev/null | grep -q "com.apple.security.device.bluetooth"; then
+  echo "error: the signed binary does not have the Bluetooth entitlement." >&2
+  exit 1
+fi
+if ! otool -s __TEXT __info_plist "$binary" | grep -q "__info_plist"; then
+  echo "error: the binary does not have an embedded Info.plist." >&2
+  exit 1
+fi
+
 mkdir -p dist
-zip_path="dist/bleswift-provider-$version-macos.zip"
-rm -f "$zip_path"
-ditto -c -k "$binary" "$zip_path"
+if [ "$skip_notarize" -eq 0 ]; then
+  zip_path="dist/bleswift-provider-$version-macos.zip"
+else
+  # Give a test build a different name, so that nobody uploads it as a release by mistake.
+  zip_path="dist/bleswift-provider-$version-macos-unnotarized.zip"
+fi
+# Do not put resource forks or extended attributes in the zip file. Without these options,
+# ditto adds an AppleDouble "._bleswift-provider" entry.
+ditto -c -k --norsrc --noextattr --noqtn "$binary" "$zip_path"
 
 if [ "$skip_notarize" -eq 0 ]; then
-  submission="$(xcrun notarytool submit "$zip_path" --keychain-profile "$notary_profile" --wait)"
-  echo "$submission"
-  if ! echo "$submission" | grep -q "status: Accepted"; then
+  # Keep the output in a file, so that a failure still shows the submission ID. Use the ID
+  # with "xcrun notarytool log <id>" to read the reason.
+  notary_output="$work_directory/notarytool.txt"
+  if ! xcrun notarytool submit "$zip_path" --keychain-profile "$notary_profile" --wait \
+      | tee "$notary_output"; then
+    echo "error: notarytool failed. Read the output above for the submission ID." >&2
+    exit 1
+  fi
+  if ! grep -q "status: Accepted" "$notary_output"; then
     echo "error: notarization did not return the status Accepted." >&2
     exit 1
   fi
 else
-  echo "Notarization skipped."
+  echo "Notarization skipped. The script writes no formula for a test build."
+  echo "Output: $zip_path"
+  exit 0
 fi
 
 sha256="$(shasum -a 256 "$zip_path" | awk '{print $1}')"
@@ -134,8 +174,11 @@ sed -e "s/__VERSION__/$version/g" -e "s/__SHA256__/$sha256/g" \
 cat <<NEXT
 
 Next steps. The script does not do these steps.
-  1. Upload the zip file to the release:
+  1. Push the tag, and create the GitHub release if it does not exist:
+       git push origin $version
+       gh release create $version --verify-tag --notes-file <notes>
+  2. Upload the zip file to the release:
        gh release upload $version $zip_path
-  2. Copy dist/bleswift-provider.rb to Formula/ in kylebrowning/homebrew-tap.
-  3. Commit and push the tap.
+  3. Copy dist/bleswift-provider.rb to Formula/ in kylebrowning/homebrew-tap.
+  4. Commit and push the tap.
 NEXT

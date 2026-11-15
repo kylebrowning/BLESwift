@@ -12,7 +12,9 @@ These files build the `bleswift-provider` release binary for Homebrew.
 ## One-time setup
 
 1. Create a "Developer ID Application" certificate in your Apple Developer account.
-2. Install the certificate in your login keychain.
+2. Install the certificate and its private key in your login keychain. If the keychain has
+   more than one "Developer ID Application" identity, set `BLESWIFT_SIGNING_IDENTITY` to the
+   full name of the identity.
 3. Store the notarization credentials in the keychain:
 
 ```sh
@@ -31,10 +33,18 @@ The command asks for an app-specific password.
 Scripts/release/release-provider.sh 3.2.0
 ```
 
-4. Wait for the notarization to finish. To test the build without notarization, add `--skip-notarize`.
-5. Upload the zip file: `gh release upload 3.2.0 dist/bleswift-provider-3.2.0-macos.zip`.
-6. Copy `dist/bleswift-provider.rb` to `Formula/` in `kylebrowning/homebrew-tap`.
-7. Commit and push the tap.
+4. Wait for the notarization to finish.
+5. Push the tag: `git push origin 3.2.0`.
+6. If the GitHub release does not exist, create it: `gh release create 3.2.0 --verify-tag --notes-file <notes>`.
+7. Upload the zip file: `gh release upload 3.2.0 dist/bleswift-provider-3.2.0-macos.zip`.
+8. Copy `dist/bleswift-provider.rb` to `Formula/` in `kylebrowning/homebrew-tap`.
+9. Commit and push the tap.
+
+To test the build without notarization, add `--skip-notarize`. The script then writes
+`dist/bleswift-provider-<version>-macos-unnotarized.zip` and no formula. Do not upload this file.
+
+You cannot staple a ticket to a bare command-line binary. Gatekeeper checks the notarization
+online. A Homebrew download has no quarantine flag, so Gatekeeper does not check it at install.
 
 The script never uploads a file and never pushes to a repository.
 
