@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `StatusOptions`, `CaptureOptions`, `ParseError.invalidValue(flag:value:)`, and
   `ProviderCommandLine.Options.verbose`.
 
+### Changed
+
+- `LinkRole.monitor`, `LinkMessage.providerStatus`, and
+  `ProviderCommandLine.ParseError.invalidValue(flag:value:)` are new enum cases. An exhaustive
+  `switch` over one of these enums outside this package does not compile until you add the new
+  case or a `default` case.
+
 ## [3.1.0] - 2026-11-01
 
 ### Added

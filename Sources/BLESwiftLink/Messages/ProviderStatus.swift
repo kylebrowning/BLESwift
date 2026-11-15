@@ -10,8 +10,11 @@ public struct ProviderStatus: Codable, Sendable, Equatable {
     /// One live session of the provider.
     public struct Session: Codable, Sendable, Equatable {
 
-        /// The number that the provider gave the session when it opened. The log lines of the
-        /// provider use the same number.
+        /// The number that the provider gave the session when it opened. The session log lines
+        /// of the provider use the same number.
+        ///
+        /// This is not the connection number `N` in a `link N` line of the traffic log. When the
+        /// traffic log is on, a line `link N is <role> session M` connects the two numbers.
         public var ordinal: Int
 
         /// The role that the client stated in its ``ClientHello``.

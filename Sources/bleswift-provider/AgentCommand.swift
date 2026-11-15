@@ -32,7 +32,7 @@ enum AgentCommand {
     /// - Parameters:
     ///   - options: The parsed serve options. The function uses them to check the endpoint.
     ///   - arguments: The serve arguments, as given. The agent runs with them, with each
-    ///     `--fixture` path made absolute.
+    ///     `--fixture` path made absolute and with an explicit `--listen`.
     /// - Returns: The exit status. It is `0` on success, `64` (`EX_USAGE`) for a non-loopback
     ///   endpoint, `66` (`EX_NOINPUT`) for a fixture that does not load, and `70` (`EX_SOFTWARE`) if the executable is not found, the file cannot be
     ///   written, or `launchctl bootstrap` fails.
@@ -63,7 +63,11 @@ enum AgentCommand {
                 return 66
             }
         }
-        let agentArguments = ProviderAgent.absoluteFixtureArguments(arguments, currentDirectory: currentDirectory)
+        let agentArguments = ProviderAgent.agentArguments(
+            arguments,
+            endpoint: options.endpoint,
+            currentDirectory: currentDirectory
+        )
         let plist = ProviderAgent.propertyList(executable: executable, arguments: agentArguments, logPath: logPath)
         do {
             let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
@@ -96,7 +100,8 @@ enum AgentCommand {
 
     /// Unloads the agent with `launchctl` and removes its property list file.
     ///
-    /// - Returns: The exit status, which is always `0`.
+    /// - Returns: The exit status. It is `0` on success, and `74` (`EX_IOERR`) if the file
+    ///   cannot be removed.
     static func uninstall() -> Int32 {
         // This fails when no agent is loaded, so ignore its status.
         _ = launchctl(["bootout", "\(domain)/\(ProviderAgent.label)"])
@@ -107,6 +112,7 @@ enum AgentCommand {
                 print("removed \(propertyListPath)")
             } catch {
                 printError("bleswift-provider: failed to remove \(propertyListPath): \(error)")
+                return 74
             }
         } else {
             print("no agent file at \(propertyListPath)")

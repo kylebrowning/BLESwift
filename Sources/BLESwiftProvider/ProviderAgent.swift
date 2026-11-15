@@ -69,6 +69,45 @@ public enum ProviderAgent {
         return result
     }
 
+    /// The arguments for the agent: `arguments` with each `--fixture` path made absolute, and
+    /// with an explicit `--listen`.
+    ///
+    /// If `arguments` contain `--listen`, the function keeps it as given. If not, it appends
+    /// `--listen` and `endpoint` after the other arguments. The agent then always listens on the
+    /// endpoint that `install-agent` checked. `--listen` wins over `BLESWIFT_LINK`, so the
+    /// environment of `launchd` cannot change the endpoint.
+    ///
+    /// - Parameters:
+    ///   - arguments: Serve arguments that ``ProviderCommandLine/parse(_:environment:)`` accepts.
+    ///   - endpoint: The endpoint that `install-agent` checked.
+    ///   - currentDirectory: The current directory of the process.
+    /// - Returns: The arguments for the agent.
+    package static func agentArguments(_ arguments: [String], endpoint: LinkEndpoint, currentDirectory: String) -> [String] {
+        var result = absoluteFixtureArguments(arguments, currentDirectory: currentDirectory)
+        if !containsListen(arguments) {
+            result += ["--listen", endpoint.description]
+        }
+        return result
+    }
+
+    /// Whether `arguments` contain `--listen` in the position of a flag.
+    private static func containsListen(_ arguments: [String]) -> Bool {
+        var index = arguments.startIndex
+        while index < arguments.endIndex {
+            switch arguments[index] {
+            case "--listen":
+                return true
+            case "--fixture":
+                // Skip the value of `--fixture`, which can be any text.
+                index = arguments.index(after: index)
+            default:
+                break
+            }
+            index = arguments.index(after: index)
+        }
+        return false
+    }
+
     /// The error to print when the agent would listen on `endpoint`, or `nil` if `endpoint` is
     /// on loopback.
     ///

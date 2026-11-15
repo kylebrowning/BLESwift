@@ -56,7 +56,7 @@ swift run bleswift-provider [--passthrough] [--fixture file.json …] [--listen 
 | `--fixture <path>` | Load a fixture document and host its devices. Repeatable. |
 | `--listen <host:port>` | Where to listen. Defaults to `BLESWIFT_LINK`, then `127.0.0.1:45541`. Use a literal address. The provider and the client both change `localhost` to `127.0.0.1`, so that the two ends use the same loopback family. |
 | `--json` | Encode outgoing messages as JSON instead of the binary property list default. |
-| `--verbose` | Log one line for each link message in each direction. Each line has the number of the connection, `<-` or `->`, and a summary of the message. A summary has a maximum of 240 characters, and it shows a data value only as its byte count. |
+| `--verbose` | Log one line for each link message in each direction. Each line has the number of the connection, `<-` or `->`, and a summary of the message. A summary has a maximum of 240 characters, and it shows a data value only as its byte count. The connection number `N` in `link N` is not the session number that `status` shows. When a session opens, the log has the line `link N is <role> session M`. |
 
 The virtual radio always exists. `--passthrough` adds the Mac's radio. It does not replace the virtual radio. A hosted `PeripheralHost` is visible to other clients in both modes.
 
@@ -104,12 +104,12 @@ bleswift-provider install-agent --passthrough --fixture /path/to/hrm.json
 3. It finds its own executable. If `install-agent` cannot find the executable, it exits with code `70`. Then run it with a full path.
 4. It makes each `--fixture` path absolute against the current directory, and loads each fixture. If a fixture does not load, `install-agent` exits with code `66` and writes no agent.
 
-Then `install-agent` writes `~/Library/LaunchAgents/com.kylebrowning.bleswift-provider.plist` and loads it with `launchctl`. The agent runs with your options in the order that you gave them, with the absolute fixture paths. It starts at login and writes its output to `~/Library/Logs/bleswift-provider.log`. If the provider exits with an error, `launchd` starts it again, with a minimum of 30 seconds between two starts. If the provider exits normally, it stays stopped.
+Then `install-agent` writes `~/Library/LaunchAgents/com.kylebrowning.bleswift-provider.plist` and loads it with `launchctl`. The agent runs with your options in the order that you gave them, with the absolute fixture paths. If you did not give `--listen`, `install-agent` adds `--listen` with the endpoint that it checked, which is `127.0.0.1:45541`. It starts at login and writes its output to `~/Library/Logs/bleswift-provider.log`. If the provider exits with an error, `launchd` starts it again, with a minimum of 30 seconds between two starts. If the provider exits normally, it stays stopped.
 
-- The agent does not read `BLESWIFT_LINK`. To use a different port, give `--listen`.
+- The agent always has an explicit `--listen`, and `--listen` wins over `BLESWIFT_LINK`. So the agent ignores `BLESWIFT_LINK`. To use a different port, give `--listen`.
 - The agent runs the executable at the path that you used, and it does not resolve symbolic links. Install the provider at a fixed path. If the path is in a `.build` directory, `install-agent` prints a warning, because a clean of that directory breaks the agent.
 
-To remove the agent, run `bleswift-provider uninstall-agent`.
+To remove the agent, run `bleswift-provider uninstall-agent`. If the command cannot remove the agent file, it exits with code `74`.
 
 ### Real Bluetooth and the entitlement
 

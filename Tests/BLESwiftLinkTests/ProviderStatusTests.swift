@@ -143,7 +143,7 @@ struct ProviderStatusTests {
     func deadlineClosesAnOpenMonitor() async throws {
         var configuration = ProviderConfiguration()
         configuration.endpoint = LinkEndpoint(host: "127.0.0.1", port: 0)
-        configuration.handshakeTimeout = .milliseconds(200)
+        configuration.handshakeTimeout = .seconds(1)
         let lines = Mutex<[String]>([])
         configuration.log = { line in lines.withLock { $0.append(line) } }
         let provider = Provider(configuration: configuration)
@@ -177,8 +177,8 @@ struct ProviderStatusTests {
         let statusTime = try #require(status.withLock { $0 })
         let closeTime = try #require(closed.withLock { $0 })
         // The provider does not close a monitor connection after the status. Only the deadline
-        // closes it, 200 ms after the connection opened.
-        #expect(closeTime - statusTime >= .milliseconds(150))
+        // closes it, one second after the connection opened.
+        #expect(closeTime - statusTime >= .milliseconds(500))
         #expect(lines.withLock { $0 }.contains("closing a monitor connection that stayed open"))
         #expect(!lines.withLock { $0 }.contains { $0.hasPrefix("releasing a connection that sent no client hello") })
         #expect(await provider.sessionCount == 0)

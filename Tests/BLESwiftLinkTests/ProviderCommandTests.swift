@@ -150,6 +150,40 @@ struct ProviderCommandTests {
         #expect(ProviderAgent.absoluteFixtureArguments([], currentDirectory: "/work") == [])
     }
 
+    @Test("The agent always gets an explicit --listen")
+    func agentArgumentsHaveListen() {
+        let endpoint = LinkEndpoint.default
+        #expect(ProviderAgent.agentArguments(
+            ["--passthrough", "--fixture", "hrm.json"], endpoint: endpoint, currentDirectory: "/work"
+        ) == ["--passthrough", "--fixture", "/work/hrm.json", "--listen", "127.0.0.1:45541"])
+        #expect(ProviderAgent.agentArguments([], endpoint: endpoint, currentDirectory: "/work")
+            == ["--listen", "127.0.0.1:45541"])
+        // A --listen from the user stays as given, and the function adds no second one.
+        #expect(ProviderAgent.agentArguments(
+            ["--listen", "127.0.0.1:9", "--passthrough"],
+            endpoint: LinkEndpoint(host: "127.0.0.1", port: 9),
+            currentDirectory: "/work"
+        ) == ["--listen", "127.0.0.1:9", "--passthrough"])
+        // A fixture path with the text --listen is a value, not a flag.
+        #expect(ProviderAgent.agentArguments(
+            ["--fixture", "--listen"], endpoint: endpoint, currentDirectory: "/work"
+        ) == ["--fixture", "/work/--listen", "--listen", "127.0.0.1:45541"])
+    }
+
+    @Test("-h and --help as the value of a flag are values")
+    func helpAsAValue() throws {
+        #expect(try CommandLine.parseCommand(["capture", "--name", "-h"], environment: [:])
+            == .capture(CommandLine.CaptureOptions(names: ["-h"])))
+        #expect(try CommandLine.parseCommand(["capture", "--output", "-h"], environment: [:])
+            == .capture(CommandLine.CaptureOptions(outputPath: "-h")))
+        #expect(try CommandLine.parseCommand(["install-agent", "--fixture", "--help"], environment: [:])
+            == .installAgent(CommandLine.Options(fixturePaths: ["--help"]), arguments: ["--fixture", "--help"]))
+        #expect(try CommandLine.parseCommand(["capture", "--name", "x", "-h"], environment: [:]) == .help)
+        #expect(throws: CommandLine.ParseError.unknownFlag("--x")) {
+            try CommandLine.parseCommand(["uninstall-agent", "--x", "-h"], environment: [:])
+        }
+    }
+
     @Test("The agent must listen on loopback")
     func agentRejectsNonLoopback() throws {
         #expect(ProviderAgent.endpointError(for: .default) == nil)

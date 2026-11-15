@@ -25,10 +25,9 @@ enum StatusCommand {
                 printError("bleswift-provider: no provider at \(options.endpoint)")
                 return 69
             case .rejected, .unexpectedMessage:
+                // A provider that closes the connection without a reply gives a reason that
+                // already says that it may be older than this tool.
                 printError("bleswift-provider: \(error)")
-                if !error.description.contains("older than this tool") {
-                    printError("bleswift-provider: the provider may be older than this tool")
-                }
                 return 76
             }
         } catch {

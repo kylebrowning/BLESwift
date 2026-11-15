@@ -387,6 +387,10 @@ public actor Provider {
                 counter += 1
                 return counter
             }
+            // The handshake reads this number to log which session the connection opened. No
+            // message reaches the handshake before this method returns, because both run on the
+            // listener queue.
+            pending.withLock { $0.setTrafficOrdinal(ordinal, for: connection) }
             connection.onTraffic = { direction, message in
                 log("link \(ordinal) \(direction == .inbound ? "<-" : "->") \(message.trafficSummary)")
             }
@@ -406,10 +410,10 @@ public actor Provider {
         Task { [weak self, weak connection] in
             try? await Task.sleep(for: timeout)
             guard let self, let connection else { return }
-            guard let didRouteHello = self.pending.withLock({ $0.unclaimedHelloState(connection) }) else { return }
-            // A monitor connection sent its hello but is never claimed. It reaches this point
+            guard let isMonitor = self.pending.withLock({ $0.unclaimedMonitorState(connection) }) else { return }
+            // A monitor connection got its status but is never claimed. It reaches this point
             // only if the client did not close it after it read the status.
-            if didRouteHello {
+            if isMonitor {
                 self.configuration.log?("closing a monitor connection that stayed open")
             } else {
                 self.configuration.log?("releasing a connection that sent no client hello within \(timeout)")
@@ -490,6 +494,7 @@ public actor Provider {
         // status. If the client does not close it, the handshake deadline cancels it. The entry
         // stays in `pending` until the terminal state releases it.
         if hello.role == .monitor {
+            pending.withLock { $0.markMonitor(connection) }
             connection.send(.serverHello(accepted))
             connection.send(.providerStatus(statusSnapshot()))
             configuration.log?("answered a status request from \(hello.clientName)")
@@ -530,6 +535,7 @@ public actor Provider {
                 ordinal: sessionOrdinal, role: .central, clientName: hello.clientName
             )
             configuration.log?("opened central session \(sessionOrdinal) for \(hello.clientName)")
+            logTrafficSession(of: connection, role: .central)
         case .peripheral:
             sessionOrdinal += 1
             let queue = DispatchQueue(label: "bleswift-provider.host.\(sessionOrdinal)")
@@ -555,12 +561,22 @@ public actor Provider {
                 ordinal: sessionOrdinal, role: .peripheral, clientName: hello.clientName
             )
             configuration.log?("opened host session \(sessionOrdinal) for \(hello.clientName)")
+            logTrafficSession(of: connection, role: .peripheral)
         case .monitor:
             // The branch above the claim handles monitor clients.
             assertionFailure("a monitor hello returns before the claim")
             connection.cancel()
             return
         }
+    }
+
+    /// Logs which session `connection` opened, when the traffic log is on. The traffic log
+    /// numbers connections, and the session log numbers sessions. This line connects the two
+    /// numbers.
+    private func logTrafficSession(of connection: LinkConnection, role: LinkRole) {
+        guard configuration.logTraffic, let log = configuration.log,
+              let ordinal = pending.withLock({ $0.trafficOrdinal(of: connection) }) else { return }
+        log("link \(ordinal) is \(role.rawValue) session \(sessionOrdinal)")
     }
 
     /// The state of this provider, for a ``BLESwiftLink/LinkRole/monitor`` client.
@@ -724,6 +740,11 @@ struct PendingConnections {
         var didRouteHello = false
         /// Whether an accepted handshake has claimed this connection.
         var isClaimed = false
+        /// Whether the handshake answered this connection as a monitor client. A monitor
+        /// connection is never claimed.
+        var isMonitor = false
+        /// The number of this connection in the traffic log, if the traffic log is on.
+        var trafficOrdinal: Int?
         /// The session's message handler, once the session has one.
         var handler: (@Sendable (LinkMessage) -> Void)?
         /// Whether the code is replaying the backlog to ``handler``. A message that arrives
@@ -871,13 +892,28 @@ struct PendingConnections {
         return !entry.isTerminated && !entry.isClaimed
     }
 
-    /// Whether the table routed a hello for `connection`, if the connection is still claimable.
+    /// Whether `connection` is a monitor connection, if the connection is still claimable.
     ///
-    /// - Returns: `nil` if ``isClaimable(_:)`` is `false`. Otherwise, whether the first message
-    ///   of the connection went to the handshake.
-    func unclaimedHelloState(_ connection: LinkConnection) -> Bool? {
+    /// - Returns: `nil` if ``isClaimable(_:)`` is `false`. Otherwise, whether
+    ///   ``markMonitor(_:)`` marked the connection.
+    func unclaimedMonitorState(_ connection: LinkConnection) -> Bool? {
         guard isClaimable(connection) else { return nil }
-        return entries[ObjectIdentifier(connection)]?.didRouteHello
+        return entries[ObjectIdentifier(connection)]?.isMonitor
+    }
+
+    /// Records that the handshake answered `connection` as a monitor client.
+    mutating func markMonitor(_ connection: LinkConnection) {
+        entries[ObjectIdentifier(connection)]?.isMonitor = true
+    }
+
+    /// Records the number of `connection` in the traffic log.
+    mutating func setTrafficOrdinal(_ ordinal: Int, for connection: LinkConnection) {
+        entries[ObjectIdentifier(connection)]?.trafficOrdinal = ordinal
+    }
+
+    /// The number of `connection` in the traffic log, or `nil` if it has none.
+    func trafficOrdinal(of connection: LinkConnection) -> Int? {
+        entries[ObjectIdentifier(connection)]?.trafficOrdinal
     }
 
     /// Claims `connection` for a completed handshake.

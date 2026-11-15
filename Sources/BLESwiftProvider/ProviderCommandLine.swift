@@ -195,7 +195,8 @@ public enum ProviderCommandLine {
     /// The first argument selects the subcommand: `status`, `capture`, `install-agent`, or
     /// `uninstall-agent`. Any other first argument selects ``Command/serve(_:)``, which
     /// ``parse(_:environment:)`` parses from the whole array. `-h` or `--help` in the arguments
-    /// gives ``Command/help``.
+    /// in the position of a flag gives ``Command/help``. As the value of a flag, for example
+    /// `--name -h`, it is a value.
     ///
     /// `install-agent` parses its arguments with an empty environment. The agent runs under
     /// `launchd`, which does not pass `BLESWIFT_LINK`, so only `--listen` sets its endpoint.
@@ -215,27 +216,22 @@ public enum ProviderCommandLine {
         case "-h", "--help":
             return .help
         case "status":
-            guard !containsHelp(rest) else { return .help }
-            return .status(try parseStatus(rest, environment: environment))
+            return try parseStatus(rest, environment: environment).map(Command.status) ?? .help
         case "capture":
-            guard !containsHelp(rest) else { return .help }
-            return .capture(try parseCapture(rest))
+            return try parseCapture(rest).map(Command.capture) ?? .help
         case "install-agent":
-            guard !containsHelp(rest) else { return .help }
-            return .installAgent(try parse(rest, environment: [:]), arguments: rest)
+            let options = try parse(rest, environment: [:])
+            return options.showHelp ? .help : .installAgent(options, arguments: rest)
         case "uninstall-agent":
-            guard !containsHelp(rest) else { return .help }
-            if let extra = rest.first { throw ParseError.unknownFlag(extra) }
+            if let first = rest.first {
+                guard first == "-h" || first == "--help" else { throw ParseError.unknownFlag(first) }
+                return .help
+            }
             return .uninstallAgent
         default:
             let options = try parse(arguments, environment: environment)
             return options.showHelp ? .help : .serve(options)
         }
-    }
-
-    /// Whether `arguments` contain `-h` or `--help`.
-    private static func containsHelp(_ arguments: [String]) -> Bool {
-        arguments.contains { $0 == "-h" || $0 == "--help" }
     }
 
     /// Returns the value after the flag at `index`, and moves `index` to it.
@@ -247,12 +243,16 @@ public enum ProviderCommandLine {
     }
 
     /// Parses the arguments of the `status` subcommand.
-    private static func parseStatus(_ arguments: [String], environment: [String: String]) throws -> StatusOptions {
+    ///
+    /// - Returns: The options, or `nil` for `-h` or `--help` in the position of a flag.
+    private static func parseStatus(_ arguments: [String], environment: [String: String]) throws -> StatusOptions? {
         var options = StatusOptions(endpoint: LinkEndpoint.fromEnvironment(environment) ?? .default)
         var index = arguments.startIndex
         while index < arguments.endIndex {
             let argument = arguments[index]
             switch argument {
+            case "-h", "--help":
+                return nil
             case "--json":
                 options.json = true
             case "--listen":
@@ -270,12 +270,16 @@ public enum ProviderCommandLine {
     }
 
     /// Parses the arguments of the `capture` subcommand.
-    private static func parseCapture(_ arguments: [String]) throws -> CaptureOptions {
+    ///
+    /// - Returns: The options, or `nil` for `-h` or `--help` in the position of a flag.
+    private static func parseCapture(_ arguments: [String]) throws -> CaptureOptions? {
         var options = CaptureOptions()
         var index = arguments.startIndex
         while index < arguments.endIndex {
             let argument = arguments[index]
             switch argument {
+            case "-h", "--help":
+                return nil
             case "--duration":
                 let value = try flagValue(after: &index, in: arguments)
                 // `Duration.seconds(_:)` traps on a value that is too large, so limit the value
@@ -341,7 +345,8 @@ public enum ProviderCommandLine {
       install-agent [options]
                              Install a launch agent that runs the provider at login with the
                               options given. The agent must listen on loopback.
-      uninstall-agent        Remove the launch agent.
+      uninstall-agent        Remove the launch agent. Exits 74 if the agent file cannot be
+                              removed.
 
     Options:
       --listen <host:port>   Where to listen. Defaults to the BLESWIFT_LINK environment

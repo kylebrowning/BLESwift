@@ -91,6 +91,7 @@ struct ProviderTrafficLogTests {
         }
         #expect(lines.all.contains { $0.hasPrefix("link 1 <- clientHello(") })
         #expect(lines.all.contains { $0.hasPrefix("link 1 -> serverHello(") })
+        #expect(lines.all.contains("link 1 is central session 1"))
         connection.cancel()
         await provider.stop()
     }
