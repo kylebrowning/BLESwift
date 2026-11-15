@@ -129,6 +129,10 @@ locally. CI also runs it on each push to `main` and on each pull request from th
 The `--passthrough` option also gives access to the real radio of your Mac. For this option,
 the provider build must be signed and must have the Bluetooth entitlement.
 
+The provider also has tools. `capture` records real devices as a fixture document. `status`
+shows the sessions of a running provider. `install-agent` runs the provider at login.
+`--verbose` logs each link message.
+
 For fixtures, virtual devices in code, and the differences from CoreBluetooth, read the
 [Running in the iOS Simulator](Sources/BLESwift/BLESwift.docc/SimulatorSupport.md) article.
 
