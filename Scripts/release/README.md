@@ -33,12 +33,11 @@ The command asks for an app-specific password.
 Scripts/release/release-provider.sh 3.2.0
 ```
 
-4. Wait for the notarization to finish.
-5. Push the tag: `git push origin 3.2.0`.
-6. If the GitHub release does not exist, create it: `gh release create 3.2.0 --verify-tag --notes-file <notes>`.
-7. Upload the zip file: `gh release upload 3.2.0 dist/bleswift-provider-3.2.0-macos.zip`.
-8. Copy `dist/bleswift-provider.rb` to `Formula/` in `kylebrowning/homebrew-tap`.
-9. Commit and push the tap.
+4. Push the tag: `git push origin 3.2.0`.
+5. If the GitHub release does not exist, create it: `gh release create 3.2.0 --verify-tag --notes-file <notes>`.
+6. Upload the zip file: `gh release upload 3.2.0 dist/bleswift-provider-3.2.0-macos.zip`.
+7. Copy `dist/bleswift-provider.rb` to `Formula/` in `kylebrowning/homebrew-tap`.
+8. Commit and push the tap.
 
 To test the build without notarization, add `--skip-notarize`. The script then writes
 `dist/bleswift-provider-<version>-macos-unnotarized.zip` and no formula. Do not upload this file.

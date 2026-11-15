@@ -143,8 +143,7 @@ run `swift run bleswift-provider`.
 - It supports the central role and the peripheral role in the simulator.
 - It connects several simulators to one virtual radio at the same time.
 - It serves fixtures from a JSON file or from Swift code.
-- It supports fault injection and a manual clock.
-- It gives access to the real radio of your Mac with `--passthrough`.
+- It gives central-role clients access to the real radio of your Mac with `--passthrough`.
 
 ### Mocking Bluetooth in-process
 

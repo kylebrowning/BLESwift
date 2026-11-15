@@ -95,9 +95,6 @@ if [ -z "${DEVELOPER_DIR:-}" ] && [[ "$(xcode-select -p)" == *CommandLineTools ]
   fi
 fi
 
-# Remove the output of an earlier run, so that dist/ holds only the files of this run.
-rm -rf dist
-
 work_directory="$(mktemp -d)"
 trap 'rm -rf "$work_directory"' EXIT
 
@@ -113,7 +110,7 @@ build_arguments=(
 )
 swift build "${build_arguments[@]}" \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$rendered_plist"
-binary="$(swift build "${build_arguments[@]}" --show-bin-path)/bleswift-provider"
+binary="$(swift build "${build_arguments[@]}" --show-bin-path | tail -n 1)/bleswift-provider"
 
 codesign --force --options runtime --timestamp \
   --entitlements "$entitlements" --sign "$identity" "$binary"
@@ -135,6 +132,8 @@ if ! otool -s __TEXT __info_plist "$binary" | grep -q "__info_plist"; then
   exit 1
 fi
 
+# Remove the output of an earlier run, so that dist/ holds only the files of this run.
+rm -rf dist
 mkdir -p dist
 if [ "$skip_notarize" -eq 0 ]; then
   zip_path="dist/bleswift-provider-$version-macos.zip"
