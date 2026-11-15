@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to a PSM that is not published fails with code 12. A publish that cannot get its PSM fails
   with code 13.
 
+### Fixed
+
+- A client with a different protocol version now always receives the provider's refusal and
+  its reason. Before, the provider closed the connection at once, and the refusal was
+  sometimes lost.
+
 ## [3.1.0] - 2026-11-01
 
 ### Added

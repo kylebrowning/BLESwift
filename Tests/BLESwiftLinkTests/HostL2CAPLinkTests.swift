@@ -224,15 +224,13 @@ struct HostL2CAPLinkTests {
             answer.withLock { $0 = hello }
         }
         connection.start()
-        await waitFor(timeout: .seconds(2)) { answer.withLock { $0 } != nil }
+        await waitFor(timeout: .seconds(5)) { answer.withLock { $0 } != nil }
 
-        // The provider sends a refusal and cancels the connection at once, so the refusal does
-        // not always reach the client. Either way, the client is never accepted and no session
-        // opens.
-        #expect(answer.withLock { $0?.accepted } != true)
-        if let refusal = answer.withLock({ $0 }) {
-            #expect(refusal.protocolVersion == 2)
-        }
+        // The client receives the refusal, and its reason names both versions.
+        let refusal = try #require(answer.withLock { $0 })
+        #expect(refusal.accepted == false)
+        #expect(refusal.protocolVersion == 2)
+        #expect(refusal.reason == "protocol version 1 is not 2")
         #expect(await provider.sessionCount == 0)
         connection.onStateChange = nil
         connection.onMessage = nil
