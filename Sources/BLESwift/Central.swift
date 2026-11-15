@@ -426,6 +426,8 @@ public actor Central {
     ///   - A real `CBCentralManager` does not back the `Central`.
     ///   - A tracked peripheral has a connection attempt or a disconnect in progress. Extraction
     ///     then would leave the pending continuation waiting forever.
+    ///   - A connected peripheral has a pending L2CAP open, live or cancelled. The backend
+    ///     still sends one event for the open, and the new owner of the manager would get it.
     public func stopAndExtractState() throws -> (manager: CBCentralManager, peripherals: [CBPeripheral]) {
         guard let currentManager = manager else {
             throw BLESwiftError.stopped
@@ -436,6 +438,12 @@ public actor Central {
 
         // An entry that is not `.connected` blocks extraction. See the throws docs above.
         guard !connections.values.contains(where: { if case .connected = $0 { return false }; return true }) else {
+            throw BLESwiftError.stopped
+        }
+
+        // A pending L2CAP open, live or cancelled, also blocks extraction. See the throws docs
+        // above.
+        guard !connections.values.contains(where: { if case .connected(let session) = $0 { return !session.pendingL2CAPOpens.isEmpty }; return false }) else {
             throw BLESwiftError.stopped
         }
 
@@ -822,8 +830,13 @@ public actor Central {
     /// Like an explicit `disconnect`, it never triggers a ``ReconnectPolicy`` retry. It does
     /// not touch an active scan.
     ///
-    /// - Parameter error: The error that pending operations fail with. The default is
-    ///   ``BLESwiftError/cancelled``.
+    /// The waiters fail with these errors:
+    /// - A pending connect and a parked notification survivor fail with `error`.
+    /// - On a connected peripheral, every GATT operation in progress and every pending L2CAP
+    ///   open fail with ``BLESwiftError/cancelled``. They do not get `error`.
+    ///
+    /// - Parameter error: The error for a pending connect and a parked notification survivor.
+    ///   The default is ``BLESwiftError/cancelled``.
     public func cancelAllOperations(error: Error? = nil) {
         let resolvedError = error ?? BLESwiftError.cancelled
 
@@ -3601,9 +3614,11 @@ public actor Central {
 
     /// Resolves one pending L2CAP open of `identifier` with a `didOpenL2CAPChannel` event.
     ///
+    /// Each event uses exactly one entry, because the backend sends one event for each call.
     /// It selects the entry with these rules:
     /// - If the event has a channel and no error, it selects the oldest entry with the same PSM.
-    ///   If no entry has that PSM, it closes the channel and removes no entry.
+    /// - If no entry has that PSM, it closes the channel and selects the oldest entry. A live
+    ///   oldest entry fails with ``BLESwiftError/l2capOpenFailed``.
     /// - If the event has an error or no channel, it selects the oldest entry.
     /// - If no entry is pending, it closes the channel, so that the channel does not leak.
     ///
@@ -3621,13 +3636,16 @@ public actor Central {
             channel?.close(error: BLESwiftError.notConnected)
             return
         }
+        if error == nil, let channel, !session.pendingL2CAPOpens.contains(where: { $0.psm == channel.psm }) {
+            let entry = session.pendingL2CAPOpens.removeFirst()
+            connections[identifier] = .connected(session)
+            log("Closing L2CAP channel \(channel.psm) for \(identifier): no pending open has that PSM", level: .debug, category: "l2cap")
+            channel.close(error: nil)
+            entry.continuation?.resume(throwing: BLESwiftError.l2capOpenFailed)
+            return
+        }
         let index: Int
-        if error == nil, let channel {
-            guard let match = session.pendingL2CAPOpens.firstIndex(where: { $0.psm == channel.psm }) else {
-                log("Closing L2CAP channel \(channel.psm) for \(identifier): no pending open has that PSM", level: .debug, category: "l2cap")
-                channel.close(error: nil)
-                return
-            }
+        if error == nil, let channel, let match = session.pendingL2CAPOpens.firstIndex(where: { $0.psm == channel.psm }) {
             index = match
         } else {
             index = session.pendingL2CAPOpens.startIndex
@@ -3690,9 +3708,22 @@ public actor Central {
     }
 
     /// Registers a newly opened `transport` under a new token and returns the public
-    /// ``L2CAPChannel`` handle. If the peripheral disconnects between the open and this call,
-    /// it closes the transport and throws ``BLESwiftError/notConnected``.
+    /// ``L2CAPChannel`` handle. It closes the transport and does not register it in these
+    /// cases:
+    /// - If the calling task is cancelled, it throws ``BLESwiftError/operationCancelled``. A
+    ///   timeout cancels the task, so a channel that arrives at the deadline does not leak.
+    /// - If the peripheral disconnects between the open and this call, it throws
+    ///   ``BLESwiftError/notConnected``.
+    ///
+    /// A small window stays open. If the task is cancelled after this check, `withTimeout`
+    /// can throw and drop the returned handle. The channel then stays registered until a
+    /// disconnect or a stop closes it.
     private func registerL2CAPChannel(identifier: PeripheralIdentifier, transport: any L2CAPChannelRemote) throws -> L2CAPChannel {
+        if Task.isCancelled {
+            log("Closing L2CAP channel \(transport.psm) for \(identifier): the open is cancelled", level: .debug, category: "l2cap")
+            transport.close(error: nil)
+            throw BLESwiftError.operationCancelled
+        }
         guard case .connected(var session) = connections[identifier] else {
             transport.close(error: BLESwiftError.notConnected)
             throw BLESwiftError.notConnected
@@ -3733,6 +3764,8 @@ public actor Central {
     /// ``stopAndExtractState()`` uses it.
     func closeAllSessionsL2CAPChannels(error: Error) {
         for identifier in Array(connections.keys) {
+            // The pending-open guard in `stopAndExtractState()` makes this call unreachable
+            // today. It stays so that no open can wait forever if that guard changes.
             failPendingL2CAPOpens(for: identifier, error: error, keepEntries: false)
             closeL2CAPChannels(for: identifier, error: error)
         }

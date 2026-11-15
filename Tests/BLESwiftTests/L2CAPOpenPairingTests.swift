@@ -117,27 +117,70 @@ struct L2CAPOpenPairingTests {
         #expect(await first.onQueue { first.writtenData }.isEmpty)
     }
 
-    @Test("A success whose PSM matches no pending open is closed and resumes no open")
+    @Test("A success whose PSM matches no pending open is closed, and the oldest open fails with l2capOpenFailed")
     func unmatchedPSMIsClosed() async throws {
         let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
         await fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .hold }
 
         let openA = await startOpen(peripheral, fakePeripheral, psm: Self.psmA, expectedCalls: 1)
+        let openB = await startOpen(peripheral, fakePeripheral, psm: Self.psmA, expectedCalls: 2)
         let stray = FakeL2CAPChannel(psm: Self.psmB, queue: fakePeripheral.queue)
         fakePeripheral.simulateL2CAPOpenResult(channel: stray, error: nil)
+        #expect(await thrownError(openA) as? BLESwiftError == .l2capOpenFailed)
         await waitFor { await stray.onQueue { stray.isClosed } }
         #expect(await stray.onQueue { stray.isClosed })
 
-        // Open A is still pending. Its own channel resolves it.
-        let channelA = FakeL2CAPChannel(psm: Self.psmA, queue: fakePeripheral.queue)
-        fakePeripheral.simulateL2CAPOpenResult(channel: channelA, error: nil)
-        let channel = try await openA.value
+        // The event used up the entry of open A. The next event goes to open B.
+        let channelB = FakeL2CAPChannel(psm: Self.psmA, queue: fakePeripheral.queue)
+        fakePeripheral.simulateL2CAPOpenResult(channel: channelB, error: nil)
+        let channel = try await openB.value
         #expect(channel.psm == Self.psmA)
-        #expect(await channelA.onQueue { !channelA.isClosed })
+        #expect(await channelB.onQueue { !channelB.isClosed })
     }
 
-    @Test("A disconnect fails the live open with the disconnect error and drops the tombstone")
-    func disconnectFailsLiveOpen() async throws {
+    @Test("A failure that arrives first goes to the oldest open, and the later success with that PSM is closed")
+    func failureFirstThenSuccess() async throws {
+        let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
+        await fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .hold }
+
+        let openA = await startOpen(peripheral, fakePeripheral, psm: Self.psmA, expectedCalls: 1)
+        let openB = await startOpen(peripheral, fakePeripheral, psm: Self.psmB, expectedCalls: 2)
+
+        // The failure is for call B, but an error carries no PSM, so it goes to open A.
+        fakePeripheral.simulateL2CAPOpenResult(channel: nil, error: NSError(domain: "L2CAPOpenPairingTests", code: 9))
+        let errorA = await thrownError(openA) as NSError?
+        #expect(errorA?.domain == "L2CAPOpenPairingTests")
+        #expect(errorA?.code == 9)
+
+        // The success is for call A. Only open B is pending, and its PSM is different.
+        let channelA = FakeL2CAPChannel(psm: Self.psmA, queue: fakePeripheral.queue)
+        fakePeripheral.simulateL2CAPOpenResult(channel: channelA, error: nil)
+        #expect(await thrownError(openB) as? BLESwiftError == .l2capOpenFailed)
+        await waitFor { await channelA.onQueue { channelA.isClosed } }
+        #expect(await channelA.onQueue { channelA.isClosed })
+    }
+
+    @Test("A channel that arrives after the open task is cancelled is closed and not returned")
+    func channelAfterTaskCancelIsClosed() async throws {
+        let (_, _, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
+        await fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .hold }
+
+        let openA = await startOpen(peripheral, fakePeripheral, psm: Self.psmA, expectedCalls: 1)
+        let channelA = FakeL2CAPChannel(psm: Self.psmA, queue: fakePeripheral.queue)
+        // On the queue, enqueue the event first and then cancel the task. The event runs before
+        // the cancel handler's block, so the open receives the channel while its task is
+        // cancelled.
+        await fakePeripheral.onQueue {
+            fakePeripheral.simulateL2CAPOpenResult(channel: channelA, error: nil)
+            openA.cancel()
+        }
+        #expect(await thrownError(openA) as? BLESwiftError == .operationCancelled)
+        await waitFor { await channelA.onQueue { channelA.isClosed } }
+        #expect(await channelA.onQueue { channelA.isClosed })
+    }
+
+    @Test("An unexpected disconnect fails the live open with unexpectedDisconnect")
+    func unexpectedDisconnectFailsLiveOpen() async throws {
         let (central, fakeCentral, fakePeripheral, peripheral) = try await makeConnectedTestCentral()
         await fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .hold }
 
