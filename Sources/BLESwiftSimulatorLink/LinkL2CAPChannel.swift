@@ -27,11 +27,43 @@ enum LinkL2CAPError: Error, Equatable {
     case frameTooLarge(Int)
 }
 
+/// One outbound frame of a tunneled L2CAP channel. The owner of the channel puts it on the link
+/// as the request of its role, under the id of the channel.
+enum LinkL2CAPFrame: Sendable, Equatable {
+    /// Bytes for the peer.
+    case data(Data)
+    /// Flow-control credit for the provider.
+    case credit(Int)
+    /// The close of the channel.
+    case close
+
+    /// The central-role request for this frame on `channel`.
+    func centralRequest(channel: UInt32) -> CentralRequest {
+        switch self {
+        case .data(let data): return .l2capData(channel: channel, data: data)
+        case .credit(let bytes): return .l2capCredit(channel: channel, bytes: bytes)
+        case .close: return .l2capClose(channel: channel)
+        }
+    }
+
+    /// The peripheral-role request for this frame on `channel`.
+    func hostRequest(channel: UInt32) -> HostRequest {
+        switch self {
+        case .data(let data): return .l2capData(channel: channel, data: data)
+        case .credit(let bytes): return .l2capCredit(channel: channel, bytes: bytes)
+        case .close: return .l2capClose(channel: channel)
+        }
+    }
+}
+
 /// The client half of a tunneled L2CAP channel, an ``BLESwiftCore/L2CAPChannelRemote``. Its bytes
 /// travel as `l2capData` frames under credit-based flow control.
 ///
-/// ``LinkPeripheral/openL2CAPChannel(_:)`` creates a channel. ``LinkCentral`` then feeds it
-/// through ``receive(_:)``, ``addCredit(bytes:)``, and ``remoteClosed(error:)``.
+/// Both roles use it. ``LinkPeripheral/openL2CAPChannel(_:)`` creates a central-role channel, and
+/// ``LinkCentral`` feeds it. ``LinkPeripheralManager`` creates a peripheral-role channel when a
+/// central opens one, and feeds it. The owner feeds a channel through ``receive(_:)``,
+/// ``addCredit(bytes:)``, and ``remoteClosed(error:)``. The channel gives each outbound frame to
+/// its owner as a ``LinkL2CAPFrame``.
 ///
 /// - Outbound: ``write(_:)`` splits its payload into chunks of at most ``maximumChunk`` bytes. It
 ///   uses credit for each chunk and suspends if credit is short. The provider returns credit only
@@ -85,9 +117,9 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
     /// `l2capCredit`, and `l2capClosed`.
     let channel: UInt32
 
-    /// Puts one request on the link. It is safe to call from any isolation domain. ``LinkCentral``
+    /// Puts one frame on the link. It is safe to call from any isolation domain. The owner
     /// supplies a closure that hops onto its own queue.
-    private let send: @Sendable (CentralRequest) -> Void
+    private let send: @Sendable (LinkL2CAPFrame) -> Void
 
     private let state = Mutex(State())
 
@@ -102,12 +134,17 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
     /// - Parameters:
     ///   - channel: The link-wide channel id. The provider tags the frames of this channel with it.
     ///   - psm: The PSM against which the code issued the open.
-    ///   - send: Puts one ``BLESwiftLink/CentralRequest`` on the link, from any isolation
-    ///     domain.
-    init(channel: UInt32, psm: L2CAPPSM, send: @escaping @Sendable (CentralRequest) -> Void) {
+    ///   - sendFrame: Puts one ``LinkL2CAPFrame`` on the link, from any isolation domain.
+    init(channel: UInt32, psm: L2CAPPSM, sendFrame: @escaping @Sendable (LinkL2CAPFrame) -> Void) {
         self.channel = channel
         self.psm = psm
-        self.send = send
+        self.send = sendFrame
+    }
+
+    /// Creates a central-role channel whose frames go to `send` as
+    /// ``BLESwiftLink/CentralRequest`` values. Only tests use this initializer.
+    convenience init(channel: UInt32, psm: L2CAPPSM, send: @escaping @Sendable (CentralRequest) -> Void) {
+        self.init(channel: channel, psm: psm, sendFrame: { frame in send(frame.centralRequest(channel: channel)) })
     }
 
     // MARK: - L2CAPChannelRemote
@@ -225,7 +262,7 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
         case .yield(let continuation):
             continuation.yield(data)
         }
-        send(.l2capCredit(channel: channel, bytes: data.count))
+        send(.credit(data.count))
     }
 
     /// Grants `bytes` of outbound credit and resumes a writer that waited for room.
@@ -266,7 +303,7 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
     /// Acquires credit for `chunk` and puts the chunk on the wire.
     private func sendChunk(_ chunk: Data) async throws {
         try await acquireCredit(chunk.count)
-        send(.l2capData(channel: channel, data: chunk))
+        send(.data(chunk))
     }
 
     /// Suspends until `count` bytes of outbound credit are available, and then consumes them.
@@ -338,7 +375,7 @@ final class LinkL2CAPChannel: L2CAPChannelRemote {
         }
         guard let teardown else { return }
         // Make every callout after the lock is released.
-        if teardown.shouldSendClose { send(.l2capClose(channel: channel)) }
+        if teardown.shouldSendClose { send(.close) }
         teardown.continuation?.finish(throwing: error)
         for waiter in teardown.waiters { waiter.continuation.resume(throwing: LinkL2CAPError.closed) }
     }

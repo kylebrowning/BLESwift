@@ -26,6 +26,10 @@ import Foundation
 /// A client that pushes past it loses its link. The hosted database is bounded at
 /// ``maximumHostedServices``.
 ///
+/// **L2CAP.** A channel that a remote central opens gets a session-wide id, from 1, and an
+/// ``L2CAPChannelRelay`` bridges it. At most ``maximumHostChannels`` channels are open at one
+/// time.
+///
 /// - Note: The session holds its ``BLESwiftLink/LinkConnection`` strongly, as ``CentralSession``
 ///   does.
 final class HostSession: Sendable {
@@ -61,6 +65,12 @@ final class HostSession: Sendable {
     /// a client that loops over new UUIDs would reach in one second. A client past this number
     /// has left the protocol. The link goes, and not this session's memory.
     static let maximumHostedServices = 64
+
+    /// The number of L2CAP channels that remote centrals can have open to this host at one time.
+    /// A channel that opens past this number is closed at once, and the client never hears of it.
+    /// Sixty-four is the same bound as the hosted database, and much more than a real host keeps
+    /// open.
+    static let maximumHostChannels = 64
 
     /// The connection that this session serves. The session holds it strongly for its whole
     /// lifetime.
@@ -98,6 +108,13 @@ final class HostSession: Sendable {
     /// session ``queue``.
     nonisolated(unsafe) private var hostedServices = 0
 
+    /// The relay that bridges the L2CAP channels that remote centrals open to this host.
+    private let relay: L2CAPChannelRelay
+
+    /// The id that the next host-side L2CAP channel gets. The ids of each session start at 1 and
+    /// are never used again. Use it only on ``queue``.
+    nonisolated(unsafe) private var nextChannel: UInt32 = 1
+
     /// Creates a session that serves `connection` from `backend`.
     ///
     /// The ordering is the same as in ``CentralSession``. The initializer first schedules the
@@ -130,6 +147,10 @@ final class HostSession: Sendable {
         self.queue = queue
         self.label = "host session \(ordinal)"
         self.log = log
+        // The relay calls `send` on `queue`, as ``send(_:)`` requires.
+        self.relay = L2CAPChannelRelay(queue: queue, log: log) { [connection] channel, frame in
+            connection.send(.hostEvent(HostSession.event(for: frame, channel: channel)))
+        }
         queue.async { [self] in
             guard !isClosed else { return }
             // Nothing can precede the hello on the wire. See `CentralSession`.
@@ -150,10 +171,12 @@ final class HostSession: Sendable {
         }
     }
 
-    /// Tears the session down. It stops advertising, empties the hosted GATT database, and
-    /// takes the hosted device off the radio, so any central that is still connected to the
-    /// device sees the removal. It detaches the backend's event handler and closes the link
-    /// connection. Repeated calls are safe. It is safe to call from any thread.
+    /// Tears the session down. It closes every host-side L2CAP channel with
+    /// `LinkError.providerDisconnected`, so the central at the other end sees an error. It stops
+    /// advertising, empties the hosted GATT database, and takes the hosted device off the radio,
+    /// so any central that is still connected to the device sees the removal. It detaches the
+    /// backend's event handler and closes the link connection. Repeated calls are safe. It is
+    /// safe to call from any thread.
     ///
     /// The method asks for the removal outright and does not take it as a side effect of the
     /// detach. Clearing the handler of a ``VirtualPeripheralManagerBackend`` only detaches the
@@ -163,6 +186,7 @@ final class HostSession: Sendable {
         queue.async { [self] in
             guard !isClosed else { return }
             isClosed = true
+            relay.closeChannels(matching: { _ in true }, error: LinkError.providerDisconnected.nsError)
             backend.stopAdvertising()
             backend.removeAllHostedServices()
             (backend as? any HostedDeviceRemoving)?.removeHostedDevice()
@@ -254,7 +278,65 @@ final class HostSession: Sendable {
                 centrals: centrals?.map { Subscriber(id: $0, maximumUpdateValueLength: Self.maximumUpdateValueLength) }
             ))
             drainUpdates()
+
+        case .publishL2CAPChannel(let requiresEncryption):
+            guard let publisher = backend as? any L2CAPPublishing else {
+                send(.didPublishL2CAPChannel(psm: nil, error: WireError(BLESwiftError.l2capPublishFailed as NSError)))
+                return
+            }
+            publisher.publishL2CAPChannel(requiresEncryption: requiresEncryption)
+
+        case .unpublishL2CAPChannel(let psm):
+            guard let publisher = backend as? any L2CAPPublishing else {
+                send(.didUnpublishL2CAPChannel(psm: psm, error: WireError(BLESwiftError.l2capPublishFailed as NSError)))
+                return
+            }
+            publisher.unpublishL2CAPChannel(L2CAPPSM(psm))
+
+        case .l2capData(let channel, let data):
+            do {
+                try relay.write(data, to: channel)
+            } catch {
+                switch error {
+                case .frameTooLarge(let channel, let bytes):
+                    failProtocol(ProtocolViolation.l2capFrameTooLarge(channel: channel, bytes: bytes))
+                case .writeWindowExceeded(let channel):
+                    failProtocol(ProtocolViolation.l2capWriteWindowExceeded(channel: channel))
+                }
+            }
+
+        case .l2capCredit(let channel, let bytes):
+            relay.grantCredit(bytes, to: channel)
+
+        case .l2capClose(let channel):
+            relay.closeChannel(channel)
         }
+    }
+
+    /// The peripheral-role event for one relay frame on `channel`.
+    static func event(for frame: L2CAPChannelRelay.Frame, channel: UInt32) -> HostWireEvent {
+        switch frame {
+        case .data(let data): return .l2capData(channel: channel, data: data)
+        case .credit(let bytes): return .l2capCredit(channel: channel, bytes: bytes)
+        case .closed(let error): return .l2capClosed(channel: channel, error: error)
+        }
+    }
+
+    /// Gives a channel that a remote central opened to the relay, under a new id, and tells the
+    /// client. Past ``maximumHostChannels`` open channels, it closes the new channel instead. Call
+    /// it on ``queue``.
+    private func bridgeIncomingChannel(_ channel: any L2CAPChannelRemote, from central: UUID) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard relay.channels.count < Self.maximumHostChannels else {
+            log?("\(label): \(relay.channels.count) L2CAP channels are open; closing the new channel from \(central)")
+            channel.close(error: nil)
+            return
+        }
+        let identifier = nextChannel
+        nextChannel &+= 1
+        let open = relay.insert(channel, as: identifier, owner: central)
+        send(.didOpenL2CAPChannel(channel: identifier, psm: channel.psm.rawValue, central: central))
+        relay.startPump(for: identifier, open: open)
     }
 
     /// The client actions that this session refuses to serve.
@@ -270,6 +352,14 @@ final class HostSession: Sendable {
         /// The client published more services than ``maximumHostedServices`` allows. It grows
         /// the provider's hosted database without bound.
         case hostedServiceLimitExceeded
+
+        /// A `l2capData` frame was larger than the chunk size to which both ends chunk. See
+        /// ``L2CAPChannelRelay/maximumChunk``.
+        case l2capFrameTooLarge(channel: UInt32, bytes: Int)
+
+        /// More client-written bytes than ``L2CAPChannelRelay/maximumOutstandingWrites`` allows
+        /// were unwritten on one channel. The client has ignored its credit window.
+        case l2capWriteWindowExceeded(channel: UInt32)
     }
 
     /// Drops the client's link because the client sent something that the protocol does not
@@ -412,14 +502,19 @@ final class HostSession: Sendable {
             // in `CentralSession`.
             break
 
-        case .didPublishL2CAPChannel, .didUnpublishL2CAPChannel:
-            // The link protocol does not carry peripheral-role L2CAP yet.
-            break
+        case .didPublishL2CAPChannel(let psm, let error):
+            send(.didPublishL2CAPChannel(psm: psm?.rawValue, error: error.wire))
 
-        case .didOpenL2CAPChannel(let channel, _, _):
-            // The link protocol does not carry peripheral-role L2CAP yet. Close the channel, so
-            // that it does not leak.
-            channel?.close(error: nil)
+        case .didUnpublishL2CAPChannel(let psm, let error):
+            send(.didUnpublishL2CAPChannel(psm: psm.rawValue, error: error.wire))
+
+        case .didOpenL2CAPChannel(let channel, let central, let error):
+            // A failed open has no host-side waiter, so the session drops it.
+            guard error == nil, let channel, let central else {
+                log?("\(label): dropping a failed L2CAP channel open")
+                return
+            }
+            bridgeIncomingChannel(channel, from: central)
         }
     }
 

@@ -243,3 +243,4 @@ The radio is a test harness. It does not simulate the radio link. These limits a
 - RSSI is a constant. See ``VirtualRadio/rssi``.
 - There are no system-connected peripherals. Nothing is connected before your code connects it.
 - Writes without response and notifications have the limit ``VirtualRadio/maximumWriteWithoutResponseLength``. Responses have the limit ``VirtualRadio/maximumValueLength``. Hardware has the same ATT limits.
+- L2CAP channels work. A `PeripheralHost` over a ``VirtualPeripheralManagerBackend`` publishes a PSM, and a `Central` on the same radio opens it. Your own handler can accept channels if it conforms to ``VirtualL2CAPAccepting``. The radio ignores `requiresEncryption`, because it has no link encryption. A disconnect, a removal, or a detach fails each open channel with ``VirtualRadio/peripheralDisconnectedError``.

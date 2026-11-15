@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Peripheral-role L2CAP. `PeripheralHost.publishL2CAPChannel(requiresEncryption:)` publishes
+  a channel and returns its PSM. `PeripheralHost.unpublishL2CAPChannel(_:)` removes it.
+  `PeripheralHost.incomingL2CAPChannels()` delivers each channel that a central opens, as an
+  `IncomingL2CAPChannel`. It works on CoreBluetooth, on the virtual radio, and over the
+  simulator link.
+- `L2CAPPublishing`, the backend protocol for this feature, and
+  `BLESwiftError.l2capPublishFailed`. `FakePeripheralManager` conforms and can script each
+  result.
+- L2CAP channels on the virtual radio. A `Central` can open a channel to a PSM that a hosted
+  device published. A custom device handler accepts channels if it conforms to
+  `VirtualL2CAPAccepting`. The radio ignores `requiresEncryption`.
+
+### Changed
+
+- The link protocol version is now 2. An app and `bleswift-provider` must use the same
+  version, so update them together.
+- `PeripheralHostEvent` has three new cases: `didPublishL2CAPChannel(psm:error:)`,
+  `didUnpublishL2CAPChannel(psm:error:)`, and
+  `didOpenL2CAPChannel(channel:central:error:)`. An exhaustive `switch` over
+  `PeripheralHostEvent` outside the package must handle them.
+- On the virtual radio, an L2CAP open no longer fails with `BLESwiftProvider` code 3. An open
+  to a PSM that is not published fails with code 12. A publish that cannot get its PSM fails
+  with code 13.
+
 ## [3.1.0] - 2026-11-01
 
 ### Added

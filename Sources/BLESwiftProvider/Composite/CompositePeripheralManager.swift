@@ -21,11 +21,14 @@ import Foundation
 /// - A child that is not powered on is skipped. The composite publishes to it again when it powers
 ///   on.
 /// - ``updateValue(_:for:onSubscribed:)`` keeps one FIFO for each child.
+/// - ``publishL2CAPChannel(requiresEncryption:)`` publishes one PSM on every powered-on child
+///   that can publish. A real child selects the PSM, and each virtual child publishes that same
+///   PSM.
 /// - Important: Every child must be confined to the same `queue`. Do not call
 ///   ``init(backends:queue:log:)`` from that queue.
 ///
 /// See <doc:BLESwiftProvider#Composite-backends>.
-public final class CompositePeripheralManager: PeripheralManaging, HostedDeviceRemoving, Sendable {
+public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemoving, Sendable {
 
     /// One outstanding fan-out that waits for the completions of its children.
     private struct Pending {
@@ -117,6 +120,68 @@ public final class CompositePeripheralManager: PeripheralManaging, HostedDeviceR
     /// line for each push.
     nonisolated(unsafe) private var _loggedDropping: Set<Int> = []
 
+    // MARK: L2CAP state
+
+    /// One ``publishL2CAPChannel(requiresEncryption:)`` call that has not completed. The
+    /// composite completes the calls in call order. A batch that settled waits in
+    /// ``_publishBatches`` until every earlier batch has settled too.
+    private struct PublishBatch {
+        /// Identifies the batch in the waits of each child.
+        let id: UInt64
+        /// The `requiresEncryption` argument of the call.
+        let requiresEncryption: Bool
+        /// The child that selects the PSM, while it has not answered.
+        var lead: Int?
+        /// The PSM that the lead child published.
+        var psm: L2CAPPSM?
+        /// The children that were asked for ``psm`` and have not answered.
+        var owing: Set<Int> = []
+        /// The children that published ``psm``, the lead child first.
+        var succeeded: [Int] = []
+        /// The first error that a follower reported.
+        var error: NSError?
+        /// The completion of the call, when the batch has settled.
+        var result: (psm: L2CAPPSM?, error: NSError?)?
+    }
+
+    /// One ``unpublishL2CAPChannel(_:)`` call that has not completed.
+    private struct UnpublishBatch {
+        let id: UInt64
+        let psm: L2CAPPSM
+        /// The children that have not answered.
+        var owing: Set<Int>
+        /// The first error that a child reported.
+        var error: NSError?
+    }
+
+    /// What one L2CAP completion of a child belongs to. Each child answers its calls in call
+    /// order, so one FIFO for each child pairs the answers with the calls.
+    private enum L2CAPWait {
+        /// The answer belongs to the batch with this id.
+        case batch(UInt64)
+        /// The answer belongs to an unpublish that rolled back a failed publish. The composite
+        /// swallows it.
+        case rollback
+    }
+
+    /// The publish calls that have not completed, in call order.
+    nonisolated(unsafe) private var _publishBatches: [PublishBatch] = []
+
+    /// The unpublish calls that have not completed.
+    nonisolated(unsafe) private var _unpublishBatches: [UnpublishBatch] = []
+
+    /// The allocator for batch ids.
+    nonisolated(unsafe) private var _nextBatch: UInt64 = 0
+
+    /// The publish answers that each child owes, oldest first, at the child's index.
+    nonisolated(unsafe) private var _publishWaits: [[L2CAPWait]] = []
+
+    /// The unpublish answers that each child owes, oldest first, at the child's index.
+    nonisolated(unsafe) private var _unpublishWaits: [[L2CAPWait]] = []
+
+    /// The children that hold each published PSM.
+    nonisolated(unsafe) private var _psmHolders: [L2CAPPSM: Set<Int>] = [:]
+
     /// Whether the composite told its host that the window is closed, and owes the host one
     /// `readyToUpdateSubscribers`. The `false` that closed the window sets this value. The
     /// single event that reopens the window clears it.
@@ -172,6 +237,8 @@ public final class CompositePeripheralManager: PeripheralManaging, HostedDeviceR
         self._proven = Array(repeating: false, count: backends.count)
         self._swallowedAdds = Array(repeating: 0, count: backends.count)
         self._swallowedAdvertisements = Array(repeating: 0, count: backends.count)
+        self._publishWaits = Array(repeating: [], count: backends.count)
+        self._unpublishWaits = Array(repeating: [], count: backends.count)
         queue.sync { attachChildren() }
     }
 
@@ -198,6 +265,8 @@ public final class CompositePeripheralManager: PeripheralManaging, HostedDeviceR
         self._proven = Array(repeating: false, count: backends.count)
         self._swallowedAdds = Array(repeating: 0, count: backends.count)
         self._swallowedAdvertisements = Array(repeating: 0, count: backends.count)
+        self._publishWaits = Array(repeating: [], count: backends.count)
+        self._unpublishWaits = Array(repeating: [], count: backends.count)
         attachChildren()
     }
 
@@ -267,6 +336,10 @@ public final class CompositePeripheralManager: PeripheralManaging, HostedDeviceR
             completeAdvertising(error: error, from: index)
         case .readyToUpdateSubscribers:
             resume(child: index)
+        case .didPublishL2CAPChannel(let psm, let error):
+            completePublish(psm: psm, error: error, from: index)
+        case .didUnpublishL2CAPChannel(let psm, let error):
+            completeUnpublish(psm, error: error, from: index)
         default:
             _eventHandler?(event)
         }
@@ -354,7 +427,14 @@ public final class CompositePeripheralManager: PeripheralManaging, HostedDeviceR
         _swallowedAdds[index] = 0
         _swallowedAdvertisements[index] = 0
 
+        // The radio that went away dropped its published channels, and it may never answer the
+        // L2CAP calls that it owes.
+        releaseL2CAP(child: index)
+
         reopenWindowIfPossible()
+
+        // Every table is written. Emit the L2CAP completions that the release settled.
+        flushL2CAP()
 
         // Every table is settled, so a handler that calls back from here finds this composite
         // consistent, and whatever the handler queues survives.
@@ -511,6 +591,226 @@ public final class CompositePeripheralManager: PeripheralManaging, HostedDeviceR
         guard _pendingAdvertisements[position].owing.isEmpty else { return }
         let settled = _pendingAdvertisements.remove(at: position)
         _eventHandler?(.didStartAdvertising(error: settled.error))
+    }
+
+    // MARK: - L2CAP
+
+    /// Whether child `index` can publish and selects its own PSM, as a real
+    /// `CBPeripheralManager` does.
+    private func isRealPublisher(_ index: Int) -> Bool {
+        backends[index] is any L2CAPPublishing && !(backends[index] is any FixedPSMPublishing)
+    }
+
+    /// Whether child `index` can publish a PSM that the caller selects, as the virtual radio
+    /// does.
+    private func isFixedPublisher(_ index: Int) -> Bool {
+        backends[index] is any L2CAPPublishing && backends[index] is any FixedPSMPublishing
+    }
+
+    /// The error of a publish whose lead child powered off before it answered.
+    private static var publishAbandonedError: NSError {
+        BLESwiftError.l2capPublishFailed as NSError
+    }
+
+    /// Publishes an L2CAP channel on the children. Exactly one
+    /// `didPublishL2CAPChannel(psm:error:)` follows each call, in call order.
+    ///
+    /// 1. The first powered-on child that selects its own PSM (a real `CBPeripheralManager`)
+    ///    publishes first. If no such child is on, the first powered-on child that publishes a
+    ///    given PSM (the virtual radio) publishes first, with a PSM that it selects.
+    /// 2. Every other powered-on child that publishes a given PSM then publishes that PSM.
+    /// 3. If one of them fails, the composite unpublishes the PSM on the children that published
+    ///    it, and reports the first error.
+    ///
+    /// If no child can publish, the completion carries ``noPoweredOnBackendError``. A child that
+    /// powers on later does not publish the PSM. A child that powers off drops its share.
+    public func publishL2CAPChannel(requiresEncryption: Bool) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _nextBatch += 1
+        var batch = PublishBatch(id: _nextBatch, requiresEncryption: requiresEncryption)
+        let lead = backends.indices.first { isRealPublisher($0) && isOnline($0) }
+            ?? backends.indices.first { isFixedPublisher($0) && isOnline($0) }
+        guard let lead, let publisher = backends[lead] as? any L2CAPPublishing else {
+            batch.result = (nil, Self.noPoweredOnBackendError)
+            _publishBatches.append(batch)
+            queue.async { [self] in flushL2CAP() }
+            return
+        }
+        batch.lead = lead
+        _publishBatches.append(batch)
+        _publishWaits[lead].append(.batch(batch.id))
+        publisher.publishL2CAPChannel(requiresEncryption: requiresEncryption)
+    }
+
+    /// Unpublishes `psm` on every powered-on child that holds it. One
+    /// `didUnpublishL2CAPChannel(psm:error:)` follows, with the first error. If no child holds
+    /// `psm`, the completion carries `BLESwiftProvider` code 12.
+    public func unpublishL2CAPChannel(_ psm: L2CAPPSM) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let holders = (_psmHolders.removeValue(forKey: psm) ?? []).filter { isOnline($0) }
+        guard !holders.isEmpty else {
+            queue.async { [self] in
+                dispatchPrecondition(condition: .onQueue(queue))
+                _eventHandler?(.didUnpublishL2CAPChannel(psm: psm, error: VirtualRadio.l2capNotPublishedError(psm)))
+            }
+            return
+        }
+        _nextBatch += 1
+        let id = _nextBatch
+        _unpublishBatches.append(UnpublishBatch(id: id, psm: psm, owing: holders))
+        for index in holders.sorted() {
+            _unpublishWaits[index].append(.batch(id))
+            (backends[index] as? any L2CAPPublishing)?.unpublishL2CAPChannel(psm)
+        }
+    }
+
+    /// Settles one child's `didPublishL2CAPChannel`. Call it on ``queue``.
+    ///
+    /// The method swallows an answer from a child that is no longer powered on, as
+    /// ``completeAdd(_:error:from:)`` does, because ``powerDown(child:)`` released the child. It
+    /// forwards an answer to a call that this composite never made.
+    private func completePublish(psm: L2CAPPSM?, error: NSError?, from index: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard isOnline(index) else { return }
+        guard !_publishWaits[index].isEmpty else {
+            _eventHandler?(.didPublishL2CAPChannel(psm: psm, error: error))
+            return
+        }
+        guard case .batch(let id) = _publishWaits[index].removeFirst(),
+              let position = _publishBatches.firstIndex(where: { $0.id == id }) else { return }
+        var batch = _publishBatches[position]
+        var rollbacks: [Int] = []
+        var followers: [Int] = []
+        if batch.lead == index {
+            batch.lead = nil
+            if let psm, error == nil {
+                batch.psm = psm
+                batch.succeeded = [index]
+                _psmHolders[psm, default: []].insert(index)
+                followers = backends.indices.filter { $0 != index && isFixedPublisher($0) && isOnline($0) }
+                batch.owing = Set(followers)
+                if followers.isEmpty { batch.result = (psm, nil) }
+            } else {
+                batch.result = (nil, error)
+            }
+        } else if batch.owing.remove(index) != nil {
+            if let published = batch.psm, error == nil, psm == published {
+                batch.succeeded.append(index)
+                _psmHolders[published, default: []].insert(index)
+            } else if batch.error == nil {
+                batch.error = error ?? Self.publishAbandonedError
+            }
+            if batch.owing.isEmpty { rollbacks = settleFollowers(&batch) }
+        }
+        _publishBatches[position] = batch
+        // Every table is written before the calls below. A child answers asynchronously, so no
+        // call reenters this method.
+        if let psm = batch.psm {
+            for follower in followers {
+                _publishWaits[follower].append(.batch(batch.id))
+                (backends[follower] as? any FixedPSMPublishing)?.publishL2CAPChannel(
+                    requiresEncryption: batch.requiresEncryption,
+                    psm: psm
+                )
+            }
+            for child in rollbacks {
+                _unpublishWaits[child].append(.rollback)
+                (backends[child] as? any L2CAPPublishing)?.unpublishL2CAPChannel(psm)
+            }
+        }
+        flushL2CAP()
+    }
+
+    /// Settles a batch whose followers have all answered or gone. On an error, it takes the PSM
+    /// off every child that published it. Call it on ``queue``.
+    ///
+    /// - Returns: The powered-on children on which the caller must unpublish the PSM.
+    private func settleFollowers(_ batch: inout PublishBatch) -> [Int] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let psm = batch.psm else {
+            batch.result = (nil, batch.error ?? Self.publishAbandonedError)
+            return []
+        }
+        guard let error = batch.error else {
+            batch.result = (psm, nil)
+            return []
+        }
+        batch.result = (nil, error)
+        for child in batch.succeeded {
+            _psmHolders[psm]?.remove(child)
+        }
+        if _psmHolders[psm]?.isEmpty == true { _psmHolders.removeValue(forKey: psm) }
+        return batch.succeeded.filter { isOnline($0) }
+    }
+
+    /// Settles one child's `didUnpublishL2CAPChannel`. Call it on ``queue``. The method swallows
+    /// the answer to a rollback, and an answer from a child that is no longer powered on. It
+    /// forwards an answer to a call that this composite never made.
+    private func completeUnpublish(_ psm: L2CAPPSM, error: NSError?, from index: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard isOnline(index) else { return }
+        guard !_unpublishWaits[index].isEmpty else {
+            _eventHandler?(.didUnpublishL2CAPChannel(psm: psm, error: error))
+            return
+        }
+        guard case .batch(let id) = _unpublishWaits[index].removeFirst(),
+              let position = _unpublishBatches.firstIndex(where: { $0.id == id }) else { return }
+        _unpublishBatches[position].owing.remove(index)
+        if _unpublishBatches[position].error == nil { _unpublishBatches[position].error = error }
+        flushL2CAP()
+    }
+
+    /// Releases child `index` from every L2CAP call that it owes, and forgets the PSMs that it
+    /// held. It emits nothing. ``powerDown(child:)`` calls ``flushL2CAP()`` after it has written
+    /// every table. Call it on ``queue``.
+    private func releaseL2CAP(child index: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        _publishWaits[index].removeAll()
+        _unpublishWaits[index].removeAll()
+        for psm in Array(_psmHolders.keys) {
+            _psmHolders[psm]?.remove(index)
+            if _psmHolders[psm]?.isEmpty == true { _psmHolders.removeValue(forKey: psm) }
+        }
+        var rollbacks: [(child: Int, psm: L2CAPPSM)] = []
+        for position in _publishBatches.indices where _publishBatches[position].result == nil {
+            var batch = _publishBatches[position]
+            batch.succeeded.removeAll { $0 == index }
+            if batch.lead == index {
+                batch.lead = nil
+                batch.result = (nil, Self.publishAbandonedError)
+            } else if batch.owing.remove(index) != nil, batch.owing.isEmpty, let psm = batch.psm {
+                for child in settleFollowers(&batch) {
+                    rollbacks.append((child, psm))
+                }
+            }
+            _publishBatches[position] = batch
+        }
+        for position in _unpublishBatches.indices {
+            _unpublishBatches[position].owing.remove(index)
+        }
+        for rollback in rollbacks {
+            _unpublishWaits[rollback.child].append(.rollback)
+            (backends[rollback.child] as? any L2CAPPublishing)?.unpublishL2CAPChannel(rollback.psm)
+        }
+    }
+
+    /// Emits the L2CAP completions that are ready. Publish completions go out in call order: a
+    /// batch that settled waits for every earlier batch. An unpublish completion goes out when
+    /// its last child has answered. Call it on ``queue``.
+    private func flushL2CAP() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        var events: [PeripheralHostEvent] = []
+        while let head = _publishBatches.first, let result = head.result {
+            _publishBatches.removeFirst()
+            events.append(.didPublishL2CAPChannel(psm: result.psm, error: result.error))
+        }
+        for batch in _unpublishBatches where batch.owing.isEmpty {
+            events.append(.didUnpublishL2CAPChannel(psm: batch.psm, error: batch.error))
+        }
+        _unpublishBatches.removeAll { $0.owing.isEmpty }
+        // Every table is written, so a handler that calls back from here finds this composite
+        // consistent.
+        for event in events { _eventHandler?(event) }
     }
 
     // MARK: - HostedDeviceRemoving

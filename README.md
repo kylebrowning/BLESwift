@@ -125,6 +125,8 @@ The provider has a virtual radio. The virtual radio does not need hardware, enti
 approval. A `PeripheralHost` in a simulator becomes a device on the virtual radio, so
 **two simulators can communicate**. `Scripts/sim-to-sim-e2e.sh` tests this. You can run it
 locally. CI also runs it on each push to `main` and on each pull request from this repository.
+The two simulators can also use L2CAP channels. One app publishes a PSM, and the other app
+opens it.
 
 The `--passthrough` option also gives access to the real radio of your Mac. For this option,
 the provider build must be signed and must have the Bluetooth entitlement.

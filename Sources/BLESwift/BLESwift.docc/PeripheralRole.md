@@ -91,6 +91,32 @@ try await host.updateValue(newReading, for: measurement)
 
 If the CoreBluetooth transmit queue is full, ``PeripheralHost/updateValue(_:for:onSubscribed:)`` suspends. It waits for `peripheralManagerIsReady(toUpdateSubscribers:)` and tries again. The call returns when CoreBluetooth has queued the update.
 
+## Publishing an L2CAP channel
+
+For a transfer that is too large for GATT, publish an L2CAP channel. ``PeripheralHost/publishL2CAPChannel(requiresEncryption:)`` returns the PSM that the system selected. Give the PSM to centrals, for example in a readable characteristic. Each channel that a central opens arrives on ``PeripheralHost/incomingL2CAPChannels()``:
+
+```swift
+// Subscribe before you publish. The stream does not replay.
+let incoming = await host.incomingL2CAPChannels()
+let psm = try await host.publishL2CAPChannel()
+
+Task {
+    for await channel in incoming {
+        Task {
+            for try await chunk in channel.incomingData {
+                try await channel.write(chunk)   // Echo each chunk back.
+            }
+        }
+    }
+}
+```
+
+- An ``IncomingL2CAPChannel`` has a single-consumer ``IncomingL2CAPChannel/incomingData`` stream. Let only one subscriber read it.
+- If a channel opens while nothing consumes ``PeripheralHost/incomingL2CAPChannels()``, the host closes the channel.
+- The host does not track open channels. The channel closes when the central disconnects, when Bluetooth turns off, or when either side calls close.
+- ``PeripheralHost/unpublishL2CAPChannel(_:)`` removes the PSM. Channels that are already open stay open.
+- When the radio leaves ``CentralState/poweredOn``, the radio drops every published PSM. Publish again after power returns.
+
 ## Tearing down
 
 ``PeripheralHost/stopAndExtractState()`` detaches the delegate and returns the `CBPeripheralManager` to you. It fails every pending operation with ``BLESwiftError/stopped``. For a softer stop, use ``PeripheralHost/stopAdvertising()`` or ``PeripheralHost/removeAllServices()``.
@@ -147,6 +173,10 @@ To connect a real ``PeripheralHost`` to a real ``Central`` in one process, use `
 ### Advertising
 
 - ``PeripheralAdvertisement``
+
+### L2CAP
+
+- ``IncomingL2CAPChannel``
 
 ### Requests and responses
 
