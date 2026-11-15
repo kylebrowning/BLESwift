@@ -416,22 +416,55 @@ struct HostL2CAPLinkTests {
         #expect(await radio.publishedL2CAP[virtual.identifier] == nil)
     }
 
-    @Test("A conflict on the virtual child rolls back the real child's publish")
-    func compositeConflictRollsBack() async throws {
-        let (host, real, virtual, radio) = await makeCompositeHost("composite.l2cap.conflict", realState: .poweredOn)
-        await real.onQueue { real.publishBehavior = .succeed(L2CAPPSM(0x0085)) }
+    /// Answers the `count`-th held publish call of `real` with `psm`.
+    private func answerPublish(_ real: FakePeripheralManager, call count: Int, psm: UInt16) async {
+        await waitFor(timeout: .seconds(5)) { await real.onQueue { real.publishL2CAPChannelCalls.count >= count } }
+        real.simulatePublishResult(psm: L2CAPPSM(psm), error: nil)
+    }
+
+    @Test("A conflict on the virtual child makes the real child give another PSM, and the conflicting PSM is unpublished")
+    func compositeConflictRetries() async throws {
+        let (host, real, virtual, radio) = await makeCompositeHost("composite.l2cap.retry", realState: .poweredOn)
+        await real.onQueue { real.publishBehavior = .hold }
         let generation = try #require(await radio.generation(of: virtual.identifier))
-        _ = await radio.publishL2CAP(device: virtual.identifier, generation: generation, psm: L2CAPPSM(0x0085))
+        _ = await radio.publishL2CAP(device: virtual.identifier, generation: generation, psm: L2CAPPSM(0x0080))
+
+        let publish = Task { try await host.publishL2CAPChannel() }
+        await answerPublish(real, call: 1, psm: 0x0080)
+        await answerPublish(real, call: 2, psm: 0x0081)
+
+        #expect(try await bounded { try await publish.value } == L2CAPPSM(0x0081))
+        #expect(await real.onQueue { real.publishL2CAPChannelCalls.count } == 2)
+        await waitFor(timeout: .seconds(5)) { await real.onQueue { !real.unpublishL2CAPChannelCalls.isEmpty } }
+        #expect(await real.onQueue { real.unpublishL2CAPChannelCalls } == [L2CAPPSM(0x0080)])
+        #expect(await radio.publishedL2CAP[virtual.identifier] == [L2CAPPSM(0x0080), L2CAPPSM(0x0081)])
+    }
+
+    @Test("Four conflicts fail the publish with code 13 and unpublish every PSM on the real child")
+    func compositeFourConflictsFail() async throws {
+        let (host, real, virtual, radio) = await makeCompositeHost("composite.l2cap.conflict", realState: .poweredOn)
+        await real.onQueue { real.publishBehavior = .hold }
+        let generation = try #require(await radio.generation(of: virtual.identifier))
+        let taken: [UInt16] = [0x0080, 0x0081, 0x0082, 0x0083]
+        for psm in taken {
+            _ = await radio.publishL2CAP(device: virtual.identifier, generation: generation, psm: L2CAPPSM(psm))
+        }
+
+        let publish = Task { try await host.publishL2CAPChannel() }
+        for (call, psm) in taken.enumerated() {
+            await answerPublish(real, call: call + 1, psm: psm)
+        }
 
         do {
-            _ = try await host.publishL2CAPChannel()
+            _ = try await bounded { try await publish.value }
             Issue.record("expected the publish to fail")
         } catch {
             #expect((error as NSError).domain == "BLESwiftProvider")
             #expect((error as NSError).code == 13)
         }
-        await waitFor(timeout: .seconds(5)) { await real.onQueue { !real.unpublishL2CAPChannelCalls.isEmpty } }
-        #expect(await real.onQueue { real.unpublishL2CAPChannelCalls } == [L2CAPPSM(0x0085)])
+        #expect(await real.onQueue { real.publishL2CAPChannelCalls.count } == 4)
+        await waitFor(timeout: .seconds(5)) { await real.onQueue { real.unpublishL2CAPChannelCalls.count == 4 } }
+        #expect(Set(await real.onQueue { real.unpublishL2CAPChannelCalls }) == Set(taken.map(L2CAPPSM.init)))
     }
 
     @Test("With the real child off, the composite publishes on the virtual child alone")
@@ -513,19 +546,91 @@ struct HostL2CAPLinkTests {
         }
     }
 
-    @Test("Two publishes on a composite complete in call order")
+    /// A real child for the composite that a test drives by hand. Its radio state changes with
+    /// no state event, and it answers a publish only when the test calls ``answer(psm:)``.
+    private final class HeldRealChild: L2CAPPublishing, Sendable {
+        let queue: DispatchQueue
+        nonisolated(unsafe) private var _eventHandler: ((PeripheralHostEvent) -> Void)?
+        nonisolated(unsafe) var state: CentralState = .poweredOn
+        nonisolated(unsafe) private(set) var publishCalls = 0
+
+        init(queue: DispatchQueue) { self.queue = queue }
+
+        var eventHandler: ((PeripheralHostEvent) -> Void)? {
+            get { dispatchPrecondition(condition: .onQueue(queue)); return _eventHandler }
+            set { dispatchPrecondition(condition: .onQueue(queue)); _eventHandler = newValue }
+        }
+        var radioState: CentralState { dispatchPrecondition(condition: .onQueue(queue)); return state }
+        var isAdvertising: Bool { false }
+        static var bluetoothAuthorization: BluetoothAuthorization { .allowedAlways }
+        func startAdvertising(_ advertisement: PeripheralAdvertisement) {}
+        func stopAdvertising() {}
+        func add(_ service: GATTService) {}
+        func removeAllHostedServices() {}
+        func respond(to token: RequestToken, value: Data?, error: ATTError?) {}
+        func updateValue(_ value: Data, for characteristic: CharacteristicIdentifier, onSubscribed centrals: [Subscriber]?) -> Bool { true }
+        func publishL2CAPChannel(requiresEncryption: Bool) {
+            dispatchPrecondition(condition: .onQueue(queue))
+            publishCalls += 1
+        }
+        func unpublishL2CAPChannel(_ psm: L2CAPPSM) {}
+
+        /// Delivers a successful publish answer on ``queue``.
+        func answer(psm: L2CAPPSM) {
+            queue.async { [self] in _eventHandler?(.didPublishL2CAPChannel(psm: psm, error: nil)) }
+        }
+    }
+
+    @Test("A publish that settles first waits for the earlier publish before it completes")
     func compositePublishesInOrder() async throws {
-        let (composite, real, _, _, log, queue) = await makeComposite("composite.l2cap.order")
-        await real.onQueue { real.publishBehavior = .hold }
+        let radio = VirtualRadio()
+        let queue = DispatchQueue(label: "composite.l2cap.order")
+        let real = HeldRealChild(queue: queue)
+        let virtual = VirtualPeripheralManagerBackend(radio: radio, queue: queue)
+        let composite = CompositePeripheralManager(backends: [real, virtual], queue: queue)
+        let log = Log<[PeripheralHostEvent]>([])
+        await Self.onQueue(queue) {
+            composite.eventHandler = { event in
+                if case .didPublishL2CAPChannel = event { log.withLock { $0.append(event) } }
+            }
+        }
+        await waitFor(timeout: .seconds(5)) { await radio.generation(of: virtual.identifier) != nil }
+
+        // Batch 1 waits on the real child. Then the real child goes off with no state event, so
+        // the virtual child leads batch 2 and settles it first.
         await Self.onQueue(queue) {
             composite.publishL2CAPChannel(requiresEncryption: false)
+            real.state = .poweredOff
             composite.publishL2CAPChannel(requiresEncryption: false)
         }
-        real.simulatePublishResult(psm: L2CAPPSM(0x0090), error: nil)
-        real.simulatePublishResult(psm: L2CAPPSM(0x0091), error: nil)
+        await waitFor(timeout: .seconds(5)) { await radio.publishedL2CAP[virtual.identifier] == [L2CAPPSM(0x0080)] }
+        #expect(await radio.publishedL2CAP[virtual.identifier] == [L2CAPPSM(0x0080)])
+        try? await Task.sleep(for: .milliseconds(50))
+        await Self.onQueue(queue) {}
+        // Batch 2 has settled, but its completion waits for batch 1.
+        #expect(Self.publishes(log).isEmpty)
+
+        // The real child comes back with no state event and answers batch 1.
+        await Self.onQueue(queue) { real.state = .poweredOn }
+        real.answer(psm: L2CAPPSM(0x0090))
 
         await waitFor(timeout: .seconds(5)) { Self.publishes(log).count == 2 }
-        #expect(Self.publishes(log) == [0x0090, 0x0091])
+        #expect(Self.publishes(log) == [0x0090, 0x0080])
+        #expect(await Self.onQueue(queue) { real.publishCalls } == 1)
+    }
+
+    @Test("A child answer that matches no call is dropped, and a stale publish is unpublished on that child")
+    func compositeDropsStaleAnswers() async throws {
+        // Keep the composite: its children hold it weakly.
+        let (composite, real, _, _, log, queue) = await makeComposite("composite.l2cap.stale")
+        defer { withExtendedLifetime(composite) {} }
+        real.simulatePublishResult(psm: L2CAPPSM(0x0090), error: nil)
+        await waitFor(timeout: .seconds(5)) { await real.onQueue { !real.unpublishL2CAPChannelCalls.isEmpty } }
+        #expect(await real.onQueue { real.unpublishL2CAPChannelCalls } == [L2CAPPSM(0x0090)])
+        // The fake answers that unpublish too. The composite swallows the answer as a rollback.
+        try? await Task.sleep(for: .milliseconds(50))
+        await Self.onQueue(queue) {}
+        #expect(log.withLock { $0 }.isEmpty)
     }
 
     @Test("An unpublish over two holders reaches both and completes once")
@@ -592,16 +697,28 @@ struct HostL2CAPLinkTests {
                 break
             }
         }
-        // The client reads the refusal and does not close the connection.
+        // The client reads the refusal and does not close the connection. It records whether the
+        // connection was still open when the refusal arrived.
+        let openAtRefusal = Mutex<Bool?>(nil)
         connection.onMessage = { message in
             guard case .serverHello(let hello) = message else { return }
             answer.withLock { $0 = hello }
+            openAtRefusal.withLock { $0 = !ended.withLock { $0 } }
         }
+        let start = ContinuousClock.now
         connection.start()
 
-        await waitFor(timeout: .seconds(5)) { ended.withLock { $0 } }
+        await waitFor(timeout: .seconds(5)) { answer.withLock { $0 } != nil }
         #expect(answer.withLock { $0?.accepted } == false)
+        #expect(openAtRefusal.withLock { $0 } == true)
+        // The refusal does not close the connection. Only the deadline does.
+        if ContinuousClock.now - start < .milliseconds(150) {
+            #expect(!ended.withLock { $0 })
+        }
+
+        await waitFor(timeout: .seconds(5)) { ended.withLock { $0 } }
         #expect(ended.withLock { $0 })
+        #expect(ContinuousClock.now - start >= .milliseconds(200))
         connection.onStateChange = nil
         connection.onMessage = nil
         connection.cancel()

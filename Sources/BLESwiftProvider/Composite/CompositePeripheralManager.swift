@@ -132,6 +132,14 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
         let requiresEncryption: Bool
         /// The child that selects the PSM, while it has not answered.
         var lead: Int?
+        /// The child that selects the PSM, for every attempt of the batch.
+        var leadChild: Int?
+        /// The number of PSMs that the lead child was asked for, from 1.
+        var attempts = 1
+        /// The PSMs that the real lead child published and a follower already held. They stay
+        /// published on the lead child until the batch settles, so the lead child cannot give
+        /// them again. Then the composite unpublishes them.
+        var conflicts: [L2CAPPSM] = []
         /// The PSM that the lead child published.
         var psm: L2CAPPSM?
         /// The children that were asked for ``psm`` and have not answered.
@@ -619,8 +627,12 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
     ///    publishes first. If no such child is on, the first powered-on child that publishes a
     ///    given PSM (the virtual radio) publishes first, with a PSM that it selects.
     /// 2. Every other powered-on child that publishes a given PSM then publishes that PSM.
-    /// 3. If one of them fails, the composite unpublishes the PSM on the children that published
-    ///    it, and reports the first error.
+    /// 3. If a follower already holds the PSM (`BLESwiftProvider` code 13) and a real child
+    ///    leads, the PSM stays on the real child and the real child gives another PSM. The
+    ///    composite tries at most four PSMs. When the publish settles, it unpublishes each PSM
+    ///    that conflicted on the real child.
+    /// 4. If a follower fails in any other way, or four PSMs conflict, the composite unpublishes
+    ///    the PSM on the children that published it, and reports the first error.
     ///
     /// If no child can publish, the completion carries ``noPoweredOnBackendError``. A child that
     /// powers on later does not publish the PSM. A child that powers off drops its share.
@@ -637,6 +649,7 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
             return
         }
         batch.lead = lead
+        batch.leadChild = lead
         _publishBatches.append(batch)
         _publishWaits[lead].append(.batch(batch.id))
         publisher.publishL2CAPChannel(requiresEncryption: requiresEncryption)
@@ -667,23 +680,43 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
         }
     }
 
+    /// The number of PSMs that a real lead child is asked for in one publish, when a follower
+    /// already holds each PSM that the lead child gives.
+    private static let maximumPublishAttempts = 4
+
+    /// Whether `error` says that a follower already holds the PSM (`BLESwiftProvider` code 13).
+    private static func isPSMConflict(_ error: NSError?) -> Bool {
+        error?.domain == "BLESwiftProvider" && error?.code == 13
+    }
+
     /// Settles one child's `didPublishL2CAPChannel`. Call it on ``queue``.
     ///
     /// The method swallows an answer from a child that is no longer powered on, as
-    /// ``completeAdd(_:error:from:)`` does, because ``powerDown(child:)`` released the child. It
-    /// forwards an answer to a call that this composite never made.
+    /// ``completeAdd(_:error:from:)`` does, because ``powerDown(child:)`` released the child. An
+    /// answer that matches no call is stale. The method drops it. If it is a success, the method
+    /// unpublishes that PSM on the child.
+    ///
+    /// If a follower already holds the PSM that a real lead child gave, the PSM stays on the lead
+    /// child and the lead child is asked for another PSM, at most
+    /// ``maximumPublishAttempts`` times in all. When the batch settles, the composite
+    /// unpublishes every such PSM on the lead child. See ``flushL2CAP()``.
     private func completePublish(psm: L2CAPPSM?, error: NSError?, from index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard isOnline(index) else { return }
-        guard !_publishWaits[index].isEmpty else {
-            _eventHandler?(.didPublishL2CAPChannel(psm: psm, error: error))
+        let wait = _publishWaits[index].isEmpty ? nil : _publishWaits[index].removeFirst()
+        guard case .batch(let id) = wait,
+              let position = _publishBatches.firstIndex(where: { $0.id == id }) else {
+            log?("composite child \(index) answered a publish that it does not owe; dropping it")
+            if let psm, error == nil {
+                _unpublishWaits[index].append(.rollback)
+                (backends[index] as? any L2CAPPublishing)?.unpublishL2CAPChannel(psm)
+            }
             return
         }
-        guard case .batch(let id) = _publishWaits[index].removeFirst(),
-              let position = _publishBatches.firstIndex(where: { $0.id == id }) else { return }
         var batch = _publishBatches[position]
         var rollbacks: [Int] = []
         var followers: [Int] = []
+        var retry = false
         if batch.lead == index {
             batch.lead = nil
             if let psm, error == nil {
@@ -703,23 +736,49 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
             } else if batch.error == nil {
                 batch.error = error ?? Self.publishAbandonedError
             }
-            if batch.owing.isEmpty { rollbacks = settleFollowers(&batch) }
+            if batch.owing.isEmpty {
+                if let lead = batch.leadChild, let conflicted = batch.psm,
+                   Self.isPSMConflict(batch.error), isRealPublisher(lead), isOnline(lead),
+                   batch.attempts < Self.maximumPublishAttempts {
+                    // Keep the PSM on the lead child, so it cannot give the PSM again. Take it
+                    // off the followers that published it, and ask the lead child again.
+                    rollbacks = batch.succeeded.filter { $0 != lead && isOnline($0) }
+                    for child in batch.succeeded where child != lead {
+                        _psmHolders[conflicted]?.remove(child)
+                    }
+                    batch.conflicts.append(conflicted)
+                    batch.attempts += 1
+                    batch.succeeded = []
+                    batch.error = nil
+                    batch.lead = lead
+                    retry = true
+                } else {
+                    rollbacks = settleFollowers(&batch)
+                }
+            }
         }
+        let published = batch.psm
+        if retry { batch.psm = nil }
         _publishBatches[position] = batch
         // Every table is written before the calls below. A child answers asynchronously, so no
         // call reenters this method.
-        if let psm = batch.psm {
+        if let published {
             for follower in followers {
                 _publishWaits[follower].append(.batch(batch.id))
                 (backends[follower] as? any FixedPSMPublishing)?.publishL2CAPChannel(
                     requiresEncryption: batch.requiresEncryption,
-                    psm: psm
+                    psm: published
                 )
             }
             for child in rollbacks {
                 _unpublishWaits[child].append(.rollback)
-                (backends[child] as? any L2CAPPublishing)?.unpublishL2CAPChannel(psm)
+                (backends[child] as? any L2CAPPublishing)?.unpublishL2CAPChannel(published)
             }
+        }
+        if retry, let lead = batch.lead, let publisher = backends[lead] as? any L2CAPPublishing {
+            log?("composite child \(lead) gave a PSM that another child holds; asking for another (attempt \(batch.attempts))")
+            _publishWaits[lead].append(.batch(batch.id))
+            publisher.publishL2CAPChannel(requiresEncryption: batch.requiresEncryption)
         }
         flushL2CAP()
     }
@@ -747,13 +806,13 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
     }
 
     /// Settles one child's `didUnpublishL2CAPChannel`. Call it on ``queue``. The method swallows
-    /// the answer to a rollback, and an answer from a child that is no longer powered on. It
-    /// forwards an answer to a call that this composite never made.
+    /// the answer to a rollback, and an answer from a child that is no longer powered on. An
+    /// answer that matches no call is stale, and the method drops it.
     private func completeUnpublish(_ psm: L2CAPPSM, error: NSError?, from index: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard isOnline(index) else { return }
         guard !_unpublishWaits[index].isEmpty else {
-            _eventHandler?(.didUnpublishL2CAPChannel(psm: psm, error: error))
+            log?("composite child \(index) answered an unpublish that it does not owe; dropping it")
             return
         }
         guard case .batch(let id) = _unpublishWaits[index].removeFirst(),
@@ -806,6 +865,23 @@ public final class CompositePeripheralManager: L2CAPPublishing, HostedDeviceRemo
     /// its last child has answered. Call it on ``queue``.
     private func flushL2CAP() {
         dispatchPrecondition(condition: .onQueue(queue))
+        // A settled batch no longer needs the PSMs that conflicted. Take them off the lead
+        // child. A lead child that powered off already dropped them.
+        var conflicts: [(child: Int, psm: L2CAPPSM)] = []
+        for position in _publishBatches.indices where _publishBatches[position].result != nil {
+            let batch = _publishBatches[position]
+            guard let lead = batch.leadChild, !batch.conflicts.isEmpty else { continue }
+            for psm in batch.conflicts {
+                _psmHolders[psm]?.remove(lead)
+                if _psmHolders[psm]?.isEmpty == true { _psmHolders.removeValue(forKey: psm) }
+                if isOnline(lead) { conflicts.append((lead, psm)) }
+            }
+            _publishBatches[position].conflicts = []
+        }
+        for conflict in conflicts {
+            _unpublishWaits[conflict.child].append(.rollback)
+            (backends[conflict.child] as? any L2CAPPublishing)?.unpublishL2CAPChannel(conflict.psm)
+        }
         var events: [PeripheralHostEvent] = []
         while let head = _publishBatches.first, let result = head.result {
             _publishBatches.removeFirst()

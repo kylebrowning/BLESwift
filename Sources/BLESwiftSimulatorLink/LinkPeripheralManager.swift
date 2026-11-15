@@ -381,13 +381,28 @@ public final class LinkPeripheralManager: L2CAPPublishing, Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         // The closure hops onto `queue`, because a channel's methods run wherever its consumer
         // is. `LinkCentral.registerChannel` does the same.
-        return LinkL2CAPChannel(channel: identifier, psm: psm, sendFrame: { [weak self] frame in
+        //
+        // A provider gives ids from 1 again after a reconnect, so an id alone does not name a
+        // channel. The hop sends a frame only while this channel is the one filed under the id.
+        // A frame from a channel of an earlier link would otherwise reach the channel that now
+        // has its id. The box holds the channel weakly, because the channel holds this closure.
+        let owner = WeakChannel()
+        let channel = LinkL2CAPChannel(channel: identifier, psm: psm, sendFrame: { [weak self] frame in
             guard let self else { return }
             queue.async { [self] in
+                guard let current = _channels[identifier], current === owner.channel else { return }
                 if case .close = frame { _channels.removeValue(forKey: identifier) }
                 send(frame.hostRequest(channel: identifier))
             }
         })
+        owner.channel = channel
+        return channel
+    }
+
+    /// A weak reference to one channel. ``makeChannel(_:psm:)`` sets it once, on ``queue``,
+    /// before any frame can hop, and the hop reads it on ``queue``.
+    private final class WeakChannel: Sendable {
+        nonisolated(unsafe) weak var channel: LinkL2CAPChannel?
     }
 
     // MARK: - Sending
