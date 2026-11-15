@@ -479,7 +479,10 @@ public actor Provider {
                 reason: reason,
                 providerName: configuration.providerName
             )))
-            connection.cancel()
+            // Do not cancel the connection here. An immediate cancel can drop the refusal before
+            // it reaches the socket, and the client then never learns why it was refused. The
+            // entry stays in `pending`, unclaimed. The client closes the connection after it
+            // reads the refusal. If it does not, the handshake deadline closes it.
             return
         }
         let accepted = ServerHello(

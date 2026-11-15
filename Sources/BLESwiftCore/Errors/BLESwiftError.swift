@@ -83,6 +83,9 @@ public enum BLESwiftError: Error, Sendable, Equatable {
     /// An L2CAP channel open completed with neither a channel nor an error, a malformed
     /// `peripheral(_:didOpen:error:)` callback.
     case l2capOpenFailed
+    /// Publishing an L2CAP channel failed. The backend cannot publish L2CAP channels, or the
+    /// publish completed with neither a PSM nor an error.
+    case l2capPublishFailed
     /// An operation on an L2CAP channel failed because the channel is closed, by a disconnect, an
     /// explicit `close()`, or a transport error.
     case l2capChannelClosed
@@ -157,6 +160,8 @@ extension BLESwiftError: LocalizedError {
             return "Invalid argument: \(reason)"
         case .l2capOpenFailed:
             return "Opening the L2CAP channel failed"
+        case .l2capPublishFailed:
+            return "Publishing the L2CAP channel failed"
         case .l2capChannelClosed:
             return "The L2CAP channel is closed"
         case let .unsupportedCharacteristicOperation(characteristic, required):

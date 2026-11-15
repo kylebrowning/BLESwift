@@ -601,23 +601,26 @@ public final class VirtualPeripheralRemote: PeripheralRemote, Sendable {
         return []
     }
 
-    /// Fails the attempt, because the virtual radio serves GATT only and not L2CAP channels. The
-    /// failure comes from the serial chain, for the reason given at ``discoverDescriptors(for:)``.
+    /// Opens an L2CAP channel to `psm` through the radio. It delivers `didOpenL2CAPChannel` after
+    /// the radio answers. The open runs on the serial chain, behind every earlier request, as a
+    /// read or a write does.
+    ///
+    /// The attempt fails in these cases:
+    ///
+    /// - The remote is not connected: ``VirtualRadio/peripheralDisconnectedError``.
+    /// - The device did not publish `psm`, or it accepts no channels: `BLESwiftProvider` code 12.
     public func openL2CAPChannel(_ psm: L2CAPPSM) {
         dispatchPrecondition(condition: .onQueue(queue))
-        enqueue { [queue] in
+        enqueue { [radio, identifier, session, queue] in
+            let result = await radio.openL2CAP(session: session, device: identifier, psm: psm)
             queue.async { [self] in
-                deliver(.didOpenL2CAPChannel(channel: nil, error: Self.l2capUnsupportedError))
+                switch result {
+                case .success(let channel):
+                    deliver(.didOpenL2CAPChannel(channel: channel, error: nil))
+                case .failure(let error):
+                    deliver(.didOpenL2CAPChannel(channel: nil, error: error))
+                }
             }
         }
-    }
-
-    /// The error every ``openL2CAPChannel(_:)`` attempt fails with.
-    static var l2capUnsupportedError: NSError {
-        NSError(
-            domain: "BLESwiftProvider",
-            code: 3,
-            userInfo: [NSLocalizedDescriptionKey: "The virtual radio does not support L2CAP channels."]
-        )
     }
 }

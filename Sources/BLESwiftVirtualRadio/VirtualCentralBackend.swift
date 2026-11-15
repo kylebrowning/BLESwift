@@ -476,9 +476,9 @@ public final class VirtualCentralBackend: CentralManaging, Sendable {
     /// The error that a connect fails with when the remote it received is no longer the remote that
     /// this backend filed for that identifier.
     ///
-    /// The code is 8, not 7, because 7 is already `CentralSession.l2capCreditRejected` in the same
-    /// `BLESwiftProvider` domain. A caller that switches on the code can then tell the failures
-    /// apart.
+    /// The code is 8, not 7, because 7 is already `L2CAPChannelRelay.creditRejectedError` in the
+    /// same `BLESwiftProvider` domain. A caller that switches on the code can then tell the
+    /// failures apart.
     public static var stalePeripheralHandleError: NSError {
         NSError(
             domain: "BLESwiftProvider",

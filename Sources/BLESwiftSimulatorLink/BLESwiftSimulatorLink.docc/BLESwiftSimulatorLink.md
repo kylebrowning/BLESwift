@@ -49,7 +49,7 @@ If an established link drops, these actions occur:
 
 - The radio state returns to `.unsupported` and stays so until the provider reconnects and sends its state.
 - A `LinkCentral` reports every peripheral that was not disconnected as disconnected, with `LinkError.providerDisconnected`.
-- A `LinkPeripheralManager` sets `isAdvertising` to `false`. It reports each subscriber as gone with a synthesized `didUnsubscribe`.
+- A `LinkPeripheralManager` sets `isAdvertising` to `false`. It reports each subscriber as gone with a synthesized `didUnsubscribe`. It closes each L2CAP channel that a central opened to the host, with `LinkError.providerDisconnected`.
 
 The subscribers belonged to the session that ended. A reconnect creates new `Subscriber` ids.
 
@@ -78,6 +78,7 @@ A tunneled L2CAP channel moves its bytes as `l2capData` frames under credit-base
 
 - **Client to provider.** The channel starts with `LinkFlowControl.l2capInitialCredit` bytes of credit. A write splits into chunks of at most a quarter of that credit and uses credit for each chunk. When not enough credit remains, the writer suspends. The provider returns credit only after its own write to the real transport returns, so a slow peer suspends the writer. Waiting writers resume in arrival order.
 - **Provider to client.** The channel credits the provider when the bytes arrive, whether or not a consumer is reading. This window limits only the data in flight on the wire. It is not back-pressure. A consumer that does not read does not slow the provider, and the channel's buffer grows.
+- **Both roles.** The same rules apply to a channel that a `LinkCentral` opens and to a channel that a central opens to a `LinkPeripheralManager` host. The provider gives the host's channels ids from 1 for each session. It closes a channel with `BLESwiftProvider` code 7 if the client grants credit that would make the window larger than `LinkFlowControl.l2capInitialCredit`. A frame larger than the chunk size, or more unwritten bytes than one window and one chunk, costs the client its link.
 
 ### Dial retries
 

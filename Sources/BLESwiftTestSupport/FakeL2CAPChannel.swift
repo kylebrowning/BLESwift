@@ -3,6 +3,7 @@
 //  BLESwiftTestSupport
 //
 
+import BLESwiftCompat17
 import BLESwiftCore
 import Dispatch
 import Foundation
@@ -10,9 +11,10 @@ import Foundation
 /// An in-memory `L2CAPChannelRemote` for tests. It models an open L2CAP channel with queue-confined
 /// pipes, and uses no CoreBluetooth streams and no hardware.
 ///
-/// As with ``FakePeripheral``, a queue confines it and no lock protects it. Every stored property
-/// is `nonisolated(unsafe)`. This is safe because every entry point runs on `queue` and touches
-/// state inline. Off-queue code uses ``onQueue(_:)``.
+/// As with ``FakePeripheral``, a queue confines it. Every stored property is
+/// `nonisolated(unsafe)`. This is safe because every entry point runs on `queue` and touches
+/// state inline. Off-queue code uses ``onQueue(_:)``. The one exception is the flag that
+/// ``inbound()`` sets, which a `Mutex` guards.
 public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
 
     /// The PSM that the channel is open on.
@@ -67,9 +69,20 @@ public final class FakeL2CAPChannel: L2CAPChannelRemote, Sendable {
     // MARK: - L2CAPChannelRemote
 
     /// The stream of data that ``simulateInbound(_:)`` delivers. ``close(error:)`` finishes it.
+    /// The first call gives out the stream. Every later call returns a stream that finishes at
+    /// once, as the real transports do.
     public func inbound() -> AsyncThrowingStream<Data, Error> {
-        inboundStream
+        let first = vended.withLock { vended -> Bool in
+            defer { vended = true }
+            return !vended
+        }
+        guard first else { return AsyncThrowingStream { $0.finish() } }
+        return inboundStream
     }
+
+    /// Whether ``inbound()`` already gave out its stream. A caller calls ``inbound()`` from any
+    /// isolation domain, so this one value uses a `Mutex` and not the queue.
+    private let vended = Mutex(false)
 
     /// Records `data` in ``writtenData``. The completion depends on ``writeBehavior``.
     ///

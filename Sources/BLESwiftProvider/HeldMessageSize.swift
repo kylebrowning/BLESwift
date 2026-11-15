@@ -81,7 +81,10 @@ extension HostRequest {
             return value?.count ?? 0
         case .updateValue(_, let value, _, let centrals):
             return value.count + LinkMessage.byteCount(of: centrals)
-        case .stopAdvertising, .removeAllServices:
+        case .l2capData(_, let data):
+            return data.count
+        case .stopAdvertising, .removeAllServices, .publishL2CAPChannel, .unpublishL2CAPChannel,
+             .l2capCredit, .l2capClose:
             return 0
         }
     }

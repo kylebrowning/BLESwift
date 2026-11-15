@@ -31,6 +31,7 @@ See <doc:InProcessMocking> for both. `BLESwiftProvider` re-exports this module.
 - ``VirtualDevice``
 - ``VirtualDeviceDescriptor``
 - ``VirtualDeviceHandler``
+- ``VirtualL2CAPAccepting``
 - ``VirtualDeviceHandle``
 - ``FixtureDeviceHandler``
 
