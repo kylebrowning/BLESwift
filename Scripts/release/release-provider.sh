@@ -75,6 +75,19 @@ identity="${BLESWIFT_SIGNING_IDENTITY:-Developer ID Application}"
 notary_profile="${BLESWIFT_NOTARY_PROFILE:-bleswift-notary}"
 entitlements="$script_directory/bleswift-provider.entitlements"
 
+# The Command Line Tools cannot link the x86_64 slice, so the universal build needs Xcode.
+if [ -z "${DEVELOPER_DIR:-}" ] && [[ "$(xcode-select -p)" == *CommandLineTools ]]; then
+  xcode_developer_directory="/Applications/Xcode.app/Contents/Developer"
+  if [ -d "$xcode_developer_directory" ]; then
+    export DEVELOPER_DIR="$xcode_developer_directory"
+    echo "Using Xcode from $DEVELOPER_DIR for the universal build."
+  else
+    echo "error: the universal build needs Xcode, but the Command Line Tools are selected." >&2
+    echo "Install Xcode and run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer" >&2
+    exit 1
+  fi
+fi
+
 work_directory="$(mktemp -d)"
 trap 'rm -rf "$work_directory"' EXIT
 

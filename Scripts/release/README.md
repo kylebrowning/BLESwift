@@ -38,6 +38,13 @@ Scripts/release/release-provider.sh 3.2.0
 
 The script never uploads a file and never pushes to a repository.
 
+## Toolchain
+
+The universal build needs Xcode. The Command Line Tools cannot link the x86_64 slice.
+If `DEVELOPER_DIR` is not set and the Command Line Tools are selected, the script uses
+`/Applications/Xcode.app/Contents/Developer`. If Xcode is not at that path, the script stops.
+In that case, run `sudo xcode-select -s <path-to-Xcode>/Contents/Developer`, or set `DEVELOPER_DIR`.
+
 ## Environment variables
 
 - `BLESWIFT_SIGNING_IDENTITY` is the name of the signing identity. The default is
