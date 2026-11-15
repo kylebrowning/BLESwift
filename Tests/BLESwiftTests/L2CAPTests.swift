@@ -82,6 +82,13 @@ struct L2CAPTests {
             Issue.record("expected the peripheral to remain .connected after a cancelled open")
             return
         }
+        // The backend sends one event for each call, also for a cancelled call. Deliver the
+        // late result of the cancelled call. `Central` closes its channel.
+        let lateChannel = FakeL2CAPChannel(psm: Self.psm, queue: fakePeripheral.queue)
+        fakePeripheral.simulateL2CAPOpenResult(channel: lateChannel, error: nil)
+        await waitFor { await lateChannel.onQueue { lateChannel.isClosed } }
+        #expect(await lateChannel.onQueue { lateChannel.isClosed })
+
         await fakePeripheral.onQueue { fakePeripheral.l2capOpenBehavior = .succeed }
         let channel = try await peripheral.openL2CAPChannel(psm: Self.psm)
         #expect(channel.psm == Self.psm)

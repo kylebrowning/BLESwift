@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `Peripheral.openL2CAPChannel(psm:timeout:)` now gives each open its own result. Before
+  this fix, the late result of a cancelled or timed-out open went to the next open. That open
+  then got a channel for a different PSM or a different call's error. Now `Central` closes a
+  late channel for a cancelled open.
+- A pending L2CAP open now fails when the peripheral disconnects or the `Central` stops.
+  Before this fix, the open waited forever. `cancelAllOperations(error:)` now also fails a
+  pending L2CAP open with `BLESwiftError.cancelled`.
+
 ## [3.1.0] - 2026-11-01
 
 ### Added

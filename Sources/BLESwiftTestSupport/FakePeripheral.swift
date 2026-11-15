@@ -583,6 +583,8 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
         /// Deliver a failing `didOpenL2CAPChannel` with `error` and no channel.
         case fail(NSError)
         /// Record the call but deliver nothing. Use it to test open timeout and cancellation.
+        /// A held call still needs a result from ``FakePeripheral/simulateL2CAPOpenResult(channel:error:)``,
+        /// because `Central` pairs every result with a call, cancelled calls included.
         case hold
     }
 
@@ -597,6 +599,20 @@ public final class FakePeripheral: PeripheralRemote, Sendable {
             dispatchPrecondition(condition: .onQueue(queue))
             _l2capOpenBehavior = newValue
         }
+    }
+
+    /// Delivers one `didOpenL2CAPChannel` event asynchronously on ``queue``. Use it to resolve
+    /// an open that ``L2CAPOpenBehavior/hold`` held. You choose the result and the order of
+    /// the events.
+    ///
+    /// - Parameters:
+    ///   - channel: The channel to deliver, or `nil`. Create it with
+    ///     `FakeL2CAPChannel(psm:queue:)` and this fake's ``queue``.
+    ///   - error: The error to deliver, or `nil`.
+    ///
+    /// It does not change ``lastOpenedL2CAPChannel``. Call it from any thread.
+    public func simulateL2CAPOpenResult(channel: FakeL2CAPChannel?, error: NSError?) {
+        queue.async { [self] in deliver(.didOpenL2CAPChannel(channel: channel, error: error)) }
     }
 
     /// Every `L2CAPPSM` that ``openL2CAPChannel(_:)`` received, in order. Read it with
