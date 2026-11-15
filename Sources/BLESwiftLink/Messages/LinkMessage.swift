@@ -25,3 +25,20 @@ public enum LinkMessage: Codable, Sendable, Equatable {
     /// A `peripheral`-role event from the provider to the client.
     case hostEvent(HostWireEvent)
 }
+
+extension LinkMessage {
+
+    /// The maximum number of characters in ``trafficSummary`` before the ellipsis.
+    static let trafficSummaryLimit = 240
+
+    /// A short description of this message for a traffic log.
+    ///
+    /// The value is `String(describing:)` of the message. If that has more than 240 characters,
+    /// the value keeps the first 240 and adds "…". A `Data` value describes itself as its byte
+    /// count, so no payload bytes reach the log.
+    public var trafficSummary: String {
+        let description = String(describing: self)
+        guard description.count > Self.trafficSummaryLimit else { return description }
+        return String(description.prefix(Self.trafficSummaryLimit)) + "…"
+    }
+}

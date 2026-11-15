@@ -62,6 +62,10 @@ public struct ProviderConfiguration: Sendable {
     /// is `nil`, the provider discards the lines.
     public var log: (@Sendable (String) -> Void)?
 
+    /// Whether the provider logs the link traffic. When `true`, the provider writes one ``log``
+    /// line for each link message in each direction. The default is `false`.
+    public var logTraffic: Bool = false
+
     /// A hook for tests and consumers. It replaces the real CoreBluetooth central backend that
     /// the provider uses when ``passthrough`` is true. The provider calls the factory once for
     /// each central-role session, with that session's serial queue. The factory must return a

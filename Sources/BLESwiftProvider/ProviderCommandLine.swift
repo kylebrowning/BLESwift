@@ -9,7 +9,7 @@ import Foundation
 
 /// The command-line interface for the `bleswift-provider` executable.
 ///
-/// The grammar is small: five flags, and one of them can repeat. Thus ``parse(_:environment:)``
+/// The grammar is small: six flags, and one of them can repeat. Thus ``parse(_:environment:)``
 /// reads the argument array directly and the module has no argument-parsing dependency.
 public enum ProviderCommandLine {
 
@@ -25,6 +25,9 @@ public enum ProviderCommandLine {
         public var passthrough: Bool
         /// The paths that follow `--fixture`, in argument order.
         public var fixturePaths: [String]
+        /// Whether the arguments contain `--verbose`. When `true`, the provider logs one line for
+        /// each link message in each direction.
+        public var verbose: Bool
         /// Whether the arguments contain `-h`/`--help`. When `true`, parsing stopped at the flag
         /// and the other fields are incomplete.
         public var showHelp: Bool
@@ -35,12 +38,14 @@ public enum ProviderCommandLine {
             codec: LinkCodec = .binaryPropertyList,
             passthrough: Bool = false,
             fixturePaths: [String] = [],
+            verbose: Bool = false,
             showHelp: Bool = false
         ) {
             self.endpoint = endpoint
             self.codec = codec
             self.passthrough = passthrough
             self.fixturePaths = fixturePaths
+            self.verbose = verbose
             self.showHelp = showHelp
         }
     }
@@ -93,6 +98,8 @@ public enum ProviderCommandLine {
                 options.passthrough = true
             case "--json":
                 options.codec = .json
+            case "--verbose":
+                options.verbose = true
             case "--fixture":
                 index = arguments.index(after: index)
                 guard index < arguments.endIndex else { throw ParseError.missingValue(argument) }
@@ -141,6 +148,7 @@ public enum ProviderCommandLine {
                               clients, alongside the virtual devices.
       --json                 Encode outgoing messages as JSON instead of the binary property
                               list default.
+      --verbose              Log one line for each link message in each direction.
       -h, --help             Print this help text and exit.
 
     Environment:

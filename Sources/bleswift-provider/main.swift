@@ -33,6 +33,7 @@ configuration.endpoint = options.endpoint
 configuration.codec = options.codec
 configuration.passthrough = options.passthrough
 configuration.log = { print($0) }
+configuration.logTraffic = options.verbose
 
 // If a fixture cannot be read or decoded, print the underlying error and exit with `66`
 // (`EX_NOINPUT`). Decoding validates every UUID string, so a typo such as `"zzzz"` arrives here

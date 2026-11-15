@@ -54,6 +54,12 @@ struct ProviderCommandLineTests {
         #expect(options.endpoint == LinkEndpoint(host: "192.168.0.1", port: 1))
     }
 
+    @Test("--verbose sets verbose")
+    func verbose() throws {
+        #expect(try ProviderCommandLine.parse([]).verbose == false)
+        #expect(try ProviderCommandLine.parse(["--verbose"]).verbose == true)
+    }
+
     @Test("--json sets the JSON codec")
     func json() throws {
         let options = try ProviderCommandLine.parse(["--json"])

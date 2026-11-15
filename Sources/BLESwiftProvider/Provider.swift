@@ -94,6 +94,11 @@ public actor Provider {
     /// The number for the next session's queue label.
     private var sessionOrdinal = 0
 
+    /// The number of the last connection that got a traffic log. The log lines use it to tell
+    /// the connections apart. It is a `Mutex` and not actor state, because ``register(_:)`` is
+    /// `nonisolated` and runs on the listener queue.
+    private nonisolated let connectionCounter = Mutex(0)
+
     /// Each ``stop()`` increases this value. Work that suspended before a stop can then see,
     /// when it resumes, that a stop tore down the provider with which it was registering. See
     /// ``addVirtualDevice(_:advertising:)``.
@@ -361,8 +366,25 @@ public actor Provider {
     /// - Returns: `false` when ``ProviderConfiguration/maximumPendingConnections`` connections
     ///   already wait for a handshake. In that case the method recorded nothing, and the caller
     ///   must cancel this connection.
+    ///
+    /// The listener started the connection already. The method sets the traffic log here
+    /// anyway, because the connection delivers its messages on the listener queue, and this
+    /// method runs on that queue first.
     private nonisolated func register(_ connection: LinkConnection) -> Bool {
-        pending.withLock { $0.register(connection, limit: configuration.maximumPendingConnections) }
+        let registered = pending.withLock {
+            $0.register(connection, limit: configuration.maximumPendingConnections)
+        }
+        guard registered else { return false }
+        if configuration.logTraffic, let log = configuration.log {
+            let ordinal = connectionCounter.withLock { counter -> Int in
+                counter += 1
+                return counter
+            }
+            connection.onTraffic = { direction, message in
+                log("link \(ordinal) \(direction == .inbound ? "<-" : "->") \(message.trafficSummary)")
+            }
+        }
+        return true
     }
 
     /// Cancels `connection` if it has not done the handshake after
