@@ -1,0 +1,18 @@
+class BleswiftProvider < Formula
+  desc "Gives iOS Simulator apps access to Bluetooth through BLESwift"
+  homepage "https://github.com/kylebrowning/BLESwift"
+  url "https://github.com/kylebrowning/BLESwift/releases/download/__VERSION__/bleswift-provider-__VERSION__-macos.zip"
+  version "__VERSION__"
+  sha256 "__SHA256__"
+  license "MIT"
+
+  depends_on macos: :ventura
+
+  def install
+    bin.install "bleswift-provider"
+  end
+
+  test do
+    assert_match "Usage: bleswift-provider", shell_output("#{bin}/bleswift-provider --help")
+  end
+end
