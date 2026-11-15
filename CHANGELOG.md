@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-15
+
 ### Added
 
 - Peripheral-role L2CAP. `PeripheralHost.publishL2CAPChannel(requiresEncryption:)` publishes
@@ -498,7 +500,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed a deadlock when connecting to the same peripheral concurrently.
 - Restoring multiple peripherals now happens concurrently.
 
-[Unreleased]: https://github.com/kylebrowning/BLESwift/compare/3.1.0...HEAD
+[Unreleased]: https://github.com/kylebrowning/BLESwift/compare/3.2.0...HEAD
+[3.2.0]: https://github.com/kylebrowning/BLESwift/compare/3.1.0...3.2.0
 [3.1.0]: https://github.com/kylebrowning/BLESwift/compare/3.0.0...3.1.0
 [3.0.0]: https://github.com/kylebrowning/BLESwift/compare/2.1.0...3.0.0
 [2.1.0]: https://github.com/kylebrowning/BLESwift/compare/2.0.0...2.1.0
