@@ -43,6 +43,7 @@ public final class LinkConnection: Sendable {
     private struct Storage {
         var state: State = .idle
         var onMessage: (@Sendable (LinkMessage) -> Void)?
+        var onTraffic: (@Sendable (LinkTrafficDirection, LinkMessage) -> Void)?
         var onStateChange: (@Sendable (State) -> Void)?
         var buffer = Data()
         var isTerminal = false
@@ -93,6 +94,22 @@ public final class LinkConnection: Sendable {
         set { storage.withLock { $0.onMessage = newValue } }
     }
 
+    /// Called for every message that this connection sends or receives. Use it to log the
+    /// traffic of the link.
+    ///
+    /// - For an outbound message, ``send(_:)`` calls it on the caller's thread, before it encodes
+    ///   the message. A connection that is not ``State/ready`` drops the message after this call.
+    /// - For an inbound message, the connection calls it on `queue`, immediately before
+    ///   ``onMessage``. It also calls it when ``onMessage`` is `nil`.
+    ///
+    /// The connection calls it outside every lock. The guarantee is the same as for
+    /// ``onMessage``: set it on the connection's queue before that queue delivers any message,
+    /// and it sees every inbound message.
+    public var onTraffic: (@Sendable (LinkTrafficDirection, LinkMessage) -> Void)? {
+        get { storage.withLock { $0.onTraffic } }
+        set { storage.withLock { $0.onTraffic = newValue } }
+    }
+
     /// Called on `queue` for every ``State`` transition, including the transitions that
     /// ``start()`` and ``cancel()`` cause. The connection dispatches each transition onto `queue`
     /// and publishes it once.
@@ -134,6 +151,9 @@ public final class LinkConnection: Sendable {
     /// This keeps a local record of the cause. A frame with an illegal length would make the peer
     /// drop the link as a protocol violation, with no local record.
     public func send(_ message: LinkMessage) {
+        if let traffic = storage.withLock({ $0.onTraffic }) {
+            traffic(.outbound, message)
+        }
         let encodeFailure: (any Error)? = sendGate.withLock { _ in
             let isReady = storage.withLock { storage -> Bool in
                 if case .ready = storage.state { return true }
@@ -217,12 +237,17 @@ public final class LinkConnection: Sendable {
                         return
                     }
                     // A cancel that races this receive must win: deliver nothing after the end.
-                    let delivery = self.storage.withLock { storage -> (live: Bool, handler: (@Sendable (LinkMessage) -> Void)?) in
-                        (!storage.isTerminal, storage.onMessage)
+                    let delivery = self.storage.withLock { storage in
+                        (live: !storage.isTerminal, handler: storage.onMessage, traffic: storage.onTraffic)
                     }
                     guard delivery.live else { return }
-                    if let handler = delivery.handler {
-                        self.queue.async { handler(message) }
+                    let handler = delivery.handler
+                    let traffic = delivery.traffic
+                    if handler != nil || traffic != nil {
+                        self.queue.async {
+                            traffic?(.inbound, message)
+                            handler?(message)
+                        }
                     }
                 }
             }
@@ -245,7 +270,7 @@ public final class LinkConnection: Sendable {
     /// Moves to a terminal state once, cancels the underlying connection, and publishes the
     /// transition on `queue`.
     ///
-    /// The function releases both handlers here, after it copies out the handler that it
+    /// The function releases every handler here, after it copies out the handler that it
     /// publishes. A stored handler usually captures its connection strongly (as
     /// `LinkClientSession.dial()` does), which is a retain cycle that nothing else breaks. A
     /// client that redials a dead provider every few seconds would leak one ``LinkConnection``
@@ -258,6 +283,7 @@ public final class LinkConnection: Sendable {
             storage.buffer = Data()
             let handler = storage.onStateChange
             storage.onMessage = nil
+            storage.onTraffic = nil
             storage.onStateChange = nil
             return (true, handler)
         }

@@ -54,6 +54,10 @@ The virtual radio (`VirtualRadio`, `VirtualDevice`, `VirtualCentralBackend`, and
 - ``ProviderCommandLine``
 - ``ProviderFixtureError``
 
+### Status
+
+- ``ProviderStatusClient``
+
 ### Backends
 
 - ``CompositeCentral``
